@@ -31,6 +31,7 @@
 
 ## Testing And Verification
 
+- `bun run lint` from this package or `bun run lint` from the repo root.
 - `bun run typecheck` from this package or `bun run typecheck` from the repo root.
 - `bun run test` from this package or `bun run test` from the repo root.
 
