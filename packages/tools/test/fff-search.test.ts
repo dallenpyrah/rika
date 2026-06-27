@@ -6,7 +6,7 @@ import { PermissionPolicy, ToolExecutor } from "@rika/agent"
 import { Config } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
-import { BuiltInTools, FffSearch, HashlineFile } from "../src/index"
+import { AstGrepOutline, BuiltInTools, FffSearch, HashlineFile } from "../src/index"
 
 const tempWorkspace = () => mkdtemp(join(tmpdir(), "rika-fff-"))
 
@@ -24,6 +24,13 @@ const fakeFiles = [
   { path: "README.md", content: "target docs\n" },
 ]
 
+const outlineRunner: AstGrepOutline.CommandRunner = {
+  run: (command, args) =>
+    args.length === 1 && args[0] === "--version"
+      ? Effect.succeed({ stdout: `${command} 0.44.0\n`, stderr: "" })
+      : Effect.succeed({ stdout: "outline\n", stderr: "" }),
+}
+
 const run = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, FffSearch.Service>) =>
   Effect.runPromise(
     effect.pipe(Effect.provide(FffSearch.fakeLayer(fakeFiles)), Effect.provide(configLayer(workspaceRoot))),
@@ -32,6 +39,7 @@ const run = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, FffSearch.
 const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolExecutor.Service>) => {
   const registryLayer = BuiltInTools.registryLayerFromServices.pipe(
     Layer.provideMerge(FffSearch.fakeLayer(fakeFiles)),
+    Layer.provideMerge(AstGrepOutline.fakeLayer(outlineRunner)),
     Layer.provideMerge(HashlineFile.layer),
     Layer.provideMerge(configLayer(workspaceRoot)),
   )
@@ -132,6 +140,7 @@ describe("FffSearch", () => {
       "fff.multi_grep",
       "fff.health",
       "fff.rescan",
+      "ast_grep_outline",
       "read",
       "write",
       "edit",
