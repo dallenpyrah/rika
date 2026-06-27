@@ -9,11 +9,14 @@
 
 ## Key Files
 
-| File                    | Purpose                                                     |
-| ----------------------- | ----------------------------------------------------------- |
-| `src/hashline-file.ts`  | Hashline read/write/edit service and tool registry layer.   |
-| `src/index.ts`          | Package namespace exports.                                  |
-| `test/hashline-file.ts` | Hashline anchor, edit validation, and write behavior tests. |
+| File                         | Purpose                                                               |
+| ---------------------------- | --------------------------------------------------------------------- |
+| `src/builtins.ts`            | Composed live built-in tool registry and executor layer.              |
+| `src/fff-search.ts`          | fff-backed path, glob, directory, grep, multi-grep, and health tools. |
+| `src/hashline-file.ts`       | Hashline read/write/edit service and tool registry layer.             |
+| `src/index.ts`               | Package namespace exports.                                            |
+| `test/fff-search.test.ts`    | fff fake/fallback, pagination, anchors, and registry tests.           |
+| `test/hashline-file.test.ts` | Hashline anchor, edit validation, and write behavior tests.           |
 
 ## Current Standards
 
@@ -21,6 +24,7 @@
 - Keep filesystem mutation behind Effect services and layers so tests can swap implementations.
 - Register built-in tools by returning `ToolRegistry.Definition` values or a `ToolRegistry.Service` layer.
 - Tool outputs should include structured metadata for future TUI rendering rather than terminal-only strings.
+- Live CLI and Rivet host tool composition goes through `BuiltInTools.toolExecutorLayer` so default search, read, write, edit, and shell tools stay consistent.
 
 ## For AI Agents
 

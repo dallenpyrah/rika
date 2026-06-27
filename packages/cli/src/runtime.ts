@@ -2,7 +2,7 @@ import { AgentLoop, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
-import { HashlineFile } from "@rika/tools"
+import { BuiltInTools, FffSearch } from "@rika/tools"
 import { Effect, Layer } from "effect"
 import * as Args from "./args"
 import * as Execute from "./execute"
@@ -37,10 +37,12 @@ type RuntimeError =
   | Config.ConfigError
   | Database.DatabaseError
   | Execute.ExecuteError
+  | FffSearch.FffSearchError
   | Migration.MigrationError
 
 const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Migration.MigrationError) return `Rika failed: ${error.message}`
+  if (error instanceof FffSearch.FffSearchError) return `Rika failed: ${error.message}`
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
   return Execute.formatError(error)
@@ -64,7 +66,7 @@ export const liveLayer = (
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
-  const toolLayer = HashlineFile.toolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(configLayer))
   const baseLayer = Layer.mergeAll(
     configLayer,
     Output.layer,
@@ -99,4 +101,8 @@ export type LiveLayerOutput =
   | Time.Service
   | ToolExecutor.Service
 
-export type LiveLayerError = Config.ConfigError | Database.DatabaseError | Migration.MigrationError
+export type LiveLayerError =
+  | Config.ConfigError
+  | Database.DatabaseError
+  | FffSearch.FffSearchError
+  | Migration.MigrationError

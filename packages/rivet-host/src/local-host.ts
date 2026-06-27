@@ -2,7 +2,7 @@ import { AgentLoop, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
-import { HashlineFile } from "@rika/tools"
+import { BuiltInTools, FffSearch } from "@rika/tools"
 import { Registry } from "@rivetkit/effect"
 import { Layer } from "effect"
 import { layer as threadActorLayer } from "./thread-live"
@@ -19,7 +19,7 @@ export const endpointFromEnv = (env: Record<string, string | undefined> = proces
 
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
-const configuredToolLayer = HashlineFile.toolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
+const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
 
 type ServiceLayerOutput =
   | AgentLoop.Service
@@ -34,7 +34,7 @@ type ServiceLayerOutput =
   | Time.Service
   | ToolExecutor.Service
 
-type ServiceLayerError = Config.ConfigError | Database.DatabaseError
+type ServiceLayerError = Config.ConfigError | Database.DatabaseError | FffSearch.FffSearchError
 
 const baseServiceLayer = Layer.mergeAll(
   Time.layer,
