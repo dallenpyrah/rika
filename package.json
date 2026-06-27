@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "rika",
+  "description": "Effect-native coding agent operating system inspired by Amp Code",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "build": "bun turbo build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "oxlint .",
+    "test": "bun turbo test",
+    "typecheck": "bun turbo typecheck"
+  },
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "apps/*"
+    ],
+    "catalog": {
+      "@effect/platform": "4.0.0-beta.83",
+      "@effect/platform-node": "4.0.0-beta.83",
+      "@effect/sql-sqlite-bun": "4.0.0-beta.83",
+      "@tsconfig/bun": "1.0.9",
+      "@types/bun": "1.3.13",
+      "@types/node": "24.12.2",
+      "drizzle-kit": "1.0.0-rc.2",
+      "drizzle-orm": "1.0.0-rc.2",
+      "effect": "4.0.0-beta.83",
+      "oxlint": "1.60.0",
+      "oxlint-tsgolint": "0.21.0",
+      "prettier": "3.6.2",
+      "turbo": "2.8.13",
+      "typescript": "5.8.2"
+    }
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@types/node": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "prettier": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "semi": false
+  }
+}
