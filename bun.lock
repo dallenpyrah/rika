@@ -18,6 +18,21 @@
         "typescript": "catalog:",
       },
     },
+    "packages/agent": {
+      "name": "@rika/agent",
+      "version": "0.0.0",
+      "dependencies": {
+        "@rika/core": "workspace:*",
+        "@rika/llm": "workspace:*",
+        "@rika/persistence": "workspace:*",
+        "@rika/schema": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
     "packages/core": {
       "name": "@rika/core",
       "version": "0.0.0",
@@ -63,7 +78,9 @@
       "version": "0.0.0",
       "dependencies": {
         "@effect/platform-node": "catalog:",
+        "@rika/agent": "workspace:*",
         "@rika/core": "workspace:*",
+        "@rika/llm": "workspace:*",
         "@rika/persistence": "workspace:*",
         "@rika/schema": "workspace:*",
         "@rivetkit/effect": "catalog:",
@@ -253,6 +270,8 @@
     "@oxlint/binding-win32-x64-msvc": ["@oxlint/binding-win32-x64-msvc@1.60.0", "", { "os": "win32", "cpu": "x64" }, "sha512-JOro4ZcfBLamJCyfURQmOQByoorgOdx3ZjAkSqnb/CyG/i+lN3KoV5LAgk5ZAW6DPq7/Cx7n23f8DuTWXTWgyQ=="],
 
     "@pinojs/redact": ["@pinojs/redact@0.4.0", "", {}, "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg=="],
+
+    "@rika/agent": ["@rika/agent@workspace:packages/agent"],
 
     "@rika/core": ["@rika/core@workspace:packages/core"],
 

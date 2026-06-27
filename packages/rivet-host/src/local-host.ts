@@ -1,4 +1,6 @@
+import { AgentLoop, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
+import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Registry } from "@rivetkit/effect"
 import { Layer } from "effect"
@@ -15,17 +17,40 @@ export const endpointFromEnv = (env: Record<string, string | undefined> = proces
   env.RIVET_ENDPOINT ?? defaultEndpoint
 
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
+const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
 
-export const serviceLayer = Layer.mergeAll(
+type ServiceLayerOutput =
+  | AgentLoop.Service
+  | Config.Service
+  | Database.Service
+  | IdGenerator.Service
+  | Migration.Service
+  | Provider.Service
+  | Router.Service
+  | ThreadEventLog.Service
+  | ThreadProjection.Service
+  | Time.Service
+  | ToolExecutor.Service
+
+type ServiceLayerError = Config.ConfigError | Database.DatabaseError
+
+const baseServiceLayer = Layer.mergeAll(
   Time.layer,
   IdGenerator.layer,
   configuredDatabaseLayer,
   Migration.layer,
   ThreadEventLog.layer,
   ThreadProjection.layer,
+  ToolExecutor.emptyLayer,
+  configuredLlmLayer,
 )
 
-export const supportLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(serviceLayer))
+export const serviceLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError> = AgentLoop.layer.pipe(
+  Layer.provideMerge(baseServiceLayer),
+)
+
+export const supportLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError | Migration.MigrationError> =
+  Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(serviceLayer))
 
 export const actorsLayer = () => threadActorLayer.pipe(Layer.provide(supportLayer))
 

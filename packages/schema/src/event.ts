@@ -41,6 +41,18 @@ export const MessageAdded = Schema.Struct({
   data: Schema.Struct({ message: Message }),
 }).annotate({ identifier: "Rika.Event.MessageAdded" })
 
+export interface ModelStreamChunk extends Schema.Schema.Type<typeof ModelStreamChunk> {}
+export const ModelStreamChunk = Schema.Struct({
+  ...fields,
+  turn_id: TurnId,
+  type: Schema.Literal("model.stream.chunk"),
+  data: Schema.Struct({
+    text: Schema.String,
+    provider: Schema.String,
+    model: Schema.String,
+  }),
+}).annotate({ identifier: "Rika.Event.ModelStreamChunk" })
+
 export interface ToolCallRequested extends Schema.Schema.Type<typeof ToolCallRequested> {}
 export const ToolCallRequested = Schema.Struct({
   ...fields,
@@ -89,6 +101,7 @@ export type Event =
   | ThreadCreated
   | TurnStarted
   | MessageAdded
+  | ModelStreamChunk
   | ToolCallRequested
   | ToolCallCompleted
   | ArtifactCreated
@@ -100,6 +113,7 @@ export const Event = Schema.Union([
   ThreadCreated,
   TurnStarted,
   MessageAdded,
+  ModelStreamChunk,
   ToolCallRequested,
   ToolCallCompleted,
   ArtifactCreated,

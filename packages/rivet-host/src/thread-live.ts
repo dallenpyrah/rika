@@ -1,6 +1,7 @@
+import { AgentLoop } from "@rika/agent"
 import { IdGenerator, Time } from "@rika/core"
 import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
-import { Event, Ids, Message } from "@rika/schema"
+import { Event, Ids } from "@rika/schema"
 import { Registry, State } from "@rivetkit/effect"
 import { Effect, Layer } from "effect"
 import {
@@ -19,6 +20,7 @@ import {
 export const layer: Layer.Layer<
   never,
   never,
+  | AgentLoop.Service
   | Database.Service
   | IdGenerator.Service
   | Registry.Registry
@@ -31,6 +33,7 @@ export const layer: Layer.Layer<
     const projection = yield* ThreadProjection.Service
     const idGenerator = yield* IdGenerator.Service
     const time = yield* Time.Service
+    const agentLoop = yield* AgentLoop.Service
 
     const replay = (input: ThreadIdPayload) =>
       Effect.gen(function* () {
@@ -63,21 +66,9 @@ export const layer: Layer.Layer<
 
     const acceptTurn = (input: AcceptTurnPayload) =>
       Effect.gen(function* () {
-        const ensured = yield* ensureThread(input)
-        const turnId = Ids.TurnId.make(yield* idGenerator.next("turn"))
-        const started = yield* makeTurnStarted(input.thread_id, turnId, ensured.last_sequence + 1, idGenerator, time)
-        const message = yield* makeMessageAdded(
-          input.thread_id,
-          turnId,
-          input.content,
-          ensured.last_sequence + 2,
-          idGenerator,
-          time,
-        )
-        const appendedStarted = yield* appendAndProject(started)
-        const appendedMessage = yield* appendAndProject(message)
-        const previousEvents = yield* eventLog.readThread({ thread_id: input.thread_id, limit: ensured.last_sequence })
-        const next = stateFromEvents(input.thread_id, [...previousEvents, appendedStarted, appendedMessage])
+        yield* agentLoop.runTurn(input)
+        const events = yield* eventLog.readThread({ thread_id: input.thread_id })
+        const next = stateFromEvents(input.thread_id, events)
         yield* State.set(state, next).pipe(Effect.orDie)
         return snapshotFromState(next, input.thread_id)
       })
@@ -122,62 +113,6 @@ const makeThreadCreated = (
         input.user_id === undefined
           ? { workspace_id: input.workspace_id }
           : { workspace_id: input.workspace_id, user_id: input.user_id },
-    }
-    return event
-  })
-
-const makeTurnStarted = (
-  threadId: Ids.ThreadId,
-  turnId: Ids.TurnId,
-  sequence: number,
-  idGenerator: IdGenerator.Interface,
-  time: Time.Interface,
-): Effect.Effect<Event.TurnStarted> =>
-  Effect.gen(function* () {
-    const createdAt = yield* time.nowMillis
-    const eventId = Ids.EventId.make(yield* idGenerator.next("event"))
-    const event: Event.TurnStarted = {
-      id: eventId,
-      thread_id: threadId,
-      turn_id: turnId,
-      sequence,
-      version: 1,
-      created_at: createdAt,
-      type: "turn.started",
-      data: {},
-    }
-    return event
-  })
-
-const makeMessageAdded = (
-  threadId: Ids.ThreadId,
-  turnId: Ids.TurnId,
-  content: string,
-  sequence: number,
-  idGenerator: IdGenerator.Interface,
-  time: Time.Interface,
-): Effect.Effect<Event.MessageAdded> =>
-  Effect.gen(function* () {
-    const createdAt = yield* time.nowMillis
-    const messageId = Ids.MessageId.make(yield* idGenerator.next("message"))
-    const eventId = Ids.EventId.make(yield* idGenerator.next("event"))
-    const event: Event.MessageAdded = {
-      id: eventId,
-      thread_id: threadId,
-      turn_id: turnId,
-      sequence,
-      version: 1,
-      created_at: createdAt,
-      type: "message.added",
-      data: {
-        message: Message.user({
-          id: messageId,
-          thread_id: threadId,
-          turn_id: turnId,
-          content,
-          created_at: createdAt,
-        }),
-      },
     }
     return event
   })

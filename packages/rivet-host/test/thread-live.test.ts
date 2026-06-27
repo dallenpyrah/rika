@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { IdGenerator, Time } from "@rika/core"
+import { AgentLoop, ToolExecutor } from "@rika/agent"
+import { Config, IdGenerator, Time } from "@rika/core"
+import { Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Registry } from "@rivetkit/effect"
@@ -9,14 +11,29 @@ import { ThreadLive } from "../src/index"
 const threadId = Ids.ThreadId.make("thread_actor_smoke")
 const workspaceId = Ids.WorkspaceId.make("workspace_actor_smoke")
 
-const serviceLayer = Layer.mergeAll(
+const configLayer = Config.layerFromValues({
+  workspace_root: "/workspace/rika-actor-test",
+  data_dir: "/workspace/rika-actor-test/.rika",
+  default_mode: "smart",
+})
+const llmLayer = Router.layer.pipe(
+  Layer.provideMerge(Provider.fakeLayer(["actor loop response"])),
+  Layer.provideMerge(configLayer),
+)
+
+const baseServiceLayer = Layer.mergeAll(
+  configLayer,
   Database.memoryLayer,
   Migration.layer,
   ThreadEventLog.layer,
   ThreadProjection.layer,
   Time.fixedLayer(Common.TimestampMillis.make(1_800_000_000_000)),
   IdGenerator.sequenceLayer(1),
+  ToolExecutor.emptyLayer,
+  llmLayer,
 )
+
+const serviceLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseServiceLayer))
 
 const supportLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(serviceLayer))
 

@@ -105,4 +105,19 @@ describe("Rika protocol schemas", () => {
 
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
+
+  test("round-trips model stream chunk events", () => {
+    const event: Event.Event = {
+      id: eventId,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 2,
+      version: 1,
+      created_at: now,
+      type: "model.stream.chunk",
+      data: { text: "delta", provider: "openai", model: "gpt-5.5" },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
 })

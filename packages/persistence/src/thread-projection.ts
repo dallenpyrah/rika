@@ -192,7 +192,7 @@ const applyEventRow = (database: ProjectionDatabase, event: Event.Event) => {
     case "thread.archived":
       return applyThreadArchived(database, event)
     default:
-      return undefined
+      return applySequenceOnly(database, event)
   }
 }
 
@@ -250,6 +250,14 @@ const applyThreadArchived = (database: ProjectionDatabase, event: Event.ThreadAr
   database.run(sql`
     update thread_projections set
       archived = 1,
+      last_sequence = ${event.sequence},
+      updated_at = ${event.created_at}
+    where thread_id = ${event.thread_id}
+  `)
+
+const applySequenceOnly = (database: ProjectionDatabase, event: Event.Event) =>
+  database.run(sql`
+    update thread_projections set
       last_sequence = ${event.sequence},
       updated_at = ${event.created_at}
     where thread_id = ${event.thread_id}

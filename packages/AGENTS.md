@@ -11,6 +11,7 @@
 
 | Directory      | Purpose                                                                                   |
 | -------------- | ----------------------------------------------------------------------------------------- |
+| `agent/`       | Agent loop orchestration and minimal tool execution boundary. See `agent/AGENTS.md`.      |
 | `core/`        | Core Effect service examples and future runtime/domain services. See `core/AGENTS.md`.    |
 | `llm/`         | Provider-neutral LLM contracts and mode routing. See `llm/AGENTS.md`.                     |
 | `persistence/` | Drizzle-backed local SQLite adapter services and migrations. See `persistence/AGENTS.md`. |
