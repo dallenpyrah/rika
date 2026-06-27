@@ -16,9 +16,11 @@
 | `src/fff-search.ts`             | fff-backed path, glob, directory, grep, multi-grep, and health tools. |
 | `src/hashline-file.ts`          | Hashline read/write/edit service and tool registry layer.             |
 | `src/index.ts`                  | Package namespace exports.                                            |
+| `src/semantic-search.ts`        | Semantic/hybrid code search service, fake layer, and built-in tool.   |
 | `test/ast-grep-outline.test.ts` | Outline args, caps, path safety, and registry behavior tests.         |
 | `test/fff-search.test.ts`       | fff fake/fallback, pagination, anchors, and registry tests.           |
 | `test/hashline-file.test.ts`    | Hashline anchor, edit validation, and write behavior tests.           |
+| `test/semantic-search.test.ts`  | Semantic search fake/live fallback, diagnostics, and tool tests.      |
 
 ## Current Standards
 
@@ -26,6 +28,7 @@
 - Keep filesystem mutation behind Effect services and layers so tests can swap implementations.
 - Register built-in tools by returning `ToolRegistry.Definition` values or a `ToolRegistry.Service` layer.
 - Tool outputs should include structured metadata for future TUI rendering rather than terminal-only strings.
+- Use `semantic_search` first for behavior/concept/data-flow discovery, but keep fff as the exact path/content search fallback.
 - Use `ast_grep_outline` after search has identified candidate files or directories and before broad reads of large source files.
 - Live CLI and Rivet host tool composition goes through `BuiltInTools.toolExecutorLayer` so default search, outline, read, write, edit, and shell tools stay consistent.
 

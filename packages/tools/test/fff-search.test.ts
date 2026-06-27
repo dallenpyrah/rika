@@ -6,7 +6,7 @@ import { PermissionPolicy, ToolExecutor } from "@rika/agent"
 import { Config } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
-import { AstGrepOutline, BuiltInTools, FffSearch, HashlineFile } from "../src/index"
+import { AstGrepOutline, BuiltInTools, FffSearch, HashlineFile, SemanticSearch } from "../src/index"
 
 const tempWorkspace = () => mkdtemp(join(tmpdir(), "rika-fff-"))
 
@@ -38,6 +38,7 @@ const run = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, FffSearch.
 
 const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolExecutor.Service>) => {
   const registryLayer = BuiltInTools.registryLayerFromServices.pipe(
+    Layer.provideMerge(SemanticSearch.fakeLayer()),
     Layer.provideMerge(FffSearch.fakeLayer(fakeFiles)),
     Layer.provideMerge(AstGrepOutline.fakeLayer(outlineRunner)),
     Layer.provideMerge(HashlineFile.layer),
@@ -133,6 +134,8 @@ describe("FffSearch", () => {
 
     expect(names).toEqual([
       "shell.command",
+      "semantic_search",
+      "semantic_search.status",
       "fffind",
       "fff.glob",
       "fff.directory_search",
