@@ -9,17 +9,21 @@
 
 ## Key Files
 
-| File                            | Purpose                                                          |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `drizzle.config.ts`             | Drizzle Kit configuration for local SQLite migration generation. |
-| `drizzle/`                      | Committed generated SQL migrations and Drizzle metadata.         |
-| `src/database.ts`               | Effect `Database` service and SQLite connection layers.          |
-| `src/migration.ts`              | Effect `Migration` service for runtime migration application.    |
-| `src/schema/event-log.ts`       | Drizzle schema for the canonical event log tables.               |
-| `src/schema/index.ts`           | Schema exports consumed by Drizzle Kit and services.             |
-| `test/database.test.ts`         | Database layer replacement tests.                                |
-| `test/migration.test.ts`        | Runtime migration service tests.                                 |
-| `test/schema/event-log.test.ts` | Event log schema tests.                                          |
+| File                             | Purpose                                                          |
+| -------------------------------- | ---------------------------------------------------------------- |
+| `drizzle.config.ts`              | Drizzle Kit configuration for local SQLite migration generation. |
+| `drizzle/`                       | Committed generated SQL migrations and Drizzle metadata.         |
+| `src/database.ts`                | Effect `Database` service and SQLite connection layers.          |
+| `src/migration.ts`               | Effect `Migration` service for runtime migration application.    |
+| `src/schema/event-log.ts`        | Drizzle schema for the canonical event log tables.               |
+| `src/schema/index.ts`            | Schema exports consumed by Drizzle Kit and services.             |
+| `src/thread-event-log.ts`        | Canonical append-only thread event log service.                  |
+| `src/thread-projection.ts`       | Rebuildable thread list/latest message/active turn projections.  |
+| `test/database.test.ts`          | Database layer replacement tests.                                |
+| `test/migration.test.ts`         | Runtime migration service tests.                                 |
+| `test/schema/event-log.test.ts`  | Event log schema tests.                                          |
+| `test/thread-event-log.test.ts`  | Event append, ordering, idempotency, and restart tests.          |
+| `test/thread-projection.test.ts` | Projection apply and rebuild tests.                              |
 
 ## Current Standards
 
@@ -28,6 +32,7 @@
 - Prefer `Database.memoryLayer` in tests; use file-backed `layerFromPath` only when testing file-specific SQLite behavior.
 - Generated SQL migrations in `drizzle/` are committed. Do not hand-edit Drizzle metadata unless repairing a broken migration intentionally.
 - Raw Drizzle handles may be used only inside this package.
+- `ThreadEventLog` is canonical. `ThreadProjection` tables are disposable and must rebuild from `thread_events` only.
 
 ## For AI Agents
 
