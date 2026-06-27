@@ -23,8 +23,7 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
         Execute.executeCommand(command).pipe(
           Effect.provide(liveLayer(command, input.env, input.cwd)),
           Effect.matchEffect({
-            onFailure: (error: AgentLoop.RunError | Execute.ExecuteError | Migration.MigrationError) =>
-              Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
+            onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
             onSuccess: (code) => Effect.succeed(code),
           }),
         ),
@@ -32,12 +31,25 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
   ),
 )
 
-const formatRuntimeError = (error: AgentLoop.RunError | Execute.ExecuteError | Migration.MigrationError) => {
+type RuntimeError =
+  | AgentLoop.RunError
+  | Config.ConfigError
+  | Database.DatabaseError
+  | Execute.ExecuteError
+  | Migration.MigrationError
+
+const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Migration.MigrationError) return `Rika failed: ${error.message}`
+  if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
+  if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
   return Execute.formatError(error)
 }
 
-export const liveLayer = (command: Args.ExecuteCommand, env: Record<string, string | undefined>, cwd: string) => {
+export const liveLayer = (
+  command: Args.ExecuteCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<LiveLayerOutput, LiveLayerError> => {
   const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
   const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
   const configLayer = Config.layerFromValues(
@@ -84,3 +96,5 @@ export type LiveLayerOutput =
   | ThreadProjection.Service
   | Time.Service
   | ToolExecutor.Service
+
+export type LiveLayerError = Config.ConfigError | Database.DatabaseError | Migration.MigrationError

@@ -4,7 +4,7 @@ import { Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer, Stream } from "effect"
-import { AgentLoop, ToolExecutor } from "../src/index"
+import { AgentLoop, PermissionPolicy, ToolExecutor, ToolRegistry } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_agent_loop")
 const workspaceId = Ids.WorkspaceId.make("workspace_agent_loop")
@@ -15,7 +15,11 @@ const configLayer = Config.layerFromValues({
   default_mode: "smart",
 })
 
-const makeLayer = (responses: ReadonlyArray<Provider.FakeResponse>) => {
+const defaultToolLayer = ToolExecutor.fakeLayer({
+  "fake.echo": (call) => Effect.succeed({ echoed: call.input }),
+})
+
+const makeLayer = (responses: ReadonlyArray<Provider.FakeResponse>, toolLayer = defaultToolLayer) => {
   const llmLayer = Router.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(Provider.fakeLayer(responses)))
   const services = Layer.mergeAll(
     configLayer,
@@ -25,9 +29,7 @@ const makeLayer = (responses: ReadonlyArray<Provider.FakeResponse>) => {
     ThreadProjection.layer,
     Time.fixedLayer(Common.TimestampMillis.make(1_900_000_000_000)),
     IdGenerator.sequenceLayer(1),
-    ToolExecutor.fakeLayer({
-      "fake.echo": (call) => Effect.succeed({ echoed: call.input }),
-    }),
+    toolLayer,
     llmLayer,
   )
 
@@ -101,6 +103,36 @@ describe("AgentLoop", () => {
       "message.added",
       "turn.completed",
     ])
+  })
+
+  test("records permission-blocked tool calls as structured tool results", async () => {
+    const toolLayer = ToolExecutor.layer.pipe(
+      Layer.provideMerge(ToolRegistry.fakeLayer({ "fake.echo": (call) => Effect.succeed({ echoed: call.input }) })),
+      Layer.provideMerge(PermissionPolicy.rejectLayer("policy denied fake.echo")),
+    )
+    const layer = makeLayer(
+      [JSON.stringify({ tool_call: { name: "fake.echo", input: { text: "blocked" } } }), "continued after block"],
+      toolLayer,
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_blocked_tool"),
+          workspace_id: workspaceId,
+          content: "please call a blocked tool",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_blocked_tool") })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.find((event) => event.type === "tool.call.completed")).toMatchObject({
+      data: { result: { status: "error", error: { kind: "permission", message: "policy denied fake.echo" } } },
+    })
+    expect(result.events.at(-1)).toMatchObject({ type: "turn.completed" })
   })
 
   test("records cancellation as a replayable turn failure", async () => {
