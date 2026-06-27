@@ -9,9 +9,15 @@
 
 ## Key Files
 
-| File           | Purpose                                         |
-| -------------- | ----------------------------------------------- |
-| `src/index.ts` | Package entrypoint for schema/protocol exports. |
+| File              | Purpose                                                   |
+| ----------------- | --------------------------------------------------------- |
+| `src/index.ts`    | Package entrypoint for schema/protocol namespace exports. |
+| `src/ids.ts`      | Branded protocol ID schemas and constructors.             |
+| `src/message.ts`  | Message and content-part schemas.                         |
+| `src/event.ts`    | Canonical thread event union and event reference helpers. |
+| `src/tool.ts`     | Tool call/result wire schemas.                            |
+| `src/artifact.ts` | Durable artifact wire schema.                             |
+| `src/error.ts`    | Serializable error envelope schema.                       |
 
 ## Current Standards
 
@@ -26,6 +32,7 @@
 
 ## Testing And Verification
 
+- `bun run lint` from this package or `bun run lint` from the repo root.
 - `bun run typecheck` from this package or `bun run typecheck` from the repo root.
 - `bun run test` from this package or `bun run test` from the repo root.
 
