@@ -8,11 +8,14 @@ Rika is a greenfield Effect-native coding agent system. The repository currently
 
 ## Key Files
 
-| File | Purpose |
-| ---- | ------- |
-| `README.md` | Product direction and current repo state. |
-| `CONTEXT.md` | Domain glossary. Keep implementation details out of this file. |
+| File               | Purpose                                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `README.md`        | Product direction and current repo state.                                                                           |
+| `CONTEXT.md`       | Domain glossary. Keep implementation details out of this file.                                                      |
 | `docs/RESEARCH.md` | Initial research notes for Amp, OpenCode, Pi, Rivet, Drizzle, fff, hashline, semantic search, and ast-grep outline. |
+| `package.json`     | Bun workspace, dependency catalog, and root verification scripts.                                                   |
+| `turbo.json`       | Monorepo task graph for package build, typecheck, and test commands.                                                |
+| `.oxlintrc.json`   | Root oxlint configuration.                                                                                          |
 
 ## Current Standards
 
@@ -27,6 +30,13 @@ Rika is a greenfield Effect-native coding agent system. The repository currently
 - Make `fff`, hashline read/edit, semantic search, and ast-grep outline default built-in tools.
 - Keep implementation simple. Do not add abstractions unless they make dependencies swappable, remove real duplication, or match the established OpenCode-style shape.
 
+## Subdirectories
+
+| Directory          | Purpose                                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `packages/schema/` | Shared schema/protocol package placeholder. This package must stay infrastructure-free.                                    |
+| `packages/core/`   | Core Effect runtime/domain package placeholder. Runtime services should depend on interfaces and layers, not raw adapters. |
+
 ## For AI Agents
 
 - Read `CONTEXT.md` before naming new domain concepts.
@@ -38,8 +48,12 @@ Rika is a greenfield Effect-native coding agent system. The repository currently
 
 ## Testing And Verification
 
-- No implementation scaffold exists yet, so there are no canonical repo verification commands.
-- After the scaffold issue lands, this file must be updated with the exact Bun/Turbo/oxlint/typecheck/test commands.
+- `bun install`: install workspace dependencies and update `bun.lock`.
+- `bun run lint`: run oxlint across the repository.
+- `bun run typecheck`: run package type checks through Turbo.
+- `bun run test`: run package tests through Turbo.
+- `bun run build`: build package entrypoints through Turbo.
+- `bun run format:check`: check formatting with Prettier.
 
 ## Dependencies
 
