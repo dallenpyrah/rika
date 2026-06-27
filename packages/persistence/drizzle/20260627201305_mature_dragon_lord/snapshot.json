@@ -1,0 +1,349 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "81462184-187e-4cb0-986d-928de17235f8",
+  "prevIds": ["609b5682-a23f-460c-b94d-56613b939ef7"],
+  "ddl": [
+    {
+      "name": "thread_events",
+      "entityType": "tables"
+    },
+    {
+      "name": "thread_projections",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "thread_id",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "turn_id",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "type",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "payload",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "message_id",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "tool_call_id",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_id",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "thread_events"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "thread_id",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "workspace_id",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "user_id",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "latest_message_id",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "latest_message_role",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "latest_message_text",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "latest_message_created_at",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "active_turn_id",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "active_turn_status",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "archived",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_sequence",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "thread_projections"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "thread_events_pk",
+      "table": "thread_events",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["thread_id"],
+      "nameExplicit": false,
+      "name": "thread_projections_pk",
+      "table": "thread_projections",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "thread_id",
+          "isExpression": false
+        },
+        {
+          "value": "sequence",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "thread_events_thread_sequence_idx",
+      "entityType": "indexes",
+      "table": "thread_events"
+    },
+    {
+      "columns": [
+        {
+          "value": "thread_id",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "thread_events_thread_created_idx",
+      "entityType": "indexes",
+      "table": "thread_events"
+    },
+    {
+      "columns": [
+        {
+          "value": "type",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "thread_events_type_idx",
+      "entityType": "indexes",
+      "table": "thread_events"
+    },
+    {
+      "columns": [
+        {
+          "value": "updated_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "thread_projections_updated_idx",
+      "entityType": "indexes",
+      "table": "thread_projections"
+    },
+    {
+      "columns": [
+        {
+          "value": "workspace_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "thread_projections_workspace_idx",
+      "entityType": "indexes",
+      "table": "thread_projections"
+    }
+  ],
+  "renames": []
+}

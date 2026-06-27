@@ -26,3 +26,4 @@ Tests should use `Database.memoryLayer` unless the behavior being tested require
 - Raw Drizzle and `bun:sqlite` handles stay in persistence modules.
 - Core, CLI, TUI, actor, LLM, and tool orchestration code must not import Drizzle directly.
 - The append-only event log is canonical durable truth. Projections remain rebuildable.
+- `ThreadEventLog` owns event append/read invariants. `ThreadProjection` owns rebuildable thread list, latest message, and active turn read models.
