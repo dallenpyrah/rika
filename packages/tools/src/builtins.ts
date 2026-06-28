@@ -1,19 +1,22 @@
 import { PermissionPolicy, SubagentRuntime, ToolExecutor, ToolRegistry } from "@rika/agent"
 import { Config } from "@rika/core"
+import { McpApprovalStore } from "@rika/persistence"
 import { PluginHost } from "@rika/plugin"
 import { Effect, Layer } from "effect"
 import * as AstGrepOutline from "./ast-grep-outline"
 import * as FffSearch from "./fff-search"
 import * as HashlineFile from "./hashline-file"
+import * as McpClient from "./mcp-client"
 import * as SemanticSearch from "./semantic-search"
 
 export const registryLayerFromServices: Layer.Layer<
   ToolRegistry.Service,
-  never,
+  McpClient.RunError,
   | AstGrepOutline.Service
   | Config.Service
   | FffSearch.Service
   | HashlineFile.Service
+  | McpClient.Service
   | PluginHost.Service
   | SemanticSearch.Service
   | SubagentRuntime.Service
@@ -25,6 +28,7 @@ export const registryLayerFromServices: Layer.Layer<
     const astGrepOutline = yield* AstGrepOutline.Service
     const fffSearch = yield* FffSearch.Service
     const hashlineFile = yield* HashlineFile.Service
+    const mcpDefinitions = yield* McpClient.toolDefinitions()
     const semanticSearch = yield* SemanticSearch.Service
     const subagentRuntime = yield* SubagentRuntime.Service
     const pluginDefinitions = yield* PluginHost.toolDefinitions()
@@ -32,6 +36,7 @@ export const registryLayerFromServices: Layer.Layer<
       ...ToolRegistry.shellDefinitions(values.workspace_root),
       ...SubagentRuntime.toolDefinitions(subagentRuntime),
       ...pluginDefinitions,
+      ...mcpDefinitions,
       ...SemanticSearch.toolDefinitions(semanticSearch),
       ...FffSearch.toolDefinitions(fffSearch),
       ...AstGrepOutline.toolDefinitions(astGrepOutline),
@@ -66,13 +71,14 @@ export const readOnlyRegistryLayerFromServices: Layer.Layer<
 
 export const registryLayer: Layer.Layer<
   ToolRegistry.Service,
-  FffSearch.FffSearchError,
-  Config.Service | PluginHost.Service | SubagentRuntime.Service
+  FffSearch.FffSearchError | McpClient.RunError,
+  Config.Service | McpApprovalStore.Service | PluginHost.Service | SubagentRuntime.Service
 > = registryLayerFromServices.pipe(
   Layer.provideMerge(SemanticSearch.layer),
   Layer.provideMerge(FffSearch.layer),
   Layer.provideMerge(AstGrepOutline.layer),
   Layer.provideMerge(HashlineFile.layer),
+  Layer.provideMerge(McpClient.layer),
 )
 
 export const readOnlyRegistryLayer: Layer.Layer<ToolRegistry.Service, FffSearch.FffSearchError, Config.Service> =
@@ -85,8 +91,8 @@ export const readOnlyRegistryLayer: Layer.Layer<ToolRegistry.Service, FffSearch.
 
 export const toolExecutorLayer: Layer.Layer<
   ToolExecutor.Service,
-  FffSearch.FffSearchError,
-  Config.Service | PluginHost.Service | SubagentRuntime.Service
+  FffSearch.FffSearchError | McpClient.RunError,
+  Config.Service | McpApprovalStore.Service | PluginHost.Service | SubagentRuntime.Service
 > = PluginHost.toolResultExecutorLayer.pipe(
   Layer.provideMerge(
     ToolExecutor.layer.pipe(Layer.provideMerge(registryLayer), Layer.provideMerge(PluginHost.permissionPolicyLayer)),

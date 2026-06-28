@@ -52,6 +52,10 @@ _Avoid_: Prompt snippet, macro, recipe
 Executable extension code that can register tools, commands, UI, policies, hooks, or custom agent surfaces.
 _Avoid_: Skill, MCP server, script
 
+**MCP Server**:
+An external Model Context Protocol endpoint that Rika can connect to and expose as policy-governed tools. Workspace command MCP servers require explicit approval before execution.
+_Avoid_: Plugin, built-in tool, trusted script
+
 **Permission Policy**:
 A rule set that decides whether a proposed tool call is allowed, rejected, modified, or synthesized.
 _Avoid_: Approval flow, safety setting, guardrail

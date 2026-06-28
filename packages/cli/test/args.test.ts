@@ -81,6 +81,14 @@ describe("CLI args", () => {
     expect(inspect).toEqual({ type: "skills", action: "inspect", name: "deploy" })
   })
 
+  test("parses MCP management commands", async () => {
+    const list = await Effect.runPromise(Args.parse(["mcp", "list"]))
+    const approve = await Effect.runPromise(Args.parse(["mcp", "approve", "filesystem"]))
+
+    expect(list).toEqual({ type: "mcp", action: "list" })
+    expect(approve).toEqual({ type: "mcp", action: "approve", server_name: "filesystem" })
+  })
+
   test("rejects root prompt text unless --execute is set", async () => {
     const error = await Effect.runPromise(Args.parse(["hello"]).pipe(Effect.flip))
 

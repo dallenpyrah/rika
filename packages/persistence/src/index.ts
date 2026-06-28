@@ -1,4 +1,5 @@
 export * as Database from "./database"
+export * as McpApprovalStore from "./mcp-approval-store"
 export * as Migration from "./migration"
 export * as Schema from "./schema"
 export * as ThreadEventLog from "./thread-event-log"

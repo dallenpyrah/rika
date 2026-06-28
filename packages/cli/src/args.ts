@@ -56,7 +56,19 @@ export const SkillCommand = Schema.Struct({
   name: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Cli.Args.SkillCommand" })
 
-export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand | SkillCommand
+export const McpAction = Schema.Literals(["list", "approve"]).annotate({
+  identifier: "Rika.Cli.Args.McpAction",
+})
+export type McpAction = typeof McpAction.Type
+
+export interface McpCommand extends Schema.Schema.Type<typeof McpCommand> {}
+export const McpCommand = Schema.Struct({
+  type: Schema.Literal("mcp"),
+  action: McpAction,
+  server_name: Schema.optional(Schema.String),
+}).annotate({ identifier: "Rika.Cli.Args.McpCommand" })
+
+export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand | SkillCommand | McpCommand
 
 export class ArgsError extends Schema.TaggedErrorClass<ArgsError>()("ArgsError", {
   message: Schema.String,
@@ -76,6 +88,8 @@ export const usage = [
   "  rika threads reference <thread-id> [query]",
   "  rika skills list",
   "  rika skills inspect <name>",
+  "  rika mcp list",
+  "  rika mcp approve <server-name>",
   "  rika run [options] <prompt>",
   "  rika --execute [options] <prompt>",
   "",
@@ -164,6 +178,10 @@ const skillNameConfig = {
   name: Argument.string("name").pipe(Argument.withDescription("Skill name")),
 }
 
+const mcpServerConfig = {
+  serverName: Argument.string("server-name").pipe(Argument.withDescription("MCP server name")),
+}
+
 interface ExecuteInput {
   readonly mode: Option.Option<Config.Mode>
   readonly workspace: Option.Option<string>
@@ -204,6 +222,10 @@ interface SkillNameInput {
   readonly name: string
 }
 
+interface McpServerInput {
+  readonly serverName: string
+}
+
 const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Ref.Ref<Option.Option<ArgsError>>) => {
   const run = CliCommand.make("run", executeConfig, (input: ExecuteInput) =>
     Ref.set(parsedRef, Option.some(toExecuteCommand(input))),
@@ -221,6 +243,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
 
   const threads = makeThreadsCommand(parsedRef, rejectedRef)
   const skills = makeSkillsCommand(parsedRef, rejectedRef)
+  const mcp = makeMcpCommand(parsedRef, rejectedRef)
 
   return CliCommand.make("rika", rootConfig, (input: RootInput) =>
     input.execute
@@ -238,7 +261,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
           ),
   ).pipe(
     CliCommand.withDescription("Effect-native coding agent"),
-    CliCommand.withSubcommands([run, interactive, threads, skills]),
+    CliCommand.withSubcommands([run, interactive, threads, skills, mcp]),
   )
 }
 
@@ -311,6 +334,28 @@ const makeSkillsCommand = (
     CliCommand.withDescription("List and inspect installed Rika skills"),
     CliCommand.withShortDescription("Manage skills"),
     CliCommand.withSubcommands([list, inspect]),
+  )
+}
+
+const makeMcpCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Ref.Ref<Option.Option<ArgsError>>) => {
+  const list = CliCommand.make("list", {}, () => Ref.set(parsedRef, Option.some(toMcpListCommand()))).pipe(
+    CliCommand.withDescription("List configured MCP servers and trust status"),
+    CliCommand.withShortDescription("List MCP servers"),
+  )
+
+  const approve = CliCommand.make("approve", mcpServerConfig, (input: McpServerInput) =>
+    Ref.set(parsedRef, Option.some(toMcpApproveCommand(input))),
+  ).pipe(
+    CliCommand.withDescription("Approve a workspace command MCP server"),
+    CliCommand.withShortDescription("Approve MCP server"),
+  )
+
+  return CliCommand.make("mcp", {}, () =>
+    Ref.set(rejectedRef, Option.some(new ArgsError({ message: "Expected an mcp subcommand", exit_code: 2, usage }))),
+  ).pipe(
+    CliCommand.withDescription("Manage configured MCP servers"),
+    CliCommand.withShortDescription("Manage MCP"),
+    CliCommand.withSubcommands([list, approve]),
   )
 }
 
@@ -387,6 +432,14 @@ const toSkillInspectCommand = (input: SkillNameInput): SkillCommand => ({
   type: "skills",
   action: "inspect",
   name: input.name,
+})
+
+const toMcpListCommand = (): McpCommand => ({ type: "mcp", action: "list" })
+
+const toMcpApproveCommand = (input: McpServerInput): McpCommand => ({
+  type: "mcp",
+  action: "approve",
+  server_name: input.serverName,
 })
 
 interface CapturedConsole {

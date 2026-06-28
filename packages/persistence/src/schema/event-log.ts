@@ -50,3 +50,25 @@ export const thread_projections = sqliteTable(
 
 export type ThreadProjectionRow = typeof thread_projections.$inferSelect
 export type NewThreadProjectionRow = typeof thread_projections.$inferInsert
+
+export const mcp_server_approvals = sqliteTable(
+  "mcp_server_approvals",
+  {
+    id: text().primaryKey(),
+    workspace_root: text().notNull(),
+    server_name: text().notNull(),
+    fingerprint: text().notNull(),
+    approved_at: integer().notNull(),
+  },
+  (table) => [
+    uniqueIndex("mcp_server_approvals_workspace_server_fingerprint_idx").on(
+      table.workspace_root,
+      table.server_name,
+      table.fingerprint,
+    ),
+    index("mcp_server_approvals_workspace_idx").on(table.workspace_root),
+  ],
+)
+
+export type McpServerApprovalRow = typeof mcp_server_approvals.$inferSelect
+export type NewMcpServerApprovalRow = typeof mcp_server_approvals.$inferInsert

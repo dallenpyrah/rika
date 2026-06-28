@@ -1,13 +1,14 @@
 import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadService, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
-import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Database, McpApprovalStore, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { PluginHost, PluginUi } from "@rika/plugin"
-import { BuiltInTools, FffSearch } from "@rika/tools"
+import { BuiltInTools, FffSearch, McpClient } from "@rika/tools"
 import { Session, Terminal } from "@rika/tui"
 import { Effect, Layer } from "effect"
 import * as Args from "./args"
 import * as Execute from "./execute"
+import * as Mcp from "./mcp"
 import * as Output from "./output"
 import * as Skills from "./skills"
 import * as Threads from "./threads"
@@ -31,7 +32,9 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
             ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, input.env, input.cwd)))
             : command.type === "threads"
               ? Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, input.env, input.cwd)))
-              : Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, input.env, input.cwd)))
+              : command.type === "skills"
+                ? Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, input.env, input.cwd)))
+                : Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, input.env, input.cwd)))
         ).pipe(
           Effect.matchEffect({
             onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -49,6 +52,9 @@ type RuntimeError =
   | Database.DatabaseError
   | Execute.ExecuteError
   | FffSearch.FffSearchError
+  | Mcp.McpError
+  | McpApprovalStore.McpApprovalStoreError
+  | McpClient.McpClientError
   | Migration.MigrationError
   | PluginHost.RunError
   | Session.SessionError
@@ -63,6 +69,9 @@ type RuntimeError =
 const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Migration.MigrationError) return `Rika failed: ${error.message}`
   if (error instanceof FffSearch.FffSearchError) return `Rika failed: ${error.message}`
+  if (error instanceof Mcp.McpError) return Mcp.formatError(error)
+  if (error instanceof McpApprovalStore.McpApprovalStoreError) return `Rika failed: ${error.message}`
+  if (error instanceof McpClient.McpClientError) return `Rika failed: ${error.message}`
   if (error instanceof PluginHost.PluginHostError) return `Rika failed: ${error.message}`
   if (error instanceof PluginUi.PluginUiError) return `Rika failed: ${error.message}`
   if (error instanceof ContextResolver.ContextResolverError) return `Rika failed: ${error.message}`
@@ -96,44 +105,46 @@ export const liveLayer = (
     env,
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
+    mcpApprovalLayer,
+    Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    Time.layer,
+    timeLayer,
     IdGenerator.layer,
   )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
   const subagentLayer = SubagentRuntime.layer.pipe(
-    Layer.provideMerge(storageLayer),
+    Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
     Layer.provideMerge(readOnlyToolLayer),
   )
   const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
-    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(subagentLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Output.layer,
-    Migration.layer,
     storageAndThreadLayer,
     contextResolverLayer,
     skillLayer,
     toolLayer,
     llmLayer,
   )
+  const commandLayer = Execute.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
 
-  return Execute.layer.pipe(
-    Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))),
-    Layer.provideMerge(Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(baseLayer))),
-  )
+  return commandLayer
 }
 
 export const interactiveLiveLayer = (
@@ -153,44 +164,46 @@ export const interactiveLiveLayer = (
     env,
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
+    mcpApprovalLayer,
+    Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    Time.layer,
+    timeLayer,
     IdGenerator.layer,
   )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
   const subagentLayer = SubagentRuntime.layer.pipe(
-    Layer.provideMerge(storageLayer),
+    Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
     Layer.provideMerge(readOnlyToolLayer),
   )
   const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
-    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(subagentLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Terminal.layer,
-    Migration.layer,
     storageAndThreadLayer,
     contextResolverLayer,
     skillLayer,
     toolLayer,
     llmLayer,
   )
+  const sessionLayer = Session.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
 
-  return Session.layer.pipe(
-    Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))),
-    Layer.provideMerge(Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(baseLayer))),
-  )
+  return sessionLayer
 }
 
 export const skillsLiveLayer = (
@@ -244,12 +257,45 @@ export const threadsLiveLayer = (
     Time.layer,
     IdGenerator.layer,
   )
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const commandLayer = Threads.layer.pipe(Layer.provideMerge(storageAndThreadLayer))
 
-  return Threads.layer.pipe(
-    Layer.provideMerge(storageAndThreadLayer),
-    Layer.provideMerge(Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageAndThreadLayer))),
+  return commandLayer
+}
+
+export const mcpLiveLayer = (
+  _command: Args.McpCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<McpLayerOutput, LiveLayerError> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: env.RIKA_MODE === "rush" || env.RIKA_MODE === "deep" ? env.RIKA_MODE : "smart",
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
   )
+  const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    Output.layer,
+    databaseLayer,
+    Migration.layer,
+    timeLayer,
+    mcpApprovalLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const mcpClientLayer = McpClient.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const commandLayer = Mcp.layer.pipe(Layer.provideMerge(migratedStorageLayer), Layer.provideMerge(mcpClientLayer))
+
+  return commandLayer
 }
 
 export type LiveLayerOutput =
@@ -260,6 +306,7 @@ export type LiveLayerOutput =
   | Execute.Service
   | IdGenerator.Service
   | Migration.Service
+  | McpApprovalStore.Service
   | Output.Service
   | PluginHost.Service
   | Provider.Service
@@ -279,6 +326,7 @@ export type InteractiveLayerOutput =
   | Database.Service
   | IdGenerator.Service
   | Migration.Service
+  | McpApprovalStore.Service
   | PluginHost.Service
   | Provider.Service
   | Router.Service
@@ -306,10 +354,22 @@ export type ThreadsLayerOutput =
 
 export type SkillsLayerOutput = Config.Service | Output.Service | SkillRegistry.Service | Skills.Service
 
+export type McpLayerOutput =
+  | Config.Service
+  | Database.Service
+  | Mcp.Service
+  | McpApprovalStore.Service
+  | McpClient.Service
+  | Migration.Service
+  | Output.Service
+  | Time.Service
+
 export type LiveLayerError =
   | Config.ConfigError
   | ContextResolver.ContextResolverError
   | Database.DatabaseError
   | FffSearch.FffSearchError
+  | McpApprovalStore.McpApprovalStoreError
+  | McpClient.RunError
   | Migration.MigrationError
   | PluginHost.RunError

@@ -15,9 +15,11 @@
   },
   "dependencies": {
     "@ff-labs/fff-bun": "0.9.6",
+    "@modelcontextprotocol/client": "2.0.0-alpha.3",
     "@pierre/diffs": "1.2.11",
     "@rika/agent": "workspace:*",
     "@rika/core": "workspace:*",
+    "@rika/persistence": "workspace:*",
     "@rika/plugin": "workspace:*",
     "@rika/schema": "workspace:*",
     "effect": "catalog:"

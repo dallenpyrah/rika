@@ -7,7 +7,7 @@ import { Config } from "@rika/core"
 import { PluginHost } from "@rika/plugin"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
-import { AstGrepOutline, BuiltInTools, FffSearch, HashlineFile, SemanticSearch } from "../src/index"
+import { AstGrepOutline, BuiltInTools, FffSearch, HashlineFile, McpClient, SemanticSearch } from "../src/index"
 
 const tempWorkspace = () => mkdtemp(join(tmpdir(), "rika-fff-"))
 
@@ -43,6 +43,7 @@ const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolEx
     Layer.provideMerge(FffSearch.fakeLayer(fakeFiles)),
     Layer.provideMerge(AstGrepOutline.fakeLayer(outlineRunner)),
     Layer.provideMerge(HashlineFile.layer),
+    Layer.provideMerge(McpClient.emptyLayer),
     Layer.provideMerge(PluginHost.emptyLayer),
     Layer.provideMerge(SubagentRuntime.fakeLayer(() => Effect.succeed({ type: "subagent.batch", runs: [] }))),
     Layer.provideMerge(configLayer(workspaceRoot)),

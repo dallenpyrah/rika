@@ -81,3 +81,15 @@ The local `semantic-search` repo already exposes an Effect-native library plus A
 ### ast-grep-outline
 
 The local `ast-grep-outline` repo wraps `ast-grep outline` as an agent tool. Rika should ship an equivalent built-in structural outline tool that respects `sgconfig.yml`, supports custom outline rules, and returns compact symbol/navigation output.
+
+## MCP Research
+
+The current official Model Context Protocol TypeScript SDK publishes split client/server packages. Rika uses `@modelcontextprotocol/client` for client integration instead of hand-rolling JSON-RPC transports. The client package exposes `Client`, `StdioClientTransport` for local command servers, and `StreamableHTTPClientTransport` for remote HTTP servers. Tool discovery and invocation go through `client.listTools()` and `client.callTool(...)`.
+
+Rika treats MCP servers as external, untrusted extension endpoints rather than plugins:
+
+- User settings and workspace settings can define MCP servers with `command`/`args`/`env` or remote `url`/`headers`.
+- Workspace command servers are executable code and must be explicitly approved by server name plus config fingerprint before Rika spawns them.
+- MCP tools are filtered before entering the model-facing `ToolRegistry` so noisy servers do not bloat context.
+- MCP tool calls still run through `ToolExecutor` and `PermissionPolicy`; MCP integration is not a bypass around normal tool policy.
+- Auth secrets stay in config boundaries and must not be persisted into thread events.

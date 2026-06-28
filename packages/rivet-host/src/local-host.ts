@@ -1,9 +1,9 @@
 import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadService, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
-import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Database, McpApprovalStore, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { PluginHost, PluginUi } from "@rika/plugin"
-import { BuiltInTools, FffSearch } from "@rika/tools"
+import { BuiltInTools, FffSearch, McpClient } from "@rika/tools"
 import { Registry } from "@rivetkit/effect"
 import { Layer } from "effect"
 import { layer as threadActorLayer } from "./thread-live"
@@ -19,6 +19,11 @@ export const endpointFromEnv = (env: Record<string, string | undefined> = proces
   env.RIVET_ENDPOINT ?? defaultEndpoint
 
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
+const configuredTimeLayer = Time.layer
+const configuredMcpApprovalLayer = McpApprovalStore.layer.pipe(
+  Layer.provideMerge(configuredDatabaseLayer),
+  Layer.provideMerge(configuredTimeLayer),
+)
 const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
 const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredPluginLayer = PluginHost.layer.pipe(
@@ -28,21 +33,24 @@ const configuredPluginLayer = PluginHost.layer.pipe(
 const storageLayer = Layer.mergeAll(
   Config.layer,
   configuredDatabaseLayer,
+  configuredMcpApprovalLayer,
+  Migration.layer,
   ThreadEventLog.layer,
   ThreadProjection.layer,
-  Time.layer,
+  configuredTimeLayer,
   IdGenerator.layer,
 )
-const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
+const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
 const configuredContextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
 const configuredReadOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
 const configuredSubagentLayer = SubagentRuntime.layer.pipe(
-  Layer.provideMerge(storageLayer),
+  Layer.provideMerge(migratedStorageLayer),
   Layer.provideMerge(configuredLlmLayer),
   Layer.provideMerge(configuredReadOnlyToolLayer),
 )
 const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(
-  Layer.provideMerge(Config.layer),
+  Layer.provideMerge(migratedStorageLayer),
   Layer.provideMerge(configuredPluginLayer),
   Layer.provideMerge(configuredSubagentLayer),
 )
@@ -54,6 +62,7 @@ type ServiceLayerOutput =
   | Database.Service
   | IdGenerator.Service
   | Migration.Service
+  | McpApprovalStore.Service
   | PluginHost.Service
   | Provider.Service
   | Router.Service
@@ -70,13 +79,15 @@ type ServiceLayerError =
   | ContextResolver.ContextResolverError
   | Database.DatabaseError
   | FffSearch.FffSearchError
+  | McpApprovalStore.McpApprovalStoreError
+  | McpClient.RunError
+  | Migration.MigrationError
   | PluginHost.RunError
 
 const baseServiceLayer = Layer.mergeAll(
   storageAndThreadLayer,
   configuredContextResolverLayer,
   configuredSkillLayer,
-  Migration.layer,
   configuredToolLayer,
   configuredLlmLayer,
 )
@@ -85,8 +96,7 @@ export const serviceLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError> = 
   Layer.provideMerge(baseServiceLayer),
 )
 
-export const supportLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError | Migration.MigrationError> =
-  Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(serviceLayer))
+export const supportLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError> = serviceLayer
 
 export const actorsLayer = () => threadActorLayer.pipe(Layer.provide(supportLayer))
 
