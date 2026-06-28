@@ -1,4 +1,4 @@
-import { AgentLoop } from "@rika/agent"
+import { AgentLoop, WorkspaceAccess } from "@rika/agent"
 import { IdGenerator, Time } from "@rika/core"
 import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Event, Ids } from "@rika/schema"
@@ -27,6 +27,7 @@ export const layer: Layer.Layer<
   | ThreadEventLog.Service
   | ThreadProjection.Service
   | Time.Service
+  | WorkspaceAccess.Service
 > = ThreadActor.toLayer(
   Effect.fnUntraced(function* ({ state }) {
     const eventLog = yield* ThreadEventLog.Service
@@ -34,6 +35,7 @@ export const layer: Layer.Layer<
     const idGenerator = yield* IdGenerator.Service
     const time = yield* Time.Service
     const agentLoop = yield* AgentLoop.Service
+    const workspaceAccess = yield* WorkspaceAccess.Service
 
     const replay = (input: ThreadIdPayload) =>
       Effect.gen(function* () {
@@ -52,6 +54,13 @@ export const layer: Layer.Layer<
 
     const ensureThread = (input: EnsureThreadPayload) =>
       Effect.gen(function* () {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.ensureWorkspaceForCreate({
+            workspace_id: input.workspace_id,
+            user_id: input.user_id,
+            action: "write",
+          })
+        }
         const currentEvents = yield* eventLog.readThread({ thread_id: input.thread_id })
         if (currentEvents.length > 0) {
           return yield* replay({ thread_id: input.thread_id })
@@ -66,6 +75,19 @@ export const layer: Layer.Layer<
 
     const acceptTurn = (input: AcceptTurnPayload) =>
       Effect.gen(function* () {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess
+            .requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+            .pipe(
+              Effect.catchTag("WorkspaceAccessError", () =>
+                workspaceAccess.ensureWorkspaceForCreate({
+                  workspace_id: input.workspace_id,
+                  user_id: input.user_id,
+                  action: "write",
+                }),
+              ),
+            )
+        }
         yield* agentLoop.runTurn(input)
         const events = yield* eventLog.readThread({ thread_id: input.thread_id })
         const next = stateFromEvents(input.thread_id, events)

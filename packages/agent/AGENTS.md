@@ -20,6 +20,7 @@
 | `src/thread-service.ts`         | Thread lifecycle, search, share/export, and reference service.       |
 | `src/tool-registry.ts`          | Swappable tool definitions and the baseline shell command tool.      |
 | `src/tool-executor.ts`          | Tool execution boundary that applies policy before registry calls.   |
+| `src/workspace-access.ts`       | Multi-user workspace and thread access decision service.             |
 | `src/index.ts`                  | Package namespace exports.                                           |
 | `test/agent-loop.test.ts`       | Fake model/tool orchestration and cancellation tests.                |
 | `test/check-registry.test.ts`   | Check frontmatter, tool restriction, and scoped precedence tests.    |
@@ -28,6 +29,7 @@
 | `test/skill-registry.test.ts`   | Skill discovery, precedence, resources, and prompt-selection tests.  |
 | `test/thread-service.test.ts`   | Thread lifecycle, search, share/export, and reference tests.         |
 | `test/tool-executor.test.ts`    | Permission, registry, and shell execution tests.                     |
+| `test/workspace-access.test.ts` | Workspace membership and thread access-control tests.                |
 
 ## Current Standards
 
@@ -37,6 +39,7 @@
 - Keep review checks read-only by default. `.agents/checks/*.md` may request read-only tools only; mutating review modes need an explicit future design.
 - Keep skill discovery behind `SkillRegistry.Service`; show descriptions broadly but load full skill instructions only after explicit selection.
 - Persist canonical facts through `ThreadEventLog` and apply rebuildable state through `ThreadProjection`.
+- Keep hosted access checks in `WorkspaceAccess`; persistence only stores memberships.
 - Use streams, queues, and fibers for event streaming boundaries; do not introduce module-level runtime state.
 
 ## For AI Agents

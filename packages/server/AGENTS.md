@@ -22,12 +22,13 @@
 - API payloads use `@rika/schema` remote/event/artifact schemas; do not invent untyped response shapes.
 - Localhost starts without auth for the MVP. If a token is configured, require `Authorization: Bearer <token>`.
 - Turn execution and permission behavior must continue through `AgentLoop.Service` and `ToolExecutor.Service`.
+- Hosted user requests must pass through `WorkspaceAccess.Service`; local requests without `user_id` remain local-first.
 
 ## For AI Agents
 
 - Read `../../docs/effect-module-conventions.md` before changing services.
 - Do not import provider SDKs, Drizzle, Rivet internals, or filesystem mutation APIs here.
-- Keep hosted/multi-user workspace auth out of this package until the remote-hosting issue.
+- Keep hosted/multi-user access checks delegated to `WorkspaceAccess.Service`; the server only adapts request identity into service calls.
 
 ## Testing And Verification
 

@@ -93,3 +93,22 @@ export const artifacts = sqliteTable(
 
 export type ArtifactRow = typeof artifacts.$inferSelect
 export type NewArtifactRow = typeof artifacts.$inferInsert
+
+export const workspace_memberships = sqliteTable(
+  "workspace_memberships",
+  {
+    id: text().primaryKey(),
+    workspace_id: text().notNull(),
+    user_id: text().notNull(),
+    role: text().notNull(),
+    created_at: integer().notNull(),
+  },
+  (table) => [
+    uniqueIndex("workspace_memberships_workspace_user_idx").on(table.workspace_id, table.user_id),
+    index("workspace_memberships_user_idx").on(table.user_id),
+    index("workspace_memberships_workspace_idx").on(table.workspace_id),
+  ],
+)
+
+export type WorkspaceMembershipRow = typeof workspace_memberships.$inferSelect
+export type NewWorkspaceMembershipRow = typeof workspace_memberships.$inferInsert

@@ -96,9 +96,8 @@ const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect
     }
 
     if (request.method === "GET" && segments[1] === "threads" && segments[2] !== undefined && segments.length === 3) {
-      return yield* remote
-        .openThread(Ids.ThreadId.make(decodeURIComponent(segments[2])))
-        .pipe(jsonEffect(Remote.ThreadRecord))
+      const input = openThreadRequest(url, segments[2])
+      return yield* remote.openThread(input).pipe(jsonEffect(Remote.ThreadRecord))
     }
 
     if (request.method === "POST" && segments[1] === "turns" && segments.length === 2) {
@@ -117,7 +116,7 @@ const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect
     }
 
     if (request.method === "GET" && segments[1] === "artifacts" && segments[2] !== undefined && segments.length === 3) {
-      const input = { artifact_id: Ids.ArtifactId.make(decodeURIComponent(segments[2])) }
+      const input = getArtifactRequest(url, segments[2])
       return yield* remote.getArtifact(input).pipe(jsonEffect(Artifact.Artifact))
     }
 
@@ -235,10 +234,22 @@ const notFound = () => json({ error: { message: "Not found", code: "not_found" }
 
 const listThreadsRequest = (url: URL): Remote.ListThreadsRequest => {
   const includeArchived = url.searchParams.get("include_archived")
+  const workspaceId = url.searchParams.get("workspace_id")
+  const userId = url.searchParams.get("user_id")
   const limit = intParam(url, "limit")
   return {
     ...(includeArchived === null ? {} : { include_archived: includeArchived === "true" }),
+    ...(workspaceId === null ? {} : { workspace_id: Ids.WorkspaceId.make(workspaceId) }),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
     ...(limit === undefined ? {} : { limit }),
+  }
+}
+
+const openThreadRequest = (url: URL, encodedThreadId: string): Remote.OpenThreadRequest => {
+  const userId = url.searchParams.get("user_id")
+  return {
+    thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
   }
 }
 
@@ -256,10 +267,12 @@ const listArtifactsRequest = (
     )
   }
   const kind = url.searchParams.get("kind")
+  const userId = url.searchParams.get("user_id")
   const limit = intParam(url, "limit")
   return Effect.try({
     try: () => ({
       thread_id: Ids.ThreadId.make(threadId),
+      ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
       ...(kind === null ? {} : { kind: Schema.decodeUnknownSync(Artifact.Kind)(kind) }),
       ...(limit === undefined ? {} : { limit }),
     }),
@@ -270,6 +283,14 @@ const listArtifactsRequest = (
         status: 400,
       }),
   })
+}
+
+const getArtifactRequest = (url: URL, encodedArtifactId: string): Remote.GetArtifactRequest => {
+  const userId = url.searchParams.get("user_id")
+  return {
+    artifact_id: Ids.ArtifactId.make(decodeURIComponent(encodedArtifactId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+  }
 }
 
 const intParam = (url: URL, name: string) => {

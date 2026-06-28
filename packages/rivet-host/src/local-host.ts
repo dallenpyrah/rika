@@ -1,4 +1,12 @@
-import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadService, ToolExecutor } from "@rika/agent"
+import {
+  AgentLoop,
+  ContextResolver,
+  SkillRegistry,
+  SubagentRuntime,
+  ThreadService,
+  ToolExecutor,
+  WorkspaceAccess,
+} from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import {
@@ -8,22 +16,22 @@ import {
   Migration,
   ThreadEventLog,
   ThreadProjection,
+  WorkspaceStore,
 } from "@rika/persistence"
 import { PluginHost, PluginUi } from "@rika/plugin"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
-import { Registry } from "@rivetkit/effect"
-import { Layer } from "effect"
+import { Client, Registry } from "@rivetkit/effect"
+import { Effect, Layer } from "effect"
+import * as HostConfig from "./host-config"
+import * as ThreadClient from "./thread-client"
 import { layer as threadActorLayer } from "./thread-live"
 
-export interface Options {
-  readonly endpoint?: string
-  readonly noWelcome?: boolean
-}
+export interface Options extends HostConfig.ResolveOptions {}
 
-export const defaultEndpoint = "http://127.0.0.1:6420"
+export const defaultEndpoint = HostConfig.defaultLocalEndpoint
 
 export const endpointFromEnv = (env: Record<string, string | undefined> = process.env) =>
-  env.RIVET_ENDPOINT ?? defaultEndpoint
+  env.RIKA_RIVET_ENDPOINT ?? env.RIVET_ENDPOINT ?? defaultEndpoint
 
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredTimeLayer = Time.layer
@@ -32,6 +40,7 @@ const configuredMcpApprovalLayer = McpApprovalStore.layer.pipe(
   Layer.provideMerge(configuredDatabaseLayer),
   Layer.provideMerge(configuredTimeLayer),
 )
+const configuredWorkspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(configuredDatabaseLayer))
 const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
 const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredPluginLayer = PluginHost.layer.pipe(
@@ -46,11 +55,13 @@ const storageLayer = Layer.mergeAll(
   Migration.layer,
   ThreadEventLog.layer,
   ThreadProjection.layer,
+  configuredWorkspaceStoreLayer,
   configuredTimeLayer,
   IdGenerator.layer,
 )
 const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
 const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+const configuredWorkspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
 const configuredContextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
 const configuredReadOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
 const configuredSubagentLayer = SubagentRuntime.layer.pipe(
@@ -89,6 +100,8 @@ type ServiceLayerOutput =
   | ThreadService.Service
   | Time.Service
   | ToolExecutor.Service
+  | WorkspaceAccess.Service
+  | WorkspaceStore.Service
 
 type ServiceLayerError =
   | Config.ConfigError
@@ -102,6 +115,7 @@ type ServiceLayerError =
 
 const baseServiceLayer = Layer.mergeAll(
   storageAndThreadLayer,
+  configuredWorkspaceAccessLayer,
   configuredContextResolverLayer,
   configuredSkillLayer,
   configuredToolLayer,
@@ -116,9 +130,18 @@ export const supportLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError> = 
 
 export const actorsLayer = () => threadActorLayer.pipe(Layer.provide(supportLayer))
 
-export const layer = (options: Options = {}) => {
-  const endpoint = options.endpoint ?? endpointFromEnv()
-  return Registry.serve(actorsLayer()).pipe(
-    Layer.provide(Registry.layer({ endpoint, noWelcome: options.noWelcome ?? true })),
+export const clientLayer = (options: Options = {}) =>
+  Layer.unwrap(
+    HostConfig.resolveOptions(options).pipe(Effect.map((host) => Client.layer(HostConfig.toClientOptions(host)))),
   )
-}
+
+export const threadClientLayer = (options: Options = {}) => ThreadClient.layer.pipe(Layer.provide(clientLayer(options)))
+
+export const layer = (options: Options = {}) =>
+  Layer.unwrap(
+    HostConfig.resolveOptions(options).pipe(
+      Effect.map((host) =>
+        Registry.serve(actorsLayer()).pipe(Layer.provide(Registry.layer(HostConfig.toRegistryOptions(host)))),
+      ),
+    ),
+  )

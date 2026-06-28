@@ -11,11 +11,14 @@
 
 | File                       | Purpose                                                   |
 | -------------------------- | --------------------------------------------------------- |
+| `src/host-config.ts`       | Local/remote Rivet endpoint, token, and namespace config. |
 | `src/thread-actor.ts`      | Public ThreadActor contract and typed action schemas.     |
+| `src/thread-client.ts`     | Effect client adapter for the ThreadActor contract.       |
 | `src/thread-live.ts`       | Server-side ThreadActor implementation and replay bridge. |
 | `src/local-host.ts`        | Local Rivet registry/layer assembly.                      |
 | `src/main.ts`              | Bun local development entrypoint.                         |
 | `src/index.ts`             | Package namespace exports.                                |
+| `test/host-config.test.ts` | Host mode and local/remote option resolution tests.       |
 | `test/thread-live.test.ts` | ThreadActor replay and lifecycle smoke tests.             |
 
 ## Current Standards
@@ -24,6 +27,7 @@
 - Actor hot state is rebuildable. Canonical facts live in `@rika/persistence`'s event log.
 - Use `@rivetkit/effect` contracts and layers for actor code; do not wrap actor calls in ad hoc promises.
 - Keep Drizzle access behind persistence services, even inside actors.
+- Select local vs remote hosting through `HostConfig`; do not fork the ThreadActor contract by deployment mode.
 
 ## For AI Agents
 

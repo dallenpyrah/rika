@@ -44,8 +44,16 @@ export const CreateThreadRequest = Schema.Struct({
 export interface ListThreadsRequest extends Schema.Schema.Type<typeof ListThreadsRequest> {}
 export const ListThreadsRequest = Schema.Struct({
   include_archived: Schema.optional(Schema.Boolean),
+  workspace_id: Schema.optional(WorkspaceId),
+  user_id: Schema.optional(UserId),
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Remote.ListThreadsRequest" })
+
+export interface OpenThreadRequest extends Schema.Schema.Type<typeof OpenThreadRequest> {}
+export const OpenThreadRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+}).annotate({ identifier: "Rika.Remote.OpenThreadRequest" })
 
 export interface StartTurnRequest extends Schema.Schema.Type<typeof StartTurnRequest> {}
 export const StartTurnRequest = Schema.Struct({
@@ -62,12 +70,14 @@ export interface InterruptTurnRequest extends Schema.Schema.Type<typeof Interrup
 export const InterruptTurnRequest = Schema.Struct({
   thread_id: ThreadId,
   turn_id: TurnId,
+  user_id: Schema.optional(UserId),
   reason: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Remote.InterruptTurnRequest" })
 
 export interface ListArtifactsRequest extends Schema.Schema.Type<typeof ListArtifactsRequest> {}
 export const ListArtifactsRequest = Schema.Struct({
   thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
   kind: Schema.optional(ArtifactKind),
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Remote.ListArtifactsRequest" })
@@ -75,6 +85,7 @@ export const ListArtifactsRequest = Schema.Struct({
 export interface GetArtifactRequest extends Schema.Schema.Type<typeof GetArtifactRequest> {}
 export const GetArtifactRequest = Schema.Struct({
   artifact_id: ArtifactId,
+  user_id: Schema.optional(UserId),
 }).annotate({ identifier: "Rika.Remote.GetArtifactRequest" })
 
 export interface ApiError extends Schema.Schema.Type<typeof ApiError> {}

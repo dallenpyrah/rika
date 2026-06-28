@@ -8,5 +8,6 @@ export * as Ids from "./ids"
 export * as Message from "./message"
 export * as Remote from "./remote"
 export * as Tool from "./tool"
+export * as Workspace from "./workspace"
 
 export const schemaPackage = "@rika/schema"

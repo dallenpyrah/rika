@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ContextResolver, SkillRegistry, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, ToolExecutor, WorkspaceAccess } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
-import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Database, Migration, ThreadEventLog, ThreadProjection, WorkspaceStore } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Registry } from "@rivetkit/effect"
 import { Effect, Layer } from "effect"
@@ -27,6 +27,7 @@ const baseServiceLayer = Layer.mergeAll(
   Migration.layer,
   ThreadEventLog.layer,
   ThreadProjection.layer,
+  WorkspaceStore.layer.pipe(Layer.provideMerge(Database.memoryLayer)),
   Time.fixedLayer(Common.TimestampMillis.make(1_800_000_000_000)),
   IdGenerator.sequenceLayer(1),
   ContextResolver.emptyLayer,
@@ -38,9 +39,11 @@ const baseServiceLayer = Layer.mergeAll(
 const serviceLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseServiceLayer))
 
 const supportLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(serviceLayer))
+const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(supportLayer))
 
 const registryLayer = ThreadLive.layer.pipe(
   Layer.provideMerge(supportLayer),
+  Layer.provideMerge(workspaceAccessLayer),
   Layer.provideMerge(Registry.layer({ noWelcome: true })),
 )
 

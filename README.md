@@ -14,7 +14,7 @@ The implementation plan is tracked as stacked GitHub issues in this repository. 
 
 ## Current State
 
-This repository currently contains the monorepo scaffold, shared protocol schemas, core Effect runtime services, local SQLite persistence foundation, default built-in tools, agent context resolution, thread lifecycle/search/share services, an initial Amp-like interactive terminal adapter, the trusted-local TypeScript plugin host, and MCP client integration with workspace command-server trust controls. Runtime features continue to land through the numbered issue stack.
+This repository currently contains the monorepo scaffold, shared protocol schemas, core Effect runtime services, local SQLite persistence foundation, default built-in tools, agent context resolution, thread lifecycle/search/share services, an initial Amp-like interactive terminal adapter, the trusted-local TypeScript plugin host, MCP client integration with workspace command-server trust controls, IDE/SDK remote control, and local/remote Rivet host configuration with workspace membership checks. Runtime features continue to land through the numbered issue stack.
 
 ## Verification
 

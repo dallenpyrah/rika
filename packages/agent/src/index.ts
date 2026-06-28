@@ -8,5 +8,6 @@ export * as SubagentRuntime from "./subagent-runtime"
 export * as ThreadService from "./thread-service"
 export * as ToolExecutor from "./tool-executor"
 export * as ToolRegistry from "./tool-registry"
+export * as WorkspaceAccess from "./workspace-access"
 
 export const agentPackage = "@rika/agent"

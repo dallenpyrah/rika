@@ -5,5 +5,6 @@ export * as Migration from "./migration"
 export * as Schema from "./schema"
 export * as ThreadEventLog from "./thread-event-log"
 export * as ThreadProjection from "./thread-projection"
+export * as WorkspaceStore from "./workspace-store"
 
 export const persistencePackage = "@rika/persistence"

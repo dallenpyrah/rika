@@ -7,6 +7,7 @@ const requiredFiles = [
   "docs/effect-module-conventions.md",
   "docs/runtime-and-layers.md",
   "docs/persistence.md",
+  "docs/remote-rivet-hosting.md",
   "docs/ide-integration.md",
   "package.json",
   "turbo.json",

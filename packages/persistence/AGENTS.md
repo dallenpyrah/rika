@@ -21,6 +21,7 @@
 | `src/schema/index.ts`             | Schema exports consumed by Drizzle Kit and services.             |
 | `src/thread-event-log.ts`         | Canonical append-only thread event log service.                  |
 | `src/thread-projection.ts`        | Rebuildable thread list/latest message/active turn projections.  |
+| `src/workspace-store.ts`          | Durable workspace membership persistence for hosted access.      |
 | `test/database.test.ts`           | Database layer replacement tests.                                |
 | `test/artifact-store.test.ts`     | Artifact put/get/list persistence tests.                         |
 | `test/migration.test.ts`          | Runtime migration service tests.                                 |
@@ -28,6 +29,7 @@
 | `test/schema/event-log.test.ts`   | Event log schema tests.                                          |
 | `test/thread-event-log.test.ts`   | Event append, ordering, idempotency, and restart tests.          |
 | `test/thread-projection.test.ts`  | Projection apply and rebuild tests.                              |
+| `test/workspace-store.test.ts`    | Workspace membership persistence and scoping tests.              |
 
 ## Current Standards
 
@@ -37,6 +39,7 @@
 - Generated SQL migrations in `drizzle/` are committed. Do not hand-edit Drizzle metadata unless repairing a broken migration intentionally.
 - Raw Drizzle handles may be used only inside this package.
 - `ThreadEventLog` is canonical. `ThreadProjection` tables are disposable and must rebuild from `thread_events` only.
+- `WorkspaceStore` owns durable user/workspace memberships. Access decisions live above this package.
 
 ## For AI Agents
 

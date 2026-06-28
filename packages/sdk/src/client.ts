@@ -29,13 +29,13 @@ export interface Interface {
   readonly listThreads: (
     input?: Remote.ListThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSummary>, SdkError>
-  readonly openThread: (threadId: Ids.ThreadId) => Effect.Effect<Remote.ThreadRecord, SdkError>
+  readonly openThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) => Effect.Effect<Remote.ThreadRecord, SdkError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Stream.Stream<Event.Event, SdkError>
   readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, SdkError>
   readonly listArtifacts: (
     input: Remote.ListArtifactsRequest,
   ) => Effect.Effect<ReadonlyArray<Artifact.Artifact>, SdkError>
-  readonly getArtifact: (artifactId: Ids.ArtifactId) => Effect.Effect<Artifact.Artifact, SdkError>
+  readonly getArtifact: (artifactId: Ids.ArtifactId, userId?: Ids.UserId) => Effect.Effect<Artifact.Artifact, SdkError>
   readonly connectIde: (input: Ide.ConnectRequest) => Effect.Effect<Ide.ConnectResponse, SdkError>
   readonly disconnectIde: (input: Ide.DisconnectRequest) => Effect.Effect<Ide.Status, SdkError>
   readonly updateIdeContext: (input: Ide.UpdateContextRequest) => Effect.Effect<Ide.Status, SdkError>
@@ -55,9 +55,12 @@ export const make = (transport: Transport): Interface => ({
     transport
       .requestJson({ method: "GET", path: `/v1/threads${query(input)}` })
       .pipe(Effect.flatMap(decodeEffect(Schema.Array(Remote.ThreadSummary), "listThreads"))),
-  openThread: (threadId: Ids.ThreadId) =>
+  openThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
-      .requestJson({ method: "GET", path: `/v1/threads/${encodeURIComponent(threadId)}` })
+      .requestJson({
+        method: "GET",
+        path: `/v1/threads/${encodeURIComponent(threadId)}${query(userId === undefined ? {} : { user_id: userId })}`,
+      })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadRecord, "openThread"))),
   startTurn: (input: Remote.StartTurnRequest) =>
     transport
@@ -75,9 +78,12 @@ export const make = (transport: Transport): Interface => ({
     transport
       .requestJson({ method: "GET", path: `/v1/artifacts${query(input)}` })
       .pipe(Effect.flatMap(decodeEffect(Schema.Array(Artifact.Artifact), "listArtifacts"))),
-  getArtifact: (artifactId: Ids.ArtifactId) =>
+  getArtifact: (artifactId: Ids.ArtifactId, userId?: Ids.UserId) =>
     transport
-      .requestJson({ method: "GET", path: `/v1/artifacts/${encodeURIComponent(artifactId)}` })
+      .requestJson({
+        method: "GET",
+        path: `/v1/artifacts/${encodeURIComponent(artifactId)}${query(userId === undefined ? {} : { user_id: userId })}`,
+      })
       .pipe(Effect.flatMap(decodeEffect(Artifact.Artifact, "getArtifact"))),
   connectIde: (input: Ide.ConnectRequest) =>
     transport

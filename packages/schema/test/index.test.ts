@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
-import { Artifact, Codec, ErrorEnvelope, Event, Ide, Ids, Message, Remote, Tool } from "../src/index"
+import { Artifact, Codec, ErrorEnvelope, Event, Ide, Ids, Message, Remote, Tool, Workspace } from "../src/index"
 
 const now = 1_765_000_000_000
 const threadId = Ids.ThreadId.make("thread_1")
@@ -240,6 +240,24 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Remote.StreamFrame)(Codec.encode(Remote.StreamFrame)(summaryError(401)))).toEqual(
       summaryError(401),
     )
+  })
+
+  test("round-trips workspace membership payloads", () => {
+    const membership: Workspace.Membership = {
+      workspace_id: workspaceId,
+      user_id: Ids.UserId.make("user_schema_member"),
+      role: "owner",
+      created_at: now,
+    }
+    const decision: Workspace.AccessDecision = {
+      allowed: true,
+      action: "write",
+      workspace_id: workspaceId,
+      user_id: membership.user_id,
+    }
+
+    expect(Codec.decode(Workspace.Membership)(Codec.encode(Workspace.Membership)(membership))).toEqual(membership)
+    expect(Codec.decode(Workspace.AccessDecision)(Codec.encode(Workspace.AccessDecision)(decision))).toEqual(decision)
   })
 
   test("round-trips IDE integration payloads", () => {

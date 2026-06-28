@@ -1,4 +1,4 @@
-import { AgentLoop, ThreadService } from "@rika/agent"
+import { AgentLoop, ThreadService, WorkspaceAccess } from "@rika/agent"
 import { Config } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { ArtifactStore, Database } from "@rika/persistence"
@@ -18,13 +18,14 @@ export type RunError =
   | ArtifactStore.ArtifactStoreError
   | Database.DatabaseError
   | IdeBridge.IdeBridgeError
+  | WorkspaceAccess.RunError
 
 export interface Interface {
   readonly createThread: (input: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly listThreads: (
     input?: Remote.ListThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSummary>, RunError>
-  readonly openThread: (threadId: Ids.ThreadId) => Effect.Effect<Remote.ThreadRecord, RunError>
+  readonly openThread: (input: Remote.OpenThreadRequest) => Effect.Effect<Remote.ThreadRecord, RunError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Stream.Stream<Event.Event, RunError>
   readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, RunError>
   readonly listArtifacts: (
@@ -49,18 +50,40 @@ export const layer = Layer.effect(
     const artifacts = yield* ArtifactStore.Service
     const config = yield* Config.Service
     const ideBridge = yield* IdeBridge.Service
+    const workspaceAccess = yield* WorkspaceAccess.Service
 
     return Service.of({
       createThread: Effect.fn("RemoteControl.createThread")(function* (input: Remote.CreateThreadRequest) {
-        const summary = yield* threads.create(input)
+        const values = yield* config.get
+        const workspaceId = input.workspace_id ?? Ids.WorkspaceId.make(values.workspace_root)
+        yield* workspaceAccess.ensureWorkspaceForCreate({
+          workspace_id: workspaceId,
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          action: "write",
+        })
+        const summary = yield* threads.create({
+          ...input,
+          workspace_id: workspaceId,
+        })
         return toRemoteSummary(summary)
       }),
       listThreads: Effect.fn("RemoteControl.listThreads")(function* (input: Remote.ListThreadsRequest = {}) {
+        if (input.workspace_id !== undefined && input.user_id !== undefined) {
+          yield* workspaceAccess.requireWorkspace({
+            workspace_id: input.workspace_id,
+            user_id: input.user_id,
+            action: "read",
+          })
+        }
         const summaries = yield* threads.list(input)
-        return summaries.map(toRemoteSummary)
+        const readable = yield* workspaceAccess.filterReadableThreads(summaries, input.user_id)
+        return readable.map(toRemoteSummary)
       }),
-      openThread: Effect.fn("RemoteControl.openThread")(function* (threadId: Ids.ThreadId) {
-        const record = yield* threads.open({ thread_id: threadId })
+      openThread: Effect.fn("RemoteControl.openThread")(function* (input: Remote.OpenThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
+        }
+        const record = yield* threads.open({ thread_id: input.thread_id })
         return { summary: toRemoteSummary(record.summary), events: record.events }
       }),
       startTurn: (input: Remote.StartTurnRequest) =>
@@ -69,6 +92,19 @@ export const layer = Layer.effect(
             const values = yield* config.get
             const currentIdeContext = yield* ideBridge.currentContext()
             const workspaceId = input.workspace_id ?? Ids.WorkspaceId.make(values.workspace_root)
+            if (input.user_id !== undefined) {
+              yield* workspaceAccess
+                .requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+                .pipe(
+                  Effect.catchTag("WorkspaceAccessError", () =>
+                    workspaceAccess.ensureWorkspaceForCreate({
+                      workspace_id: workspaceId,
+                      user_id: input.user_id,
+                      action: "write",
+                    }),
+                  ),
+                )
+            }
             const ideContext = input.ide_context ?? Option.getOrUndefined(currentIdeContext)
             return agentLoop.streamTurn({
               thread_id: input.thread_id,
@@ -82,14 +118,29 @@ export const layer = Layer.effect(
           }),
         ),
       interruptTurn: Effect.fn("RemoteControl.interruptTurn")(function* (input: Remote.InterruptTurnRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+        }
         return yield* agentLoop.cancelTurn(input)
       }),
       listArtifacts: Effect.fn("RemoteControl.listArtifacts")(function* (input: Remote.ListArtifactsRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
+        }
         return yield* artifacts.list(input)
       }),
       getArtifact: Effect.fn("RemoteControl.getArtifact")(function* (input: Remote.GetArtifactRequest) {
         const artifact = yield* artifacts.get(input.artifact_id)
-        if (Option.isSome(artifact)) return artifact.value
+        if (Option.isSome(artifact)) {
+          if (input.user_id !== undefined) {
+            yield* workspaceAccess.requireThread({
+              thread_id: artifact.value.thread_id,
+              user_id: input.user_id,
+              action: "read",
+            })
+          }
+          return artifact.value
+        }
         return yield* new RemoteControlError({
           message: `Artifact ${input.artifact_id} was not found`,
           operation: "getArtifact",
@@ -130,9 +181,9 @@ export const listThreads = Effect.fn("RemoteControl.listThreads.call")(function*
   return yield* service.listThreads(input)
 })
 
-export const openThread = Effect.fn("RemoteControl.openThread.call")(function* (threadId: Ids.ThreadId) {
+export const openThread = Effect.fn("RemoteControl.openThread.call")(function* (input: Remote.OpenThreadRequest) {
   const service = yield* Service
-  return yield* service.openThread(threadId)
+  return yield* service.openThread(input)
 })
 
 export const startTurn = (input: Remote.StartTurnRequest) =>
@@ -192,15 +243,31 @@ export const ideNavigationRequests = Effect.fn("RemoteControl.ideNavigationReque
 export const errorToApi = (error: RunError): Remote.ApiError => ({
   error: {
     message: error instanceof Error ? error.message : String(error),
-    code: error instanceof RemoteControlError ? error.operation : error instanceof Error ? error.name : "unknown",
-    ...(error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError
-      ? { details: { status: error.status } }
+    code:
+      error instanceof RemoteControlError
+        ? error.operation
+        : error instanceof WorkspaceAccess.WorkspaceAccessDenied
+          ? "workspace_access_denied"
+          : error instanceof Error
+            ? error.name
+            : "unknown",
+    ...(error instanceof RemoteControlError ||
+    error instanceof IdeBridge.IdeBridgeError ||
+    error instanceof WorkspaceAccess.WorkspaceAccessDenied ||
+    error instanceof WorkspaceAccess.WorkspaceAccessError
+      ? { details: { status: statusFromError(error) } }
       : {}),
   },
 })
 
 export const statusFromError = (error: RunError) =>
-  error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError ? error.status : 500
+  error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError
+    ? error.status
+    : error instanceof WorkspaceAccess.WorkspaceAccessDenied
+      ? 403
+      : error instanceof WorkspaceAccess.WorkspaceAccessError
+        ? 404
+        : 500
 
 const toRemoteSummary = (summary: ThreadService.ThreadRecord["summary"]): Remote.ThreadSummary => ({
   thread_id: summary.thread_id,

@@ -7,6 +7,7 @@ import {
   SubagentRuntime,
   ThreadService,
   ToolExecutor,
+  WorkspaceAccess,
 } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
@@ -18,6 +19,7 @@ import {
   Migration,
   ThreadEventLog,
   ThreadProjection,
+  WorkspaceStore,
 } from "@rika/persistence"
 import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
@@ -115,6 +117,8 @@ type RuntimeError =
   | ThreadEventLog.ThreadEventLogError
   | ThreadProjection.ThreadProjectionError
   | Threads.ThreadsError
+  | WorkspaceAccess.RunError
+  | WorkspaceStore.WorkspaceStoreError
 
 const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Migration.MigrationError) return `Rika failed: ${error.message}`
@@ -148,6 +152,9 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof ThreadEventLog.ThreadEventLogError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadProjection.ThreadProjectionError) return `Rika failed: ${error.message}`
   if (error instanceof Threads.ThreadsError) return Threads.formatError(error)
+  if (error instanceof WorkspaceAccess.WorkspaceAccessDenied) return `Rika failed: ${error.message}`
+  if (error instanceof WorkspaceAccess.WorkspaceAccessError) return `Rika failed: ${error.message}`
+  if (error instanceof WorkspaceStore.WorkspaceStoreError) return `Rika failed: ${error.message}`
   return Execute.formatError(error)
 }
 
@@ -171,6 +178,7 @@ export const liveLayer = (
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
@@ -178,6 +186,7 @@ export const liveLayer = (
     databaseLayer,
     artifactLayer,
     mcpApprovalLayer,
+    workspaceStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -203,10 +212,12 @@ export const liveLayer = (
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Output.layer,
     storageAndThreadLayer,
+    workspaceAccessLayer,
     contextResolverLayer,
     skillLayer,
     toolLayer,
@@ -237,6 +248,7 @@ export const interactiveLiveLayer = (
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
@@ -244,6 +256,7 @@ export const interactiveLiveLayer = (
     databaseLayer,
     artifactLayer,
     mcpApprovalLayer,
+    workspaceStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -489,6 +502,7 @@ export const serverLiveLayer = (
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
@@ -496,6 +510,7 @@ export const serverLiveLayer = (
     databaseLayer,
     artifactLayer,
     mcpApprovalLayer,
+    workspaceStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -521,10 +536,12 @@ export const serverLiveLayer = (
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Output.layer,
     storageAndThreadLayer,
+    workspaceAccessLayer,
     contextResolverLayer,
     skillLayer,
     toolLayer,
@@ -561,6 +578,8 @@ export type LiveLayerOutput =
   | ThreadService.Service
   | Time.Service
   | ToolExecutor.Service
+  | WorkspaceAccess.Service
+  | WorkspaceStore.Service
 
 export type InteractiveLayerOutput =
   | AgentLoop.Service
@@ -586,6 +605,7 @@ export type InteractiveLayerOutput =
   | ThreadService.Service
   | Time.Service
   | ToolExecutor.Service
+  | WorkspaceStore.Service
 
 export type ThreadsLayerOutput =
   | Config.Service
@@ -665,6 +685,8 @@ export type ServerLayerOutput =
   | ThreadService.Service
   | Time.Service
   | ToolExecutor.Service
+  | WorkspaceAccess.Service
+  | WorkspaceStore.Service
 
 export type LiveLayerError =
   | Config.ConfigError

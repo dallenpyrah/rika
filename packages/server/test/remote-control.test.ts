@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor, WorkspaceAccess } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Provider, Router } from "@rika/llm"
-import { ArtifactStore, Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { ArtifactStore, Database, Migration, ThreadEventLog, ThreadProjection, WorkspaceStore } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Artifact, Common, Ide, Ids } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
@@ -14,6 +14,8 @@ const ideThreadId = Ids.ThreadId.make("thread_remote_ide")
 const workspaceId = Ids.WorkspaceId.make("workspace_remote_contract")
 const artifactId = Ids.ArtifactId.make("artifact_remote_contract")
 const ideClientId = Ids.IdeClientId.make("ide_remote_contract")
+const ownerId = Ids.UserId.make("user_remote_owner")
+const outsiderId = Ids.UserId.make("user_remote_outsider")
 const now = Common.TimestampMillis.make(2_000_000_000_000)
 const ideContext: Ide.ContextSnapshot = {
   workspace_roots: ["/workspace/rika-remote"],
@@ -60,10 +62,12 @@ const ideAwareContextLayer = Layer.succeed(
 const makeLayer = (contextLayer = defaultContextLayer) => {
   const databaseLayer = Database.memoryLayer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
     artifactLayer,
+    workspaceStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -72,6 +76,7 @@ const makeLayer = (contextLayer = defaultContextLayer) => {
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const llmLayer = Router.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(Provider.fakeLayer(["remote hello"])),
@@ -79,6 +84,7 @@ const makeLayer = (contextLayer = defaultContextLayer) => {
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
     threadLayer,
+    workspaceAccessLayer,
     contextLayer,
     SkillRegistry.emptyLayer,
     ToolExecutor.fakeLayer({}),
@@ -165,6 +171,29 @@ describe("remote control API and SDK", () => {
     } finally {
       await runtime.runPromise(handle.close())
     }
+  })
+
+  test("remote user requests are scoped to workspace membership", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    const created = await Effect.runPromise(
+      client.createThread({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId }),
+    )
+    const ownerThreads = await Effect.runPromise(client.listThreads({ user_id: ownerId }))
+    const outsiderThreads = await Effect.runPromise(client.listThreads({ user_id: outsiderId }))
+    const outsiderOpen = await Effect.runPromise(client.openThread(threadId, outsiderId).pipe(Effect.flip))
+    const outsiderTurn = await Effect.runPromise(
+      client
+        .startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: outsiderId, content: "break in" })
+        .pipe(Stream.runCollect, Effect.flip),
+    )
+
+    expect(created).toMatchObject({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId })
+    expect(ownerThreads.map((summary) => summary.thread_id)).toEqual([threadId])
+    expect(outsiderThreads).toEqual([])
+    expect(outsiderOpen).toMatchObject({ status: 403 })
+    expect(outsiderTurn).toMatchObject({ status: 403 })
   })
 
   test("IDE clients can provide turn context and receive navigation requests", async () => {

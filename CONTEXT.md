@@ -28,6 +28,14 @@ _Avoid_: Prompt stuffing, hidden instructions, implicit context
 The filesystem and repository context where a thread is allowed to inspect and modify code.
 _Avoid_: Project, cwd, folder
 
+**Workspace Membership**:
+A durable association between a user and a workspace that grants hosted read/write access, with an owner role for administrative actions.
+_Avoid_: ACL row, permission record, team user
+
+**Workspace Access Decision**:
+The explicit allow/deny result produced before a hosted user reads or writes a workspace, thread, or artifact.
+_Avoid_: Auth check, permission boolean, guard
+
 **Agent Mode**:
 A named behavior profile that controls model routing, autonomy, reasoning depth, and default tool policy.
 _Avoid_: Model, preset, personality
@@ -87,6 +95,10 @@ _Avoid_: Cache, state, snapshot
 **Thread Actor**:
 The active runtime owner for one thread's orchestration, hot state, model loop, and tool execution queue.
 _Avoid_: Session process, worker, server object
+
+**Rivet Host Mode**:
+The deployment choice that selects local or remote Rivet actor hosting while preserving the same Thread Actor contract.
+_Avoid_: Actor API variant, cloud mode, runtime fork
 
 **Interactive Session**:
 A terminal UI run that renders thread events, accepts prompts and command-palette commands, and delegates turns to the agent loop. Interactive sessions are adapters over durable threads, not a separate source of truth.
