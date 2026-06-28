@@ -93,15 +93,30 @@ export const readOnlyRegistryLayer: Layer.Layer<ToolRegistry.Service, FffSearch.
     Layer.provideMerge(HashlineFile.layer),
   )
 
-export const toolExecutorLayer: Layer.Layer<
+export const toolExecutorLayerFromPermissionConfig = (
+  permissionConfig: PermissionPolicy.PermissionConfig = PermissionPolicy.defaultConfig,
+): Layer.Layer<
   ToolExecutor.Service,
   FffSearch.FffSearchError | McpClient.RunError,
   Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service | SubagentRuntime.Service
-> = PluginHost.toolResultExecutorLayer.pipe(
-  Layer.provideMerge(
-    ToolExecutor.layer.pipe(Layer.provideMerge(registryLayer), Layer.provideMerge(PluginHost.permissionPolicyLayer)),
-  ),
-)
+> =>
+  PluginHost.toolResultExecutorLayer.pipe(
+    Layer.provideMerge(
+      ToolExecutor.layer.pipe(
+        Layer.provideMerge(registryLayer),
+        Layer.provideMerge(PluginHost.permissionPolicyLayerFromConfig(permissionConfig)),
+      ),
+    ),
+  )
 
-export const readOnlyToolExecutorLayer: Layer.Layer<ToolExecutor.Service, FffSearch.FffSearchError, Config.Service> =
-  ToolExecutor.layer.pipe(Layer.provideMerge(readOnlyRegistryLayer), Layer.provideMerge(PermissionPolicy.allowLayer))
+export const toolExecutorLayer = toolExecutorLayerFromPermissionConfig()
+
+export const readOnlyToolExecutorLayerFromPermissionConfig = (
+  permissionConfig: PermissionPolicy.PermissionConfig = PermissionPolicy.defaultConfig,
+): Layer.Layer<ToolExecutor.Service, FffSearch.FffSearchError, Config.Service> =>
+  ToolExecutor.layer.pipe(
+    Layer.provideMerge(readOnlyRegistryLayer),
+    Layer.provideMerge(PermissionPolicy.layerFromConfig(permissionConfig)),
+  )
+
+export const readOnlyToolExecutorLayer = readOnlyToolExecutorLayerFromPermissionConfig()

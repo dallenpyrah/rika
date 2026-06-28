@@ -100,6 +100,17 @@ Built-in tools are registered through the Effect `ToolRegistry` / `ToolExecutor`
 - MCP tools after discovery/filtering/approval
 - specialty tools: Oracle, Librarian, and Painter-like adapters
 
+Rika matches Amp's fast local default: tool permission mode is `allow-all`, so tools run without approval prompts unless you opt into stricter policy or install a plugin with a `tool.call` hook. All built-in, plugin, MCP, specialty, and self-extension tools still enter through `ToolExecutor.Service` and one `PermissionPolicy.Service` decision before execution.
+
+Optional guard configuration is environment based for now:
+
+```bash
+RIKA_GUARDED_TOOLS="shell.*,write" rika run "inspect without mutating"
+RIKA_GUARDED_FILES="secrets/*,.env" rika
+```
+
+Guarded calls return a normal permission tool result and the agent continues. Run `rika doctor` to see the active permission mode; it reports whether guards are configured without printing full tool inputs or secrets.
+
 ## Subagents and skills
 
 Subagents run isolated bounded tasks and return compact summaries. Skills are task-specific instruction packages discovered from project/user locations and loaded explicitly.

@@ -41,6 +41,7 @@ Rika is a greenfield Effect-native coding agent system. The repository is a Bun/
 - Treat the append-only event log as canonical durable truth. Projections and actor state are rebuildable.
 - Use Rivet actors from day one for active thread orchestration. Keep Rivet-specific code in the Rivet host layer.
 - Make `fff`, hashline read/edit, semantic search, and ast-grep outline default built-in tools.
+- Keep tool permissions centralized through `PermissionPolicy.Service`; Rika's default product policy is allow-all unless configuration or plugin hooks override it.
 - Keep implementation simple. Do not add abstractions unless they make dependencies swappable, remove real duplication, or match the established OpenCode-style shape.
 
 ## Subdirectories

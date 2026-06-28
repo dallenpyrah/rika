@@ -27,7 +27,36 @@ describe("ToolExecutor", () => {
       name: "fake.echo",
       status: "success",
       output: { echoed: { text: "hello" } },
+      metadata: { permission_mode: "allow-all", permission_action: "allow" },
     })
+  })
+
+  test("asks PermissionPolicy before the registry executes each tool call", async () => {
+    const order: Array<string> = []
+    const result = await Effect.runPromise(
+      ToolExecutor.execute(call("fake.ordered")).pipe(
+        Effect.provide(
+          fakeToolLayer(
+            {
+              "fake.ordered": () =>
+                Effect.sync(() => {
+                  order.push("registry")
+                  return { ok: true }
+                }),
+            },
+            PermissionPolicy.layerFromDecider(() =>
+              Effect.sync(() => {
+                order.push("policy")
+                return PermissionPolicy.allow
+              }),
+            ),
+          ),
+        ),
+      ),
+    )
+
+    expect(order).toEqual(["policy", "registry"])
+    expect(result).toMatchObject({ status: "success", output: { ok: true } })
   })
 
   test("reject-and-continue blocks registry execution", async () => {
@@ -54,6 +83,7 @@ describe("ToolExecutor", () => {
       name: "fake.blocked",
       status: "error",
       error: { kind: "permission", message: "blocked by policy", code: "fake.blocked" },
+      metadata: { permission_mode: "configured", permission_action: "reject-and-continue" },
     })
   })
 
@@ -78,6 +108,7 @@ describe("ToolExecutor", () => {
     expect(result).toMatchObject({
       status: "success",
       output: { input: { modified: true }, metadata: { permission_action: "modify" } },
+      metadata: { permission_mode: "configured", permission_action: "modify" },
     })
   })
 
@@ -111,7 +142,13 @@ describe("ToolExecutor", () => {
     )
 
     expect(executed).toBe(false)
-    expect(result).toEqual({ id: toolCall.id, name: toolCall.name, status: "success", output: { synthesized: true } })
+    expect(result).toEqual({
+      id: toolCall.id,
+      name: toolCall.name,
+      status: "success",
+      output: { synthesized: true },
+      metadata: { permission_mode: "configured", permission_action: "synthesize" },
+    })
   })
 })
 

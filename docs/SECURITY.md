@@ -16,7 +16,16 @@ Rika is a local-first coding agent that can inspect files, run commands, edit co
 
 ## Tools and permissions
 
-Tool calls run through `ToolExecutor.Service`; plugins and MCP tools do not bypass the normal policy path. Future policy plugins can reject, modify, or synthesize tool results, but the MVP does not claim complete sandboxing.
+Tool calls run through `ToolExecutor.Service`; plugins and MCP tools do not bypass the normal policy path. Rika's default policy is `allow-all`, matching Amp's no-approval local workflow: read, write, shell, MCP, specialty, and plugin tools run without prompting unless configuration or trusted plugins override the decision.
+
+The centralized `PermissionPolicy.Service` supports four decisions for every tool call:
+
+- `allow` — execute the original call.
+- `reject-and-continue` — return a normal `kind: "permission"` tool result and let the agent continue.
+- `modify` — execute the call with replacement input.
+- `synthesize` — return a tool result without executing the registry handler.
+
+Set `RIKA_GUARDED_TOOLS` and/or `RIKA_GUARDED_FILES` to opt into a configured guarded mode. Guard patterns support exact values and `*` wildcards. Permission diagnostics record only mode/action and the matched tool/path pattern; they must not persist full tool inputs or secret values. The MVP does not claim complete sandboxing.
 
 When working in untrusted repositories:
 

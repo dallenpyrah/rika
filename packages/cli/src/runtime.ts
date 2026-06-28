@@ -2,6 +2,7 @@ import {
   AgentLoop,
   CheckRegistry,
   ContextResolver,
+  PermissionPolicy,
   ReviewService,
   SkillRegistry,
   SubagentRuntime,
@@ -195,6 +196,7 @@ export const liveLayer = (
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -208,7 +210,9 @@ export const liveLayer = (
     IdGenerator.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
+    Layer.provideMerge(configLayer),
+  )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -218,7 +222,7 @@ export const liveLayer = (
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
   )
-  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
+  const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
@@ -266,6 +270,7 @@ export const interactiveLiveLayer = (
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -279,7 +284,9 @@ export const interactiveLiveLayer = (
     IdGenerator.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
+    Layer.provideMerge(configLayer),
+  )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -289,7 +296,7 @@ export const interactiveLiveLayer = (
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
   )
-  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
+  const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
@@ -463,7 +470,9 @@ export const reviewLiveLayer = (
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
-  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayerFromPermissionConfig(
+    PermissionPolicy.configFromEnv(env),
+  ).pipe(Layer.provideMerge(configLayer))
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -552,6 +561,7 @@ export const serverLiveLayer = (
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -565,7 +575,9 @@ export const serverLiveLayer = (
     IdGenerator.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
+    Layer.provideMerge(configLayer),
+  )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -575,7 +587,7 @@ export const serverLiveLayer = (
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
   )
-  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
+  const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),

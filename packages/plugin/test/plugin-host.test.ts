@@ -132,6 +132,70 @@ describe("PluginHost", () => {
     expect(decision).toEqual({ action: "reject-and-continue", message: "blocked by plugin" })
   })
 
+  test("defaults plugin policy to allow-all when no tool.call hook is registered", async () => {
+    const layer = hostLayer([])
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const mode = yield* PermissionPolicy.mode()
+        const decision = yield* PermissionPolicy.decide(call("shell.command", { command: "printf ok" }))
+        return { mode, decision }
+      }).pipe(Effect.provide(PluginHost.permissionPolicyLayer), Effect.provide(layer)),
+    )
+
+    expect(result).toEqual({ mode: "allow-all", decision: PermissionPolicy.allow })
+  })
+
+  test("plugin tool.call hooks can modify and synthesize through ToolExecutor", async () => {
+    const layer = hostLayer([
+      source("rewrite", (rika) => {
+        rika.on("tool.call", (event) => {
+          if (event.tool === "fake.rewrite") return PermissionPolicy.modify({ text: "from plugin" })
+          return undefined
+        })
+      }),
+      source("synth", (rika) => {
+        rika.on("tool.call", (event) => {
+          if (event.tool !== "fake.synth") return undefined
+          return PermissionPolicy.synthesize({
+            id: event.call.id,
+            name: event.call.name,
+            status: "success",
+            output: { synthesized: true },
+          })
+        })
+      }),
+    ])
+    const executorLayer = ToolExecutor.layer.pipe(
+      Layer.provideMerge(
+        ToolRegistry.fakeLayer({
+          "fake.rewrite": (toolCall) => Effect.succeed({ input: toolCall.input }),
+          "fake.synth": () => Effect.succeed({ should_not: "run" }),
+        }),
+      ),
+      Layer.provideMerge(PluginHost.permissionPolicyLayerFromConfig()),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const modified = yield* ToolExecutor.execute(call("fake.rewrite", { text: "original" }))
+        const synthesized = yield* ToolExecutor.execute(call("fake.synth", {}))
+        return { modified, synthesized }
+      }).pipe(Effect.provide(executorLayer), Effect.provide(layer)),
+    )
+
+    expect(result.modified).toMatchObject({
+      status: "success",
+      output: { input: { text: "from plugin" } },
+      metadata: { permission_mode: "plugin", permission_action: "modify" },
+    })
+    expect(result.synthesized).toMatchObject({
+      status: "success",
+      output: { synthesized: true },
+      metadata: { permission_mode: "plugin", permission_action: "synthesize" },
+    })
+  })
+
   test("observes tool results through the ToolExecutor boundary", async () => {
     const layer = hostLayer([
       source("annotator", (rika) => {

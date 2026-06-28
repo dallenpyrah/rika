@@ -1,3 +1,4 @@
+import { PermissionPolicy } from "@rika/agent"
 import { Context, Effect, Layer, Schema } from "effect"
 import * as Args from "./args"
 import * as LocalBackend from "./local-backend"
@@ -52,6 +53,7 @@ export const Report = Schema.Struct({
   environment: EnvironmentSummary,
   config: ConfigSummary,
   backend: BackendSummary,
+  permission: PermissionPolicy.PermissionSummary,
   rivet: RivetSummary,
   checks: Schema.Array(Check),
 }).annotate({ identifier: "Rika.Cli.Doctor.Report" })
@@ -114,6 +116,8 @@ const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.
     const rivetEndpoint = input.env.RIKA_RIVET_ENDPOINT ?? input.env.RIVET_ENDPOINT ?? "http://127.0.0.1:6420"
     const openaiConfigured =
       secretConfigured(input.env.RIKA_OPENAI_API_KEY) || secretConfigured(input.env.OPENAI_API_KEY)
+    const permissionConfig = PermissionPolicy.configFromEnv(input.env)
+    const permissionSummary = PermissionPolicy.summary(permissionConfig)
     const backendStatus = yield* backend
       .status({ workspace_root: workspaceRoot, data_dir: dataDir })
       .pipe(Effect.mapError((error) => new DoctorError({ message: error.message })))
@@ -138,13 +142,14 @@ const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.
         ...(backendStatus.endpoint === undefined ? {} : { endpoint: backendStatus.endpoint }),
         ...(backendStatus.pid === undefined || backendStatus.pid === 0 ? {} : { pid: backendStatus.pid }),
       },
+      permission: permissionSummary,
       rivet: {
         host: rivetHost,
         endpoint: rivetEndpoint,
         token_configured: secretConfigured(input.env.RIKA_RIVET_TOKEN) || secretConfigured(input.env.RIVET_TOKEN),
         namespace_configured: input.env.RIKA_RIVET_NAMESPACE !== undefined || input.env.RIVET_NAMESPACE !== undefined,
       },
-      checks: checks({ dataDir, openaiConfigured, rivetHost, rivetEndpoint }),
+      checks: checks({ dataDir, openaiConfigured, permissionSummary, rivetHost, rivetEndpoint }),
     }
     return diagnosticReport
   })
@@ -152,6 +157,7 @@ const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.
 const checks = (input: {
   readonly dataDir: string
   readonly openaiConfigured: boolean
+  readonly permissionSummary: PermissionPolicy.PermissionSummary
   readonly rivetHost: string
   readonly rivetEndpoint: string
 }): ReadonlyArray<Check> => [
@@ -166,6 +172,14 @@ const checks = (input: {
     message: input.openaiConfigured
       ? "OpenAI provider credentials are configured. Secret values are not printed."
       : "OpenAI provider credentials are not configured; live model calls will fail until configured.",
+  },
+  {
+    name: "permissions",
+    status: "ok",
+    message:
+      input.permissionSummary.mode === "allow-all"
+        ? "Permission policy is allow-all; tools run without approval by default."
+        : `Permission policy mode is ${input.permissionSummary.mode}.`,
   },
   {
     name: "rivet",

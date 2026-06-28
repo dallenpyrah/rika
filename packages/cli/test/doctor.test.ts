@@ -13,6 +13,7 @@ describe("CLI doctor command", () => {
         RIKA_WORKSPACE_ROOT: "/workspace/rika",
         RIKA_DATA_DIR: "/workspace/rika/.rika-test",
         RIKA_OPENAI_API_KEY: "openai-secret",
+        RIKA_GUARDED_TOOLS: "shell.command",
         RIKA_RIVET_HOST: "remote",
         RIKA_RIVET_ENDPOINT: "https://rivet.example.com",
         RIKA_RIVET_TOKEN: "rivet-secret",
@@ -41,6 +42,11 @@ describe("CLI doctor command", () => {
       backend: {
         status: "disconnected",
       },
+      permission: {
+        mode: "configured",
+        guarded_tools_configured: true,
+        guarded_files_configured: false,
+      },
       rivet: {
         host: "remote",
         endpoint: "https://rivet.example.com",
@@ -48,6 +54,12 @@ describe("CLI doctor command", () => {
         namespace_configured: true,
       },
     })
-    expect(parsed.checks.map((check) => check.name)).toEqual(["data-dir", "model-provider", "rivet", "telemetry"])
+    expect(parsed.checks.map((check) => check.name)).toEqual([
+      "data-dir",
+      "model-provider",
+      "permissions",
+      "rivet",
+      "telemetry",
+    ])
   })
 })

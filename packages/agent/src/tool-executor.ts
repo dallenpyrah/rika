@@ -33,31 +33,40 @@ export const layer = Layer.effect(
     return Service.of({
       describe: registry.describe,
       execute: Effect.fn("ToolExecutor.execute")(function* (call: Tool.Call) {
+        const mode = yield* policy.mode
         const decision = yield* policy.decide(call).pipe(
           Effect.match({
             onFailure: (error) => PermissionPolicy.reject(error.message, error.details),
             onSuccess: (allowed) => allowed,
           }),
         )
+        const metadata = permissionMetadata(mode, decision.action)
 
         switch (decision.action) {
           case "allow":
-            return yield* executeRegistryCall(registry, call)
+            return yield* executeRegistryCall(registry, call).pipe(
+              Effect.map((result) => withMetadata(result, metadata)),
+            )
           case "modify":
-            return yield* executeRegistryCall(registry, modifiedCall(call, decision.input))
+            return yield* executeRegistryCall(registry, modifiedCall(call, decision.input)).pipe(
+              Effect.map((result) => withMetadata(result, metadata)),
+            )
           case "reject-and-continue":
-            return errorResult(
-              call,
-              new ToolExecutorError({
-                message: decision.message,
-                kind: "permission",
-                name: call.name,
-                retryable: false,
-                ...(decision.details === undefined ? {} : { details: decision.details }),
-              }),
+            return withMetadata(
+              errorResult(
+                call,
+                new ToolExecutorError({
+                  message: decision.message,
+                  kind: "permission",
+                  name: call.name,
+                  retryable: false,
+                  ...(decision.details === undefined ? {} : { details: decision.details }),
+                }),
+              ),
+              metadata,
             )
           case "synthesize":
-            return normalizeSynthesizedResult(call, decision.result)
+            return withMetadata(normalizeSynthesizedResult(call, decision.result), metadata)
           default:
             return yield* Effect.die(new Error("Unknown permission policy decision"))
         }
@@ -110,6 +119,19 @@ const normalizeSynthesizedResult = (call: Tool.Call, result: Tool.Result): Tool.
   ...result,
   id: call.id,
   name: call.name,
+})
+
+const permissionMetadata = (
+  mode: PermissionPolicy.PermissionMode,
+  action: PermissionPolicy.Decision["action"],
+): Common.Metadata => ({
+  permission_mode: mode,
+  permission_action: action,
+})
+
+const withMetadata = (result: Tool.Result, metadata: Common.Metadata): Tool.Result => ({
+  ...result,
+  metadata: { ...result.metadata, ...metadata },
 })
 
 const fromRegistryError = (error: ToolRegistry.ToolRegistryError) =>
