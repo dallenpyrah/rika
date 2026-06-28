@@ -1,4 +1,4 @@
-import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadService, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
@@ -93,8 +93,6 @@ export const liveLayer = (
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
-  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(configLayer))
-  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -103,6 +101,17 @@ export const liveLayer = (
     Time.layer,
     IdGenerator.layer,
   )
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const subagentLayer = SubagentRuntime.layer.pipe(
+    Layer.provideMerge(storageLayer),
+    Layer.provideMerge(llmLayer),
+    Layer.provideMerge(readOnlyToolLayer),
+  )
+  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(subagentLayer),
+  )
+  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
@@ -139,8 +148,6 @@ export const interactiveLiveLayer = (
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
-  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(configLayer))
-  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -149,6 +156,17 @@ export const interactiveLiveLayer = (
     Time.layer,
     IdGenerator.layer,
   )
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const subagentLayer = SubagentRuntime.layer.pipe(
+    Layer.provideMerge(storageLayer),
+    Layer.provideMerge(llmLayer),
+    Layer.provideMerge(readOnlyToolLayer),
+  )
+  const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(subagentLayer),
+  )
+  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
@@ -238,6 +256,7 @@ export type LiveLayerOutput =
   | Provider.Service
   | Router.Service
   | SkillRegistry.Service
+  | SubagentRuntime.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
   | ThreadService.Service
@@ -255,6 +274,7 @@ export type InteractiveLayerOutput =
   | Router.Service
   | Session.Service
   | SkillRegistry.Service
+  | SubagentRuntime.Service
   | Terminal.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service

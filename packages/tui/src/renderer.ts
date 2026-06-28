@@ -129,6 +129,7 @@ const cardIcon = (card: ViewState.Card) => {
   if (card.kind === "diff") return "△"
   if (card.kind === "error") return "✕"
   if (card.kind === "skill") return "✦"
+  if (card.kind === "subagent") return "◎"
   if (card.kind === "context") return "◇"
   return "○"
 }

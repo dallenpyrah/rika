@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { PermissionPolicy, ToolExecutor } from "@rika/agent"
+import { PermissionPolicy, SubagentRuntime, ToolExecutor } from "@rika/agent"
 import { Config } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
@@ -42,6 +42,7 @@ const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolEx
     Layer.provideMerge(FffSearch.fakeLayer(fakeFiles)),
     Layer.provideMerge(AstGrepOutline.fakeLayer(outlineRunner)),
     Layer.provideMerge(HashlineFile.layer),
+    Layer.provideMerge(SubagentRuntime.fakeLayer(() => Effect.succeed({ type: "subagent.batch", runs: [] }))),
     Layer.provideMerge(configLayer(workspaceRoot)),
   )
   const executorLayer = ToolExecutor.layer.pipe(
@@ -134,6 +135,7 @@ describe("FffSearch", () => {
 
     expect(names).toEqual([
       "shell.command",
+      "task",
       "semantic_search",
       "semantic_search.status",
       "fffind",

@@ -17,9 +17,10 @@ describe("TUI renderer", () => {
         messageAdded(3, "user", "write a file"),
         contextResolved(4),
         skillLoaded(5),
-        toolRequested(6),
-        toolCompleted(7),
-        modelChunk(8, "done"),
+        subagentCompleted(6),
+        toolRequested(7),
+        toolCompleted(8),
+        modelChunk(9, "done"),
       ],
     })
 
@@ -31,6 +32,7 @@ describe("TUI renderer", () => {
     expect(text).toContain("Streaming")
     expect(text).toContain("Context resolved · 1 entries")
     expect(text).toContain("Skill loaded: deploy · project · info · collapsed")
+    expect(text).toContain("Subagent: searcher · completed · done · collapsed")
     expect(text).toContain("write · success · done · collapsed")
     expect(text).toContain("File diff · src/example.ts · collapsed · done · collapsed")
   })
@@ -107,6 +109,23 @@ const skillLoaded = (sequence: number): Event.SkillLoaded => ({
     source: "project",
     skill_file: ".agents/skills/deploy/SKILL.md",
     resource_paths: ["scripts/deploy.ts"],
+  },
+})
+
+const subagentCompleted = (sequence: number): Event.SubagentCompleted => ({
+  ...base(sequence),
+  turn_id: turnId,
+  type: "subagent.completed",
+  data: {
+    subagent_id: "subagent_render_1",
+    name: "searcher",
+    status: "completed",
+    summary: "Found the code path.",
+    evidence: ["packages/agent/src/agent-loop.ts"],
+    tool_access: "read-only",
+    tool_names: ["semantic_search"],
+    started_at: Common.TimestampMillis.make(sequence),
+    completed_at: Common.TimestampMillis.make(sequence),
   },
 })
 

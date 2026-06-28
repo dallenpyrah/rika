@@ -2,7 +2,7 @@ import { Config } from "@rika/core"
 import { Common, Event, Ids, Message } from "@rika/schema"
 
 export type Activity = "idle" | "thinking" | "streaming" | "running-tools" | "failed"
-export type CardKind = "context" | "tool" | "diff" | "error" | "skill" | "system"
+export type CardKind = "context" | "tool" | "diff" | "error" | "skill" | "subagent" | "system"
 export type CardStatus = "info" | "running" | "success" | "error"
 
 export interface ThreadMessage {
@@ -91,6 +91,8 @@ export const applyEvent = (state: ViewState, event: Event.Event): ViewState => {
       return tick({ ...state, cards: [...state.cards, contextCard(event)], activity: "thinking", active: true })
     case "skill.loaded":
       return tick({ ...state, cards: [...state.cards, skillCard(event)], activity: "thinking", active: true })
+    case "subagent.completed":
+      return tick({ ...state, cards: [...state.cards, subagentCard(event)], activity: "streaming", active: true })
     case "model.stream.chunk":
       return tick({
         ...state,
@@ -205,6 +207,16 @@ const skillCard = (event: Event.SkillLoaded): Card => ({
     `File: ${event.data.skill_file}`,
     `Resources: ${event.data.resource_paths.join(", ")}`,
   ].join("\n"),
+})
+
+const subagentCard = (event: Event.SubagentCompleted): Card => ({
+  id: event.id,
+  kind: "subagent",
+  title: `Subagent: ${event.data.name}`,
+  subtitle: event.data.status,
+  status: event.data.status === "completed" ? "success" : event.data.status === "failed" ? "error" : "info",
+  collapsed: true,
+  body: [event.data.summary, ...event.data.evidence.map((evidence) => `- ${evidence}`)].join("\n"),
 })
 
 const toolCard = (event: Event.ToolCallRequested): Card => ({

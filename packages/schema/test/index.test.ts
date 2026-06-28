@@ -193,4 +193,29 @@ describe("Rika protocol schemas", () => {
 
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
+
+  test("round-trips subagent summary events", () => {
+    const event: Event.Event = {
+      id: eventId,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 5,
+      version: 1,
+      created_at: now,
+      type: "subagent.completed",
+      data: {
+        subagent_id: "subagent_1",
+        name: "searcher",
+        status: "completed",
+        summary: "Found the relevant code.",
+        evidence: ["packages/agent/src/agent-loop.ts"],
+        tool_access: "read-only",
+        tool_names: ["semantic_search"],
+        started_at: now,
+        completed_at: now,
+      },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
 })

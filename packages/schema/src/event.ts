@@ -99,6 +99,24 @@ export const SkillLoaded = Schema.Struct({
   }),
 }).annotate({ identifier: "Rika.Event.SkillLoaded" })
 
+export interface SubagentCompleted extends Schema.Schema.Type<typeof SubagentCompleted> {}
+export const SubagentCompleted = Schema.Struct({
+  ...fields,
+  turn_id: TurnId,
+  type: Schema.Literal("subagent.completed"),
+  data: Schema.Struct({
+    subagent_id: Schema.String,
+    name: Schema.String,
+    status: Schema.Literals(["completed", "failed", "cancelled"]),
+    summary: Schema.String,
+    evidence: Schema.Array(Schema.String),
+    tool_access: Schema.Literals(["read-only", "none"]),
+    tool_names: Schema.Array(Schema.String),
+    started_at: TimestampMillis,
+    completed_at: TimestampMillis,
+  }),
+}).annotate({ identifier: "Rika.Event.SubagentCompleted" })
+
 export interface ToolCallRequested extends Schema.Schema.Type<typeof ToolCallRequested> {}
 export const ToolCallRequested = Schema.Struct({
   ...fields,
@@ -157,6 +175,7 @@ export type Event =
   | ModelStreamChunk
   | ContextResolved
   | SkillLoaded
+  | SubagentCompleted
   | ToolCallRequested
   | ToolCallCompleted
   | ArtifactCreated
@@ -172,6 +191,7 @@ export const Event = Schema.Union([
   ModelStreamChunk,
   ContextResolved,
   SkillLoaded,
+  SubagentCompleted,
   ToolCallRequested,
   ToolCallCompleted,
   ArtifactCreated,

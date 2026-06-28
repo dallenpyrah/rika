@@ -251,7 +251,7 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
       return
     }
 
-    const call = yield* makeToolCall(dependencies, toolRequest)
+    const call = yield* makeToolCall(dependencies, input.thread_id, turnId, toolRequest)
     yield* append(yield* makeToolCallRequested(dependencies, input.thread_id, turnId, call, sequence + 1))
     const result = yield* dependencies.toolExecutor.execute(call).pipe(
       Effect.catchIf(
@@ -260,6 +260,11 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
       ),
     )
     yield* append(yield* makeToolCallCompleted(dependencies, input.thread_id, turnId, result, sequence + 1))
+    if (call.name === "task" && result.status === "success") {
+      for (const summary of subagentSummaries(result.output)) {
+        yield* append(yield* makeSubagentCompleted(dependencies, input.thread_id, turnId, summary, sequence + 1))
+      }
+    }
 
     const followUpMessages = [
       ...messages,
@@ -483,6 +488,57 @@ const extractJson = (content: string) => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
+const subagentSummaries = (value: Common.JsonValue | undefined): ReadonlyArray<Event.SubagentCompleted["data"]> => {
+  if (!isRecord(value) || value.type !== "subagent.batch" || !Array.isArray(value.runs)) return []
+  return value.runs.flatMap((run) => {
+    const summary = toSubagentSummary(run)
+    return summary === undefined ? [] : [summary]
+  })
+}
+
+const toSubagentSummary = (value: unknown): Event.SubagentCompleted["data"] | undefined => {
+  if (!isRecord(value)) return undefined
+  const evidence = stringArray(value.evidence)
+  const toolNames = stringArray(value.tool_names)
+  const startedAt = value.started_at
+  const completedAt = value.completed_at
+  if (
+    typeof value.subagent_id !== "string" ||
+    typeof value.name !== "string" ||
+    !isSubagentStatus(value.status) ||
+    typeof value.summary !== "string" ||
+    evidence === undefined ||
+    !isToolAccess(value.tool_access) ||
+    toolNames === undefined ||
+    typeof startedAt !== "number" ||
+    typeof completedAt !== "number" ||
+    !Number.isInteger(startedAt) ||
+    !Number.isInteger(completedAt)
+  ) {
+    return undefined
+  }
+  return {
+    subagent_id: value.subagent_id,
+    name: value.name,
+    status: value.status,
+    summary: value.summary,
+    evidence,
+    tool_access: value.tool_access,
+    tool_names: toolNames,
+    started_at: Common.TimestampMillis.make(startedAt),
+    completed_at: Common.TimestampMillis.make(completedAt),
+  }
+}
+
+const isSubagentStatus = (value: unknown): value is Event.SubagentCompleted["data"]["status"] =>
+  value === "completed" || value === "failed" || value === "cancelled"
+
+const isToolAccess = (value: unknown): value is Event.SubagentCompleted["data"]["tool_access"] =>
+  value === "read-only" || value === "none"
+
+const stringArray = (value: unknown): ReadonlyArray<string> | undefined =>
+  Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined
+
 const routerRequest = (input: RunTurnInput, messages: ReadonlyArray<Provider.Message>): Router.Request =>
   input.mode === undefined ? { messages } : { mode: input.mode, messages }
 
@@ -689,11 +745,39 @@ const makeModelStreamChunk = (
     return event
   })
 
-const makeToolCall = (dependencies: Dependencies, request: ToolRequest) =>
+const makeToolCall = (dependencies: Dependencies, threadId: Ids.ThreadId, turnId: Ids.TurnId, request: ToolRequest) =>
   Effect.gen(function* () {
     const id = Ids.ToolCallId.make(yield* dependencies.idGenerator.next("tool_call"))
-    const call: Tool.Call = { id, name: request.name, input: request.input }
+    const call: Tool.Call = {
+      id,
+      name: request.name,
+      input: request.input,
+      metadata: { thread_id: threadId, turn_id: turnId },
+    }
     return call
+  })
+
+const makeSubagentCompleted = (
+  dependencies: Dependencies,
+  threadId: Ids.ThreadId,
+  turnId: Ids.TurnId,
+  summary: Event.SubagentCompleted["data"],
+  sequence: number,
+) =>
+  Effect.gen(function* () {
+    const createdAt = yield* dependencies.time.nowMillis
+    const id = Ids.EventId.make(yield* dependencies.idGenerator.next("event"))
+    const event: Event.SubagentCompleted = {
+      id,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence,
+      version: 1,
+      created_at: createdAt,
+      type: "subagent.completed",
+      data: summary,
+    }
+    return event
   })
 
 const makeToolCallRequested = (

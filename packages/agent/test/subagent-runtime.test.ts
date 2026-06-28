@@ -1,0 +1,194 @@
+import { describe, expect, test } from "bun:test"
+import { IdGenerator, Time } from "@rika/core"
+import { Provider, Router } from "@rika/llm"
+import { Common, Ids, Tool } from "@rika/schema"
+import { Effect, Layer, Stream } from "effect"
+import { SubagentRuntime, ToolExecutor } from "../src/index"
+
+const now = Common.TimestampMillis.make(2_000_000_000_000)
+
+const defaultToolLayer = ToolExecutor.fakeLayer(
+  {
+    read: (call) => Effect.succeed({ path: pathFromInput(call.input), content: "read output" }),
+  },
+  [{ name: "read", description: "Read a workspace file" }],
+)
+
+const makeLayer = (routerLayer: Layer.Layer<Router.Service>, toolLayer = defaultToolLayer) =>
+  SubagentRuntime.layer.pipe(
+    Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+    Layer.provideMerge(Time.fixedLayer(now)),
+    Layer.provideMerge(routerLayer),
+    Layer.provideMerge(toolLayer),
+  )
+
+describe("SubagentRuntime", () => {
+  test("runs independent read-only subagents concurrently and returns compact evidence", async () => {
+    let active = 0
+    let maxActive = 0
+    const requests: Array<Router.Request> = []
+    const routerLayer = fakeRouterLayer((request) =>
+      Effect.promise(async () => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        requests.push(request)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        active -= 1
+        const prompt = request.messages.at(-1)?.content ?? "missing"
+        return response(`Summary for ${prompt}\n- evidence:${prompt}`)
+      }),
+    )
+
+    const result = await Effect.runPromise(
+      SubagentRuntime.runBatch({
+        agents: [
+          { name: "alpha", prompt: "inspect alpha" },
+          { name: "beta", prompt: "inspect beta" },
+        ],
+      }).pipe(Effect.provide(makeLayer(routerLayer))),
+    )
+
+    expect(maxActive).toBeGreaterThan(1)
+    expect(result.runs.map((run) => `${run.name}:${run.status}:${run.summary.split("\n")[0]}`)).toEqual([
+      "alpha:completed:Summary for inspect alpha",
+      "beta:completed:Summary for inspect beta",
+    ])
+    expect(result.runs[0]?.evidence).toEqual(["evidence:inspect alpha"])
+    expect(requests[0]?.messages.map((message) => message.content).join("\n")).not.toContain("inspect beta")
+    expect(requests[1]?.messages.map((message) => message.content).join("\n")).not.toContain("inspect alpha")
+    expect(requests.map((request) => request.max_output_tokens)).toEqual([500, 500])
+  })
+
+  test("rejects mutating tool access before subagents run", async () => {
+    let called = false
+    const routerLayer = fakeRouterLayer(() =>
+      Effect.sync(() => {
+        called = true
+        return response("should not run")
+      }),
+    )
+
+    const error = await Effect.runPromise(
+      SubagentRuntime.runBatch({ agents: [{ name: "writer", prompt: "edit files", tool_names: ["write"] }] }).pipe(
+        Effect.provide(makeLayer(routerLayer)),
+        Effect.flip,
+      ),
+    )
+
+    expect(called).toBe(false)
+    expect(error).toMatchObject({ message: expect.stringContaining("read-only") })
+  })
+
+  test("allows one read-only tool call and feeds only the result into the final summary", async () => {
+    const toolCalls: Array<Tool.Call> = []
+    const routerRequests: Array<Router.Request> = []
+    let requestCount = 0
+    const routerLayer = fakeRouterLayer((request) =>
+      Effect.sync(() => {
+        routerRequests.push(request)
+        requestCount += 1
+        if (requestCount === 1) {
+          return response(JSON.stringify({ tool_call: { name: "read", input: { path: "README.md" } } }))
+        }
+        expect(request.messages.at(-1)?.role).toBe("tool")
+        return response("Read README.md and found the setup notes.\n- README.md")
+      }),
+    )
+    const toolLayer = ToolExecutor.fakeLayer(
+      {
+        read: (call) =>
+          Effect.sync(() => {
+            toolCalls.push(call)
+            return { path: "README.md", content: "setup notes" }
+          }),
+      },
+      [{ name: "read", description: "Read a workspace file" }],
+    )
+
+    const result = await Effect.runPromise(
+      SubagentRuntime.runBatch({
+        parent_thread_id: Ids.ThreadId.make("thread_parent"),
+        parent_turn_id: Ids.TurnId.make("turn_parent"),
+        agents: [{ name: "reader", prompt: "read setup", tool_names: ["read"], max_output_chars: 800 }],
+      }).pipe(Effect.provide(makeLayer(routerLayer, toolLayer))),
+    )
+
+    expect(result.runs[0]).toMatchObject({
+      name: "reader",
+      status: "completed",
+      evidence: ["README.md"],
+      summary: expect.stringContaining("setup notes"),
+    })
+    expect(toolCalls[0]).toMatchObject({
+      name: "read",
+      metadata: {
+        subagent_id: "subagent_1",
+        subagent_name: "reader",
+        parent_thread_id: "thread_parent",
+        parent_turn_id: "turn_parent",
+      },
+    })
+    expect(routerRequests.map((request) => request.max_output_tokens)).toEqual([200, 200])
+    expect(routerRequests.map((request) => request.metadata)).toEqual([
+      {
+        subagent_id: "subagent_1",
+        subagent_name: "reader",
+        parent_thread_id: "thread_parent",
+        parent_turn_id: "turn_parent",
+      },
+      {
+        subagent_id: "subagent_1",
+        subagent_name: "reader",
+        parent_thread_id: "thread_parent",
+        parent_turn_id: "turn_parent",
+      },
+    ])
+  })
+
+  test("returns cancelled summaries without invoking the model", async () => {
+    let called = false
+    const routerLayer = fakeRouterLayer(() =>
+      Effect.sync(() => {
+        called = true
+        return response("should not run")
+      }),
+    )
+
+    const result = await Effect.runPromise(
+      SubagentRuntime.runBatch({ cancelled: true, agents: [{ name: "slow", prompt: "work" }] }).pipe(
+        Effect.provide(makeLayer(routerLayer)),
+      ),
+    )
+
+    expect(called).toBe(false)
+    expect(result.runs[0]).toMatchObject({ name: "slow", status: "cancelled" })
+  })
+})
+
+const fakeRouterLayer = (complete: (request: Router.Request) => Effect.Effect<Provider.GenerateResponse>) =>
+  Layer.succeed(
+    Router.Service,
+    Router.Service.of({
+      route: Effect.fn("SubagentRuntime.test.route")(function* (request: Router.Request) {
+        return {
+          mode: request.mode ?? "smart",
+          provider: request.provider ?? "openai",
+          model: request.model ?? "fake-model",
+          messages: request.messages,
+          reasoning_effort: request.reasoning_effort ?? "none",
+          max_output_tokens: request.max_output_tokens ?? 1_000,
+        }
+      }),
+      complete: Effect.fn("SubagentRuntime.test.complete")(complete),
+      stream: (request: Router.Request) =>
+        Stream.fromIterable(Provider.streamEventsFromResponse(response(request.messages.at(-1)?.content ?? ""))),
+    }),
+  )
+
+const response = (content: string): Provider.GenerateResponse => ({ provider: "openai", model: "fake-model", content })
+
+const pathFromInput = (value: Common.JsonValue): string => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return ""
+  const path = Object.entries(value).find(([key]) => key === "path")?.[1]
+  return typeof path === "string" ? path : ""
+}

@@ -1,4 +1,4 @@
-import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadService, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
@@ -19,7 +19,6 @@ export const endpointFromEnv = (env: Record<string, string | undefined> = proces
 
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
-const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
 const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(Config.layer))
 const storageLayer = Layer.mergeAll(
   Config.layer,
@@ -31,6 +30,16 @@ const storageLayer = Layer.mergeAll(
 )
 const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(storageLayer))
 const configuredContextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+const configuredReadOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
+const configuredSubagentLayer = SubagentRuntime.layer.pipe(
+  Layer.provideMerge(storageLayer),
+  Layer.provideMerge(configuredLlmLayer),
+  Layer.provideMerge(configuredReadOnlyToolLayer),
+)
+const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(
+  Layer.provideMerge(Config.layer),
+  Layer.provideMerge(configuredSubagentLayer),
+)
 
 type ServiceLayerOutput =
   | AgentLoop.Service
@@ -42,6 +51,7 @@ type ServiceLayerOutput =
   | Provider.Service
   | Router.Service
   | SkillRegistry.Service
+  | SubagentRuntime.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
   | ThreadService.Service

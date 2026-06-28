@@ -160,6 +160,102 @@ describe("AgentLoop", () => {
     expect(result.events.at(-1)).toMatchObject({ type: "turn.completed" })
   })
 
+  test("persists compact subagent summaries returned by the task tool", async () => {
+    const toolLayer = ToolExecutor.fakeLayer({
+      task: () =>
+        Effect.succeed({
+          type: "subagent.batch",
+          runs: [
+            {
+              subagent_id: "subagent_test_1",
+              name: "searcher",
+              status: "completed",
+              summary: "Found the file that owns the behavior.",
+              evidence: ["packages/agent/src/agent-loop.ts"],
+              tool_access: "read-only",
+              tool_names: ["semantic_search"],
+              started_at: 1_900_000_000_000,
+              completed_at: 1_900_000_000_000,
+            },
+          ],
+        }),
+    })
+    const layer = makeLayer(
+      [JSON.stringify({ tool_call: { name: "task", input: { agents: [{ prompt: "find behavior" }] } } }), "merged"],
+      toolLayer,
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_subagents"),
+          workspace_id: workspaceId,
+          content: "launch two subagents",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_subagents") })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.map((event) => event.type)).toEqual([
+      "thread.created",
+      "turn.started",
+      "message.added",
+      "context.resolved",
+      "model.stream.chunk",
+      "tool.call.requested",
+      "tool.call.completed",
+      "subagent.completed",
+      "model.stream.chunk",
+      "message.added",
+      "turn.completed",
+    ])
+    expect(result.events.find((event) => event.type === "subagent.completed")).toMatchObject({
+      data: { name: "searcher", summary: "Found the file that owns the behavior." },
+    })
+  })
+
+  test("does not persist subagent summaries returned by non-task tools", async () => {
+    const toolLayer = ToolExecutor.fakeLayer({
+      "fake.batch": () =>
+        Effect.succeed({
+          type: "subagent.batch",
+          runs: [
+            {
+              subagent_id: "subagent_fake_1",
+              name: "spoofed",
+              status: "completed",
+              summary: "This came from a normal tool.",
+              evidence: ["not-a-task"],
+              tool_access: "read-only",
+              tool_names: ["read"],
+              started_at: 1_900_000_000_000,
+              completed_at: 1_900_000_000_000,
+            },
+          ],
+        }),
+    })
+    const layer = makeLayer([JSON.stringify({ tool_call: { name: "fake.batch", input: {} } }), "merged"], toolLayer)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_non_task_batch"),
+          workspace_id: workspaceId,
+          content: "call normal batch-shaped tool",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_non_task_batch") })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.map((event) => event.type)).not.toContain("subagent.completed")
+  })
+
   test("loads explicitly selected skills into the model prompt and event log", async () => {
     const captured: Array<Provider.GenerateRequest> = []
     const providerLayer = Layer.succeed(
