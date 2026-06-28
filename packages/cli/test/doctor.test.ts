@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer, Schema } from "effect"
-import { Doctor, Output } from "../src/index"
+import { Doctor, LocalBackend, Output } from "../src/index"
 
 describe("CLI doctor command", () => {
   test("prints local diagnostics without leaking secrets", async () => {
@@ -18,7 +18,9 @@ describe("CLI doctor command", () => {
         RIKA_RIVET_TOKEN: "rivet-secret",
         RIKA_RIVET_NAMESPACE: "team",
       },
-    }).pipe(Layer.provideMerge(Output.memoryLayer(output)))
+    })
+      .pipe(Layer.provideMerge(Output.memoryLayer(output)))
+      .pipe(Layer.provideMerge(LocalBackend.layerFromInput({ env: {}, cwd: "/workspace/rika" })))
 
     const exitCode = await Effect.runPromise(Doctor.executeCommand({ type: "doctor" }).pipe(Effect.provide(layer)))
 
@@ -35,6 +37,9 @@ describe("CLI doctor command", () => {
         data_dir: "/workspace/rika/.rika-test",
         openai_configured: true,
         telemetry: "disabled",
+      },
+      backend: {
+        status: "disconnected",
       },
       rivet: {
         host: "remote",

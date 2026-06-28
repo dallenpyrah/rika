@@ -9,19 +9,22 @@
 
 ## Key Files
 
-| File                    | Purpose                                                         |
-| ----------------------- | --------------------------------------------------------------- |
-| `src/view-state.ts`     | Pure event-to-view projection for terminal rendering.           |
-| `src/renderer.ts`       | Amp-like frame renderer with collapsed cards and status chrome. |
-| `src/terminal.ts`       | Swappable terminal input/output boundary for live/tests.        |
-| `src/session.ts`        | Interactive session loop over `AgentLoop.streamTurn`.           |
-| `src/index.ts`          | Package namespace exports.                                      |
-| `test/renderer.test.ts` | Snapshot-like render coverage for critical visual states.       |
-| `test/session.test.ts`  | Memory-terminal interactive session tests.                      |
+| File                          | Purpose                                                         |
+| ----------------------------- | --------------------------------------------------------------- |
+| `src/view-state.ts`           | Pure event-to-view projection for terminal rendering.           |
+| `src/renderer.ts`             | Amp-like frame renderer with collapsed cards and status chrome. |
+| `src/remote-session.ts`       | SDK-backed thin TUI session for the shared local backend.       |
+| `src/terminal.ts`             | Swappable terminal input/output boundary for live/tests.        |
+| `src/session.ts`              | Interactive session loop over `AgentLoop.streamTurn`.           |
+| `src/index.ts`                | Package namespace exports.                                      |
+| `test/renderer.test.ts`       | Snapshot-like render coverage for critical visual states.       |
+| `test/remote-session.test.ts` | Thin-client TUI coverage over a fake SDK backend.               |
+| `test/session.test.ts`        | Memory-terminal interactive session tests.                      |
 
 ## Current Standards
 
 - UI code consumes `@rika/schema` events and service streams; it must not reach into actor internals or persistence tables.
+- Default interactive runtime uses `RemoteSession` over `@rika/sdk`; keep the direct `Session` seam for isolated tests and ephemeral sessions.
 - Keep rendering mostly pure. Effects belong at terminal and agent-loop boundaries.
 - Terminal I/O goes behind `Terminal.Service`; tests use `Terminal.memoryLayer`.
 - Tool, diff, context, and historical cards are collapsed by default and expanded only by explicit view state.

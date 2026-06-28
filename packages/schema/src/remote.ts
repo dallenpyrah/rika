@@ -5,6 +5,21 @@ import { Event } from "./event"
 import { ContextSnapshot as IdeContextSnapshot } from "./ide"
 import { ArtifactId, ThreadId, TurnId, UserId, WorkspaceId } from "./ids"
 
+export const BackendStatus = Schema.Literals(["healthy", "starting", "stale", "disconnected", "remote"]).annotate({
+  identifier: "Rika.Remote.BackendStatus",
+})
+export type BackendStatus = typeof BackendStatus.Type
+
+export interface BackendHealth extends Schema.Schema.Type<typeof BackendHealth> {}
+export const BackendHealth = Schema.Struct({
+  status: BackendStatus,
+  url: Schema.String,
+  workspace_root: Schema.String,
+  data_dir: Schema.String,
+  pid: Schema.optional(Schema.Int),
+  version: Schema.String,
+}).annotate({ identifier: "Rika.Remote.BackendHealth" })
+
 export const AgentMode = Schema.Literals(["rush", "smart", "deep"]).annotate({
   identifier: "Rika.Remote.AgentMode",
 })
@@ -54,6 +69,69 @@ export const OpenThreadRequest = Schema.Struct({
   thread_id: ThreadId,
   user_id: Schema.optional(UserId),
 }).annotate({ identifier: "Rika.Remote.OpenThreadRequest" })
+
+export interface ArchiveThreadRequest extends Schema.Schema.Type<typeof ArchiveThreadRequest> {}
+export const ArchiveThreadRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+}).annotate({ identifier: "Rika.Remote.ArchiveThreadRequest" })
+
+export interface SearchThreadsRequest extends Schema.Schema.Type<typeof SearchThreadsRequest> {}
+export const SearchThreadsRequest = Schema.Struct({
+  query: Schema.optional(Schema.String),
+  include_archived: Schema.optional(Schema.Boolean),
+  workspace_id: Schema.optional(WorkspaceId),
+  user_id: Schema.optional(UserId),
+  after: Schema.optional(TimestampMillis),
+  before: Schema.optional(TimestampMillis),
+  limit: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Remote.SearchThreadsRequest" })
+
+export interface ThreadSearchResult extends Schema.Schema.Type<typeof ThreadSearchResult> {}
+export const ThreadSearchResult = Schema.Struct({
+  summary: ThreadSummary,
+  score: Schema.Int,
+  matched: Schema.Array(Schema.String),
+}).annotate({ identifier: "Rika.Remote.ThreadSearchResult" })
+
+export interface ShareThreadRequest extends Schema.Schema.Type<typeof ShareThreadRequest> {}
+export const ShareThreadRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+}).annotate({ identifier: "Rika.Remote.ShareThreadRequest" })
+
+export interface ThreadExport extends Schema.Schema.Type<typeof ThreadExport> {}
+export const ThreadExport = Schema.Struct({
+  schema_version: Schema.Literal(1),
+  exported_at: TimestampMillis,
+  thread_id: ThreadId,
+  summary: ThreadSummary,
+  events: Schema.Array(Event),
+}).annotate({ identifier: "Rika.Remote.ThreadExport" })
+
+export interface ReferenceThreadRequest extends Schema.Schema.Type<typeof ReferenceThreadRequest> {}
+export const ReferenceThreadRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+  query: Schema.optional(Schema.String),
+  max_chars: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Remote.ReferenceThreadRequest" })
+
+export interface ThreadReference extends Schema.Schema.Type<typeof ThreadReference> {}
+export const ThreadReference = Schema.Struct({
+  thread_id: ThreadId,
+  rendered: Schema.String,
+  entries: Schema.Array(Schema.String),
+  total_chars: Schema.Int,
+  truncated: Schema.Boolean,
+}).annotate({ identifier: "Rika.Remote.ThreadReference" })
+
+export interface SubscribeThreadEventsRequest extends Schema.Schema.Type<typeof SubscribeThreadEventsRequest> {}
+export const SubscribeThreadEventsRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+  after_sequence: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Remote.SubscribeThreadEventsRequest" })
 
 export interface StartTurnRequest extends Schema.Schema.Type<typeof StartTurnRequest> {}
 export const StartTurnRequest = Schema.Struct({

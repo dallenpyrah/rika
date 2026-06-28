@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Schema } from "effect"
 import * as Args from "./args"
+import * as LocalBackend from "./local-backend"
 import * as Output from "./output"
 
 export interface EnvironmentSummary extends Schema.Schema.Type<typeof EnvironmentSummary> {}
@@ -28,6 +29,13 @@ export const RivetSummary = Schema.Struct({
   namespace_configured: Schema.Boolean,
 }).annotate({ identifier: "Rika.Cli.Doctor.RivetSummary" })
 
+export interface BackendSummary extends Schema.Schema.Type<typeof BackendSummary> {}
+export const BackendSummary = Schema.Struct({
+  status: Schema.String,
+  endpoint: Schema.optional(Schema.String),
+  pid: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Cli.Doctor.BackendSummary" })
+
 export const CheckStatus = Schema.Literals(["ok", "warning"])
 export type CheckStatus = typeof CheckStatus.Type
 
@@ -43,6 +51,7 @@ export const Report = Schema.Struct({
   version: Schema.String,
   environment: EnvironmentSummary,
   config: ConfigSummary,
+  backend: BackendSummary,
   rivet: RivetSummary,
   checks: Schema.Array(Check),
 }).annotate({ identifier: "Rika.Cli.Doctor.Report" })
@@ -71,7 +80,8 @@ export const layerFromInput = (input: Input) =>
     Service,
     Effect.gen(function* () {
       const output = yield* Output.Service
-      const makeReport = reportFromInput(input)
+      const backend = yield* LocalBackend.Service
+      const makeReport = reportFromInput(input, backend)
 
       return Service.of({
         executeCommand: Effect.fn("Cli.Doctor.executeCommand")(function* (_command: Args.DoctorCommand) {
@@ -96,14 +106,17 @@ export const report = Effect.fn("Cli.Doctor.report.call")(function* () {
 
 export const formatError = (error: RunError) => `Rika failed: ${error.message}`
 
-const reportFromInput = (input: Input): Effect.Effect<Report, DoctorError> =>
-  Effect.sync(() => {
+const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.Effect<Report, DoctorError> =>
+  Effect.gen(function* () {
     const workspaceRoot = input.env.RIKA_WORKSPACE_ROOT ?? input.cwd
     const dataDir = input.env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
     const rivetHost = input.env.RIKA_RIVET_HOST ?? "local"
     const rivetEndpoint = input.env.RIKA_RIVET_ENDPOINT ?? input.env.RIVET_ENDPOINT ?? "http://127.0.0.1:6420"
     const openaiConfigured =
       secretConfigured(input.env.RIKA_OPENAI_API_KEY) || secretConfigured(input.env.OPENAI_API_KEY)
+    const backendStatus = yield* backend
+      .status({ workspace_root: workspaceRoot, data_dir: dataDir })
+      .pipe(Effect.mapError((error) => new DoctorError({ message: error.message })))
     const diagnosticReport: Report = {
       version: input.version ?? "0.0.0",
       environment: {
@@ -119,6 +132,11 @@ const reportFromInput = (input: Input): Effect.Effect<Report, DoctorError> =>
         database_url_configured: input.env.RIKA_DATABASE_URL !== undefined,
         openai_configured: openaiConfigured,
         telemetry: "disabled",
+      },
+      backend: {
+        status: backendStatus.status,
+        ...(backendStatus.endpoint === undefined ? {} : { endpoint: backendStatus.endpoint }),
+        ...(backendStatus.pid === undefined || backendStatus.pid === 0 ? {} : { pid: backendStatus.pid }),
       },
       rivet: {
         host: rivetHost,

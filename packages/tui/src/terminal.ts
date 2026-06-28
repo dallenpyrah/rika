@@ -65,9 +65,16 @@ const liveService = (readline: ReadLineInterface) =>
       return yield* Effect.tryPromise({
         try: () => readline.question(options.prompt),
         catch: (cause) => toError(cause, "readLine"),
-      })
+      }).pipe(
+        Effect.catchTag("TerminalError", (error) =>
+          isClosedReadline(error) ? Effect.succeed(undefined) : Effect.fail(error),
+        ),
+      )
     }),
   })
+
+const isClosedReadline = (error: TerminalError) =>
+  error.operation === "readLine" && error.message.toLowerCase().includes("readline was closed")
 
 const toError = (cause: unknown, operation: string) =>
   new TerminalError({ message: cause instanceof Error ? cause.message : String(cause), operation })

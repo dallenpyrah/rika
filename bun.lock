@@ -216,6 +216,7 @@
         "@rika/core": "workspace:*",
         "@rika/persistence": "workspace:*",
         "@rika/schema": "workspace:*",
+        "@rika/sdk": "workspace:*",
         "effect": "catalog:",
       },
       "devDependencies": {

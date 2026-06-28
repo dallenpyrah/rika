@@ -1,7 +1,7 @@
 import { AgentLoop, ThreadService, WorkspaceAccess } from "@rika/agent"
 import { Config } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
-import { ArtifactStore, Database } from "@rika/persistence"
+import { ArtifactStore, Database, ThreadEventLog } from "@rika/persistence"
 import { Artifact, Common, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
 
@@ -17,15 +17,25 @@ export type RunError =
   | ThreadService.Error
   | ArtifactStore.ArtifactStoreError
   | Database.DatabaseError
+  | ThreadEventLog.ThreadEventLogError
   | IdeBridge.IdeBridgeError
   | WorkspaceAccess.RunError
 
 export interface Interface {
+  readonly backendHealth: (url: string) => Effect.Effect<Remote.BackendHealth, RunError>
   readonly createThread: (input: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly listThreads: (
     input?: Remote.ListThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSummary>, RunError>
   readonly openThread: (input: Remote.OpenThreadRequest) => Effect.Effect<Remote.ThreadRecord, RunError>
+  readonly archiveThread: (input: Remote.ArchiveThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
+  readonly unarchiveThread: (input: Remote.ArchiveThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
+  readonly searchThreads: (
+    input: Remote.SearchThreadsRequest,
+  ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, RunError>
+  readonly shareThread: (input: Remote.ShareThreadRequest) => Effect.Effect<Remote.ThreadExport, RunError>
+  readonly referenceThread: (input: Remote.ReferenceThreadRequest) => Effect.Effect<Remote.ThreadReference, RunError>
+  readonly subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) => Stream.Stream<Event.Event, RunError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Stream.Stream<Event.Event, RunError>
   readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, RunError>
   readonly listArtifacts: (
@@ -49,10 +59,23 @@ export const layer = Layer.effect(
     const threads = yield* ThreadService.Service
     const artifacts = yield* ArtifactStore.Service
     const config = yield* Config.Service
+    const database = yield* Database.Service
+    const eventLog = yield* ThreadEventLog.Service
     const ideBridge = yield* IdeBridge.Service
     const workspaceAccess = yield* WorkspaceAccess.Service
 
     return Service.of({
+      backendHealth: Effect.fn("RemoteControl.backendHealth")(function* (url: string) {
+        const values = yield* config.get
+        return {
+          status: "healthy",
+          url,
+          workspace_root: values.workspace_root,
+          data_dir: values.data_dir,
+          pid: process.pid,
+          version: "0.0.0",
+        }
+      }),
       createThread: Effect.fn("RemoteControl.createThread")(function* (input: Remote.CreateThreadRequest) {
         const values = yield* config.get
         const workspaceId = input.workspace_id ?? Ids.WorkspaceId.make(values.workspace_root)
@@ -86,6 +109,66 @@ export const layer = Layer.effect(
         const record = yield* threads.open({ thread_id: input.thread_id })
         return { summary: toRemoteSummary(record.summary), events: record.events }
       }),
+      archiveThread: Effect.fn("RemoteControl.archiveThread")(function* (input: Remote.ArchiveThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+        }
+        return toRemoteSummary(yield* threads.archive({ thread_id: input.thread_id }))
+      }),
+      unarchiveThread: Effect.fn("RemoteControl.unarchiveThread")(function* (input: Remote.ArchiveThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+        }
+        return toRemoteSummary(yield* threads.unarchive({ thread_id: input.thread_id }))
+      }),
+      searchThreads: Effect.fn("RemoteControl.searchThreads")(function* (input: Remote.SearchThreadsRequest) {
+        if (input.workspace_id !== undefined && input.user_id !== undefined) {
+          yield* workspaceAccess.requireWorkspace({
+            workspace_id: input.workspace_id,
+            user_id: input.user_id,
+            action: "read",
+          })
+        }
+        const results = yield* threads.search(input)
+        const summaries = results.map((result) => result.summary)
+        const readable = yield* workspaceAccess.filterReadableThreads(summaries, input.user_id)
+        const readableIds = new Set(readable.map((summary) => summary.thread_id))
+        return results
+          .filter((result) => readableIds.has(result.summary.thread_id))
+          .map((result) => ({ ...result, summary: toRemoteSummary(result.summary) }))
+      }),
+      shareThread: Effect.fn("RemoteControl.shareThread")(function* (input: Remote.ShareThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
+        }
+        const exported = yield* threads.share({ thread_id: input.thread_id })
+        return { ...exported, summary: toRemoteSummary(exported.summary) }
+      }),
+      referenceThread: Effect.fn("RemoteControl.referenceThread")(function* (input: Remote.ReferenceThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
+        }
+        return yield* threads.reference(input)
+      }),
+      subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            if (input.user_id !== undefined) {
+              yield* workspaceAccess.requireThread({
+                thread_id: input.thread_id,
+                user_id: input.user_id,
+                action: "read",
+              })
+            }
+            const events = yield* eventLog
+              .readThread({
+                thread_id: input.thread_id,
+                ...(input.after_sequence === undefined ? {} : { after_sequence: input.after_sequence }),
+              })
+              .pipe(Effect.provideService(Database.Service, database))
+            return Stream.fromIterable(events)
+          }),
+        ),
       startTurn: (input: Remote.StartTurnRequest) =>
         Stream.unwrap(
           Effect.gen(function* () {
@@ -174,6 +257,11 @@ export const createThread = Effect.fn("RemoteControl.createThread.call")(functio
   return yield* service.createThread(input)
 })
 
+export const backendHealth = Effect.fn("RemoteControl.backendHealth.call")(function* (url: string) {
+  const service = yield* Service
+  return yield* service.backendHealth(url)
+})
+
 export const listThreads = Effect.fn("RemoteControl.listThreads.call")(function* (
   input: Remote.ListThreadsRequest = {},
 ) {
@@ -185,6 +273,42 @@ export const openThread = Effect.fn("RemoteControl.openThread.call")(function* (
   const service = yield* Service
   return yield* service.openThread(input)
 })
+
+export const archiveThread = Effect.fn("RemoteControl.archiveThread.call")(function* (
+  input: Remote.ArchiveThreadRequest,
+) {
+  const service = yield* Service
+  return yield* service.archiveThread(input)
+})
+
+export const unarchiveThread = Effect.fn("RemoteControl.unarchiveThread.call")(function* (
+  input: Remote.ArchiveThreadRequest,
+) {
+  const service = yield* Service
+  return yield* service.unarchiveThread(input)
+})
+
+export const searchThreads = Effect.fn("RemoteControl.searchThreads.call")(function* (
+  input: Remote.SearchThreadsRequest,
+) {
+  const service = yield* Service
+  return yield* service.searchThreads(input)
+})
+
+export const shareThread = Effect.fn("RemoteControl.shareThread.call")(function* (input: Remote.ShareThreadRequest) {
+  const service = yield* Service
+  return yield* service.shareThread(input)
+})
+
+export const referenceThread = Effect.fn("RemoteControl.referenceThread.call")(function* (
+  input: Remote.ReferenceThreadRequest,
+) {
+  const service = yield* Service
+  return yield* service.referenceThread(input)
+})
+
+export const subscribeThreadEvents = (input: Remote.SubscribeThreadEventsRequest) =>
+  Stream.unwrap(Effect.map(Service, (service) => service.subscribeThreadEvents(input)))
 
 export const startTurn = (input: Remote.StartTurnRequest) =>
   Stream.unwrap(Effect.map(Service, (service) => service.startTurn(input)))

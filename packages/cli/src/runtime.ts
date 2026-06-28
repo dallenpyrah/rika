@@ -25,13 +25,14 @@ import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
 import { HttpServer, RemoteControl } from "@rika/server"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
-import { Session, Terminal } from "@rika/tui"
+import { RemoteSession, Session, Terminal } from "@rika/tui"
 import { Effect, Layer } from "effect"
 import * as Args from "./args"
 import * as Doctor from "./doctor"
 import * as Execute from "./execute"
 import * as Extensions from "./extensions"
 import * as Ide from "./ide"
+import * as LocalBackend from "./local-backend"
 import * as Mcp from "./mcp"
 import * as Output from "./output"
 import * as Review from "./review"
@@ -55,7 +56,11 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
         (command.type === "execute"
           ? Execute.executeCommand(command).pipe(Effect.provide(liveLayer(command, input.env, input.cwd)))
           : command.type === "interactive"
-            ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, input.env, input.cwd)))
+            ? command.ephemeral
+              ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, input.env, input.cwd)))
+              : RemoteSession.run(command).pipe(
+                  Effect.provide(interactiveRemoteLiveLayer(command, input.env, input.cwd)),
+                )
             : command.type === "threads"
               ? Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, input.env, input.cwd)))
               : command.type === "skills"
@@ -101,6 +106,7 @@ type RuntimeError =
   | Client.SdkError
   | Ide.IdeError
   | IdeBridge.IdeBridgeError
+  | LocalBackend.BackendError
   | Mcp.McpError
   | McpApprovalStore.McpApprovalStoreError
   | McpClient.McpClientError
@@ -109,6 +115,7 @@ type RuntimeError =
   | Review.ReviewError
   | ReviewService.ReviewServiceError
   | RemoteControl.RemoteControlError
+  | RemoteSession.RemoteSessionError
   | Server.ServerError
   | HttpServer.HttpServerError
   | Session.SessionError
@@ -131,12 +138,14 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Client.SdkError) return `Rika failed: ${error.message}`
   if (error instanceof Ide.IdeError) return Ide.formatError(error)
   if (error instanceof IdeBridge.IdeBridgeError) return `Rika failed: ${error.message}`
+  if (error instanceof LocalBackend.BackendError) return `Rika failed: ${error.message}`
   if (error instanceof Mcp.McpError) return Mcp.formatError(error)
   if (error instanceof McpApprovalStore.McpApprovalStoreError) return `Rika failed: ${error.message}`
   if (error instanceof McpClient.McpClientError) return `Rika failed: ${error.message}`
   if (error instanceof Review.ReviewError) return Review.formatError(error)
   if (error instanceof ReviewService.ReviewServiceError) return `Rika failed: ${error.message}`
   if (error instanceof RemoteControl.RemoteControlError) return `Rika failed: ${error.message}`
+  if (error instanceof RemoteSession.RemoteSessionError) return `Rika failed: ${error.message}`
   if (error instanceof Server.ServerError) return Server.formatError(error)
   if (error instanceof HttpServer.HttpServerError) return `Rika failed: ${error.message}`
   if (error instanceof ArtifactStore.ArtifactStoreError) return `Rika failed: ${error.message}`
@@ -184,7 +193,7 @@ export const liveLayer = (
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -221,6 +230,7 @@ export const liveLayer = (
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Output.layer,
+    migratedStorageLayer,
     storageAndThreadLayer,
     workspaceAccessLayer,
     contextResolverLayer,
@@ -254,7 +264,7 @@ export const interactiveLiveLayer = (
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -306,6 +316,29 @@ export const interactiveLiveLayer = (
   const sessionLayer = Session.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
 
   return sessionLayer
+}
+
+export const interactiveRemoteLiveLayer = (
+  command: Args.InteractiveCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<InteractiveRemoteLayerOutput, LiveLayerError> => {
+  const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const mode = command.mode ?? "smart"
+  const backendLayer = LocalBackend.layerFromInput({ env, cwd })
+  const remoteSessionLayer = Layer.effect(
+    RemoteSession.Service,
+    Effect.gen(function* () {
+      const backend = yield* LocalBackend.Service
+      const terminal = yield* Terminal.Service
+      const endpoint = yield* backend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode })
+      const client = Client.make(Client.fetchTransport({ base_url: endpoint.url, token: endpoint.token }))
+      return RemoteSession.make(client, terminal)
+    }),
+  ).pipe(Layer.provideMerge(backendLayer), Layer.provideMerge(Terminal.layer))
+
+  return remoteSessionLayer
 }
 
 export const skillsLiveLayer = (
@@ -429,7 +462,7 @@ export const reviewLiveLayer = (
     artifactLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -491,7 +524,10 @@ export const doctorLiveLayer = (
   env: Record<string, string | undefined>,
   cwd: string,
 ): Layer.Layer<DoctorLayerOutput, LiveLayerError> =>
-  Doctor.layerFromInput({ env, cwd }).pipe(Layer.provideMerge(Output.layer))
+  Doctor.layerFromInput({ env, cwd }).pipe(
+    Layer.provideMerge(Output.layer),
+    Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd })),
+  )
 
 export const serverLiveLayer = (
   command: Args.ServerCommand,
@@ -514,7 +550,7 @@ export const serverLiveLayer = (
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(openAiLayer(env)), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -551,6 +587,7 @@ export const serverLiveLayer = (
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Output.layer,
+    migratedStorageLayer,
     storageAndThreadLayer,
     workspaceAccessLayer,
     contextResolverLayer,
@@ -618,6 +655,8 @@ export type InteractiveLayerOutput =
   | ToolExecutor.Service
   | WorkspaceStore.Service
 
+export type InteractiveRemoteLayerOutput = LocalBackend.Service | RemoteSession.Service | Terminal.Service
+
 export type ThreadsLayerOutput =
   | Config.Service
   | Database.Service
@@ -671,7 +710,7 @@ export type ExtensionsLayerOutput =
 
 export type IdeLayerOutput = Output.Service | Ide.Service
 
-export type DoctorLayerOutput = Doctor.Service | Output.Service
+export type DoctorLayerOutput = Doctor.Service | LocalBackend.Service | Output.Service
 
 export type ServerLayerOutput =
   | AgentLoop.Service
@@ -708,8 +747,25 @@ export type LiveLayerError =
   | Database.DatabaseError
   | FffSearch.FffSearchError
   | IdeBridge.IdeBridgeError
+  | LocalBackend.BackendError
   | McpApprovalStore.McpApprovalStoreError
   | McpClient.RunError
   | Migration.MigrationError
   | PluginHost.RunError
   | ReviewService.RunError
+
+const openAiLayer = (env: Record<string, string | undefined>) => OpenAi.layer(openAiOptions(env))
+
+const openAiOptions = (env: Record<string, string | undefined>): OpenAi.Options => {
+  const apiKeyEnv = env.RIKA_OPENAI_API_KEY === undefined ? "OPENAI_API_KEY" : "RIKA_OPENAI_API_KEY"
+  const apiUrl =
+    env.RIKA_OPENAI_API_URL ??
+    env.RIKA_OPENAI_BASE_URL ??
+    env.OPENAI_BASE_URL ??
+    env.OPENAI_API_BASE ??
+    env.VIBE_OPENAI_BASE_URL
+  return {
+    apiKeyEnv,
+    ...(apiUrl === undefined || apiUrl.length === 0 ? {} : { apiUrl }),
+  }
+}

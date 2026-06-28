@@ -1,0 +1,237 @@
+import { describe, expect, test } from "bun:test"
+import { Client } from "@rika/sdk"
+import { Common, Event, Ids, Message, Remote } from "@rika/schema"
+import { Effect, Stream } from "effect"
+import { RemoteSession, Renderer, Terminal } from "../src/index"
+
+const workspaceRoot = "/workspace/rika-remote-tui-test"
+const workspaceId = Ids.WorkspaceId.make(workspaceRoot)
+
+describe("TUI remote session", () => {
+  test("runs as a thin client over the shared backend SDK", async () => {
+    const backend = fakeBackend()
+    const terminal: Terminal.MemoryTerminal = {
+      inputs: ["hello", "/threads", "/new", "/thread thread_remote_initial", "/archive", "/unarchive", "/exit"],
+      frames: [],
+      prompts: [],
+    }
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart" }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(Terminal.memoryLayer(terminal)),
+      ),
+    )
+
+    const frames = terminal.frames.map(Renderer.stripAnsi).join("\n")
+    expect(exitCode).toBe(0)
+    expect(terminal.prompts).toEqual(["› ", "› ", "› ", "› ", "› ", "› ", "› "])
+    expect(frames).toContain("Connected to shared Rika backend")
+    expect(frames).toContain("remote response")
+    expect(frames).toContain("Active threads")
+    expect(frames).toContain("Started new thread")
+    expect(frames).toContain("Resumed thread thread_remote_initial")
+    expect(frames).toContain("Archived thread_remote_initial")
+    expect(frames).toContain("Unarchived thread_remote_initial")
+    expect(backend.turns).toEqual(["hello"])
+  })
+})
+
+interface FakeBackend {
+  readonly client: Client.Interface
+  readonly turns: Array<string>
+}
+
+const fakeBackend = (): FakeBackend => {
+  const turns: Array<string> = []
+  const threads = new Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>()
+  const initialThread = Ids.ThreadId.make("thread_remote_initial")
+  const initialEvents = [threadCreated(initialThread, 1), messageAdded(initialThread, 2, "old remote message")]
+  threads.set(initialThread, { summary: summary(initialThread, "old remote message"), events: [...initialEvents] })
+  let nextThread = 1
+
+  const client: Client.Interface = {
+    backendHealth: () =>
+      Effect.succeed({
+        status: "healthy",
+        url: "http://127.0.0.1:4587",
+        workspace_root: workspaceRoot,
+        data_dir: `${workspaceRoot}/.rika`,
+        pid: 123,
+        version: "0.0.0",
+      }),
+    createThread: (input: Remote.CreateThreadRequest = {}) =>
+      Effect.sync(() => {
+        const threadId = input.thread_id ?? Ids.ThreadId.make(`thread_remote_created_${nextThread++}`)
+        const threadSummary = summary(threadId)
+        threads.set(threadId, { summary: threadSummary, events: [threadCreated(threadId, 1)] })
+        return threadSummary
+      }),
+    listThreads: () => Effect.sync(() => [...threads.values()].map((record) => record.summary)),
+    openThread: (threadId) =>
+      Effect.suspend(() => {
+        const record = threads.get(threadId)
+        if (record === undefined)
+          return Effect.fail(new Client.SdkError({ message: "missing", operation: "openThread", status: 404 }))
+        return Effect.succeed({ summary: record.summary, events: record.events })
+      }),
+    archiveThread: (threadId) => Effect.sync(() => setArchived(threads, threadId, true)),
+    unarchiveThread: (threadId) => Effect.sync(() => setArchived(threads, threadId, false)),
+    searchThreads: () =>
+      Effect.sync(() =>
+        [...threads.values()].map((record) => ({
+          summary: record.summary,
+          score: 1,
+          matched: [record.summary.latest_message_text ?? ""],
+        })),
+      ),
+    shareThread: (threadId) =>
+      Effect.suspend(() => {
+        const record = threads.get(threadId)
+        if (record === undefined)
+          return Effect.fail(new Client.SdkError({ message: "missing", operation: "shareThread", status: 404 }))
+        return Effect.succeed({
+          schema_version: 1,
+          exported_at: Common.TimestampMillis.make(10),
+          thread_id: threadId,
+          summary: record.summary,
+          events: record.events,
+        })
+      }),
+    referenceThread: (input) =>
+      Effect.succeed({
+        thread_id: input.thread_id,
+        rendered: `Reference for ${input.thread_id}`,
+        entries: [],
+        total_chars: 0,
+        truncated: false,
+      }),
+    subscribeThreadEvents: (input) => Stream.fromIterable(threads.get(input.thread_id)?.events ?? []),
+    startTurn: (input) =>
+      Stream.suspend(() => {
+        turns.push(input.content)
+        const events = turnEvents(input.thread_id, input.content, "remote response")
+        const record = threads.get(input.thread_id)
+        if (record !== undefined) {
+          record.events.push(...events)
+          record.summary = summary(input.thread_id, "remote response")
+        }
+        return Stream.fromIterable(events)
+      }),
+    interruptTurn: (input) => Effect.succeed(turnFailed(input.thread_id, input.turn_id, 1)),
+    listArtifacts: () => Effect.succeed([]),
+    getArtifact: (artifactId) =>
+      Effect.fail(new Client.SdkError({ message: String(artifactId), operation: "getArtifact", status: 404 })),
+    connectIde: (input) =>
+      Effect.succeed({ client_id: input.client_id, connected: true, capabilities: input.capabilities }),
+    disconnectIde: () => Effect.succeed(emptyIdeStatus),
+    updateIdeContext: () => Effect.succeed(emptyIdeStatus),
+    ideStatus: () => Effect.succeed(emptyIdeStatus),
+    openIdeFile: () => Effect.succeed({ accepted: false }),
+    ideNavigationRequests: () => Effect.succeed([]),
+  }
+
+  return { client, turns }
+}
+
+const emptyIdeStatus = { connected: false, capabilities: [], workspace_roots: [] } as const
+
+const setArchived = (
+  threads: Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>,
+  threadId: Ids.ThreadId,
+  archived: boolean,
+) => {
+  const record = threads.get(threadId)
+  if (record === undefined) throw new Error(`Missing thread ${threadId}`)
+  record.summary = { ...record.summary, archived }
+  return record.summary
+}
+
+const summary = (threadId: Ids.ThreadId, latest?: string): Remote.ThreadSummary => ({
+  thread_id: threadId,
+  workspace_id: workspaceId,
+  ...(latest === undefined ? {} : { latest_message_text: latest }),
+  archived: false,
+  created_at: Common.TimestampMillis.make(1),
+  updated_at: Common.TimestampMillis.make(2),
+})
+
+const turnEvents = (threadId: Ids.ThreadId, content: string, response: string): ReadonlyArray<Event.Event> => {
+  const turnId = Ids.TurnId.make("turn_remote_session")
+  return [
+    turnStarted(threadId, turnId, 3),
+    messageAdded(threadId, 4, content, turnId, "user"),
+    modelChunk(threadId, turnId, 5, response),
+    messageAdded(threadId, 6, response, turnId, "assistant"),
+    turnCompleted(threadId, turnId, 7),
+  ]
+}
+
+const base = (threadId: Ids.ThreadId, sequence: number, turnId?: Ids.TurnId): Omit<Event.Event, "type" | "data"> => ({
+  id: Ids.EventId.make(`event_remote_session_${threadId}_${sequence}`),
+  thread_id: threadId,
+  ...(turnId === undefined ? {} : { turn_id: turnId }),
+  sequence,
+  version: 1,
+  created_at: Common.TimestampMillis.make(sequence),
+})
+
+const threadCreated = (threadId: Ids.ThreadId, sequence: number): Event.ThreadCreated => ({
+  ...base(threadId, sequence),
+  type: "thread.created",
+  data: { workspace_id: workspaceId },
+})
+
+const turnStarted = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnStarted => ({
+  ...base(threadId, sequence, turnId),
+  turn_id: turnId,
+  type: "turn.started",
+  data: {},
+})
+
+const messageAdded = (
+  threadId: Ids.ThreadId,
+  sequence: number,
+  content: string,
+  turnId = Ids.TurnId.make("turn_existing_remote_session"),
+  role: Message.Role = "user",
+): Event.MessageAdded => ({
+  ...base(threadId, sequence, turnId),
+  type: "message.added",
+  data: {
+    message: {
+      id: Ids.MessageId.make(`message_remote_session_${threadId}_${sequence}`),
+      thread_id: threadId,
+      turn_id: turnId,
+      role,
+      content: [Message.text(content)],
+      created_at: Common.TimestampMillis.make(sequence),
+    },
+  },
+})
+
+const modelChunk = (
+  threadId: Ids.ThreadId,
+  turnId: Ids.TurnId,
+  sequence: number,
+  text: string,
+): Event.ModelStreamChunk => ({
+  ...base(threadId, sequence, turnId),
+  turn_id: turnId,
+  type: "model.stream.chunk",
+  data: { text, provider: "fake", model: "fake" },
+})
+
+const turnCompleted = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnCompleted => ({
+  ...base(threadId, sequence, turnId),
+  turn_id: turnId,
+  type: "turn.completed",
+  data: {},
+})
+
+const turnFailed = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnFailed => ({
+  ...base(threadId, sequence, turnId),
+  turn_id: turnId,
+  type: "turn.failed",
+  data: { error: { kind: "cancelled", message: "cancelled" } },
+})

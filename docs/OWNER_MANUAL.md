@@ -153,6 +153,8 @@ Generated plugins are disabled first and require explicit verification before en
 
 `rika` starts the interactive terminal UI. It renders Amp-like chrome with collapsed cards by default, spinner/activity state, mode/cost area, and workspace path. Current MVP input is line-oriented; command palette behavior is exposed through slash commands such as `/help`, `/mode`, `/skills`, and `/review`.
 
+Interactive sessions are thin clients by default. The first TUI for a workspace starts one shared local backend under the workspace data directory; additional TUI windows reuse that backend through the SDK instead of composing another agent/server/tool runtime. Use `rika doctor` to inspect backend status. Use `--ephemeral` when you intentionally want an isolated in-process TUI session for testing.
+
 ## Non-interactive and streaming JSON
 
 Use non-interactive mode for scripts and CI:
@@ -184,17 +186,20 @@ rika ide open-file --path packages/cli/src/main.ts --start-line 1 --end-line 5
 
 Common environment variables:
 
-| Variable                                   | Purpose                                                |
-| ------------------------------------------ | ------------------------------------------------------ |
-| `RIKA_WORKSPACE_ROOT`                      | Default workspace root.                                |
-| `RIKA_DATA_DIR`                            | Local data directory. Defaults to `<workspace>/.rika`. |
-| `RIKA_DATABASE_URL`                        | Optional SQLite database URL/path override.            |
-| `RIKA_OPENAI_API_KEY` / `OPENAI_API_KEY`   | OpenAI provider credentials.                           |
-| `RIKA_RIVET_HOST`                          | `local` or `remote`.                                   |
-| `RIKA_RIVET_ENDPOINT` / `RIVET_ENDPOINT`   | Rivet endpoint.                                        |
-| `RIKA_RIVET_TOKEN` / `RIVET_TOKEN`         | Optional Rivet token.                                  |
-| `RIKA_RIVET_NAMESPACE` / `RIVET_NAMESPACE` | Optional Rivet namespace.                              |
-| `RIKA_INSTALL_DIR`                         | Destination for `install:local` / `update:local`.      |
+| Variable                                                                                                        | Purpose                                                |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `RIKA_WORKSPACE_ROOT`                                                                                           | Default workspace root.                                |
+| `RIKA_DATA_DIR`                                                                                                 | Local data directory. Defaults to `<workspace>/.rika`. |
+| `RIKA_DATABASE_URL`                                                                                             | Optional SQLite database URL/path override.            |
+| `RIKA_OPENAI_API_KEY` / `OPENAI_API_KEY`                                                                        | OpenAI provider credentials.                           |
+| `RIKA_OPENAI_API_URL` / `RIKA_OPENAI_BASE_URL` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` / `VIBE_OPENAI_BASE_URL` | OpenAI-compatible proxy endpoint.                      |
+| `RIKA_BACKEND_URL` / `RIKA_BACKEND_TOKEN`                                                                       | Connect interactive TUI to an existing backend.        |
+| `RIKA_BACKEND_PORT`                                                                                             | Override deterministic shared local backend port.      |
+| `RIKA_RIVET_HOST`                                                                                               | `local` or `remote`.                                   |
+| `RIKA_RIVET_ENDPOINT` / `RIVET_ENDPOINT`                                                                        | Rivet endpoint.                                        |
+| `RIKA_RIVET_TOKEN` / `RIVET_TOKEN`                                                                              | Optional Rivet token.                                  |
+| `RIKA_RIVET_NAMESPACE` / `RIVET_NAMESPACE`                                                                      | Optional Rivet namespace.                              |
+| `RIKA_INSTALL_DIR`                                                                                              | Destination for `install:local` / `update:local`.      |
 
 ## Persistence and Rivet hosting
 

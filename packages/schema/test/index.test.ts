@@ -234,9 +234,27 @@ describe("Rika protocol schemas", () => {
       created_at: now,
       updated_at: now,
     }
+    const health: Remote.BackendHealth = {
+      status: "healthy",
+      url: "http://127.0.0.1:4587",
+      workspace_root: "/workspace/rika",
+      data_dir: "/workspace/rika/.rika",
+      pid: 123,
+      version: "0.0.0",
+    }
+    const subscription: Remote.SubscribeThreadEventsRequest = {
+      thread_id: threadId,
+      after_sequence: 1,
+    }
 
     expect(Codec.decode(Remote.StartTurnRequest)(Codec.encode(Remote.StartTurnRequest)(start))).toEqual(start)
     expect(Codec.decode(Remote.ThreadSummary)(Codec.encode(Remote.ThreadSummary)(summary))).toEqual(summary)
+    expect(Codec.decode(Remote.BackendHealth)(Codec.encode(Remote.BackendHealth)(health))).toEqual(health)
+    expect(
+      Codec.decode(Remote.SubscribeThreadEventsRequest)(
+        Codec.encode(Remote.SubscribeThreadEventsRequest)(subscription),
+      ),
+    ).toEqual(subscription)
     expect(Codec.decode(Remote.StreamFrame)(Codec.encode(Remote.StreamFrame)(summaryError(401)))).toEqual(
       summaryError(401),
     )

@@ -36,6 +36,15 @@ Secrets should enter through environment/config boundaries:
 
 Rika should not persist raw secret values into thread events, artifacts, plugin trust records, or doctor output. `rika doctor` reports only whether secrets are configured.
 
+## Shared local backend
+
+Interactive TUI windows share one local backend per workspace/data directory by default. The backend connection record lives under `RIKA_DATA_DIR` and includes a bearer token used by local SDK clients. Rika writes that record as a private file, `rika doctor` redacts the token, and normal UI output never prints it.
+
+- Treat the shared backend token like a local session secret.
+- Delete a stale backend record or run `rika doctor` if a workspace appears disconnected after a crash.
+- Set `RIKA_BACKEND_URL` / `RIKA_BACKEND_TOKEN` only for backends you trust.
+- Use `--ephemeral` for isolated in-process tests when sharing would hide a bug.
+
 ## Plugins
 
 Plugins are executable TypeScript modules loaded from trusted local plugin locations. They can register commands, tools, modes, subagents, lifecycle hooks, UI calls, and permission hooks.

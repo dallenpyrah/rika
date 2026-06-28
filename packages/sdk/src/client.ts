@@ -25,11 +25,23 @@ export class SdkError extends Schema.TaggedErrorClass<SdkError>()("SdkError", {
 }) {}
 
 export interface Interface {
+  readonly backendHealth: () => Effect.Effect<Remote.BackendHealth, SdkError>
   readonly createThread: (input?: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
   readonly listThreads: (
     input?: Remote.ListThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSummary>, SdkError>
   readonly openThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) => Effect.Effect<Remote.ThreadRecord, SdkError>
+  readonly archiveThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly unarchiveThread: (
+    threadId: Ids.ThreadId,
+    userId?: Ids.UserId,
+  ) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly searchThreads: (
+    input: Remote.SearchThreadsRequest,
+  ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, SdkError>
+  readonly shareThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) => Effect.Effect<Remote.ThreadExport, SdkError>
+  readonly referenceThread: (input: Remote.ReferenceThreadRequest) => Effect.Effect<Remote.ThreadReference, SdkError>
+  readonly subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) => Stream.Stream<Event.Event, SdkError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Stream.Stream<Event.Event, SdkError>
   readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, SdkError>
   readonly listArtifacts: (
@@ -47,6 +59,10 @@ export interface Interface {
 const ApiErrorDetails = Schema.Struct({ status: Schema.Int })
 
 export const make = (transport: Transport): Interface => ({
+  backendHealth: () =>
+    transport
+      .requestJson({ method: "GET", path: "/health" })
+      .pipe(Effect.flatMap(decodeEffect(Remote.BackendHealth, "backendHealth"))),
   createThread: (input: Remote.CreateThreadRequest = {}) =>
     transport
       .requestJson({ method: "POST", path: "/v1/threads", body: Codec.encode(Remote.CreateThreadRequest)(input) })
@@ -62,6 +78,52 @@ export const make = (transport: Transport): Interface => ({
         path: `/v1/threads/${encodeURIComponent(threadId)}${query(userId === undefined ? {} : { user_id: userId })}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadRecord, "openThread"))),
+  archiveThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
+    transport
+      .requestJson({
+        method: "POST",
+        path: `/v1/threads/${encodeURIComponent(threadId)}/archive${query(userId === undefined ? {} : { user_id: userId })}`,
+      })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "archiveThread"))),
+  unarchiveThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
+    transport
+      .requestJson({
+        method: "POST",
+        path: `/v1/threads/${encodeURIComponent(threadId)}/unarchive${query(userId === undefined ? {} : { user_id: userId })}`,
+      })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "unarchiveThread"))),
+  searchThreads: (input: Remote.SearchThreadsRequest) =>
+    transport
+      .requestJson({ method: "GET", path: `/v1/threads/search${query(input)}` })
+      .pipe(Effect.flatMap(decodeEffect(Schema.Array(Remote.ThreadSearchResult), "searchThreads"))),
+  shareThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
+    transport
+      .requestJson({
+        method: "GET",
+        path: `/v1/threads/${encodeURIComponent(threadId)}/share${query(userId === undefined ? {} : { user_id: userId })}`,
+      })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadExport, "shareThread"))),
+  referenceThread: (input: Remote.ReferenceThreadRequest) =>
+    transport
+      .requestJson({
+        method: "GET",
+        path: `/v1/threads/${encodeURIComponent(input.thread_id)}/reference${query({
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          ...(input.query === undefined ? {} : { query: input.query }),
+          ...(input.max_chars === undefined ? {} : { max_chars: input.max_chars }),
+        })}`,
+      })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadReference, "referenceThread"))),
+  subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) =>
+    transport
+      .streamJson({
+        method: "GET",
+        path: `/v1/threads/${encodeURIComponent(input.thread_id)}/events${query({
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          ...(input.after_sequence === undefined ? {} : { after_sequence: input.after_sequence }),
+        })}`,
+      })
+      .pipe(Stream.mapEffect(decodeStreamFrame)),
   startTurn: (input: Remote.StartTurnRequest) =>
     transport
       .streamJson({ method: "POST", path: "/v1/turns", body: Codec.encode(Remote.StartTurnRequest)(input) })

@@ -17,6 +17,7 @@
     "@rika/agent": "workspace:*",
     "@rika/core": "workspace:*",
     "@rika/persistence": "workspace:*",
+    "@rika/sdk": "workspace:*",
     "@rika/schema": "workspace:*",
     "effect": "catalog:"
   },

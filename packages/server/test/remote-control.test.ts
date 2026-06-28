@@ -112,8 +112,10 @@ describe("remote control API and SDK", () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
 
+    const health = await Effect.runPromise(client.backendHealth())
     const created = await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
     expect(created).toMatchObject({ thread_id: threadId, workspace_id: workspaceId, archived: false })
+    expect(health).toMatchObject({ status: "healthy", workspace_root: "/workspace/rika-remote" })
 
     const streamed = await Effect.runPromise(
       client
@@ -132,6 +134,14 @@ describe("remote control API and SDK", () => {
 
     const opened = await Effect.runPromise(client.openThread(threadId))
     expect(opened.events.map((event) => event.type)).toContain("turn.failed")
+    const subscribed = await Effect.runPromise(
+      client.subscribeThreadEvents({ thread_id: threadId, after_sequence: 1 }).pipe(Stream.runCollect),
+    )
+    const archived = await Effect.runPromise(client.archiveThread(threadId))
+    const unarchived = await Effect.runPromise(client.unarchiveThread(threadId))
+    expect(subscribed.map((event) => event.type)).toContain("message.added")
+    expect(archived.archived).toBe(true)
+    expect(unarchived.archived).toBe(false)
 
     const artifact: Artifact.Artifact = {
       id: artifactId,
@@ -167,7 +177,11 @@ describe("remote control API and SDK", () => {
       expect(authorized.status).toBe(200)
       expect(authorizedHealth.status).toBe(200)
       expect(await authorized.json()).toEqual([])
-      expect(await authorizedHealth.json()).toEqual({ ok: true })
+      expect(await authorizedHealth.json()).toMatchObject({
+        status: "healthy",
+        workspace_root: "/workspace/rika-remote",
+        data_dir: "/workspace/rika-remote/.rika",
+      })
     } finally {
       await runtime.runPromise(handle.close())
     }

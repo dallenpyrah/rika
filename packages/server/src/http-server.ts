@@ -80,7 +80,8 @@ const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect
     const url = new URL(request.url)
     const unauthorized = unauthorizedResponse(request)
     if (unauthorized !== undefined) return unauthorized
-    if (url.pathname === "/health") return json({ ok: true })
+    if (url.pathname === "/health")
+      return yield* remote.backendHealth(serverUrl(url)).pipe(jsonEffect(Remote.BackendHealth))
 
     const segments = url.pathname.split("/").filter(Boolean)
     if (segments[0] !== "v1") return notFound()
@@ -95,9 +96,69 @@ const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect
       return yield* remote.createThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
+    if (request.method === "GET" && segments[1] === "threads" && segments[2] === "search" && segments.length === 3) {
+      const input = searchThreadsRequest(url)
+      return yield* remote.searchThreads(input).pipe(jsonEffect(Schema.Array(Remote.ThreadSearchResult)))
+    }
+
     if (request.method === "GET" && segments[1] === "threads" && segments[2] !== undefined && segments.length === 3) {
       const input = openThreadRequest(url, segments[2])
       return yield* remote.openThread(input).pipe(jsonEffect(Remote.ThreadRecord))
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "archive" &&
+      segments.length === 4
+    ) {
+      const input = archiveThreadRequest(url, segments[2])
+      return yield* remote.archiveThread(input).pipe(jsonEffect(Remote.ThreadSummary))
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "unarchive" &&
+      segments.length === 4
+    ) {
+      const input = archiveThreadRequest(url, segments[2])
+      return yield* remote.unarchiveThread(input).pipe(jsonEffect(Remote.ThreadSummary))
+    }
+
+    if (
+      request.method === "GET" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "share" &&
+      segments.length === 4
+    ) {
+      const input = shareThreadRequest(url, segments[2])
+      return yield* remote.shareThread(input).pipe(jsonEffect(Remote.ThreadExport))
+    }
+
+    if (
+      request.method === "GET" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "reference" &&
+      segments.length === 4
+    ) {
+      const input = referenceThreadRequest(url, segments[2])
+      return yield* remote.referenceThread(input).pipe(jsonEffect(Remote.ThreadReference))
+    }
+
+    if (
+      request.method === "GET" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "events" &&
+      segments.length === 4
+    ) {
+      const input = subscribeThreadEventsRequest(url, segments[2])
+      return ndjson(remote.subscribeThreadEvents(input))
     }
 
     if (request.method === "POST" && segments[1] === "turns" && segments.length === 2) {
@@ -292,6 +353,65 @@ const getArtifactRequest = (url: URL, encodedArtifactId: string): Remote.GetArti
     ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
   }
 }
+
+const archiveThreadRequest = (url: URL, encodedThreadId: string): Remote.ArchiveThreadRequest => {
+  const userId = url.searchParams.get("user_id")
+  return {
+    thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+  }
+}
+
+const searchThreadsRequest = (url: URL): Remote.SearchThreadsRequest => {
+  const queryValue = url.searchParams.get("query")
+  const includeArchived = url.searchParams.get("include_archived")
+  const workspaceId = url.searchParams.get("workspace_id")
+  const userId = url.searchParams.get("user_id")
+  const after = intParam(url, "after")
+  const before = intParam(url, "before")
+  const limit = intParam(url, "limit")
+  return {
+    ...(queryValue === null ? {} : { query: queryValue }),
+    ...(includeArchived === null ? {} : { include_archived: includeArchived === "true" }),
+    ...(workspaceId === null ? {} : { workspace_id: Ids.WorkspaceId.make(workspaceId) }),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+    ...(after === undefined ? {} : { after }),
+    ...(before === undefined ? {} : { before }),
+    ...(limit === undefined ? {} : { limit }),
+  }
+}
+
+const shareThreadRequest = (url: URL, encodedThreadId: string): Remote.ShareThreadRequest => {
+  const userId = url.searchParams.get("user_id")
+  return {
+    thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+  }
+}
+
+const referenceThreadRequest = (url: URL, encodedThreadId: string): Remote.ReferenceThreadRequest => {
+  const userId = url.searchParams.get("user_id")
+  const queryValue = url.searchParams.get("query")
+  const maxChars = intParam(url, "max_chars")
+  return {
+    thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+    ...(queryValue === null ? {} : { query: queryValue }),
+    ...(maxChars === undefined ? {} : { max_chars: maxChars }),
+  }
+}
+
+const subscribeThreadEventsRequest = (url: URL, encodedThreadId: string): Remote.SubscribeThreadEventsRequest => {
+  const userId = url.searchParams.get("user_id")
+  const afterSequence = intParam(url, "after_sequence")
+  return {
+    thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+    ...(afterSequence === undefined ? {} : { after_sequence: afterSequence }),
+  }
+}
+
+const serverUrl = (url: URL) => `${url.protocol}//${url.host}`
 
 const intParam = (url: URL, name: string) => {
   const value = url.searchParams.get(name)
