@@ -12,6 +12,7 @@
 | File                      | Purpose                                                             |
 | ------------------------- | ------------------------------------------------------------------- |
 | `src/args.ts`             | Pure argument parser for interactive and execute/run modes.         |
+| `src/doctor.ts`           | Local diagnostics command with no telemetry upload.                 |
 | `src/execute.ts`          | Effect service that runs one command and streams NDJSON.            |
 | `src/extensions.ts`       | CLI self-extension commands for skill/plugin creation and rollback. |
 | `src/ide.ts`              | CLI IDE client commands backed by the remote-control SDK.           |
@@ -24,6 +25,7 @@
 | `src/threads.ts`          | CLI thread lifecycle/search/share command executor.                 |
 | `src/main.ts`             | `rika` binary entrypoint.                                           |
 | `test/args.test.ts`       | Effect CLI parser contract tests.                                   |
+| `test/doctor.test.ts`     | Doctor report and secret-redaction tests.                           |
 | `test/execute.test.ts`    | Fake model smoke tests for streaming JSON and diagnostics.          |
 | `test/extensions.test.ts` | Self-extension command output tests over a fake service.            |
 | `test/ide.test.ts`        | IDE command tests over an in-memory SDK transport.                  |

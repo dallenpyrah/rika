@@ -1,0 +1,167 @@
+import { Context, Effect, Layer, Schema } from "effect"
+import * as Args from "./args"
+import * as Output from "./output"
+
+export interface EnvironmentSummary extends Schema.Schema.Type<typeof EnvironmentSummary> {}
+export const EnvironmentSummary = Schema.Struct({
+  bun_version: Schema.String,
+  platform: Schema.String,
+  arch: Schema.String,
+  cwd: Schema.String,
+  ci: Schema.Boolean,
+}).annotate({ identifier: "Rika.Cli.Doctor.EnvironmentSummary" })
+
+export interface ConfigSummary extends Schema.Schema.Type<typeof ConfigSummary> {}
+export const ConfigSummary = Schema.Struct({
+  workspace_root: Schema.String,
+  data_dir: Schema.String,
+  database_url_configured: Schema.Boolean,
+  openai_configured: Schema.Boolean,
+  telemetry: Schema.Literal("disabled"),
+}).annotate({ identifier: "Rika.Cli.Doctor.ConfigSummary" })
+
+export interface RivetSummary extends Schema.Schema.Type<typeof RivetSummary> {}
+export const RivetSummary = Schema.Struct({
+  host: Schema.String,
+  endpoint: Schema.String,
+  token_configured: Schema.Boolean,
+  namespace_configured: Schema.Boolean,
+}).annotate({ identifier: "Rika.Cli.Doctor.RivetSummary" })
+
+export const CheckStatus = Schema.Literals(["ok", "warning"])
+export type CheckStatus = typeof CheckStatus.Type
+
+export interface Check extends Schema.Schema.Type<typeof Check> {}
+export const Check = Schema.Struct({
+  name: Schema.String,
+  status: CheckStatus,
+  message: Schema.String,
+}).annotate({ identifier: "Rika.Cli.Doctor.Check" })
+
+export interface Report extends Schema.Schema.Type<typeof Report> {}
+export const Report = Schema.Struct({
+  version: Schema.String,
+  environment: EnvironmentSummary,
+  config: ConfigSummary,
+  rivet: RivetSummary,
+  checks: Schema.Array(Check),
+}).annotate({ identifier: "Rika.Cli.Doctor.Report" })
+
+export interface Input {
+  readonly env: Record<string, string | undefined>
+  readonly cwd: string
+  readonly version?: string
+}
+
+export class DoctorError extends Schema.TaggedErrorClass<DoctorError>()("DoctorError", {
+  message: Schema.String,
+}) {}
+
+export type RunError = DoctorError
+
+export interface Interface {
+  readonly executeCommand: (command: Args.DoctorCommand) => Effect.Effect<number, RunError>
+  readonly report: Effect.Effect<Report, RunError>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@rika/cli/Doctor") {}
+
+export const layerFromInput = (input: Input) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const output = yield* Output.Service
+      const makeReport = reportFromInput(input)
+
+      return Service.of({
+        executeCommand: Effect.fn("Cli.Doctor.executeCommand")(function* (_command: Args.DoctorCommand) {
+          const report = yield* makeReport
+          yield* output.stdout(JSON.stringify(report))
+          return 0
+        }),
+        report: makeReport,
+      })
+    }),
+  )
+
+export const executeCommand = Effect.fn("Cli.Doctor.executeCommand.call")(function* (command: Args.DoctorCommand) {
+  const service = yield* Service
+  return yield* service.executeCommand(command)
+})
+
+export const report = Effect.fn("Cli.Doctor.report.call")(function* () {
+  const service = yield* Service
+  return yield* service.report
+})
+
+export const formatError = (error: RunError) => `Rika failed: ${error.message}`
+
+const reportFromInput = (input: Input): Effect.Effect<Report, DoctorError> =>
+  Effect.sync(() => {
+    const workspaceRoot = input.env.RIKA_WORKSPACE_ROOT ?? input.cwd
+    const dataDir = input.env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+    const rivetHost = input.env.RIKA_RIVET_HOST ?? "local"
+    const rivetEndpoint = input.env.RIKA_RIVET_ENDPOINT ?? input.env.RIVET_ENDPOINT ?? "http://127.0.0.1:6420"
+    const openaiConfigured =
+      secretConfigured(input.env.RIKA_OPENAI_API_KEY) || secretConfigured(input.env.OPENAI_API_KEY)
+    const diagnosticReport: Report = {
+      version: input.version ?? "0.0.0",
+      environment: {
+        bun_version: Bun.version,
+        platform: process.platform,
+        arch: process.arch,
+        cwd: input.cwd,
+        ci: input.env.CI === "true" || input.env.CI === "1",
+      },
+      config: {
+        workspace_root: workspaceRoot,
+        data_dir: dataDir,
+        database_url_configured: input.env.RIKA_DATABASE_URL !== undefined,
+        openai_configured: openaiConfigured,
+        telemetry: "disabled",
+      },
+      rivet: {
+        host: rivetHost,
+        endpoint: rivetEndpoint,
+        token_configured: secretConfigured(input.env.RIKA_RIVET_TOKEN) || secretConfigured(input.env.RIVET_TOKEN),
+        namespace_configured: input.env.RIKA_RIVET_NAMESPACE !== undefined || input.env.RIVET_NAMESPACE !== undefined,
+      },
+      checks: checks({ dataDir, openaiConfigured, rivetHost, rivetEndpoint }),
+    }
+    return diagnosticReport
+  })
+
+const checks = (input: {
+  readonly dataDir: string
+  readonly openaiConfigured: boolean
+  readonly rivetHost: string
+  readonly rivetEndpoint: string
+}): ReadonlyArray<Check> => [
+  {
+    name: "data-dir",
+    status: input.dataDir.length > 0 ? "ok" : "warning",
+    message: input.dataDir.length > 0 ? "Data directory is configured." : "Data directory is empty.",
+  },
+  {
+    name: "model-provider",
+    status: input.openaiConfigured ? "ok" : "warning",
+    message: input.openaiConfigured
+      ? "OpenAI provider credentials are configured. Secret values are not printed."
+      : "OpenAI provider credentials are not configured; live model calls will fail until configured.",
+  },
+  {
+    name: "rivet",
+    status: input.rivetHost === "remote" && input.rivetEndpoint.length === 0 ? "warning" : "ok",
+    message:
+      input.rivetHost === "remote"
+        ? "Remote Rivet host mode is selected. Ensure endpoint/token are valid before serving users."
+        : "Local Rivet host mode is selected.",
+  },
+  {
+    name: "telemetry",
+    status: "ok",
+    message: "Doctor only reads local process configuration and does not upload telemetry.",
+  },
+]
+
+const secretConfigured = (value: string | undefined) => value !== undefined && value.length > 0

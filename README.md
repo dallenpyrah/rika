@@ -18,6 +18,27 @@ This repository currently contains the monorepo scaffold, shared protocol schema
 
 ## Verification
 
+Install and run locally from source:
+
+```bash
+bun install
+bun run package:smoke
+bun run install:local
+rika doctor
+```
+
+Update a local install with:
+
+```bash
+git pull --ff-only
+bun install
+bun run update:local
+```
+
+The full owner manual lives in `docs/OWNER_MANUAL.md`; security guidance lives in `docs/SECURITY.md`; launch gates live in `docs/LAUNCH_CHECKLIST.md`.
+
+## Development Verification
+
 ```bash
 bun install
 bun run docs:check
@@ -26,6 +47,7 @@ bun run typecheck
 bun run test
 bun run build
 bun run format:check
+bun run package:smoke
 ```
 
 Persistence migrations live in `packages/persistence/drizzle` and are managed through:

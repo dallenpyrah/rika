@@ -184,6 +184,12 @@ describe("CLI args", () => {
     })
   })
 
+  test("parses doctor command", async () => {
+    const command = await Effect.runPromise(Args.parse(["doctor"]))
+
+    expect(command).toEqual({ type: "doctor" })
+  })
+
   test("parses IDE integration commands", async () => {
     const clientId = Ids.IdeClientId.make("ide_args_client")
     const connect = await Effect.runPromise(

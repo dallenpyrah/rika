@@ -28,6 +28,7 @@ import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
 import { Session, Terminal } from "@rika/tui"
 import { Effect, Layer } from "effect"
 import * as Args from "./args"
+import * as Doctor from "./doctor"
 import * as Execute from "./execute"
 import * as Extensions from "./extensions"
 import * as Ide from "./ide"
@@ -71,9 +72,11 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                         )
                       : command.type === "ide"
                         ? Ide.executeCommand(command).pipe(Effect.provide(ideLiveLayer(command, input.env, input.cwd)))
-                        : Server.executeCommand(command).pipe(
-                            Effect.provide(serverLiveLayer(command, input.env, input.cwd)),
-                          )
+                        : command.type === "doctor"
+                          ? Doctor.executeCommand(command).pipe(Effect.provide(doctorLiveLayer(input.env, input.cwd)))
+                          : Server.executeCommand(command).pipe(
+                              Effect.provide(serverLiveLayer(command, input.env, input.cwd)),
+                            )
         ).pipe(
           Effect.matchEffect({
             onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -91,6 +94,7 @@ type RuntimeError =
   | ContextResolver.ContextResolverError
   | Config.ConfigError
   | Database.DatabaseError
+  | Doctor.DoctorError
   | Execute.ExecuteError
   | Extensions.ExtensionsError
   | FffSearch.FffSearchError
@@ -143,6 +147,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof ContextResolver.ContextResolverError) return `Rika failed: ${error.message}`
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
+  if (error instanceof Doctor.DoctorError) return Doctor.formatError(error)
   if (error instanceof Session.SessionError) return `Rika failed: ${error.message}`
   if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
@@ -482,6 +487,12 @@ export const ideLiveLayer = (
   _cwd: string,
 ): Layer.Layer<IdeLayerOutput, LiveLayerError> => Ide.layer.pipe(Layer.provideMerge(Output.layer))
 
+export const doctorLiveLayer = (
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<DoctorLayerOutput, LiveLayerError> =>
+  Doctor.layerFromInput({ env, cwd }).pipe(Layer.provideMerge(Output.layer))
+
 export const serverLiveLayer = (
   command: Args.ServerCommand,
   env: Record<string, string | undefined>,
@@ -659,6 +670,8 @@ export type ExtensionsLayerOutput =
   | Time.Service
 
 export type IdeLayerOutput = Output.Service | Ide.Service
+
+export type DoctorLayerOutput = Doctor.Service | Output.Service
 
 export type ServerLayerOutput =
   | AgentLoop.Service

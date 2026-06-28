@@ -128,6 +128,11 @@ export const IdeCommand = Schema.Struct({
   open_file: Schema.optional(Ide.OpenFileRequest),
 }).annotate({ identifier: "Rika.Cli.Args.IdeCommand" })
 
+export interface DoctorCommand extends Schema.Schema.Type<typeof DoctorCommand> {}
+export const DoctorCommand = Schema.Struct({
+  type: Schema.Literal("doctor"),
+}).annotate({ identifier: "Rika.Cli.Args.DoctorCommand" })
+
 export type Command =
   | ExecuteCommand
   | InteractiveCommand
@@ -138,6 +143,7 @@ export type Command =
   | ExtensionCommand
   | ServerCommand
   | IdeCommand
+  | DoctorCommand
 
 export class ArgsError extends Schema.TaggedErrorClass<ArgsError>()("ArgsError", {
   message: Schema.String,
@@ -166,6 +172,7 @@ export const usage = [
   "  rika extensions disable-plugin <name> [--reason <text>] [--thread <id>]",
   "  rika extensions rollback-plugin <name> [--reason <text>] [--thread <id>]",
   "  rika server [--host <host>] [--port <n>] [--token <token>] [--workspace <path>] [--ephemeral]",
+  "  rika doctor",
   "  rika ide status [--server <url>] [--token <token>]",
   "  rika ide connect --client <id> [--server <url>] [--token <token>] [--workspace <path>] [--capabilities <csv>]",
   "  rika ide disconnect --client <id> [--server <url>] [--token <token>]",
@@ -466,6 +473,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   const extensions = makeExtensionsCommand(parsedRef, rejectedRef)
   const server = makeServerCommand(parsedRef)
   const ide = makeIdeCommand(parsedRef)
+  const doctor = makeDoctorCommand(parsedRef)
 
   return CliCommand.make("rika", rootConfig, (input: RootInput) =>
     input.execute
@@ -483,7 +491,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
           ),
   ).pipe(
     CliCommand.withDescription("Effect-native coding agent"),
-    CliCommand.withSubcommands([run, interactive, threads, skills, mcp, review, extensions, server, ide]),
+    CliCommand.withSubcommands([run, interactive, threads, skills, mcp, review, extensions, server, doctor, ide]),
   )
 }
 
@@ -640,6 +648,12 @@ const makeServerCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
   ).pipe(
     CliCommand.withDescription("Start the local Rika remote-control server"),
     CliCommand.withShortDescription("Start remote-control server"),
+  )
+
+const makeDoctorCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
+  CliCommand.make("doctor", {}, () => Ref.set(parsedRef, Option.some(toDoctorCommand()))).pipe(
+    CliCommand.withDescription("Print local diagnostics without uploading telemetry"),
+    CliCommand.withShortDescription("Print diagnostics"),
   )
 
 const makeIdeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) => {
@@ -823,6 +837,8 @@ const toServerCommand = (input: ServerInput): ServerCommand => {
     ...(workspaceRoot === undefined ? {} : { workspace_root: workspaceRoot }),
   }
 }
+
+const toDoctorCommand = (): DoctorCommand => ({ type: "doctor" })
 
 const emptyIdeInput: IdeServerInput = { server: Option.none(), token: Option.none() }
 

@@ -12,7 +12,11 @@
     "docs:check": "bun run scripts/check-docs.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "install:local": "bun run scripts/install-release.ts",
     "lint": "oxlint .",
+    "package": "bun run scripts/package-cli.ts",
+    "package:smoke": "bun run scripts/package-smoke.ts",
+    "update:local": "bun run scripts/install-release.ts",
     "test": "bun turbo test",
     "typecheck": "bun turbo typecheck"
   },

@@ -13,6 +13,9 @@ Rika is a greenfield Effect-native coding agent system. The repository is a Bun/
 | `README.md`                         | Product direction and current repo state.                                                                           |
 | `CONTEXT.md`                        | Domain glossary. Keep implementation details out of this file.                                                      |
 | `docs/RESEARCH.md`                  | Initial research notes for Amp, OpenCode, Pi, Rivet, Drizzle, fff, hashline, semantic search, and ast-grep outline. |
+| `docs/OWNER_MANUAL.md`              | Launch owner manual for install, usage, configuration, and operations.                                              |
+| `docs/SECURITY.md`                  | Security reference for tools, plugins, MCP, remote auth, secrets, and trust.                                        |
+| `docs/LAUNCH_CHECKLIST.md`          | Launch verification matrix, Amp-parity checklist, and known non-goals.                                              |
 | `docs/effect-module-conventions.md` | Copyable Effect service/module conventions.                                                                         |
 | `docs/runtime-and-layers.md`        | Runtime/layer assembly conventions and base service list.                                                           |
 | `docs/persistence.md`               | Drizzle, SQLite, migration, and persistence service boundary rules.                                                 |
@@ -71,6 +74,7 @@ Rika is a greenfield Effect-native coding agent system. The repository is a Bun/
 - `bun run test`: run package tests through Turbo.
 - `bun run build`: build package entrypoints through Turbo.
 - `bun run format:check`: check formatting with Prettier.
+- `bun run package:smoke`: compile the CLI release artifact and verify help/doctor startup.
 
 ## Skills Index
 

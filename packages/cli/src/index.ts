@@ -1,4 +1,5 @@
 export * as Args from "./args"
+export * as Doctor from "./doctor"
 export * as Execute from "./execute"
 export * as Extensions from "./extensions"
 export * as Ide from "./ide"
