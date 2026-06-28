@@ -78,7 +78,35 @@ export const ReviewCommand = Schema.Struct({
   ephemeral: Schema.Boolean,
 }).annotate({ identifier: "Rika.Cli.Args.ReviewCommand" })
 
-export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand | SkillCommand | McpCommand | ReviewCommand
+export const ExtensionAction = Schema.Literals([
+  "create-skill",
+  "create-plugin",
+  "enable-plugin",
+  "disable-plugin",
+  "rollback-plugin",
+]).annotate({ identifier: "Rika.Cli.Args.ExtensionAction" })
+export type ExtensionAction = typeof ExtensionAction.Type
+
+export interface ExtensionCommand extends Schema.Schema.Type<typeof ExtensionCommand> {}
+export const ExtensionCommand = Schema.Struct({
+  type: Schema.Literal("extensions"),
+  action: ExtensionAction,
+  name: Schema.String,
+  description: Schema.optional(Schema.String),
+  instructions: Schema.optional(Schema.String),
+  verification_command: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+  thread_id: Schema.optional(Ids.ThreadId),
+}).annotate({ identifier: "Rika.Cli.Args.ExtensionCommand" })
+
+export type Command =
+  | ExecuteCommand
+  | InteractiveCommand
+  | ThreadCommand
+  | SkillCommand
+  | McpCommand
+  | ReviewCommand
+  | ExtensionCommand
 
 export class ArgsError extends Schema.TaggedErrorClass<ArgsError>()("ArgsError", {
   message: Schema.String,
@@ -101,6 +129,11 @@ export const usage = [
   "  rika mcp list",
   "  rika mcp approve <server-name>",
   "  rika review [--staged] [--base <ref>] [--workspace <path>] [--ephemeral] [paths...]",
+  "  rika extensions create-skill <name> --description <text> [--instructions <text>] [--thread <id>]",
+  "  rika extensions create-plugin <name> --description <text> [--thread <id>]",
+  "  rika extensions enable-plugin <name> --verification <command> [--thread <id>]",
+  "  rika extensions disable-plugin <name> [--reason <text>] [--thread <id>]",
+  "  rika extensions rollback-plugin <name> [--reason <text>] [--thread <id>]",
   "  rika run [options] <prompt>",
   "  rika --execute [options] <prompt>",
   "",
@@ -204,6 +237,29 @@ const reviewConfig = {
   ),
 }
 
+const extensionCreateConfig = {
+  name: Argument.string("name").pipe(Argument.withDescription("Extension name")),
+  description: Flag.string("description").pipe(Flag.withDescription("Extension description")),
+  thread: Flag.string("thread").pipe(Flag.optional, Flag.withDescription("Thread id for the artifact")),
+}
+
+const extensionCreateSkillConfig = {
+  ...extensionCreateConfig,
+  instructions: Flag.string("instructions").pipe(Flag.optional, Flag.withDescription("Initial skill instructions")),
+}
+
+const extensionEnableConfig = {
+  name: Argument.string("name").pipe(Argument.withDescription("Plugin name")),
+  verification: Flag.string("verification").pipe(Flag.withDescription("Verification command required before enabling")),
+  thread: Flag.string("thread").pipe(Flag.optional, Flag.withDescription("Thread id for the artifact")),
+}
+
+const extensionDisableConfig = {
+  name: Argument.string("name").pipe(Argument.withDescription("Plugin name")),
+  reason: Flag.string("reason").pipe(Flag.optional, Flag.withDescription("Trust or rollback reason")),
+  thread: Flag.string("thread").pipe(Flag.optional, Flag.withDescription("Thread id for the artifact")),
+}
+
 interface ExecuteInput {
   readonly mode: Option.Option<Config.Mode>
   readonly workspace: Option.Option<string>
@@ -256,6 +312,28 @@ interface ReviewInput {
   readonly ephemeral: boolean
 }
 
+interface ExtensionCreateInput {
+  readonly name: string
+  readonly description: string
+  readonly thread: Option.Option<string>
+}
+
+interface ExtensionCreateSkillInput extends ExtensionCreateInput {
+  readonly instructions: Option.Option<string>
+}
+
+interface ExtensionEnableInput {
+  readonly name: string
+  readonly verification: string
+  readonly thread: Option.Option<string>
+}
+
+interface ExtensionDisableInput {
+  readonly name: string
+  readonly reason: Option.Option<string>
+  readonly thread: Option.Option<string>
+}
+
 const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Ref.Ref<Option.Option<ArgsError>>) => {
   const run = CliCommand.make("run", executeConfig, (input: ExecuteInput) =>
     Ref.set(parsedRef, Option.some(toExecuteCommand(input))),
@@ -275,6 +353,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   const skills = makeSkillsCommand(parsedRef, rejectedRef)
   const mcp = makeMcpCommand(parsedRef, rejectedRef)
   const review = makeReviewCommand(parsedRef)
+  const extensions = makeExtensionsCommand(parsedRef, rejectedRef)
 
   return CliCommand.make("rika", rootConfig, (input: RootInput) =>
     input.execute
@@ -292,7 +371,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
           ),
   ).pipe(
     CliCommand.withDescription("Effect-native coding agent"),
-    CliCommand.withSubcommands([run, interactive, threads, skills, mcp, review]),
+    CliCommand.withSubcommands([run, interactive, threads, skills, mcp, review, extensions]),
   )
 }
 
@@ -398,6 +477,51 @@ const makeReviewCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
     CliCommand.withShortDescription("Review local diff"),
   )
 
+const makeExtensionsCommand = (
+  parsedRef: Ref.Ref<Option.Option<Command>>,
+  rejectedRef: Ref.Ref<Option.Option<ArgsError>>,
+) => {
+  const createSkill = CliCommand.make("create-skill", extensionCreateSkillConfig, (input: ExtensionCreateSkillInput) =>
+    Ref.set(parsedRef, Option.some(toExtensionCreateSkillCommand(input))),
+  ).pipe(CliCommand.withDescription("Create a project-local skill"), CliCommand.withShortDescription("Create skill"))
+
+  const createPlugin = CliCommand.make("create-plugin", extensionCreateConfig, (input: ExtensionCreateInput) =>
+    Ref.set(parsedRef, Option.some(toExtensionCreatePluginCommand(input))),
+  ).pipe(
+    CliCommand.withDescription("Create a disabled project-local plugin"),
+    CliCommand.withShortDescription("Create plugin"),
+  )
+
+  const enablePlugin = CliCommand.make("enable-plugin", extensionEnableConfig, (input: ExtensionEnableInput) =>
+    Ref.set(parsedRef, Option.some(toExtensionEnablePluginCommand(input))),
+  ).pipe(
+    CliCommand.withDescription("Enable a generated plugin after verification passes"),
+    CliCommand.withShortDescription("Enable plugin"),
+  )
+
+  const disablePlugin = CliCommand.make("disable-plugin", extensionDisableConfig, (input: ExtensionDisableInput) =>
+    Ref.set(parsedRef, Option.some(toExtensionDisablePluginCommand("disable-plugin", input))),
+  ).pipe(CliCommand.withDescription("Disable a local plugin"), CliCommand.withShortDescription("Disable plugin"))
+
+  const rollbackPlugin = CliCommand.make("rollback-plugin", extensionDisableConfig, (input: ExtensionDisableInput) =>
+    Ref.set(parsedRef, Option.some(toExtensionDisablePluginCommand("rollback-plugin", input))),
+  ).pipe(
+    CliCommand.withDescription("Rollback a local plugin by disabling it"),
+    CliCommand.withShortDescription("Rollback plugin"),
+  )
+
+  return CliCommand.make("extensions", {}, () =>
+    Ref.set(
+      rejectedRef,
+      Option.some(new ArgsError({ message: "Expected an extensions subcommand", exit_code: 2, usage })),
+    ),
+  ).pipe(
+    CliCommand.withDescription("Create, verify, enable, disable, and rollback Rika extensions"),
+    CliCommand.withShortDescription("Manage extensions"),
+    CliCommand.withSubcommands([createSkill, createPlugin, enablePlugin, disablePlugin, rollbackPlugin]),
+  )
+}
+
 const toExecuteCommand = (input: ExecuteInput): ExecuteCommand => {
   const mode = Option.getOrUndefined(input.mode)
   const workspaceRoot = Option.getOrUndefined(input.workspace)
@@ -492,6 +616,53 @@ const toReviewCommand = (input: ReviewInput): ReviewCommand => {
     ...(workspaceRoot === undefined ? {} : { workspace_root: workspaceRoot }),
     ...(baseRef === undefined ? {} : { base_ref: baseRef }),
   }
+}
+
+const toExtensionCreateSkillCommand = (input: ExtensionCreateSkillInput): ExtensionCommand => {
+  const instructions = Option.getOrUndefined(input.instructions)
+  return {
+    type: "extensions",
+    action: "create-skill",
+    name: input.name,
+    description: input.description,
+    ...(instructions === undefined ? {} : { instructions }),
+    ...threadOption(input.thread),
+  }
+}
+
+const toExtensionCreatePluginCommand = (input: ExtensionCreateInput): ExtensionCommand => ({
+  type: "extensions",
+  action: "create-plugin",
+  name: input.name,
+  description: input.description,
+  ...threadOption(input.thread),
+})
+
+const toExtensionEnablePluginCommand = (input: ExtensionEnableInput): ExtensionCommand => ({
+  type: "extensions",
+  action: "enable-plugin",
+  name: input.name,
+  verification_command: input.verification,
+  ...threadOption(input.thread),
+})
+
+const toExtensionDisablePluginCommand = (
+  action: Extract<ExtensionAction, "disable-plugin" | "rollback-plugin">,
+  input: ExtensionDisableInput,
+): ExtensionCommand => {
+  const reason = Option.getOrUndefined(input.reason)
+  return {
+    type: "extensions",
+    action,
+    name: input.name,
+    ...(reason === undefined ? {} : { reason }),
+    ...threadOption(input.thread),
+  }
+}
+
+const threadOption = (thread: Option.Option<string>) => {
+  const value = Option.getOrUndefined(thread)
+  return value === undefined ? {} : { thread_id: Ids.ThreadId.make(value) }
 }
 
 interface CapturedConsole {

@@ -18,12 +18,13 @@ import {
   ThreadEventLog,
   ThreadProjection,
 } from "@rika/persistence"
-import { PluginHost, PluginUi } from "@rika/plugin"
+import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
 import { Session, Terminal } from "@rika/tui"
 import { Effect, Layer } from "effect"
 import * as Args from "./args"
 import * as Execute from "./execute"
+import * as Extensions from "./extensions"
 import * as Mcp from "./mcp"
 import * as Output from "./output"
 import * as Review from "./review"
@@ -53,7 +54,13 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                 ? Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, input.env, input.cwd)))
                 : command.type === "mcp"
                   ? Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, input.env, input.cwd)))
-                  : Review.executeCommand(command).pipe(Effect.provide(reviewLiveLayer(command, input.env, input.cwd)))
+                  : command.type === "review"
+                    ? Review.executeCommand(command).pipe(
+                        Effect.provide(reviewLiveLayer(command, input.env, input.cwd)),
+                      )
+                    : Extensions.executeCommand(command).pipe(
+                        Effect.provide(extensionsLiveLayer(command, input.env, input.cwd)),
+                      )
         ).pipe(
           Effect.matchEffect({
             onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -72,6 +79,7 @@ type RuntimeError =
   | Config.ConfigError
   | Database.DatabaseError
   | Execute.ExecuteError
+  | Extensions.ExtensionsError
   | FffSearch.FffSearchError
   | Mcp.McpError
   | McpApprovalStore.McpApprovalStoreError
@@ -81,6 +89,7 @@ type RuntimeError =
   | Review.ReviewError
   | ReviewService.ReviewServiceError
   | Session.SessionError
+  | SelfExtension.SelfExtensionError
   | SkillRegistry.SkillRegistryError
   | SubagentRuntime.RunError
   | Skills.SkillsError
@@ -92,6 +101,7 @@ type RuntimeError =
 
 const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Migration.MigrationError) return `Rika failed: ${error.message}`
+  if (error instanceof Extensions.ExtensionsError) return Extensions.formatError(error)
   if (error instanceof FffSearch.FffSearchError) return `Rika failed: ${error.message}`
   if (error instanceof Mcp.McpError) return Mcp.formatError(error)
   if (error instanceof McpApprovalStore.McpApprovalStoreError) return `Rika failed: ${error.message}`
@@ -107,6 +117,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
   if (error instanceof Session.SessionError) return `Rika failed: ${error.message}`
+  if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
   if (error instanceof Skills.SkillsError) return Skills.formatError(error)
   if (error instanceof Terminal.TerminalError) return `Rika failed: ${error.message}`
@@ -394,6 +405,41 @@ export const reviewLiveLayer = (
   return commandLayer
 }
 
+export const extensionsLiveLayer = (
+  _command: Args.ExtensionCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<ExtensionsLayerOutput, LiveLayerError> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: env.RIKA_MODE === "rush" || env.RIKA_MODE === "deep" ? env.RIKA_MODE : "smart",
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
+  )
+  const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    Output.layer,
+    databaseLayer,
+    Migration.layer,
+    timeLayer,
+    IdGenerator.layer,
+    artifactLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const selfExtensionLayer = SelfExtension.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const commandLayer = Extensions.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(selfExtensionLayer))
+
+  return commandLayer
+}
+
 export type LiveLayerOutput =
   | AgentLoop.Service
   | ArtifactStore.Service
@@ -481,6 +527,17 @@ export type ReviewLayerOutput =
   | SubagentRuntime.Service
   | Time.Service
   | ToolExecutor.Service
+
+export type ExtensionsLayerOutput =
+  | ArtifactStore.Service
+  | Config.Service
+  | Database.Service
+  | Extensions.Service
+  | IdGenerator.Service
+  | Migration.Service
+  | Output.Service
+  | SelfExtension.Service
+  | Time.Service
 
 export type LiveLayerError =
   | Config.ConfigError

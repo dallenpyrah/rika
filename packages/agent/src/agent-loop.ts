@@ -382,6 +382,7 @@ const systemMessage = (
     context?.data.rendered ?? "No resolved workspace context for this turn.",
     skillInstructions(skills),
     specialtyToolGuidance(tools),
+    selfExtensionGuidance(),
     toolInstructions(tools),
   ].join("\n\n"),
 })
@@ -424,6 +425,14 @@ const specialtyToolGuidance = (tools: ReadonlyArray<ToolExecutor.Descriptor>) =>
   if (lines.length === 0) return "No specialty tools are currently available."
   return ["Specialty tool guidance:", ...lines].join("\n")
 }
+
+const selfExtensionGuidance = () =>
+  [
+    "Self-extension guidance:",
+    "When the user asks Rika to create or modify Rika itself, use normal workspace files and tools rather than hidden mutation paths.",
+    "Project skills live under .agents/skills/<name>/SKILL.md. Project plugins live under .rika/plugins/ and executable generated plugins should be written disabled as <name>.ts.disabled until verification passes.",
+    "Enable executable plugins only after an explicit verification command succeeds, then record the trust decision and keep rollback as a rename back to .ts.disabled.",
+  ].join("\n")
 
 const toolInstructions = (tools: ReadonlyArray<ToolExecutor.Descriptor>) => {
   if (tools.length === 0) return "No tools are currently available."

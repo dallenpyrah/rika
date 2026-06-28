@@ -9,20 +9,23 @@
 
 ## Key Files
 
-| File                       | Purpose                                                            |
-| -------------------------- | ------------------------------------------------------------------ |
-| `src/api.ts`               | Public plugin author API types and hook contracts.                 |
-| `src/plugin-host.ts`       | Effect service that loads plugins and exposes registered behavior. |
-| `src/plugin-ui.ts`         | Swappable plugin UI service for TUI and non-interactive adapters.  |
-| `src/examples.ts`          | Small example plugins used as executable documentation.            |
-| `src/index.ts`             | Package namespace exports.                                         |
-| `test/plugin-host.test.ts` | Loader, hook ordering, command/tool, and policy behavior tests.    |
+| File                          | Purpose                                                                |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| `src/api.ts`                  | Public plugin author API types and hook contracts.                     |
+| `src/plugin-host.ts`          | Effect service that loads plugins and exposes registered behavior.     |
+| `src/plugin-ui.ts`            | Swappable plugin UI service for TUI and non-interactive adapters.      |
+| `src/self-extension.ts`       | Auditable skill/plugin generation, enable, disable, and rollback.      |
+| `src/examples.ts`             | Small example plugins used as executable documentation.                |
+| `src/index.ts`                | Package namespace exports.                                             |
+| `test/plugin-host.test.ts`    | Loader, hook ordering, command/tool, and policy behavior tests.        |
+| `test/self-extension.test.ts` | Self-extension generation, verification, artifact, and rollback tests. |
 
 ## Current Standards
 
 - Plugins are trusted local TypeScript modules in `.rika/plugins/*.ts` for the MVP.
 - Plugin code registers capabilities through `PluginHost`; runtime execution still goes through `ToolRegistry`, `ToolExecutor`, and `PermissionPolicy`.
 - Plugin UI calls must go through `PluginUi.Service`; do not import TUI, CLI output, or process IO directly here.
+- Self-extension must write generated executable plugins disabled first and require an explicit verification command before enablement.
 - Keep sandboxing explicit. The MVP loader is not a sandbox and must not claim isolation.
 
 ## For AI Agents

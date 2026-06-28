@@ -102,6 +102,7 @@
       "dependencies": {
         "@rika/agent": "workspace:*",
         "@rika/core": "workspace:*",
+        "@rika/persistence": "workspace:*",
         "@rika/schema": "workspace:*",
         "effect": "catalog:",
       },

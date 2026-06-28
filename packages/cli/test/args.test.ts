@@ -104,6 +104,60 @@ describe("CLI args", () => {
     })
   })
 
+  test("parses extension management commands", async () => {
+    const threadId = Ids.ThreadId.make("thread_args_extensions")
+    const createSkill = await Effect.runPromise(
+      Args.parse([
+        "extensions",
+        "create-skill",
+        "deploy-helper",
+        "--description",
+        "Deploy safely",
+        "--instructions",
+        "Run checks",
+        "--thread",
+        threadId,
+      ]),
+    )
+    const createPlugin = await Effect.runPromise(
+      Args.parse(["extensions", "create-plugin", "notify", "--description", "Notify user"]),
+    )
+    const enablePlugin = await Effect.runPromise(
+      Args.parse(["extensions", "enable-plugin", "notify", "--verification", "bun test", "--thread", threadId]),
+    )
+    const rollbackPlugin = await Effect.runPromise(
+      Args.parse(["extensions", "rollback-plugin", "notify", "--reason", "startup failed"]),
+    )
+
+    expect(createSkill).toEqual({
+      type: "extensions",
+      action: "create-skill",
+      name: "deploy-helper",
+      description: "Deploy safely",
+      instructions: "Run checks",
+      thread_id: threadId,
+    })
+    expect(createPlugin).toEqual({
+      type: "extensions",
+      action: "create-plugin",
+      name: "notify",
+      description: "Notify user",
+    })
+    expect(enablePlugin).toEqual({
+      type: "extensions",
+      action: "enable-plugin",
+      name: "notify",
+      verification_command: "bun test",
+      thread_id: threadId,
+    })
+    expect(rollbackPlugin).toEqual({
+      type: "extensions",
+      action: "rollback-plugin",
+      name: "notify",
+      reason: "startup failed",
+    })
+  })
+
   test("rejects root prompt text unless --execute is set", async () => {
     const error = await Effect.runPromise(Args.parse(["hello"]).pipe(Effect.flip))
 

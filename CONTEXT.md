@@ -60,6 +60,14 @@ _Avoid_: Prompt snippet, macro, recipe
 Executable extension code that can register tools, commands, UI, policies, hooks, or custom agent surfaces.
 _Avoid_: Skill, MCP server, script
 
+**Self-Extension**:
+An auditable workflow where Rika creates or modifies its own project-local skills and plugins through normal workspace files, records the resulting diff and trust decision as an artifact, and keeps executable plugins disabled until explicitly verified and enabled.
+_Avoid_: Hidden mutation, hot patch, magic self-modification
+
+**Trust Decision**:
+A durable record of why executable extension code is enabled, disabled, or rolled back, including whether verification ran and who or what made the decision.
+_Avoid_: Permission prompt, boolean flag, implicit approval
+
 **MCP Server**:
 An external Model Context Protocol endpoint that Rika can connect to and expose as policy-governed tools. Workspace command MCP servers require explicit approval before execution.
 _Avoid_: Plugin, built-in tool, trusted script
