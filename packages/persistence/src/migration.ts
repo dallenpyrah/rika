@@ -1,9 +1,21 @@
 import { fileURLToPath } from "node:url"
+import { dirname, join } from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
 import { migrate as migrateDatabase } from "drizzle-orm/bun-sqlite/migrator"
 import { DatabaseError, Service as DatabaseService, withDatabaseEffect } from "./database"
 
-export const defaultMigrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url))
+export const sourceMigrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url))
+
+export const installedMigrationsFolder = (executablePath = process.execPath) =>
+  join(dirname(executablePath), "..", "share", "rika", "drizzle")
+
+export const migrationsFolderFromEnv = (env: Record<string, string | undefined> = process.env) => {
+  if (env.RIKA_MIGRATIONS_DIR !== undefined && env.RIKA_MIGRATIONS_DIR.length > 0) return env.RIKA_MIGRATIONS_DIR
+  if (sourceMigrationsFolder.includes("/$bunfs/")) return installedMigrationsFolder()
+  return sourceMigrationsFolder
+}
+
+export const defaultMigrationsFolder = migrationsFolderFromEnv()
 
 export class MigrationError extends Schema.TaggedErrorClass<MigrationError>()("MigrationError", {
   message: Schema.String,

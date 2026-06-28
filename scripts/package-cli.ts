@@ -4,6 +4,8 @@ const root = new URL("..", import.meta.url)
 const packageJson = readPackageJson(await Bun.file(new URL("package.json", root)).json())
 const artifactName = `rika-${process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`
 const outDir = new URL("dist/release/", root)
+const shareDir = new URL("dist/share/rika/drizzle/", root)
+const migrationsDir = new URL("packages/persistence/drizzle/", root)
 const artifact = new URL(artifactName, outDir)
 const manifest = {
   name: "rika",
@@ -16,6 +18,9 @@ const manifest = {
 }
 
 await $`mkdir -p ${outDir.pathname}`
+await $`rm -rf ${shareDir.pathname}`
+await $`mkdir -p ${shareDir.pathname}`
+await $`cp -R ${migrationsDir.pathname}. ${shareDir.pathname}`
 await $`bun build --compile packages/cli/src/main.ts --outfile ${artifact.pathname}`
 await Bun.write(new URL(`${artifactName}.json`, outDir), `${JSON.stringify(manifest, null, 2)}\n`)
 

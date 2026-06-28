@@ -18,4 +18,12 @@ describe("Migration", () => {
 
     expect(tables.map((table) => table.name)).toContain("thread_events")
   })
+
+  test("resolves source, configured, and installed migration folders", () => {
+    expect(Migration.migrationsFolderFromEnv({ RIKA_MIGRATIONS_DIR: "/tmp/rika-migrations" })).toBe(
+      "/tmp/rika-migrations",
+    )
+    expect(Migration.migrationsFolderFromEnv({})).toBe(Migration.sourceMigrationsFolder)
+    expect(Migration.installedMigrationsFolder("/opt/rika/bin/rika")).toBe("/opt/rika/share/rika/drizzle")
+  })
 })
