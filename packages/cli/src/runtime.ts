@@ -2,6 +2,7 @@ import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadServi
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { PluginHost, PluginUi } from "@rika/plugin"
 import { BuiltInTools, FffSearch } from "@rika/tools"
 import { Session, Terminal } from "@rika/tui"
 import { Effect, Layer } from "effect"
@@ -49,6 +50,7 @@ type RuntimeError =
   | Execute.ExecuteError
   | FffSearch.FffSearchError
   | Migration.MigrationError
+  | PluginHost.RunError
   | Session.SessionError
   | SkillRegistry.SkillRegistryError
   | Skills.SkillsError
@@ -61,6 +63,8 @@ type RuntimeError =
 const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Migration.MigrationError) return `Rika failed: ${error.message}`
   if (error instanceof FffSearch.FffSearchError) return `Rika failed: ${error.message}`
+  if (error instanceof PluginHost.PluginHostError) return `Rika failed: ${error.message}`
+  if (error instanceof PluginUi.PluginUiError) return `Rika failed: ${error.message}`
   if (error instanceof ContextResolver.ContextResolverError) return `Rika failed: ${error.message}`
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
@@ -93,6 +97,7 @@ export const liveLayer = (
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -109,6 +114,7 @@ export const liveLayer = (
   )
   const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(pluginLayer),
     Layer.provideMerge(subagentLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
@@ -148,6 +154,7 @@ export const interactiveLiveLayer = (
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -164,6 +171,7 @@ export const interactiveLiveLayer = (
   )
   const toolLayer = BuiltInTools.toolExecutorLayer.pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(pluginLayer),
     Layer.provideMerge(subagentLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
@@ -253,6 +261,7 @@ export type LiveLayerOutput =
   | IdGenerator.Service
   | Migration.Service
   | Output.Service
+  | PluginHost.Service
   | Provider.Service
   | Router.Service
   | SkillRegistry.Service
@@ -270,6 +279,7 @@ export type InteractiveLayerOutput =
   | Database.Service
   | IdGenerator.Service
   | Migration.Service
+  | PluginHost.Service
   | Provider.Service
   | Router.Service
   | Session.Service
@@ -302,3 +312,4 @@ export type LiveLayerError =
   | Database.DatabaseError
   | FffSearch.FffSearchError
   | Migration.MigrationError
+  | PluginHost.RunError

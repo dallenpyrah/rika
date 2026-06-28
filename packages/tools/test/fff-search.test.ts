@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PermissionPolicy, SubagentRuntime, ToolExecutor } from "@rika/agent"
 import { Config } from "@rika/core"
+import { PluginHost } from "@rika/plugin"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
 import { AstGrepOutline, BuiltInTools, FffSearch, HashlineFile, SemanticSearch } from "../src/index"
@@ -42,6 +43,7 @@ const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolEx
     Layer.provideMerge(FffSearch.fakeLayer(fakeFiles)),
     Layer.provideMerge(AstGrepOutline.fakeLayer(outlineRunner)),
     Layer.provideMerge(HashlineFile.layer),
+    Layer.provideMerge(PluginHost.emptyLayer),
     Layer.provideMerge(SubagentRuntime.fakeLayer(() => Effect.succeed({ type: "subagent.batch", runs: [] }))),
     Layer.provideMerge(configLayer(workspaceRoot)),
   )

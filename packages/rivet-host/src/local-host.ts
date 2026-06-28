@@ -2,6 +2,7 @@ import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadServi
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { PluginHost, PluginUi } from "@rika/plugin"
 import { BuiltInTools, FffSearch } from "@rika/tools"
 import { Registry } from "@rivetkit/effect"
 import { Layer } from "effect"
@@ -20,6 +21,10 @@ export const endpointFromEnv = (env: Record<string, string | undefined> = proces
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
 const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(Config.layer))
+const configuredPluginLayer = PluginHost.layer.pipe(
+  Layer.provideMerge(Config.layer),
+  Layer.provideMerge(PluginUi.silentLayer),
+)
 const storageLayer = Layer.mergeAll(
   Config.layer,
   configuredDatabaseLayer,
@@ -38,6 +43,7 @@ const configuredSubagentLayer = SubagentRuntime.layer.pipe(
 )
 const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(
   Layer.provideMerge(Config.layer),
+  Layer.provideMerge(configuredPluginLayer),
   Layer.provideMerge(configuredSubagentLayer),
 )
 
@@ -48,6 +54,7 @@ type ServiceLayerOutput =
   | Database.Service
   | IdGenerator.Service
   | Migration.Service
+  | PluginHost.Service
   | Provider.Service
   | Router.Service
   | SkillRegistry.Service
@@ -63,6 +70,7 @@ type ServiceLayerError =
   | ContextResolver.ContextResolverError
   | Database.DatabaseError
   | FffSearch.FffSearchError
+  | PluginHost.RunError
 
 const baseServiceLayer = Layer.mergeAll(
   storageAndThreadLayer,

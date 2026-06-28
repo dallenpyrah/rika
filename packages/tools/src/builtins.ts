@@ -1,5 +1,6 @@
 import { PermissionPolicy, SubagentRuntime, ToolExecutor, ToolRegistry } from "@rika/agent"
 import { Config } from "@rika/core"
+import { PluginHost } from "@rika/plugin"
 import { Effect, Layer } from "effect"
 import * as AstGrepOutline from "./ast-grep-outline"
 import * as FffSearch from "./fff-search"
@@ -13,6 +14,7 @@ export const registryLayerFromServices: Layer.Layer<
   | Config.Service
   | FffSearch.Service
   | HashlineFile.Service
+  | PluginHost.Service
   | SemanticSearch.Service
   | SubagentRuntime.Service
 > = Layer.effect(
@@ -25,9 +27,11 @@ export const registryLayerFromServices: Layer.Layer<
     const hashlineFile = yield* HashlineFile.Service
     const semanticSearch = yield* SemanticSearch.Service
     const subagentRuntime = yield* SubagentRuntime.Service
+    const pluginDefinitions = yield* PluginHost.toolDefinitions()
     const definitions = [
       ...ToolRegistry.shellDefinitions(values.workspace_root),
       ...SubagentRuntime.toolDefinitions(subagentRuntime),
+      ...pluginDefinitions,
       ...SemanticSearch.toolDefinitions(semanticSearch),
       ...FffSearch.toolDefinitions(fffSearch),
       ...AstGrepOutline.toolDefinitions(astGrepOutline),
@@ -63,7 +67,7 @@ export const readOnlyRegistryLayerFromServices: Layer.Layer<
 export const registryLayer: Layer.Layer<
   ToolRegistry.Service,
   FffSearch.FffSearchError,
-  Config.Service | SubagentRuntime.Service
+  Config.Service | PluginHost.Service | SubagentRuntime.Service
 > = registryLayerFromServices.pipe(
   Layer.provideMerge(SemanticSearch.layer),
   Layer.provideMerge(FffSearch.layer),
@@ -82,8 +86,12 @@ export const readOnlyRegistryLayer: Layer.Layer<ToolRegistry.Service, FffSearch.
 export const toolExecutorLayer: Layer.Layer<
   ToolExecutor.Service,
   FffSearch.FffSearchError,
-  Config.Service | SubagentRuntime.Service
-> = ToolExecutor.layer.pipe(Layer.provideMerge(registryLayer), Layer.provideMerge(PermissionPolicy.allowLayer))
+  Config.Service | PluginHost.Service | SubagentRuntime.Service
+> = PluginHost.toolResultExecutorLayer.pipe(
+  Layer.provideMerge(
+    ToolExecutor.layer.pipe(Layer.provideMerge(registryLayer), Layer.provideMerge(PluginHost.permissionPolicyLayer)),
+  ),
+)
 
 export const readOnlyToolExecutorLayer: Layer.Layer<ToolExecutor.Service, FffSearch.FffSearchError, Config.Service> =
   ToolExecutor.layer.pipe(Layer.provideMerge(readOnlyRegistryLayer), Layer.provideMerge(PermissionPolicy.allowLayer))

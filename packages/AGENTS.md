@@ -15,6 +15,7 @@
 | `core/`        | Core Effect service examples and future runtime/domain services. See `core/AGENTS.md`.    |
 | `llm/`         | Provider-neutral LLM contracts and mode routing. See `llm/AGENTS.md`.                     |
 | `persistence/` | Drizzle-backed local SQLite adapter services and migrations. See `persistence/AGENTS.md`. |
+| `plugin/`      | Trusted local TypeScript plugin API and host services. See `plugin/AGENTS.md`.            |
 | `rivet-host/`  | RivetKit actor definitions and local host assembly. See `rivet-host/AGENTS.md`.           |
 | `schema/`      | Shared schema/protocol package. See `schema/AGENTS.md`.                                   |
 | `tools/`       | Built-in workspace tools and adapters. See `tools/AGENTS.md`.                             |

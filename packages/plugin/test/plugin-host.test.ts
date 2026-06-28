@@ -1,0 +1,193 @@
+import { describe, expect, test } from "bun:test"
+import { PermissionPolicy, ToolExecutor, ToolRegistry } from "@rika/agent"
+import { Common, Ids, Tool } from "@rika/schema"
+import { Effect, Layer } from "effect"
+import { PluginHost, PluginUi } from "../src/index"
+
+const memoryUi = (): PluginUi.MemoryUi => ({
+  notifications: [],
+  confirmations: [],
+  inputs: [],
+  selects: [],
+  confirmResponses: [],
+  inputResponses: [],
+  selectResponses: [],
+})
+
+const source = (name: string, entrypoint: PluginHost.PluginSource["entrypoint"]): PluginHost.PluginSource => ({
+  name,
+  path: `.rika/plugins/${name}.ts`,
+  entrypoint,
+})
+
+const call = (name: string, input: Common.JsonValue): Tool.Call => ({
+  id: Ids.ToolCallId.make(`tool_call_${name.replaceAll(".", "_")}`),
+  name,
+  input,
+})
+
+const hostLayer = (sources: ReadonlyArray<PluginHost.PluginSource>, ui = memoryUi()) =>
+  PluginHost.layerFromSources(sources).pipe(Layer.provide(PluginUi.memoryLayer(ui)))
+
+describe("PluginHost", () => {
+  test("loads plugins and reports load errors without hiding valid plugins", async () => {
+    const layer = hostLayer([
+      source("valid", (rika) => rika.registerMode({ name: "rush", description: "Fast plugin mode" })),
+      source("broken", () => {
+        throw new Error("boom")
+      }),
+    ])
+
+    const loaded = await Effect.runPromise(
+      Effect.gen(function* () {
+        const report = yield* PluginHost.Service.pipe(Effect.flatMap((host) => host.report))
+        const modes = yield* PluginHost.Service.pipe(Effect.flatMap((host) => host.modes))
+        return { report, modes }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(loaded.report.loaded.map((plugin) => plugin.name)).toEqual(["valid"])
+    expect(loaded.report.errors).toEqual([{ name: "broken", path: ".rika/plugins/broken.ts", message: "boom" }])
+    expect(loaded.report.trust).toMatchObject({ model: "trusted-local", sandboxed: false })
+    expect(loaded.modes).toEqual([{ name: "rush", description: "Fast plugin mode" }])
+  })
+
+  test("registers tools and commands without modifying core registries", async () => {
+    const ui = memoryUi()
+    const layer = hostLayer(
+      [
+        source("capabilities", (rika) => {
+          rika.registerTool(
+            "plugin.echo",
+            { description: "Echo from a plugin", input_schema: { type: "object" } },
+            (toolCall) => ({
+              echoed: toolCall.input,
+            }),
+          )
+          rika.registerCommand("plugin.notify", { title: "Notify", category: "plugins" }, async (ctx) => {
+            await ctx.ui.notify("plugin command ran")
+          })
+          rika.registerSubagent({
+            name: "plugin-reader",
+            description: "Read with a plugin prompt",
+            prompt: "Read only.",
+          })
+        }),
+      ],
+      ui,
+    )
+
+    const output = await Effect.runPromise(
+      Effect.gen(function* () {
+        const definitions = yield* PluginHost.toolDefinitions()
+        const registryLayer = ToolRegistry.layerFromDefinitions(definitions)
+        const toolOutput = yield* ToolRegistry.execute(call("plugin.echo", { text: "hello" })).pipe(
+          Effect.provide(registryLayer),
+        )
+        const commands = yield* PluginHost.commands()
+        yield* PluginHost.runCommand("plugin.notify")
+        const subagents = yield* PluginHost.Service.pipe(Effect.flatMap((host) => host.subagents))
+        return { toolOutput, commands, subagents }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(output.toolOutput).toEqual({ echoed: { text: "hello" } })
+    expect(output.commands).toEqual([
+      {
+        name: "plugin.notify",
+        descriptor: { title: "Notify", category: "plugins", availability: { type: "enabled" } },
+      },
+    ])
+    expect(output.subagents).toEqual([
+      { name: "plugin-reader", description: "Read with a plugin prompt", prompt: "Read only." },
+    ])
+    expect(ui.notifications).toEqual(["plugin command ran"])
+  })
+
+  test("runs tool.call hooks through the PermissionPolicy path in registration order", async () => {
+    const order: Array<string> = []
+    const layer = hostLayer([
+      source("observer", (rika) => {
+        rika.on("tool.call", () => {
+          order.push("observer")
+        })
+      }),
+      source("guard", (rika) => {
+        rika.on("tool.call", (event) => {
+          order.push("guard")
+          if (event.tool === "shell.command") return PermissionPolicy.reject("blocked by plugin")
+          return undefined
+        })
+      }),
+    ])
+
+    const decision = await Effect.runPromise(
+      PermissionPolicy.decide(call("shell.command", { command: "rm -rf /" })).pipe(
+        Effect.provide(PluginHost.permissionPolicyLayer),
+        Effect.provide(layer),
+      ),
+    )
+
+    expect(order).toEqual(["observer", "guard"])
+    expect(decision).toEqual({ action: "reject-and-continue", message: "blocked by plugin" })
+  })
+
+  test("observes tool results through the ToolExecutor boundary", async () => {
+    const layer = hostLayer([
+      source("annotator", (rika) => {
+        rika.on("tool.result", (event) => ({
+          ...event.result,
+          output: { observed: true, original: event.result.output ?? null },
+        }))
+      }),
+    ])
+    const baseExecutorLayer = ToolExecutor.fakeLayer({ "fake.tool": () => Effect.succeed({ original: true }) })
+    const executorLayer = PluginHost.toolResultExecutorLayer.pipe(
+      Layer.provideMerge(baseExecutorLayer),
+      Layer.provideMerge(layer),
+    )
+
+    const observed = await Effect.runPromise(
+      ToolExecutor.execute(call("fake.tool", {})).pipe(Effect.provide(executorLayer)),
+    )
+
+    expect(observed).toMatchObject({
+      name: "fake.tool",
+      status: "success",
+      output: { observed: true, original: { original: true } },
+    })
+  })
+
+  test("emits lifecycle hooks and collects guarded agent continuations", async () => {
+    const events: Array<string> = []
+    const layer = hostLayer([
+      source("events", (rika) => {
+        rika.on("session.start", (event) => {
+          events.push(`session:${event.thread.id}`)
+        })
+        rika.on("agent.start", (event) => {
+          events.push(`start:${event.turn_id}`)
+        })
+        rika.on("agent.end", (event) => {
+          events.push(`end:${event.turn_id}`)
+          if (!event.message.includes("[plugin:verified]")) {
+            return { action: "continue", userMessage: "[plugin:verified] Run verification." }
+          }
+          return undefined
+        })
+      }),
+    ])
+
+    const continues = await Effect.runPromise(
+      Effect.gen(function* () {
+        const host = yield* PluginHost.Service
+        yield* host.emitSessionStart({ thread: { id: "thread_1" } })
+        yield* host.emitAgentStart({ thread_id: "thread_1", turn_id: "turn_1", message: "work" })
+        return yield* host.emitAgentEnd({ thread_id: "thread_1", turn_id: "turn_1", message: "done" })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(events).toEqual(["session:thread_1", "start:turn_1", "end:turn_1"])
+    expect(continues).toEqual([{ action: "continue", userMessage: "[plugin:verified] Run verification." }])
+  })
+})
