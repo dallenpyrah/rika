@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ContextResolver, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
@@ -28,6 +28,7 @@ const makeLayer = (output: Output.MemoryOutput) => {
     Time.fixedLayer(Common.TimestampMillis.make(1_950_000_000_000)),
     IdGenerator.sequenceLayer(1),
     ContextResolver.emptyLayer,
+    SkillRegistry.emptyLayer,
     ToolExecutor.emptyLayer,
     llmLayer,
   )

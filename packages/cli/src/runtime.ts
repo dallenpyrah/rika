@@ -1,4 +1,4 @@
-import { AgentLoop, ContextResolver, ThreadService, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
@@ -8,6 +8,7 @@ import { Effect, Layer } from "effect"
 import * as Args from "./args"
 import * as Execute from "./execute"
 import * as Output from "./output"
+import * as Skills from "./skills"
 import * as Threads from "./threads"
 
 export interface ProcessInput {
@@ -27,7 +28,9 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
           ? Execute.executeCommand(command).pipe(Effect.provide(liveLayer(command, input.env, input.cwd)))
           : command.type === "interactive"
             ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, input.env, input.cwd)))
-            : Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, input.env, input.cwd)))
+            : command.type === "threads"
+              ? Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, input.env, input.cwd)))
+              : Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, input.env, input.cwd)))
         ).pipe(
           Effect.matchEffect({
             onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -47,6 +50,8 @@ type RuntimeError =
   | FffSearch.FffSearchError
   | Migration.MigrationError
   | Session.SessionError
+  | SkillRegistry.SkillRegistryError
+  | Skills.SkillsError
   | Terminal.TerminalError
   | ThreadService.ThreadServiceError
   | ThreadEventLog.ThreadEventLogError
@@ -60,6 +65,8 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
   if (error instanceof Session.SessionError) return `Rika failed: ${error.message}`
+  if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
+  if (error instanceof Skills.SkillsError) return Skills.formatError(error)
   if (error instanceof Terminal.TerminalError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadService.ThreadServiceError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadEventLog.ThreadEventLogError) return `Rika failed: ${error.message}`
@@ -87,6 +94,7 @@ export const liveLayer = (
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const toolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -102,6 +110,7 @@ export const liveLayer = (
     Migration.layer,
     storageAndThreadLayer,
     contextResolverLayer,
+    skillLayer,
     toolLayer,
     llmLayer,
   )
@@ -131,6 +140,7 @@ export const interactiveLiveLayer = (
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const toolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -146,6 +156,7 @@ export const interactiveLiveLayer = (
     Migration.layer,
     storageAndThreadLayer,
     contextResolverLayer,
+    skillLayer,
     toolLayer,
     llmLayer,
   )
@@ -153,6 +164,30 @@ export const interactiveLiveLayer = (
   return Session.layer.pipe(
     Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))),
     Layer.provideMerge(Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(baseLayer))),
+  )
+}
+
+export const skillsLiveLayer = (
+  _command: Args.SkillCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<SkillsLayerOutput, LiveLayerError> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: env.RIKA_MODE === "rush" || env.RIKA_MODE === "deep" ? env.RIKA_MODE : "smart",
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
+  )
+
+  return Skills.layer.pipe(
+    Layer.provideMerge(Output.layer),
+    Layer.provideMerge(SkillRegistry.layer),
+    Layer.provideMerge(configLayer),
   )
 }
 
@@ -202,6 +237,7 @@ export type LiveLayerOutput =
   | Output.Service
   | Provider.Service
   | Router.Service
+  | SkillRegistry.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
   | ThreadService.Service
@@ -218,6 +254,7 @@ export type InteractiveLayerOutput =
   | Provider.Service
   | Router.Service
   | Session.Service
+  | SkillRegistry.Service
   | Terminal.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
@@ -236,6 +273,8 @@ export type ThreadsLayerOutput =
   | ThreadService.Service
   | Threads.Service
   | Time.Service
+
+export type SkillsLayerOutput = Config.Service | Output.Service | SkillRegistry.Service | Skills.Service
 
 export type LiveLayerError =
   | Config.ConfigError

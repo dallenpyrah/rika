@@ -85,6 +85,20 @@ export const ContextResolved = Schema.Struct({
   }),
 }).annotate({ identifier: "Rika.Event.ContextResolved" })
 
+export interface SkillLoaded extends Schema.Schema.Type<typeof SkillLoaded> {}
+export const SkillLoaded = Schema.Struct({
+  ...fields,
+  turn_id: TurnId,
+  type: Schema.Literal("skill.loaded"),
+  data: Schema.Struct({
+    name: Schema.String,
+    description: Schema.String,
+    source: Schema.String,
+    skill_file: Schema.String,
+    resource_paths: Schema.Array(Schema.String),
+  }),
+}).annotate({ identifier: "Rika.Event.SkillLoaded" })
+
 export interface ToolCallRequested extends Schema.Schema.Type<typeof ToolCallRequested> {}
 export const ToolCallRequested = Schema.Struct({
   ...fields,
@@ -142,6 +156,7 @@ export type Event =
   | MessageAdded
   | ModelStreamChunk
   | ContextResolved
+  | SkillLoaded
   | ToolCallRequested
   | ToolCallCompleted
   | ArtifactCreated
@@ -156,6 +171,7 @@ export const Event = Schema.Union([
   MessageAdded,
   ModelStreamChunk,
   ContextResolved,
+  SkillLoaded,
   ToolCallRequested,
   ToolCallCompleted,
   ArtifactCreated,

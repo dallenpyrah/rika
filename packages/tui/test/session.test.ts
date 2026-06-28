@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ThreadService } from "@rika/agent"
+import { AgentLoop, SkillRegistry, ThreadService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
@@ -41,6 +41,7 @@ const makeLayer = (terminal: Terminal.MemoryTerminal) => {
     Time.fixedLayer(Common.TimestampMillis.make(1_970_000_000_000)),
     IdGenerator.sequenceLayer(1),
     Terminal.memoryLayer(terminal),
+    SkillRegistry.fakeLayer([deploySkill]),
     fakeAgentLayer,
   )
   return Session.layer.pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
@@ -98,7 +99,40 @@ describe("TUI session", () => {
     expect(frames).toContain("Thread export JSON")
     expect(frames).toContain('"thread_id": "thread_existing_tui"')
   })
+
+  test("lists and inspects installed skills through slash commands", async () => {
+    const terminal: Terminal.MemoryTerminal = {
+      inputs: ["/skills", "/skill deploy", "/exit"],
+      frames: [],
+      prompts: [],
+    }
+
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        return yield* Session.run({})
+      }).pipe(Effect.provide(makeLayer(terminal))),
+    )
+
+    const frames = terminal.frames.map(Renderer.stripAnsi).join("\n")
+    expect(exitCode).toBe(0)
+    expect(frames).toContain("Installed skills (1)")
+    expect(frames).toContain("deploy: Deploy safely")
+    expect(frames).toContain("Deploy instructions")
+  })
 })
+
+const deploySkill: SkillRegistry.Skill = {
+  summary: {
+    name: "deploy",
+    description: "Deploy safely",
+    source: "project",
+    directory: "/workspace/.agents/skills/deploy",
+    skill_file: "/workspace/.agents/skills/deploy/SKILL.md",
+  },
+  instructions: "Deploy instructions",
+  resources: [{ path: "/workspace/.agents/skills/deploy/scripts/deploy.ts", relative_path: "scripts/deploy.ts" }],
+}
 
 const turnEvents = (input: AgentLoop.RunTurnInput, response: string): ReadonlyArray<Event.Event> => {
   const turnId = Ids.TurnId.make("turn_tui_session")

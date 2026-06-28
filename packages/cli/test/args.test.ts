@@ -73,6 +73,14 @@ describe("CLI args", () => {
     expect(reference).toEqual({ type: "threads", action: "reference", thread_id: threadId, query: "auth race" })
   })
 
+  test("parses skill management commands", async () => {
+    const list = await Effect.runPromise(Args.parse(["skills", "list"]))
+    const inspect = await Effect.runPromise(Args.parse(["skills", "inspect", "deploy"]))
+
+    expect(list).toEqual({ type: "skills", action: "list" })
+    expect(inspect).toEqual({ type: "skills", action: "inspect", name: "deploy" })
+  })
+
   test("rejects root prompt text unless --execute is set", async () => {
     const error = await Effect.runPromise(Args.parse(["hello"]).pipe(Effect.flip))
 

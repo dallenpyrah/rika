@@ -82,6 +82,8 @@ const cardLines = (card: ViewState.Card) => {
 const paletteLines = () => [
   "╭─ Command Palette",
   "│ /mode rush|smart|deep    switch agent mode",
+  "│ /skills                  list installed skills",
+  "│ /skill <name>            inspect a skill",
   "│ /threads                 list active threads",
   "│ /search <query>          search local threads",
   "│ /new                     start a new durable thread",
@@ -126,6 +128,7 @@ const cardIcon = (card: ViewState.Card) => {
   if (card.kind === "tool") return "◆"
   if (card.kind === "diff") return "△"
   if (card.kind === "error") return "✕"
+  if (card.kind === "skill") return "✦"
   if (card.kind === "context") return "◇"
   return "○"
 }

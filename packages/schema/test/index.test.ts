@@ -172,4 +172,25 @@ describe("Rika protocol schemas", () => {
 
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
+
+  test("round-trips skill loaded events", () => {
+    const event: Event.Event = {
+      id: eventId,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 4,
+      version: 1,
+      created_at: now,
+      type: "skill.loaded",
+      data: {
+        name: "deploy",
+        description: "Deploy safely",
+        source: "project",
+        skill_file: ".agents/skills/deploy/SKILL.md",
+        resource_paths: ["scripts/deploy.ts"],
+      },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
 })

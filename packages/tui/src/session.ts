@@ -1,4 +1,4 @@
-import { AgentLoop, ThreadService } from "@rika/agent"
+import { AgentLoop, SkillRegistry, ThreadService } from "@rika/agent"
 import { Config, IdGenerator } from "@rika/core"
 import { Ids } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
@@ -22,6 +22,7 @@ export type RunError =
   | SessionError
   | AgentLoop.RunError
   | Config.ConfigError
+  | SkillRegistry.SkillRegistryError
   | Terminal.TerminalError
   | ThreadService.Error
 
@@ -35,6 +36,7 @@ interface Dependencies {
   readonly agentLoop: AgentLoop.Interface
   readonly config: Config.Interface
   readonly idGenerator: IdGenerator.Interface
+  readonly skillRegistry: SkillRegistry.Interface
   readonly terminal: Terminal.Interface
   readonly threadService: ThreadService.Interface
 }
@@ -45,9 +47,10 @@ export const layer = Layer.effect(
     const agentLoop = yield* AgentLoop.Service
     const config = yield* Config.Service
     const idGenerator = yield* IdGenerator.Service
+    const skillRegistry = yield* SkillRegistry.Service
     const terminal = yield* Terminal.Service
     const threadService = yield* ThreadService.Service
-    const dependencies: Dependencies = { agentLoop, config, idGenerator, terminal, threadService }
+    const dependencies: Dependencies = { agentLoop, config, idGenerator, skillRegistry, terminal, threadService }
 
     return Service.of({
       run: Effect.fn("Tui.Session.run")(function* (input: RunInput) {
@@ -125,6 +128,17 @@ const handleCommand = (
     if (name === "/help" || name === "/palette")
       return { state: ViewState.withPalette(state), thread_id: threadId, mode, exit: false }
     if (name === "/mode") return modeCommand(state, threadId, mode, argument)
+    if (name === "/skills") {
+      const skills = yield* dependencies.skillRegistry.list()
+      return { state: ViewState.withNotice(state, formatSkills(skills)), thread_id: threadId, mode, exit: false }
+    }
+    if (name === "/skill") {
+      if (argument === undefined || argument.length === 0) {
+        return { state: ViewState.withNotice(state, "Usage: /skill <name>"), thread_id: threadId, mode, exit: false }
+      }
+      const skill = yield* dependencies.skillRegistry.inspect(argument)
+      return { state: ViewState.withNotice(state, formatSkill(skill)), thread_id: threadId, mode, exit: false }
+    }
     if (name === "/threads") {
       const summaries = yield* dependencies.threadService.list({})
       return { state: ViewState.withNotice(state, formatSummaries(summaries)), thread_id: threadId, mode, exit: false }
@@ -298,6 +312,23 @@ const formatSearchResults = (results: ReadonlyArray<ThreadService.SearchResult>)
     ...results.map((result) => `${summaryLine(result.summary)} · score ${result.score}`),
   ].join("\n")
 }
+
+const formatSkills = (skills: ReadonlyArray<SkillRegistry.SkillSummary>) => {
+  if (skills.length === 0) return "No skills installed."
+  return [`Installed skills (${skills.length})`, ...skills.map((skill) => `${skill.name}: ${skill.description}`)].join(
+    "\n",
+  )
+}
+
+const formatSkill = (skill: SkillRegistry.Skill) =>
+  [
+    `${skill.summary.name}: ${skill.summary.description}`,
+    `Source: ${skill.summary.source}`,
+    `File: ${skill.summary.skill_file}`,
+    `Resources: ${skill.resources.length === 0 ? "none" : skill.resources.map((resource) => resource.relative_path).join(", ")}`,
+    "",
+    skill.instructions,
+  ].join("\n")
 
 const summaryLine = (summary: ThreadService.ThreadRecord["summary"]) =>
   `${summary.thread_id}${summary.archived ? " [archived]" : ""}: ${summary.latest_message_text ?? "(no messages)"}`

@@ -44,7 +44,19 @@ export const ThreadCommand = Schema.Struct({
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Cli.Args.ThreadCommand" })
 
-export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand
+export const SkillAction = Schema.Literals(["list", "inspect"]).annotate({
+  identifier: "Rika.Cli.Args.SkillAction",
+})
+export type SkillAction = typeof SkillAction.Type
+
+export interface SkillCommand extends Schema.Schema.Type<typeof SkillCommand> {}
+export const SkillCommand = Schema.Struct({
+  type: Schema.Literal("skills"),
+  action: SkillAction,
+  name: Schema.optional(Schema.String),
+}).annotate({ identifier: "Rika.Cli.Args.SkillCommand" })
+
+export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand | SkillCommand
 
 export class ArgsError extends Schema.TaggedErrorClass<ArgsError>()("ArgsError", {
   message: Schema.String,
@@ -62,6 +74,8 @@ export const usage = [
   "  rika threads unarchive <thread-id>",
   "  rika threads share <thread-id>",
   "  rika threads reference <thread-id> [query]",
+  "  rika skills list",
+  "  rika skills inspect <name>",
   "  rika run [options] <prompt>",
   "  rika --execute [options] <prompt>",
   "",
@@ -146,6 +160,10 @@ const threadReferenceConfig = {
   ),
 }
 
+const skillNameConfig = {
+  name: Argument.string("name").pipe(Argument.withDescription("Skill name")),
+}
+
 interface ExecuteInput {
   readonly mode: Option.Option<Config.Mode>
   readonly workspace: Option.Option<string>
@@ -182,6 +200,10 @@ interface ThreadReferenceInput extends ThreadIdInput {
   readonly query: ReadonlyArray<string>
 }
 
+interface SkillNameInput {
+  readonly name: string
+}
+
 const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Ref.Ref<Option.Option<ArgsError>>) => {
   const run = CliCommand.make("run", executeConfig, (input: ExecuteInput) =>
     Ref.set(parsedRef, Option.some(toExecuteCommand(input))),
@@ -198,6 +220,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   )
 
   const threads = makeThreadsCommand(parsedRef, rejectedRef)
+  const skills = makeSkillsCommand(parsedRef, rejectedRef)
 
   return CliCommand.make("rika", rootConfig, (input: RootInput) =>
     input.execute
@@ -215,7 +238,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
           ),
   ).pipe(
     CliCommand.withDescription("Effect-native coding agent"),
-    CliCommand.withSubcommands([run, interactive, threads]),
+    CliCommand.withSubcommands([run, interactive, threads, skills]),
   )
 }
 
@@ -266,6 +289,28 @@ const makeThreadsCommand = (
     CliCommand.withDescription("Manage local Rika threads"),
     CliCommand.withShortDescription("Manage threads"),
     CliCommand.withSubcommands([list, search, archive, unarchive, share, reference, deleteThread]),
+  )
+}
+
+const makeSkillsCommand = (
+  parsedRef: Ref.Ref<Option.Option<Command>>,
+  rejectedRef: Ref.Ref<Option.Option<ArgsError>>,
+) => {
+  const list = CliCommand.make("list", {}, () => Ref.set(parsedRef, Option.some(toSkillListCommand()))).pipe(
+    CliCommand.withDescription("List installed skills"),
+    CliCommand.withShortDescription("List skills"),
+  )
+
+  const inspect = CliCommand.make("inspect", skillNameConfig, (input: SkillNameInput) =>
+    Ref.set(parsedRef, Option.some(toSkillInspectCommand(input))),
+  ).pipe(CliCommand.withDescription("Inspect a skill"), CliCommand.withShortDescription("Inspect skill"))
+
+  return CliCommand.make("skills", {}, () =>
+    Ref.set(rejectedRef, Option.some(new ArgsError({ message: "Expected a skills subcommand", exit_code: 2, usage }))),
+  ).pipe(
+    CliCommand.withDescription("List and inspect installed Rika skills"),
+    CliCommand.withShortDescription("Manage skills"),
+    CliCommand.withSubcommands([list, inspect]),
   )
 }
 
@@ -335,6 +380,14 @@ const toThreadReferenceCommand = (input: ThreadReferenceInput): ThreadCommand =>
     ...(query.length === 0 ? {} : { query }),
   }
 }
+
+const toSkillListCommand = (): SkillCommand => ({ type: "skills", action: "list" })
+
+const toSkillInspectCommand = (input: SkillNameInput): SkillCommand => ({
+  type: "skills",
+  action: "inspect",
+  name: input.name,
+})
 
 interface CapturedConsole {
   readonly stdout: Array<string>

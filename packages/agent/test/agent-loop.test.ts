@@ -4,7 +4,7 @@ import { Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer, Stream } from "effect"
-import { AgentLoop, ContextResolver, PermissionPolicy, ToolExecutor, ToolRegistry } from "../src/index"
+import { AgentLoop, ContextResolver, PermissionPolicy, SkillRegistry, ToolExecutor, ToolRegistry } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_agent_loop")
 const workspaceId = Ids.WorkspaceId.make("workspace_agent_loop")
@@ -19,8 +19,13 @@ const defaultToolLayer = ToolExecutor.fakeLayer({
   "fake.echo": (call) => Effect.succeed({ echoed: call.input }),
 })
 
-const makeLayer = (responses: ReadonlyArray<Provider.FakeResponse>, toolLayer = defaultToolLayer) => {
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(Provider.fakeLayer(responses)))
+const makeLayer = (
+  responses: ReadonlyArray<Provider.FakeResponse>,
+  toolLayer = defaultToolLayer,
+  skillLayer = SkillRegistry.emptyLayer,
+  providerLayer = Provider.fakeLayer(responses),
+) => {
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(providerLayer))
   const services = Layer.mergeAll(
     configLayer,
     Database.memoryLayer,
@@ -43,6 +48,7 @@ const makeLayer = (responses: ReadonlyArray<Provider.FakeResponse>, toolLayer = 
       rendered: "<rika_context>Test guidance</rika_context>",
       total_chars: 41,
     }),
+    skillLayer,
     toolLayer,
     llmLayer,
   )
@@ -154,6 +160,66 @@ describe("AgentLoop", () => {
     expect(result.events.at(-1)).toMatchObject({ type: "turn.completed" })
   })
 
+  test("loads explicitly selected skills into the model prompt and event log", async () => {
+    const captured: Array<Provider.GenerateRequest> = []
+    const providerLayer = Layer.succeed(
+      Provider.Service,
+      Provider.Service.of({
+        name: "openai",
+        complete: Effect.fn("AgentLoop.test.provider.complete")(function* (request: Provider.GenerateRequest) {
+          captured.push(request)
+          return fakeResponse(request, "skill response")
+        }),
+        stream: (request: Provider.GenerateRequest) => {
+          captured.push(request)
+          return Stream.fromIterable(Provider.streamEventsFromResponse(fakeResponse(request, "skill response")))
+        },
+      }),
+    )
+    const layer = makeLayer(
+      [],
+      defaultToolLayer,
+      SkillRegistry.fakeLayer([
+        skill("deploy", "Deploy safely", "Deploy instructions only when loaded"),
+        skill("review", "Review code", "Review instructions must stay unloaded"),
+      ]),
+      providerLayer,
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_skill"),
+          workspace_id: workspaceId,
+          content: "Use skill deploy for this release",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_skill") })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.map((event) => event.type)).toEqual([
+      "thread.created",
+      "turn.started",
+      "message.added",
+      "context.resolved",
+      "skill.loaded",
+      "model.stream.chunk",
+      "message.added",
+      "turn.completed",
+    ])
+    expect(result.events.find((event) => event.type === "skill.loaded")).toMatchObject({
+      data: { name: "deploy", resource_paths: ["templates/deploy.md"] },
+    })
+    const system = captured[0]?.messages[0]?.content ?? ""
+    expect(system).toContain("- deploy: Deploy safely")
+    expect(system).toContain("- review: Review code")
+    expect(system).toContain("Deploy instructions only when loaded")
+    expect(system).not.toContain("Review instructions must stay unloaded")
+  })
+
   test("records cancellation as a replayable turn failure", async () => {
     const layer = makeLayer(["this response is never used"])
 
@@ -194,4 +260,22 @@ describe("AgentLoop", () => {
 
     expect(queued).toEqual({ thread_id: threadId, position: 1 })
   })
+})
+
+const fakeResponse = (request: Provider.GenerateRequest, content: string): Provider.GenerateResponse => ({
+  provider: request.provider,
+  model: request.model,
+  content,
+})
+
+const skill = (name: string, description: string, instructions: string): SkillRegistry.Skill => ({
+  summary: {
+    name,
+    description,
+    source: "project",
+    directory: `/skills/${name}`,
+    skill_file: `/skills/${name}/SKILL.md`,
+  },
+  instructions,
+  resources: [{ path: `/skills/${name}/templates/deploy.md`, relative_path: "templates/deploy.md" }],
 })

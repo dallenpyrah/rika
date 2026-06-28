@@ -16,9 +16,10 @@ describe("TUI renderer", () => {
         turnStarted(2),
         messageAdded(3, "user", "write a file"),
         contextResolved(4),
-        toolRequested(5),
-        toolCompleted(6),
-        modelChunk(7, "done"),
+        skillLoaded(5),
+        toolRequested(6),
+        toolCompleted(7),
+        modelChunk(8, "done"),
       ],
     })
 
@@ -29,6 +30,7 @@ describe("TUI renderer", () => {
     expect(text).toContain("/workspace/rika")
     expect(text).toContain("Streaming")
     expect(text).toContain("Context resolved · 1 entries")
+    expect(text).toContain("Skill loaded: deploy · project · info · collapsed")
     expect(text).toContain("write · success · done · collapsed")
     expect(text).toContain("File diff · src/example.ts · collapsed · done · collapsed")
   })
@@ -42,6 +44,7 @@ describe("TUI renderer", () => {
 
     expect(text).toContain("Command Palette")
     expect(text).toContain("/mode rush|smart|deep")
+    expect(text).toContain("/skills")
     expect(text).toContain("$0.0000 · deep")
   })
 })
@@ -91,6 +94,19 @@ const contextResolved = (sequence: number): Event.ContextResolved => ({
     entries: [{ kind: "guidance", source: "test", reason: "test", trusted: false, path: "AGENTS.md" }],
     rendered: "AGENTS",
     total_chars: 6,
+  },
+})
+
+const skillLoaded = (sequence: number): Event.SkillLoaded => ({
+  ...base(sequence),
+  turn_id: turnId,
+  type: "skill.loaded",
+  data: {
+    name: "deploy",
+    description: "Deploy safely",
+    source: "project",
+    skill_file: ".agents/skills/deploy/SKILL.md",
+    resource_paths: ["scripts/deploy.ts"],
   },
 })
 

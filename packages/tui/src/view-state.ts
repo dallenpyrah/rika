@@ -2,7 +2,7 @@ import { Config } from "@rika/core"
 import { Common, Event, Ids, Message } from "@rika/schema"
 
 export type Activity = "idle" | "thinking" | "streaming" | "running-tools" | "failed"
-export type CardKind = "context" | "tool" | "diff" | "error" | "system"
+export type CardKind = "context" | "tool" | "diff" | "error" | "skill" | "system"
 export type CardStatus = "info" | "running" | "success" | "error"
 
 export interface ThreadMessage {
@@ -89,6 +89,8 @@ export const applyEvent = (state: ViewState, event: Event.Event): ViewState => {
       return applyMessage(state, event)
     case "context.resolved":
       return tick({ ...state, cards: [...state.cards, contextCard(event)], activity: "thinking", active: true })
+    case "skill.loaded":
+      return tick({ ...state, cards: [...state.cards, skillCard(event)], activity: "thinking", active: true })
     case "model.stream.chunk":
       return tick({
         ...state,
@@ -147,7 +149,8 @@ export const withNotice = (state: ViewState, notice: string): ViewState => ({ ..
 export const withPalette = (state: ViewState): ViewState => ({
   ...state,
   palette_open: true,
-  notice: "Command palette: /mode, /threads, /search, /new, /thread, /archive, /unarchive, /share, /reference, /exit",
+  notice:
+    "Command palette: /mode, /skills, /skill, /threads, /search, /new, /thread, /archive, /unarchive, /share, /reference, /exit",
 })
 
 const withoutNotice = (state: ViewState): ViewState => {
@@ -188,6 +191,20 @@ const contextCard = (event: Event.ContextResolved): Card => ({
   body: event.data.entries
     .map((entry) => `${entry.kind}: ${entry.path ?? entry.thread_reference ?? entry.source}`)
     .join("\n"),
+})
+
+const skillCard = (event: Event.SkillLoaded): Card => ({
+  id: event.id,
+  kind: "skill",
+  title: `Skill loaded: ${event.data.name}`,
+  subtitle: event.data.source,
+  status: "info",
+  collapsed: true,
+  body: [
+    event.data.description,
+    `File: ${event.data.skill_file}`,
+    `Resources: ${event.data.resource_paths.join(", ")}`,
+  ].join("\n"),
 })
 
 const toolCard = (event: Event.ToolCallRequested): Card => ({

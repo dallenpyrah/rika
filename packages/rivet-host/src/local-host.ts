@@ -1,4 +1,4 @@
-import { AgentLoop, ContextResolver, ThreadService, ToolExecutor } from "@rika/agent"
+import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
@@ -20,6 +20,7 @@ export const endpointFromEnv = (env: Record<string, string | undefined> = proces
 const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(Config.layer))
 const configuredLlmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(Config.layer))
 const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(Layer.provideMerge(Config.layer))
+const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(Config.layer))
 const storageLayer = Layer.mergeAll(
   Config.layer,
   configuredDatabaseLayer,
@@ -40,6 +41,7 @@ type ServiceLayerOutput =
   | Migration.Service
   | Provider.Service
   | Router.Service
+  | SkillRegistry.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
   | ThreadService.Service
@@ -55,6 +57,7 @@ type ServiceLayerError =
 const baseServiceLayer = Layer.mergeAll(
   storageAndThreadLayer,
   configuredContextResolverLayer,
+  configuredSkillLayer,
   Migration.layer,
   configuredToolLayer,
   configuredLlmLayer,
