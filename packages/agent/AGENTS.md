@@ -9,27 +9,32 @@
 
 ## Key Files
 
-| File                            | Purpose                                                             |
-| ------------------------------- | ------------------------------------------------------------------- |
-| `src/agent-loop.ts`             | Effect service that runs turns and emits persisted events.          |
-| `src/context-resolver.ts`       | AGENTS.md, mention, image, and thread-reference context resolver.   |
-| `src/permission-policy.ts`      | Swappable tool permission decisions for allow/block/modify/fake.    |
-| `src/skill-registry.ts`         | Skill discovery, precedence, explicit loading, and prompt metadata. |
-| `src/thread-service.ts`         | Thread lifecycle, search, share/export, and reference service.      |
-| `src/tool-registry.ts`          | Swappable tool definitions and the baseline shell command tool.     |
-| `src/tool-executor.ts`          | Tool execution boundary that applies policy before registry calls.  |
-| `src/index.ts`                  | Package namespace exports.                                          |
-| `test/agent-loop.test.ts`       | Fake model/tool orchestration and cancellation tests.               |
-| `test/context-resolver.test.ts` | Guidance, file, image, thread, and frontmatter resolver tests.      |
-| `test/skill-registry.test.ts`   | Skill discovery, precedence, resources, and prompt-selection tests. |
-| `test/thread-service.test.ts`   | Thread lifecycle, search, share/export, and reference tests.        |
-| `test/tool-executor.test.ts`    | Permission, registry, and shell execution tests.                    |
+| File                            | Purpose                                                              |
+| ------------------------------- | -------------------------------------------------------------------- |
+| `src/agent-loop.ts`             | Effect service that runs turns and emits persisted events.           |
+| `src/check-registry.ts`         | Review check discovery, frontmatter parsing, and scoped precedence.  |
+| `src/context-resolver.ts`       | AGENTS.md, mention, image, and thread-reference context resolver.    |
+| `src/permission-policy.ts`      | Swappable tool permission decisions for allow/block/modify/fake.     |
+| `src/review-service.ts`         | Local diff review orchestration using check subagents and artifacts. |
+| `src/skill-registry.ts`         | Skill discovery, precedence, explicit loading, and prompt metadata.  |
+| `src/thread-service.ts`         | Thread lifecycle, search, share/export, and reference service.       |
+| `src/tool-registry.ts`          | Swappable tool definitions and the baseline shell command tool.      |
+| `src/tool-executor.ts`          | Tool execution boundary that applies policy before registry calls.   |
+| `src/index.ts`                  | Package namespace exports.                                           |
+| `test/agent-loop.test.ts`       | Fake model/tool orchestration and cancellation tests.                |
+| `test/check-registry.test.ts`   | Check frontmatter, tool restriction, and scoped precedence tests.    |
+| `test/context-resolver.test.ts` | Guidance, file, image, thread, and frontmatter resolver tests.       |
+| `test/review-service.test.ts`   | Review finding parsing, dedupe, and artifact persistence tests.      |
+| `test/skill-registry.test.ts`   | Skill discovery, precedence, resources, and prompt-selection tests.  |
+| `test/thread-service.test.ts`   | Thread lifecycle, search, share/export, and reference tests.         |
+| `test/tool-executor.test.ts`    | Permission, registry, and shell execution tests.                     |
 
 ## Current Standards
 
 - Keep the agent loop provider-neutral by depending on `@rika/llm`'s `Router.Service`, not provider SDKs.
 - Keep tool execution behind `ToolExecutor.Service`; register runnable tools through `ToolRegistry.Service` and route policy through `PermissionPolicy.Service`.
 - Keep prompt context assembly behind `ContextResolver.Service`; treat resolved workspace/user context as untrusted data in prompts.
+- Keep review checks read-only by default. `.agents/checks/*.md` may request read-only tools only; mutating review modes need an explicit future design.
 - Keep skill discovery behind `SkillRegistry.Service`; show descriptions broadly but load full skill instructions only after explicit selection.
 - Persist canonical facts through `ThreadEventLog` and apply rebuildable state through `ThreadProjection`.
 - Use streams, queues, and fibers for event streaming boundaries; do not introduce module-level runtime state.

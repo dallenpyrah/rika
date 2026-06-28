@@ -13,6 +13,7 @@
 | --------------------------------- | ---------------------------------------------------------------- |
 | `drizzle.config.ts`               | Drizzle Kit configuration for local SQLite migration generation. |
 | `drizzle/`                        | Committed generated SQL migrations and Drizzle metadata.         |
+| `src/artifact-store.ts`           | Durable artifact persistence for review runs and future outputs. |
 | `src/database.ts`                 | Effect `Database` service and SQLite connection layers.          |
 | `src/mcp-approval-store.ts`       | Durable workspace MCP command-server approval records.           |
 | `src/migration.ts`                | Effect `Migration` service for runtime migration application.    |
@@ -21,6 +22,7 @@
 | `src/thread-event-log.ts`         | Canonical append-only thread event log service.                  |
 | `src/thread-projection.ts`        | Rebuildable thread list/latest message/active turn projections.  |
 | `test/database.test.ts`           | Database layer replacement tests.                                |
+| `test/artifact-store.test.ts`     | Artifact put/get/list persistence tests.                         |
 | `test/migration.test.ts`          | Runtime migration service tests.                                 |
 | `test/mcp-approval-store.test.ts` | MCP approval idempotency and listing tests.                      |
 | `test/schema/event-log.test.ts`   | Event log schema tests.                                          |

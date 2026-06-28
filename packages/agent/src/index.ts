@@ -1,6 +1,8 @@
 export * as AgentLoop from "./agent-loop"
+export * as CheckRegistry from "./check-registry"
 export * as ContextResolver from "./context-resolver"
 export * as PermissionPolicy from "./permission-policy"
+export * as ReviewService from "./review-service"
 export * as SkillRegistry from "./skill-registry"
 export * as SubagentRuntime from "./subagent-runtime"
 export * as ThreadService from "./thread-service"

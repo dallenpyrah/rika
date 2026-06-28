@@ -89,6 +89,21 @@ describe("CLI args", () => {
     expect(approve).toEqual({ type: "mcp", action: "approve", server_name: "filesystem" })
   })
 
+  test("parses review commands", async () => {
+    const command = await Effect.runPromise(
+      Args.parse(["review", "--staged", "--base", "main", "--workspace", "/workspace/rika", "src/app.ts"]),
+    )
+
+    expect(command).toEqual({
+      type: "review",
+      staged: true,
+      base_ref: "main",
+      workspace_root: "/workspace/rika",
+      paths: ["src/app.ts"],
+      ephemeral: false,
+    })
+  })
+
   test("rejects root prompt text unless --execute is set", async () => {
     const error = await Effect.runPromise(Args.parse(["hello"]).pipe(Effect.flip))
 

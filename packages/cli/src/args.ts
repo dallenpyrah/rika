@@ -68,7 +68,17 @@ export const McpCommand = Schema.Struct({
   server_name: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Cli.Args.McpCommand" })
 
-export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand | SkillCommand | McpCommand
+export interface ReviewCommand extends Schema.Schema.Type<typeof ReviewCommand> {}
+export const ReviewCommand = Schema.Struct({
+  type: Schema.Literal("review"),
+  workspace_root: Schema.optional(Schema.String),
+  staged: Schema.Boolean,
+  base_ref: Schema.optional(Schema.String),
+  paths: Schema.Array(Schema.String),
+  ephemeral: Schema.Boolean,
+}).annotate({ identifier: "Rika.Cli.Args.ReviewCommand" })
+
+export type Command = ExecuteCommand | InteractiveCommand | ThreadCommand | SkillCommand | McpCommand | ReviewCommand
 
 export class ArgsError extends Schema.TaggedErrorClass<ArgsError>()("ArgsError", {
   message: Schema.String,
@@ -90,6 +100,7 @@ export const usage = [
   "  rika skills inspect <name>",
   "  rika mcp list",
   "  rika mcp approve <server-name>",
+  "  rika review [--staged] [--base <ref>] [--workspace <path>] [--ephemeral] [paths...]",
   "  rika run [options] <prompt>",
   "  rika --execute [options] <prompt>",
   "",
@@ -182,6 +193,17 @@ const mcpServerConfig = {
   serverName: Argument.string("server-name").pipe(Argument.withDescription("MCP server name")),
 }
 
+const reviewConfig = {
+  workspace: Flag.string("workspace").pipe(Flag.optional, Flag.withDescription("Workspace root for the review")),
+  staged: Flag.boolean("staged").pipe(Flag.withDescription("Review only staged changes")),
+  base: Flag.string("base").pipe(Flag.optional, Flag.withDescription("Review changes since base ref")),
+  ephemeral: Flag.boolean("ephemeral").pipe(Flag.withDescription("Use in-memory persistence for this review")),
+  paths: Argument.string("paths").pipe(
+    Argument.variadic({ min: 0 }),
+    Argument.withDescription("Optional paths to limit review scope"),
+  ),
+}
+
 interface ExecuteInput {
   readonly mode: Option.Option<Config.Mode>
   readonly workspace: Option.Option<string>
@@ -226,6 +248,14 @@ interface McpServerInput {
   readonly serverName: string
 }
 
+interface ReviewInput {
+  readonly workspace: Option.Option<string>
+  readonly staged: boolean
+  readonly base: Option.Option<string>
+  readonly paths: ReadonlyArray<string>
+  readonly ephemeral: boolean
+}
+
 const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Ref.Ref<Option.Option<ArgsError>>) => {
   const run = CliCommand.make("run", executeConfig, (input: ExecuteInput) =>
     Ref.set(parsedRef, Option.some(toExecuteCommand(input))),
@@ -244,6 +274,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   const threads = makeThreadsCommand(parsedRef, rejectedRef)
   const skills = makeSkillsCommand(parsedRef, rejectedRef)
   const mcp = makeMcpCommand(parsedRef, rejectedRef)
+  const review = makeReviewCommand(parsedRef)
 
   return CliCommand.make("rika", rootConfig, (input: RootInput) =>
     input.execute
@@ -261,7 +292,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
           ),
   ).pipe(
     CliCommand.withDescription("Effect-native coding agent"),
-    CliCommand.withSubcommands([run, interactive, threads, skills, mcp]),
+    CliCommand.withSubcommands([run, interactive, threads, skills, mcp, review]),
   )
 }
 
@@ -359,6 +390,14 @@ const makeMcpCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef:
   )
 }
 
+const makeReviewCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
+  CliCommand.make("review", reviewConfig, (input: ReviewInput) =>
+    Ref.set(parsedRef, Option.some(toReviewCommand(input))),
+  ).pipe(
+    CliCommand.withDescription("Review the current local diff with configured checks"),
+    CliCommand.withShortDescription("Review local diff"),
+  )
+
 const toExecuteCommand = (input: ExecuteInput): ExecuteCommand => {
   const mode = Option.getOrUndefined(input.mode)
   const workspaceRoot = Option.getOrUndefined(input.workspace)
@@ -441,6 +480,19 @@ const toMcpApproveCommand = (input: McpServerInput): McpCommand => ({
   action: "approve",
   server_name: input.serverName,
 })
+
+const toReviewCommand = (input: ReviewInput): ReviewCommand => {
+  const workspaceRoot = Option.getOrUndefined(input.workspace)
+  const baseRef = Option.getOrUndefined(input.base)
+  return {
+    type: "review",
+    staged: input.staged,
+    paths: [...input.paths],
+    ephemeral: input.ephemeral,
+    ...(workspaceRoot === undefined ? {} : { workspace_root: workspaceRoot }),
+    ...(baseRef === undefined ? {} : { base_ref: baseRef }),
+  }
+}
 
 interface CapturedConsole {
   readonly stdout: Array<string>

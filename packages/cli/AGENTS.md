@@ -9,21 +9,23 @@
 
 ## Key Files
 
-| File                   | Purpose                                                     |
-| ---------------------- | ----------------------------------------------------------- |
-| `src/args.ts`          | Pure argument parser for interactive and execute/run modes. |
-| `src/execute.ts`       | Effect service that runs one command and streams NDJSON.    |
-| `src/mcp.ts`           | CLI MCP server list/approval command executor.              |
-| `src/output.ts`        | Swappable stdout/stderr boundary for process and tests.     |
-| `src/runtime.ts`       | Live layer assembly and routing for the Bun CLI process.    |
-| `src/skills.ts`        | CLI skill list/inspect command executor.                    |
-| `src/threads.ts`       | CLI thread lifecycle/search/share command executor.         |
-| `src/main.ts`          | `rika` binary entrypoint.                                   |
-| `test/args.test.ts`    | Effect CLI parser contract tests.                           |
-| `test/execute.test.ts` | Fake model smoke tests for streaming JSON and diagnostics.  |
-| `test/mcp.test.ts`     | MCP list/approval command output tests.                     |
-| `test/skills.test.ts`  | Skill command output tests over fake skill registries.      |
-| `test/threads.test.ts` | Thread command output tests over memory persistence.        |
+| File                   | Purpose                                                        |
+| ---------------------- | -------------------------------------------------------------- |
+| `src/args.ts`          | Pure argument parser for interactive and execute/run modes.    |
+| `src/execute.ts`       | Effect service that runs one command and streams NDJSON.       |
+| `src/mcp.ts`           | CLI MCP server list/approval command executor.                 |
+| `src/output.ts`        | Swappable stdout/stderr boundary for process and tests.        |
+| `src/review.ts`        | CLI review command executor that prints machine-readable JSON. |
+| `src/runtime.ts`       | Live layer assembly and routing for the Bun CLI process.       |
+| `src/skills.ts`        | CLI skill list/inspect command executor.                       |
+| `src/threads.ts`       | CLI thread lifecycle/search/share command executor.            |
+| `src/main.ts`          | `rika` binary entrypoint.                                      |
+| `test/args.test.ts`    | Effect CLI parser contract tests.                              |
+| `test/execute.test.ts` | Fake model smoke tests for streaming JSON and diagnostics.     |
+| `test/mcp.test.ts`     | MCP list/approval command output tests.                        |
+| `test/review.test.ts`  | Review command JSON output tests over a fake review service.   |
+| `test/skills.test.ts`  | Skill command output tests over fake skill registries.         |
+| `test/threads.test.ts` | Thread command output tests over memory persistence.           |
 
 ## Current Standards
 

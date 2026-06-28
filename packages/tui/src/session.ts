@@ -1,4 +1,4 @@
-import { AgentLoop, SkillRegistry, ThreadService } from "@rika/agent"
+import { AgentLoop, ReviewService, SkillRegistry, ThreadService } from "@rika/agent"
 import { Config, IdGenerator } from "@rika/core"
 import { Ids } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
@@ -21,6 +21,7 @@ export class SessionError extends Schema.TaggedErrorClass<SessionError>()("Sessi
 export type RunError =
   | SessionError
   | AgentLoop.RunError
+  | ReviewService.RunError
   | Config.ConfigError
   | SkillRegistry.SkillRegistryError
   | Terminal.TerminalError
@@ -36,6 +37,7 @@ interface Dependencies {
   readonly agentLoop: AgentLoop.Interface
   readonly config: Config.Interface
   readonly idGenerator: IdGenerator.Interface
+  readonly reviewService: ReviewService.Interface
   readonly skillRegistry: SkillRegistry.Interface
   readonly terminal: Terminal.Interface
   readonly threadService: ThreadService.Interface
@@ -47,10 +49,19 @@ export const layer = Layer.effect(
     const agentLoop = yield* AgentLoop.Service
     const config = yield* Config.Service
     const idGenerator = yield* IdGenerator.Service
+    const reviewService = yield* ReviewService.Service
     const skillRegistry = yield* SkillRegistry.Service
     const terminal = yield* Terminal.Service
     const threadService = yield* ThreadService.Service
-    const dependencies: Dependencies = { agentLoop, config, idGenerator, skillRegistry, terminal, threadService }
+    const dependencies: Dependencies = {
+      agentLoop,
+      config,
+      idGenerator,
+      reviewService,
+      skillRegistry,
+      terminal,
+      threadService,
+    }
 
     return Service.of({
       run: Effect.fn("Tui.Session.run")(function* (input: RunInput) {
@@ -231,6 +242,19 @@ const handleCommand = (
       })
       return { state: ViewState.withNotice(state, reference.rendered), thread_id: threadId, mode, exit: false }
     }
+    if (name === "/review") {
+      const input = parseReviewArgument(argument)
+      if (input === undefined) {
+        return {
+          state: ViewState.withNotice(state, "Usage: /review [--staged] [--base <ref>] [paths...]"),
+          thread_id: threadId,
+          mode,
+          exit: false,
+        }
+      }
+      const result = yield* dependencies.reviewService.run(input)
+      return { state: ViewState.withNotice(state, formatReview(result.run)), thread_id: threadId, mode, exit: false }
+    }
     return {
       state: ViewState.withNotice(state, `Unknown command ${name}. Type /help.`),
       thread_id: threadId,
@@ -328,6 +352,47 @@ const formatSkill = (skill: SkillRegistry.Skill) =>
     `Resources: ${skill.resources.length === 0 ? "none" : skill.resources.map((resource) => resource.relative_path).join(", ")}`,
     "",
     skill.instructions,
+  ].join("\n")
+
+const parseReviewArgument = (argument: string | undefined): ReviewService.ReviewInput | undefined => {
+  const tokens = argument === undefined || argument.trim().length === 0 ? [] : argument.trim().split(/\s+/)
+  let staged = false
+  let baseRef: string | undefined
+  const paths: Array<string> = []
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (token === undefined) continue
+    if (token === "--staged") {
+      staged = true
+      continue
+    }
+    if (token === "--base") {
+      const value = tokens[index + 1]
+      if (value === undefined || value.startsWith("--")) return undefined
+      baseRef = value
+      index += 1
+      continue
+    }
+    if (token.startsWith("--")) return undefined
+    paths.push(token)
+  }
+
+  return {
+    staged,
+    ...(baseRef === undefined ? {} : { base_ref: baseRef }),
+    ...(paths.length === 0 ? {} : { paths }),
+  }
+}
+
+const formatReview = (reviewRun: ReviewService.ReviewRun) =>
+  [
+    `Review ${reviewRun.status}: ${reviewRun.findings.length} findings across ${reviewRun.changed_files.length} files`,
+    `Artifact: ${reviewRun.artifact_id}`,
+    ...reviewRun.findings.map(
+      (finding) =>
+        `- ${finding.severity} ${finding.path}:${finding.range.start_line}-${finding.range.end_line} ${finding.title}`,
+    ),
   ].join("\n")
 
 const summaryLine = (summary: ThreadService.ThreadRecord["summary"]) =>

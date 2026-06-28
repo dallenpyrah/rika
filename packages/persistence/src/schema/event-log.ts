@@ -72,3 +72,24 @@ export const mcp_server_approvals = sqliteTable(
 
 export type McpServerApprovalRow = typeof mcp_server_approvals.$inferSelect
 export type NewMcpServerApprovalRow = typeof mcp_server_approvals.$inferInsert
+
+export const artifacts = sqliteTable(
+  "artifacts",
+  {
+    id: text().primaryKey(),
+    thread_id: text().notNull(),
+    turn_id: text(),
+    kind: text().notNull(),
+    title: text(),
+    content: text().notNull(),
+    metadata: text(),
+    created_at: integer().notNull(),
+  },
+  (table) => [
+    index("artifacts_thread_created_idx").on(table.thread_id, table.created_at),
+    index("artifacts_kind_idx").on(table.kind),
+  ],
+)
+
+export type ArtifactRow = typeof artifacts.$inferSelect
+export type NewArtifactRow = typeof artifacts.$inferInsert

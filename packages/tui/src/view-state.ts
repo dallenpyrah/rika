@@ -152,7 +152,7 @@ export const withPalette = (state: ViewState): ViewState => ({
   ...state,
   palette_open: true,
   notice:
-    "Command palette: /mode, /skills, /skill, /threads, /search, /new, /thread, /archive, /unarchive, /share, /reference, /exit",
+    "Command palette: /mode, /skills, /skill, /threads, /search, /new, /thread, /archive, /unarchive, /share, /reference, /review, /exit",
 })
 
 const withoutNotice = (state: ViewState): ViewState => {

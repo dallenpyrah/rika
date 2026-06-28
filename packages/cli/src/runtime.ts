@@ -1,7 +1,23 @@
-import { AgentLoop, ContextResolver, SkillRegistry, SubagentRuntime, ThreadService, ToolExecutor } from "@rika/agent"
+import {
+  AgentLoop,
+  CheckRegistry,
+  ContextResolver,
+  ReviewService,
+  SkillRegistry,
+  SubagentRuntime,
+  ThreadService,
+  ToolExecutor,
+} from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OpenAi, Provider, Router } from "@rika/llm"
-import { Database, McpApprovalStore, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import {
+  ArtifactStore,
+  Database,
+  McpApprovalStore,
+  Migration,
+  ThreadEventLog,
+  ThreadProjection,
+} from "@rika/persistence"
 import { PluginHost, PluginUi } from "@rika/plugin"
 import { BuiltInTools, FffSearch, McpClient } from "@rika/tools"
 import { Session, Terminal } from "@rika/tui"
@@ -10,6 +26,7 @@ import * as Args from "./args"
 import * as Execute from "./execute"
 import * as Mcp from "./mcp"
 import * as Output from "./output"
+import * as Review from "./review"
 import * as Skills from "./skills"
 import * as Threads from "./threads"
 
@@ -34,7 +51,9 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
               ? Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, input.env, input.cwd)))
               : command.type === "skills"
                 ? Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, input.env, input.cwd)))
-                : Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, input.env, input.cwd)))
+                : command.type === "mcp"
+                  ? Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, input.env, input.cwd)))
+                  : Review.executeCommand(command).pipe(Effect.provide(reviewLiveLayer(command, input.env, input.cwd)))
         ).pipe(
           Effect.matchEffect({
             onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -47,6 +66,8 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
 
 type RuntimeError =
   | AgentLoop.RunError
+  | ArtifactStore.ArtifactStoreError
+  | CheckRegistry.CheckRegistryError
   | ContextResolver.ContextResolverError
   | Config.ConfigError
   | Database.DatabaseError
@@ -57,8 +78,11 @@ type RuntimeError =
   | McpClient.McpClientError
   | Migration.MigrationError
   | PluginHost.RunError
+  | Review.ReviewError
+  | ReviewService.ReviewServiceError
   | Session.SessionError
   | SkillRegistry.SkillRegistryError
+  | SubagentRuntime.RunError
   | Skills.SkillsError
   | Terminal.TerminalError
   | ThreadService.ThreadServiceError
@@ -72,6 +96,11 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Mcp.McpError) return Mcp.formatError(error)
   if (error instanceof McpApprovalStore.McpApprovalStoreError) return `Rika failed: ${error.message}`
   if (error instanceof McpClient.McpClientError) return `Rika failed: ${error.message}`
+  if (error instanceof Review.ReviewError) return Review.formatError(error)
+  if (error instanceof ReviewService.ReviewServiceError) return `Rika failed: ${error.message}`
+  if (error instanceof ArtifactStore.ArtifactStoreError) return `Rika failed: ${error.message}`
+  if (error instanceof CheckRegistry.CheckRegistryError) return `Rika failed: ${error.message}`
+  if (error instanceof SubagentRuntime.SubagentRuntimeError) return `Rika failed: ${error.message}`
   if (error instanceof PluginHost.PluginHostError) return `Rika failed: ${error.message}`
   if (error instanceof PluginUi.PluginUiError) return `Rika failed: ${error.message}`
   if (error instanceof ContextResolver.ContextResolverError) return `Rika failed: ${error.message}`
@@ -165,12 +194,14 @@ export const interactiveLiveLayer = (
   )
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
+    artifactLayer,
     mcpApprovalLayer,
     Migration.layer,
     ThreadEventLog.layer,
@@ -191,12 +222,19 @@ export const interactiveLiveLayer = (
     Layer.provideMerge(subagentLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
+  const checkLayer = CheckRegistry.layer.pipe(Layer.provideMerge(configLayer))
+  const reviewServiceLayer = ReviewService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(checkLayer),
+    Layer.provideMerge(subagentLayer),
+  )
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
     Terminal.layer,
     storageAndThreadLayer,
     contextResolverLayer,
+    reviewServiceLayer,
     skillLayer,
     toolLayer,
     llmLayer,
@@ -298,6 +336,52 @@ export const mcpLiveLayer = (
   return commandLayer
 }
 
+export const reviewLiveLayer = (
+  command: Args.ReviewCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<ReviewLayerOutput, LiveLayerError> => {
+  const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: env.RIKA_MODE === "rush" || env.RIKA_MODE === "deep" ? env.RIKA_MODE : "smart",
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
+  )
+  const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    Output.layer,
+    databaseLayer,
+    Migration.layer,
+    timeLayer,
+    IdGenerator.layer,
+    artifactLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(OpenAi.layer()), Layer.provideMerge(configLayer))
+  const readOnlyToolLayer = BuiltInTools.readOnlyToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const subagentLayer = SubagentRuntime.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+    Layer.provideMerge(readOnlyToolLayer),
+  )
+  const reviewServiceLayer = ReviewService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(CheckRegistry.layer.pipe(Layer.provideMerge(configLayer))),
+    Layer.provideMerge(subagentLayer),
+  )
+  const commandLayer = Review.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(reviewServiceLayer))
+
+  return commandLayer
+}
+
 export type LiveLayerOutput =
   | AgentLoop.Service
   | Config.Service
@@ -321,6 +405,8 @@ export type LiveLayerOutput =
 
 export type InteractiveLayerOutput =
   | AgentLoop.Service
+  | ArtifactStore.Service
+  | CheckRegistry.Service
   | Config.Service
   | ContextResolver.Service
   | Database.Service
@@ -329,6 +415,7 @@ export type InteractiveLayerOutput =
   | McpApprovalStore.Service
   | PluginHost.Service
   | Provider.Service
+  | ReviewService.Service
   | Router.Service
   | Session.Service
   | SkillRegistry.Service
@@ -364,6 +451,22 @@ export type McpLayerOutput =
   | Output.Service
   | Time.Service
 
+export type ReviewLayerOutput =
+  | ArtifactStore.Service
+  | CheckRegistry.Service
+  | Config.Service
+  | Database.Service
+  | IdGenerator.Service
+  | Migration.Service
+  | Output.Service
+  | Provider.Service
+  | Review.Service
+  | ReviewService.Service
+  | Router.Service
+  | SubagentRuntime.Service
+  | Time.Service
+  | ToolExecutor.Service
+
 export type LiveLayerError =
   | Config.ConfigError
   | ContextResolver.ContextResolverError
@@ -373,3 +476,4 @@ export type LiveLayerError =
   | McpClient.RunError
   | Migration.MigrationError
   | PluginHost.RunError
+  | ReviewService.RunError

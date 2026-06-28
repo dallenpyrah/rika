@@ -1,3 +1,4 @@
+export * as ArtifactStore from "./artifact-store"
 export * as Database from "./database"
 export * as McpApprovalStore from "./mcp-approval-store"
 export * as Migration from "./migration"

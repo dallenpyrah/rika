@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, SkillRegistry, ThreadService } from "@rika/agent"
+import { AgentLoop, ReviewService, SkillRegistry, ThreadService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
@@ -41,6 +41,7 @@ const makeLayer = (terminal: Terminal.MemoryTerminal) => {
     Time.fixedLayer(Common.TimestampMillis.make(1_970_000_000_000)),
     IdGenerator.sequenceLayer(1),
     Terminal.memoryLayer(terminal),
+    ReviewService.fakeLayer(() => Effect.succeed(fakeReviewResult)),
     SkillRegistry.fakeLayer([deploySkill]),
     fakeAgentLayer,
   )
@@ -50,7 +51,7 @@ const makeLayer = (terminal: Terminal.MemoryTerminal) => {
 describe("TUI session", () => {
   test("runs an interactive prompt, switches modes, and starts a new thread through slash commands", async () => {
     const terminal: Terminal.MemoryTerminal = {
-      inputs: ["hello", "/mode rush", "/new", "/exit"],
+      inputs: ["hello", "/mode rush", "/review --staged src/app.ts", "/new", "/exit"],
       frames: [],
       prompts: [],
     }
@@ -64,9 +65,10 @@ describe("TUI session", () => {
 
     const frames = terminal.frames.map(Renderer.stripAnsi)
     expect(exitCode).toBe(0)
-    expect(terminal.prompts).toEqual(["› ", "› ", "› ", "› "])
+    expect(terminal.prompts).toEqual(["› ", "› ", "› ", "› ", "› "])
     expect(frames.join("\n")).toContain("session response")
     expect(frames.join("\n")).toContain("Mode switched to rush")
+    expect(frames.join("\n")).toContain("Review completed: 1 findings across 1 files")
     expect(frames.join("\n")).toContain("Started new thread")
     expect(frames.at(-1)).toContain("Goodbye")
   })
@@ -132,6 +134,48 @@ const deploySkill: SkillRegistry.Skill = {
   },
   instructions: "Deploy instructions",
   resources: [{ path: "/workspace/.agents/skills/deploy/scripts/deploy.ts", relative_path: "scripts/deploy.ts" }],
+}
+
+const fakeReviewRun: ReviewService.ReviewRun = {
+  review_id: "review_tui_session",
+  thread_id: Ids.ThreadId.make("thread_tui_review"),
+  artifact_id: Ids.ArtifactId.make("artifact_tui_review"),
+  status: "completed",
+  range: { kind: "staged", paths: ["src/app.ts"] },
+  changed_files: ["src/app.ts"],
+  checks: [
+    {
+      name: "security",
+      severity_default: "high",
+      tools: ["read"],
+      source_path: ".agents/checks/security.md",
+      scope_path: "",
+      applies_to: ["src/app.ts"],
+    },
+  ],
+  findings: [
+    {
+      check_name: "security",
+      severity: "high",
+      path: "src/app.ts",
+      range: { start_line: 1, end_line: 1 },
+      title: "Avoid eval",
+      evidence: "eval(input)",
+    },
+  ],
+  started_at: Common.TimestampMillis.make(1_970_000_000_000),
+  completed_at: Common.TimestampMillis.make(1_970_000_000_000),
+}
+
+const fakeReviewResult: ReviewService.ReviewResult = {
+  run: fakeReviewRun,
+  artifact: {
+    id: fakeReviewRun.artifact_id,
+    thread_id: fakeReviewRun.thread_id,
+    kind: "review",
+    content: { review_id: fakeReviewRun.review_id },
+    created_at: fakeReviewRun.completed_at,
+  },
 }
 
 const turnEvents = (input: AgentLoop.RunTurnInput, response: string): ReadonlyArray<Event.Event> => {
