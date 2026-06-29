@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
+import { TextAttributes } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 import { Common, Event, Ids, Message } from "@rika/schema"
+import { parseDiffFromFile, type FileContents } from "@pierre/diffs"
 import { Effect, Option, Queue } from "effect"
+import { DiffRenderCache } from "../src/diff-renderer"
 import { Adapter, ViewState } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_adapter_smoke")
@@ -160,13 +163,154 @@ describe("adapter Surface (headless)", () => {
       expect(frame).toContain("Read AGENTS.md")
       expect(frame).not.toContain("Read AGENTS.md ▸")
       expect(frame).not.toContain("Read AGENTS.md ▾")
-      expect(frame).toContain("$ bun test packages/tui ▸")
+      expect(frame).toMatch(/\$ bun test packages\/tui\s+▸/)
 
       await clickLine(setup, "$ bun test packages/tui")
       expect(Effect.runSync(Queue.poll(actions).pipe(Effect.map(Option.getOrUndefined)))).toEqual({
         _tag: "ToggleCard",
         card_id: "run_tests",
       })
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
+  test("tool row verbs use normal text color and path segments open files", async () => {
+    const setup = await createTestRenderer({ width: 120, height: 24 })
+    try {
+      const actions = Effect.runSync(Queue.unbounded<Adapter.Action>())
+      const surface = new Adapter.Surface(setup.renderer, actions)
+      const state = ViewState.toggleToolGroup(
+        ViewState.initial({
+          thread_id: threadId,
+          workspace_path: "/workspace/rika",
+          mode: "smart",
+          events: [
+            toolRequested(1, "read_agents", "read", { path: "/workspace/rika/AGENTS.md" }),
+            toolCompleted(2, "read_agents", "read", {
+              path: "/workspace/rika/AGENTS.md",
+              start_line: 3,
+              end_line: 5,
+              content: "hidden",
+            }),
+            toolRequested(3, "edit_readme", "edit", { path: "/workspace/rika/README.md" }),
+            toolCompleted(4, "edit_readme", "edit", {
+              path: "/workspace/rika/README.md",
+              diff: pierreDiff("/workspace/rika/README.md"),
+            }),
+          ],
+        }),
+      )
+
+      surface.update(state)
+      await setup.renderOnce()
+
+      const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+      expectSpanColor(spans, "Explored 1 file · Edited 1 file", [201, 209, 217])
+      expectSpanColor(spans, " Read ", [201, 209, 217])
+      expectSpanColor(spans, " Edited ", [201, 209, 217])
+      expectSpanColor(spans, "AGENTS.md", [210, 162, 92])
+      expectSpanColor(spans, "README.md", [210, 162, 92])
+      expectSpanUnderline(spans, "AGENTS.md")
+      expectSpanUnderline(spans, "README.md")
+
+      await moveToText(setup, "AGENTS.md")
+      expect(mousePointerStyle(setup)).toBe("pointer")
+      await setup.mockMouse.moveTo(0, 0)
+      await setup.renderOnce()
+      expect(mousePointerStyle(setup)).toBe("default")
+
+      await clickLine(setup, "AGENTS.md")
+      expect(Effect.runSync(Queue.poll(actions).pipe(Effect.map(Option.getOrUndefined)))).toEqual({
+        _tag: "OpenFile",
+        path: "AGENTS.md",
+        range: { start_line: 3, end_line: 5 },
+      })
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
+  test("expanded edit diffs use Pierre colors for stats, markers, and syntax", async () => {
+    const setup = await createTestRenderer({ width: 120, height: 24 })
+    try {
+      const diffRenderer = new DiffRenderCache()
+      const surface = new Adapter.Surface(setup.renderer, undefined, diffRenderer)
+      const state = ViewState.toggleCard(
+        ViewState.initial({
+          thread_id: threadId,
+          workspace_path: "/workspace/rika",
+          mode: "smart",
+          events: [
+            toolRequested(1, "edit_app", "edit", { path: "app.ts" }),
+            toolCompleted(2, "edit_app", "edit", {
+              path: "app.ts",
+              diff: pierreDiff("app.ts"),
+            }),
+          ],
+        }),
+        "edit_app",
+      )
+      const content = state.cards.find((card) => card.id === "edit_app")?.content
+      if (content?.kind === "pierre-diff") await Effect.runPromise(diffRenderer.ensure(content.file_diff))
+
+      surface.update(state)
+      await setup.renderOnce()
+
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain("Edited app.ts +1 -1")
+      expect(frame).toContain("1 - const value = 1")
+      expect(frame).toContain("1 + const value = 2")
+      expect(frame).not.toContain("diff -- app.ts")
+      expect(frame).not.toContain("@@")
+
+      const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+      expectSpanColor(spans, " +1", [152, 195, 121])
+      expectSpanColor(spans, " -1", [224, 108, 117])
+      expectSpanColor(spans, "+", [152, 195, 121])
+      expectSpanColor(spans, "-", [224, 108, 117])
+      expectSpanColor(spans, "const value = 1", [224, 108, 117])
+      expectSpanColor(spans, "const value = 2", [152, 195, 121])
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
+  test("expanded grouped edit diffs are inset under the tool rows", async () => {
+    const setup = await createTestRenderer({ width: 120, height: 24 })
+    try {
+      const diffRenderer = new DiffRenderCache()
+      const surface = new Adapter.Surface(setup.renderer, undefined, diffRenderer)
+      const state = ViewState.toggleCard(
+        ViewState.toggleToolGroup(
+          ViewState.initial({
+            thread_id: threadId,
+            workspace_path: "/workspace/rika",
+            mode: "smart",
+            events: [
+              toolRequested(1, "read_agents", "read", { path: "AGENTS.md" }),
+              toolCompleted(2, "read_agents", "read", { path: "AGENTS.md", content: "hidden" }),
+              toolRequested(3, "edit_app", "edit", { path: "app.ts" }),
+              toolCompleted(4, "edit_app", "edit", {
+                path: "app.ts",
+                diff: pierreDiff("app.ts"),
+              }),
+            ],
+          }),
+        ),
+        "edit_app",
+      )
+      const content = state.cards.find((card) => card.id === "edit_app")?.content
+      if (content?.kind === "pierre-diff") await Effect.runPromise(diffRenderer.ensure(content.file_diff))
+
+      surface.update(state)
+      await setup.renderOnce()
+
+      const frame = setup.captureCharFrame()
+      const diffLine = frame.split("\n").find((line) => line.includes("1 + const value = 2"))
+      const leadingSpaces = diffLine?.match(/^ */)?.[0].length
+      expect(leadingSpaces).toBeGreaterThanOrEqual(4)
+      expect(leadingSpaces).toBeLessThanOrEqual(6)
     } finally {
       setup.renderer.destroy()
     }
@@ -228,11 +372,66 @@ const toolCompleted = (
   },
 })
 
+const pierreDiff = (name: string): Common.JsonValue => {
+  const fileDiff: Common.JsonValue = JSON.parse(
+    JSON.stringify(
+      parseDiffFromFile(
+        fileContents(name, "const value = 1\n", "before"),
+        fileContents(name, "const value = 2\n", "after"),
+      ),
+    ),
+  )
+  return { kind: "diff", renderer: "@pierre/diffs", collapsed: true, file_diff: fileDiff }
+}
+
+const fileContents = (name: string, contents: string, header: string): FileContents => ({
+  name,
+  contents,
+  header,
+  cacheKey: `${name}:${header}`,
+})
+
 const clickLine = async (setup: Awaited<ReturnType<typeof createTestRenderer>>, text: string): Promise<void> => {
+  const { x, y } = textPosition(setup, text)
+  await setup.mockMouse.click(x, y)
+  await setup.renderOnce()
+}
+
+const moveToText = async (setup: Awaited<ReturnType<typeof createTestRenderer>>, text: string): Promise<void> => {
+  const { x, y } = textPosition(setup, text)
+  await setup.mockMouse.moveTo(x, y)
+  await setup.renderOnce()
+}
+
+const textPosition = (
+  setup: Awaited<ReturnType<typeof createTestRenderer>>,
+  text: string,
+): { readonly x: number; readonly y: number } => {
   const lines = setup.captureCharFrame().split("\n")
   const y = lines.findIndex((line) => line.includes(text))
   expect(y).toBeGreaterThanOrEqual(0)
-  const x = Math.max(1, lines[y]?.indexOf(text) ?? 1)
-  await setup.mockMouse.click(x, y)
-  await setup.renderOnce()
+  const x = Math.max(1, (lines[y]?.indexOf(text) ?? 1) + Math.floor(text.length / 2))
+  return { x, y }
+}
+
+const mousePointerStyle = (setup: Awaited<ReturnType<typeof createTestRenderer>>): unknown =>
+  Reflect.get(setup.renderer, "_currentMousePointerStyle")
+
+const expectSpanColor = (
+  spans: ReturnType<Awaited<ReturnType<typeof createTestRenderer>>["captureSpans"]>["lines"][number]["spans"],
+  text: string,
+  rgb: readonly [number, number, number],
+): void => {
+  const span = spans.find((candidate) => candidate.text === text)
+  expect(span).toBeDefined()
+  expect(span?.fg.toInts().slice(0, 3)).toEqual([...rgb])
+}
+
+const expectSpanUnderline = (
+  spans: ReturnType<Awaited<ReturnType<typeof createTestRenderer>>["captureSpans"]>["lines"][number]["spans"],
+  text: string,
+): void => {
+  const span = spans.find((candidate) => candidate.text === text)
+  expect(span).toBeDefined()
+  expect((span?.attributes ?? 0) & TextAttributes.UNDERLINE).toBe(TextAttributes.UNDERLINE)
 }

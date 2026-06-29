@@ -1,9 +1,13 @@
 import { Config } from "@rika/core"
 import { Common, Event, Ids, Message } from "@rika/schema"
+import { isAbsolute, relative } from "node:path"
 
 export type Activity = "idle" | "thinking" | "streaming" | "running-tools" | "failed"
 export type CardKind = "context" | "tool" | "diff" | "error" | "skill" | "subagent" | "system"
 export type CardStatus = "info" | "running" | "success" | "error"
+export type CardContent =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "pierre-diff"; readonly file_diff: Common.JsonValue }
 
 export interface ThreadMessage {
   readonly id: string
@@ -18,9 +22,11 @@ export interface Card {
   readonly subtitle: string
   readonly status: CardStatus
   readonly collapsed: boolean
-  readonly body?: string
+  readonly content?: CardContent
   readonly tool_name?: string
   readonly expandable?: boolean
+  readonly path?: string
+  readonly range?: Common.LineRange
 }
 
 export type TranscriptEntry =
@@ -176,7 +182,7 @@ export const applyEvent = (state: ViewState, event: Event.Event): ViewState => {
       return tick({ ...state, activity: "running-tools", active: true, streaming_text: "" })
     case "tool.call.requested":
       return tick(
-        updateCard({ ...state, activity: "running-tools", active: true, streaming_text: "" }, toolCard(event)),
+        updateCard({ ...state, activity: "running-tools", active: true, streaming_text: "" }, toolCard(state, event)),
       )
     case "tool.call.completed":
       return tick(applyToolResult({ ...state, activity: "streaming", active: true }, event))
@@ -238,7 +244,7 @@ export const withPalette = (state: ViewState): ViewState => ({
   palette: { open: true, query: "", selected: 0 },
   shortcuts_open: false,
   notice:
-    "Command palette: /threads, /relaunch, /help, /welcome, /credits, /version, /exit, /ast-grep, /debug, /ide, /mcp, /mode rush, /mode smart, /mode deep",
+    "Command palette: /threads, /relaunch, /help, /welcome, /credits, /version, /exit, /ast-grep, /debug, /mcp, /mode rush, /mode smart, /mode deep",
 })
 
 const withoutNotice = (state: ViewState): ViewState => {
@@ -470,7 +476,9 @@ export const isCardCollapsed = (state: ViewState, card: Card): boolean => {
 }
 
 export const isCardExpandable = (card: Card): boolean =>
-  card.expandable !== false && card.body !== undefined && card.body.length > 0
+  card.expandable !== false && card.content !== undefined && isContentExpandable(card.content)
+
+const isContentExpandable = (content: CardContent): boolean => content.kind === "pierre-diff" || content.text.length > 0
 
 export const enqueueMessage = (state: ViewState, message: string): ViewState => ({
   ...state,
@@ -635,11 +643,14 @@ const skillCard = (event: Event.SkillLoaded): Card => ({
   subtitle: event.data.source,
   status: "info",
   collapsed: true,
-  body: [
-    event.data.description,
-    `File: ${event.data.skill_file}`,
-    `Resources: ${event.data.resource_paths.join(", ")}`,
-  ].join("\n"),
+  content: {
+    kind: "text",
+    text: [
+      event.data.description,
+      `File: ${event.data.skill_file}`,
+      `Resources: ${event.data.resource_paths.join(", ")}`,
+    ].join("\n"),
+  },
 })
 
 const subagentCard = (event: Event.SubagentCompleted): Card => ({
@@ -649,21 +660,28 @@ const subagentCard = (event: Event.SubagentCompleted): Card => ({
   subtitle: event.data.status,
   status: event.data.status === "completed" ? "success" : event.data.status === "failed" ? "error" : "info",
   collapsed: true,
-  body: [event.data.summary, ...event.data.evidence.map((evidence) => `- ${evidence}`)].join("\n"),
+  content: {
+    kind: "text",
+    text: [event.data.summary, ...event.data.evidence.map((evidence) => `- ${evidence}`)].join("\n"),
+  },
 })
 
-const toolCard = (event: Event.ToolCallRequested): Card => {
-  const body = toolRequestBody(event.data.call.name, event.data.call.input)
+const toolCard = (state: ViewState, event: Event.ToolCallRequested): Card => {
+  const text = toolRequestBody(event.data.call.name, event.data.call.input)
+  const target = fileTarget(state.workspace_path, event.data.call.input)
   return {
     id: event.data.call.id,
     kind: "tool",
-    title: toolRequestTitle(event.data.call.name, event.data.call.input),
+    title: toolRequestTitle(state.workspace_path, event.data.call.name, event.data.call.input),
     subtitle: "",
     status: "running",
     collapsed: true,
-    ...(body === undefined ? {} : { body }),
+    ...(text === undefined ? {} : { content: textContent(text) }),
     tool_name: event.data.call.name,
-    expandable: !isReadTool(event.data.call.name) && body !== undefined && body.length > 0,
+    expandable: !isReadTool(event.data.call.name) && text !== undefined && text.length > 0,
+    ...(target === undefined
+      ? {}
+      : { path: target.path, ...(target.range === undefined ? {} : { range: target.range }) }),
   }
 }
 
@@ -674,7 +692,7 @@ const toolInputCard = (event: Event.ToolCallInputStarted): Card => ({
   subtitle: "",
   status: "running",
   collapsed: true,
-  body: "",
+  content: textContent(""),
   tool_name: event.data.name,
   expandable: false,
 })
@@ -685,19 +703,23 @@ const applyToolResult = (state: ViewState, event: Event.ToolCallCompleted): View
   const toolName = existing?.tool_name ?? result.name
   const status = result.status === "success" ? "success" : "error"
   const errorBody = result.error?.message ?? "Tool failed"
+  const target = fileTarget(state.workspace_path, result.output) ?? cardTarget(existing)
   if (isReadTool(toolName)) {
     return updateCard(state, {
       id: result.id,
       kind: "tool",
-      title: existing?.title ?? toolReadTitle(result.output),
+      title: existing?.title ?? toolReadTitle(state.workspace_path, result.output),
       subtitle: result.status === "success" ? "" : errorBody,
       status,
       collapsed: true,
       tool_name: toolName,
       expandable: false,
+      ...(target === undefined
+        ? {}
+        : { path: target.path, ...(target.range === undefined ? {} : { range: target.range }) }),
     })
   }
-  const diff = result.status === "success" ? extractPierreDiff(result.output) : undefined
+  const diff = result.status === "success" ? extractPierreDiff(state.workspace_path, result.output) : undefined
   if (diff !== undefined) {
     return updateCard(state, {
       id: result.id,
@@ -706,22 +728,26 @@ const applyToolResult = (state: ViewState, event: Event.ToolCallCompleted): View
       subtitle: "",
       status,
       collapsed: true,
-      body: diff.body,
+      content: { kind: "pierre-diff", file_diff: diff.file_diff },
       tool_name: toolName,
       expandable: true,
+      path: diff.path,
     })
   }
-  const body = result.status === "success" ? toolResultBody(toolName, result.output) : errorBody
+  const text = result.status === "success" ? toolResultBody(toolName, result.output) : errorBody
   return updateCard(state, {
     id: result.id,
     kind: "tool",
-    title: existing?.title ?? toolResultTitle(toolName, result.output),
+    title: existing?.title ?? toolResultTitle(state.workspace_path, toolName, result.output),
     subtitle: "",
     status,
     collapsed: true,
-    ...(body === undefined ? {} : { body }),
+    ...(text === undefined ? {} : { content: textContent(text) }),
     tool_name: toolName,
-    expandable: body !== undefined && body.length > 0,
+    expandable: text !== undefined && text.length > 0,
+    ...(target === undefined
+      ? {}
+      : { path: target.path, ...(target.range === undefined ? {} : { range: target.range }) }),
   })
 }
 
@@ -732,7 +758,7 @@ const errorCard = (event: Event.TurnFailed): Card => ({
   subtitle: event.data.error.kind,
   status: "error",
   collapsed: false,
-  body: event.data.error.message,
+  content: textContent(event.data.error.message),
 })
 
 const systemCard = (title: string, subtitle: string, id: string): Card => ({
@@ -781,18 +807,19 @@ const jsonSummary = (value: Common.JsonValue | undefined) => {
   return `${text.slice(0, 800)}\n… truncated`
 }
 
-const toolRequestTitle = (name: string, input: Common.JsonValue): string => {
+const toolRequestTitle = (workspacePath: string, name: string, input: Common.JsonValue): string => {
   const lower = name.toLowerCase()
-  if (isReadTool(name)) return toolReadTitle(input)
-  if (lower === "write") return withTarget("Write", pathFrom(input))
-  if (lower.includes("edit") || lower === "apply_patch") return withTarget("Edit", pathFrom(input))
+  if (isReadTool(name)) return toolReadTitle(workspacePath, input)
+  if (lower === "write") return withTarget("Write", displayPathFrom(workspacePath, input))
+  if (lower.includes("edit") || lower === "apply_patch")
+    return withTarget("Edit", displayPathFrom(workspacePath, input))
   if (isCommandTool(name)) {
     const command = stringField(input, "command") ?? stringField(input, "cmd") ?? stringField(input, "script")
     return command === undefined ? "Run command" : `$ ${oneLine(command, 160)}`
   }
   if (lower.includes("grep")) {
     const pattern = stringField(input, "pattern") ?? stringField(input, "query")
-    const path = pathFrom(input)
+    const path = displayPathFrom(workspacePath, input)
     return ["Grep", path, pattern === undefined ? undefined : quoted(oneLine(pattern, 80))]
       .filter((part): part is string => part !== undefined && part.length > 0)
       .join(" ")
@@ -801,11 +828,11 @@ const toolRequestTitle = (name: string, input: Common.JsonValue): string => {
     const query = searchQuery(input)
     return query === undefined ? "Search" : `Search ${oneLine(query, 120)}`
   }
-  return withTarget(humanToolName(name), pathFrom(input) ?? searchQuery(input))
+  return withTarget(humanToolName(name), displayPathFrom(workspacePath, input) ?? searchQuery(input))
 }
 
-const toolReadTitle = (value: Common.JsonValue | undefined): string => {
-  const path = pathFrom(value)
+const toolReadTitle = (workspacePath: string, value: Common.JsonValue | undefined): string => {
+  const path = displayPathFrom(workspacePath, value)
   return path === undefined ? "Read" : `Read ${path}${lineRangeSuffix(value)}`
 }
 
@@ -819,8 +846,8 @@ const toolRequestBody = (name: string, input: Common.JsonValue): string | undefi
   return text.length === 0 ? undefined : text
 }
 
-const toolResultTitle = (name: string, output: Common.JsonValue | undefined): string =>
-  withTarget(humanToolName(name), pathFrom(output) ?? searchQuery(output))
+const toolResultTitle = (workspacePath: string, name: string, output: Common.JsonValue | undefined): string =>
+  withTarget(humanToolName(name), displayPathFrom(workspacePath, output) ?? searchQuery(output))
 
 const toolResultBody = (name: string, output: Common.JsonValue | undefined): string | undefined => {
   if (output === undefined) return undefined
@@ -869,21 +896,21 @@ interface RenderedDiff {
   readonly path: string
   readonly additions: number
   readonly deletions: number
-  readonly body: string
+  readonly file_diff: Common.JsonValue
 }
 
-const extractPierreDiff = (value: Common.JsonValue | undefined): RenderedDiff | undefined => {
+const extractPierreDiff = (workspacePath: string, value: Common.JsonValue | undefined): RenderedDiff | undefined => {
   if (Array.isArray(value)) {
     for (const item of value) {
-      const found = extractPierreDiff(item)
+      const found = extractPierreDiff(workspacePath, item)
       if (found !== undefined) return found
     }
     return undefined
   }
   if (!isJsonObject(value)) return undefined
-  if (isPierreDiff(value)) return renderPierreDiff(value)
+  if (isPierreDiff(value)) return renderPierreDiff(workspacePath, value)
   for (const child of Object.values(value)) {
-    const found = extractPierreDiff(child)
+    const found = extractPierreDiff(workspacePath, child)
     if (found !== undefined) return found
   }
   return undefined
@@ -892,58 +919,29 @@ const extractPierreDiff = (value: Common.JsonValue | undefined): RenderedDiff | 
 const isPierreDiff = (value: Record<string, Common.JsonValue>) =>
   value.kind === "diff" && value.renderer === "@pierre/diffs"
 
-const renderPierreDiff = (value: Record<string, Common.JsonValue>): RenderedDiff | undefined => {
+const renderPierreDiff = (workspacePath: string, value: Record<string, Common.JsonValue>): RenderedDiff | undefined => {
   const fileDiff = value.file_diff
   if (!isJsonObject(fileDiff)) return undefined
-  const path = stringField(fileDiff, "name") ?? "diff"
-  const deletionLines = stringArrayField(fileDiff, "deletionLines")
-  const additionLines = stringArrayField(fileDiff, "additionLines")
-  const hunks = arrayField(fileDiff, "hunks")?.filter(isJsonObject) ?? []
-  const body: Array<string> = [`diff -- ${path}`]
-  let additions = 0
-  let deletions = 0
-  for (const hunk of hunks) {
-    body.push(hunkSpec(hunk))
-    const content = arrayField(hunk, "hunkContent")?.filter(isJsonObject) ?? []
-    for (const part of content) {
-      if (part.type === "context") {
-        const count = numberField(part, "lines") ?? 0
-        const deletionStart = numberField(part, "deletionLineIndex") ?? 0
-        const additionStart = numberField(part, "additionLineIndex") ?? 0
-        for (let index = 0; index < count; index += 1) {
-          body.push(` ${diffLine(deletionLines[deletionStart + index] ?? additionLines[additionStart + index] ?? "")}`)
-        }
-      }
-      if (part.type === "change") {
-        const deletionCount = numberField(part, "deletions") ?? 0
-        const additionCount = numberField(part, "additions") ?? 0
-        const deletionStart = numberField(part, "deletionLineIndex") ?? 0
-        const additionStart = numberField(part, "additionLineIndex") ?? 0
-        deletions += deletionCount
-        additions += additionCount
-        for (let index = 0; index < deletionCount; index += 1) {
-          body.push(`-${diffLine(deletionLines[deletionStart + index] ?? "")}`)
-        }
-        for (let index = 0; index < additionCount; index += 1) {
-          body.push(`+${diffLine(additionLines[additionStart + index] ?? "")}`)
-        }
-      }
-    }
-  }
-  return { path, additions, deletions, body: limitBlock(body.join("\n")) }
+  const path = workspaceRelativePath(workspacePath, stringField(fileDiff, "name") ?? "diff")
+  const additions = countChangedLines(fileDiff, "additions")
+  const deletions = countChangedLines(fileDiff, "deletions")
+  return { path, additions, deletions, file_diff: fileDiff }
 }
 
-const hunkSpec = (hunk: Record<string, Common.JsonValue>): string => {
-  const spec = stringField(hunk, "hunkSpecs")
-  if (spec !== undefined) return spec.trimEnd()
-  const deletionStart = numberField(hunk, "deletionStart") ?? 0
-  const deletionCount = numberField(hunk, "deletionCount") ?? 0
-  const additionStart = numberField(hunk, "additionStart") ?? 0
-  const additionCount = numberField(hunk, "additionCount") ?? 0
-  return `@@ -${deletionStart},${deletionCount} +${additionStart},${additionCount} @@`
-}
+const countChangedLines = (fileDiff: Record<string, Common.JsonValue>, key: "additions" | "deletions"): number =>
+  arrayField(fileDiff, "hunks")
+    ?.filter(isJsonObject)
+    .reduce(
+      (total, hunk) =>
+        total +
+        (arrayField(hunk, "hunkContent")
+          ?.filter(isJsonObject)
+          .reduce((inner, content) => inner + (content.type === "change" ? (numberField(content, key) ?? 0) : 0), 0) ??
+          0),
+      0,
+    ) ?? 0
 
-const diffLine = (line: string): string => line.replace(/\r?\n$/, "")
+const textContent = (text: string): CardContent => ({ kind: "text", text })
 
 const editedTitle = (name: string, diff: RenderedDiff): string => {
   const verb = name.toLowerCase() === "write" ? "Wrote" : "Edited"
@@ -981,6 +979,26 @@ const pathFrom = (value: Common.JsonValue | undefined): string | undefined => {
   return stringField(value, "path") ?? stringField(value, "file") ?? stringField(value, "name")
 }
 
+const displayPathFrom = (workspacePath: string, value: Common.JsonValue | undefined): string | undefined => {
+  const path = pathFrom(value)
+  return path === undefined ? undefined : workspaceRelativePath(workspacePath, path)
+}
+
+const fileTarget = (
+  workspacePath: string,
+  value: Common.JsonValue | undefined,
+): { readonly path: string; readonly range?: Common.LineRange } | undefined => {
+  const path = displayPathFrom(workspacePath, value)
+  if (path === undefined) return undefined
+  const range = lineRange(value)
+  return { path, ...(range === undefined ? {} : { range }) }
+}
+
+const cardTarget = (
+  card: Card | undefined,
+): { readonly path: string; readonly range?: Common.LineRange } | undefined =>
+  card?.path === undefined ? undefined : { path: card.path, ...(card.range === undefined ? {} : { range: card.range }) }
+
 const searchQuery = (value: Common.JsonValue | undefined): string | undefined => {
   if (!isJsonObject(value)) return undefined
   const direct = stringField(value, "query") ?? stringField(value, "pattern")
@@ -991,14 +1009,33 @@ const searchQuery = (value: Common.JsonValue | undefined): string | undefined =>
 }
 
 const lineRangeSuffix = (value: Common.JsonValue | undefined): string => {
-  if (!isJsonObject(value)) return ""
+  const range = lineRange(value)
+  if (range === undefined) return ""
+  return range.start_line === range.end_line ? ` L${range.start_line}` : ` L${range.start_line}-${range.end_line}`
+}
+
+const lineRange = (value: Common.JsonValue | undefined): Common.LineRange | undefined => {
+  if (!isJsonObject(value)) return undefined
   const start =
     numberField(value, "start_line") ?? numberField(isJsonObject(value.range) ? value.range : undefined, "start_line")
   const end =
     numberField(value, "end_line") ?? numberField(isJsonObject(value.range) ? value.range : undefined, "end_line")
-  if (start === undefined || end === undefined) return ""
-  return start === end ? ` L${start}` : ` L${start}-${end}`
+  if (start === undefined || end === undefined) return undefined
+  return { start_line: start, end_line: end }
 }
+
+const workspaceRelativePath = (workspacePath: string, path: string): string => {
+  const slashPath = slashify(path)
+  if (!isAbsolute(path)) return trimDotPath(slashPath)
+  const relativePath = slashify(relative(workspacePath, path))
+  if (relativePath.length === 0) return "."
+  if (relativePath.startsWith("../") || relativePath === ".." || isAbsolute(relativePath)) return slashPath
+  return trimDotPath(relativePath)
+}
+
+const slashify = (path: string): string => path.replace(/\\/g, "/")
+
+const trimDotPath = (path: string): string => (path.startsWith("./") ? path.slice(2) : path)
 
 const quoted = (value: string): string => `"${value}"`
 
@@ -1029,11 +1066,6 @@ const arrayField = (value: Common.JsonValue | undefined, key: string): ReadonlyA
   if (!isJsonObject(value)) return undefined
   const field = value[key]
   return Array.isArray(field) ? field : undefined
-}
-
-const stringArrayField = (value: Common.JsonValue | undefined, key: string): ReadonlyArray<string> => {
-  const field = arrayField(value, key)
-  return field?.filter((item): item is string => typeof item === "string") ?? []
 }
 
 const isJsonObject = (value: Common.JsonValue | undefined): value is Record<string, Common.JsonValue> =>

@@ -121,19 +121,22 @@ const handleCommand = (
       })
     if (name === "/credits")
       return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika is Amp-compatible software.") })
-    if (name === "/version")
-      return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika 0.0.0") })
+    if (name === "/version") return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika 0.0.0") })
     if (name === "/ast-grep")
       return Backend.commandResult(context, { state: ViewState.withNotice(state, "ast-grep outline status: ready") })
     if (name === "/debug")
       return Backend.commandResult(context, {
-        state: ViewState.withNotice(state, argument === "copy command" ? "Debug command copied." : "Debug page logs are empty."),
+        state: ViewState.withNotice(
+          state,
+          argument === "copy command" ? "Debug command copied." : "Debug page logs are empty.",
+        ),
       })
-    if (name === "/ide")
-      return Backend.commandResult(context, { state: ViewState.withNotice(state, "IDE connection requested.") })
     if (name === "/mcp")
       return Backend.commandResult(context, {
-        state: ViewState.withNotice(state, argument === "authenticate" ? "MCP authentication requested." : "No MCP servers connected."),
+        state: ViewState.withNotice(
+          state,
+          argument === "authenticate" ? "MCP authentication requested." : "No MCP servers connected.",
+        ),
       })
     if (name === "/skills" || name === "/skill")
       return Backend.commandResult(context, {
@@ -179,8 +182,7 @@ const handleCommand = (
     }
     if (name === "/archive" || name === "/unarchive") {
       const target = argument === undefined || argument.length === 0 ? threadId : Ids.ThreadId.make(argument)
-      const summary =
-        name === "/archive" ? yield* client.archiveThread(target) : yield* client.unarchiveThread(target)
+      const summary = name === "/archive" ? yield* client.archiveThread(target) : yield* client.unarchiveThread(target)
       const record = target === threadId ? yield* client.openThread(target) : undefined
       const nextState =
         record === undefined
@@ -213,13 +215,17 @@ const handleCommand = (
       })
       return Backend.commandResult(context, { state: ViewState.withNotice(state, reference.rendered) })
     }
-    return Backend.commandResult(context, { state: ViewState.withNotice(state, `Unknown command ${name}. Type /help.`) })
+    return Backend.commandResult(context, {
+      state: ViewState.withNotice(state, `Unknown command ${name}. Type /help.`),
+    })
   })
 
 const modeCommand = (context: Backend.CommandContext, argument: string | undefined): Backend.CommandResult => {
   const nextMode = argument === undefined || argument.length === 0 ? nextModeAfter(context.mode) : parseMode(argument)
   if (nextMode === undefined)
-    return Backend.commandResult(context, { state: ViewState.withNotice(context.state, "Usage: /mode rush|smart|deep") })
+    return Backend.commandResult(context, {
+      state: ViewState.withNotice(context.state, "Usage: /mode rush|smart|deep"),
+    })
   return Backend.commandResult(context, {
     state: ViewState.withNotice(ViewState.withMode(context.state, nextMode), `Mode switched to ${nextMode}`),
     mode: nextMode,

@@ -14,6 +14,7 @@ interface Harness {
   readonly rendered: Recorded
   readonly turns: Array<string>
   readonly commands: Array<string>
+  readonly opened: Array<Adapter.OpenFileInput>
 }
 
 const run = (
@@ -27,6 +28,7 @@ const run = (
   const rendered: Recorded = []
   const turns: Array<string> = []
   const commands: Array<string> = []
+  const opened: Array<Adapter.OpenFileInput> = []
   let turnCount = 0
 
   const adapter: Adapter.Adapter = {
@@ -35,6 +37,10 @@ const run = (
     actions: Stream.fromIterable(options.actions ?? []),
     resizes: Stream.empty,
     setExit: () => Effect.void,
+    openFile: (input) =>
+      Effect.sync(() => {
+        opened.push(input)
+      }),
     editExternally: (text) => Effect.succeed(text),
     pasteImage: () => Effect.succeed(undefined),
   }
@@ -68,7 +74,7 @@ const run = (
       { backend, renderer: adapter, ticks: Stream.empty, defaultMode: "smart", defaultWorkspace: workspacePath },
       { workspace_root: workspacePath, mode: "smart" },
     ),
-  ).then((exitCode): Harness & { exitCode: number } => ({ exitCode, rendered, turns, commands }))
+  ).then((exitCode): Harness & { exitCode: number } => ({ exitCode, rendered, turns, commands, opened }))
 }
 
 const quit = [Keys.ctrl("c"), Keys.ctrl("c")]
@@ -104,6 +110,26 @@ describe("Controller", () => {
       actions: [{ _tag: "ToggleCard", card_id: "tool_controller" }],
     })
     expect(rendered.some((state) => state.expanded_ids.has("tool_controller"))).toBe(true)
+  })
+
+  test("adapter file actions route through renderer file opening", async () => {
+    const { opened } = await run(quit, {
+      actions: [
+        {
+          _tag: "OpenFile",
+          path: "packages/tui/src/adapter.ts",
+          range: { start_line: 10, end_line: 12 },
+        },
+      ],
+    })
+
+    expect(opened).toEqual([
+      {
+        workspace_path: workspacePath,
+        path: "packages/tui/src/adapter.ts",
+        range: { start_line: 10, end_line: 12 },
+      },
+    ])
   })
 
   test("word editing chords mutate the input before submit", async () => {

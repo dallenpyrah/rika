@@ -8,6 +8,7 @@ import {
   dim,
   fg,
   type KeyEvent,
+  link,
   RGBA,
   reverse,
   ScrollBoxRenderable,
@@ -15,10 +16,14 @@ import {
   t,
   type TextChunk,
   TextRenderable,
+  underline,
 } from "@opentui/core"
 import { mkdirSync, unlinkSync } from "node:fs"
+import { resolve } from "node:path"
 import { stdin, stdout } from "node:process"
+import { pathToFileURL } from "node:url"
 import { Context, Effect, Layer, Queue, Stream } from "effect"
+import { DiffRenderCache, type RenderedDiff } from "./diff-renderer"
 import * as Keys from "./keys"
 import * as Palette from "./palette"
 import * as ViewState from "./view-state"
@@ -29,17 +34,27 @@ export interface ExitSummary {
   readonly title: string
 }
 
+export interface OpenFileInput {
+  readonly workspace_path: string
+  readonly path: string
+  readonly range?: ViewState.Card["range"]
+}
+
 export interface Adapter {
   readonly render: (state: ViewState.ViewState) => Effect.Effect<void>
   readonly keys: Stream.Stream<Keys.Key>
   readonly actions: Stream.Stream<Action>
   readonly resizes: Stream.Stream<void>
   readonly setExit: (summary: ExitSummary) => Effect.Effect<void>
+  readonly openFile: (input: OpenFileInput) => Effect.Effect<void, Error>
   readonly editExternally: (text: string) => Effect.Effect<string>
   readonly pasteImage: (workspacePath: string) => Effect.Effect<string | undefined>
 }
 
-export type Action = { readonly _tag: "ToggleCard"; readonly card_id: string } | { readonly _tag: "ToggleToolGroup" }
+export type Action =
+  | { readonly _tag: "ToggleCard"; readonly card_id: string }
+  | { readonly _tag: "ToggleToolGroup" }
+  | { readonly _tag: "OpenFile"; readonly path: string; readonly range?: ViewState.Card["range"] }
 
 export class Service extends Context.Service<Service, Adapter>()("@rika/tui/Renderer") {}
 
@@ -47,6 +62,7 @@ export interface MemoryRenderer {
   readonly rendered: Array<ViewState.ViewState>
   readonly keys?: ReadonlyArray<Keys.Key>
   readonly actions?: ReadonlyArray<Action>
+  readonly opened?: Array<OpenFileInput>
 }
 
 export const memoryLayer = (memory: MemoryRenderer) =>
@@ -58,6 +74,7 @@ export const memoryLayer = (memory: MemoryRenderer) =>
       actions: Stream.fromIterable(memory.actions ?? []),
       resizes: Stream.empty,
       setExit: () => Effect.void,
+      openFile: (input) => Effect.sync(() => memory.opened?.push(input)),
       editExternally: (text: string) => Effect.succeed(text),
       pasteImage: () => Effect.succeed(undefined),
     }),
@@ -70,13 +87,16 @@ const color = {
   border: "#30363d",
   teal: "#2dd4bf",
   orange: "#d2a25c",
-  green: "#3fb950",
-  red: "#f85149",
+  green: "#98c379",
+  red: "#e06c75",
   yellow: "#d29922",
   accent: "#58a6ff",
   panel: "#0a0a0a",
   modalPanel: "#121212",
 } as const
+
+const standaloneCardBodyIndent = 3
+const groupedCardBodyIndent = 4
 
 const cutoutBackground = (renderer: CliRenderer): RGBA => {
   const background: unknown = Reflect.get(renderer, "backgroundColor")
@@ -109,16 +129,20 @@ export const layer = Layer.effect(
     )
 
     const actions = yield* Queue.unbounded<Action>()
-    const surface = new Surface(renderer, actions)
+    const diffRenderer = new DiffRenderCache()
+    const surface = new Surface(renderer, actions, diffRenderer)
     yield* Effect.sync(() => renderer.start())
 
     return Service.of({
       render: (state: ViewState.ViewState) =>
-        Effect.sync(() => {
-          try {
-            surface.update(state)
-            renderer.requestRender()
-          } catch {}
+        Effect.gen(function* () {
+          yield* prepareVisibleDiffs(state, diffRenderer)
+          yield* Effect.sync(() => {
+            try {
+              surface.update(state)
+              renderer.requestRender()
+            } catch {}
+          })
         }),
       keys: keyStream(renderer),
       actions: Stream.fromQueue(actions),
@@ -126,6 +150,20 @@ export const layer = Layer.effect(
       setExit: (summary: ExitSummary) =>
         Effect.sync(() => {
           exitSummary = renderExitSummary(summary)
+        }),
+      openFile: (input: OpenFileInput) =>
+        Effect.tryPromise({
+          try: async () => {
+            const absolutePath = resolve(input.workspace_path, input.path)
+            const launched = Bun.spawn([...defaultOpenCommand(absolutePath)], {
+              stdin: "ignore",
+              stdout: "ignore",
+              stderr: "ignore",
+            })
+            const exitCode = await launched.exited
+            if (exitCode !== 0) throw new Error(`open exited ${exitCode}`)
+          },
+          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
         }),
       editExternally: (text: string) =>
         Effect.tryPromise(async () => {
@@ -204,6 +242,22 @@ const resizeStream = (renderer: CliRenderer): Stream.Stream<void> =>
     }),
   )
 
+const prepareVisibleDiffs = (state: ViewState.ViewState, diffRenderer: DiffRenderCache): Effect.Effect<void> =>
+  Effect.forEach(expandedDiffs(state), (diff) => diffRenderer.ensure(diff.file_diff), {
+    concurrency: 1,
+    discard: true,
+  })
+
+const expandedDiffs = (
+  state: ViewState.ViewState,
+): ReadonlyArray<Extract<ViewState.CardContent, { kind: "pierre-diff" }>> =>
+  state.cards
+    .filter((card) => !ViewState.isCardCollapsed(state, card))
+    .map((card) => card.content)
+    .filter(
+      (content): content is Extract<ViewState.CardContent, { kind: "pierre-diff" }> => content?.kind === "pierre-diff",
+    )
+
 export class Surface {
   private readonly transcript: ScrollBoxRenderable
   private readonly entriesBox: BoxRenderable
@@ -227,6 +281,7 @@ export class Surface {
   constructor(
     private readonly renderer: CliRenderer,
     private readonly actions?: Queue.Enqueue<Action>,
+    private readonly diffRenderer = new DiffRenderCache(),
   ) {
     const root = renderer.root
 
@@ -239,6 +294,7 @@ export class Surface {
       paddingTop: 1,
       viewportCulling: true,
       scrollbarOptions: { showArrows: false },
+      onMouseMove: () => renderer.setMousePointer("default"),
     })
     this.entriesBox = new BoxRenderable(renderer, { flexDirection: "column", flexShrink: 0 })
     this.thinkingText = new TextRenderable(renderer, { content: "", marginTop: 1, visible: false })
@@ -491,18 +547,24 @@ export class Surface {
     const expandable = ViewState.isCardExpandable(card)
     const focused = ViewState.focusedCard(state)?.id === card.id
     const frame = ViewState.spinnerFrames[state.spinner_index % ViewState.spinnerFrames.length] ?? "⠋"
+    const openFile = openFileHandler(card, (action) => this.emitAction(action))
     this.entriesBox.add(
-      new TextRenderable(this.renderer, {
-        content: cardHeader(card, collapsed, expandable, focused, frame),
+      cardHeaderRow(this.renderer, {
+        card,
+        collapsed,
+        expandable,
+        focused,
+        frame,
+        workspacePath: state.workspace_path,
         marginTop: 1,
-        ...(expandable ? { onMouseDown: this.emitAction({ _tag: "ToggleCard", card_id: card.id }) } : {}),
+        ...(expandable ? { onToggle: this.emitAction({ _tag: "ToggleCard", card_id: card.id }) } : {}),
+        ...(openFile === undefined ? {} : { onOpenFile: openFile }),
       }),
     )
-    if (!collapsed && card.body !== undefined && card.body.length > 0) {
+    if (!collapsed && card.content !== undefined && ViewState.isCardExpandable(card)) {
       this.entriesBox.add(
         new TextRenderable(this.renderer, {
-          content: t`${fg(color.dim)(card.body)}`,
-          paddingLeft: 2,
+          content: this.cardBody(card, standaloneCardBodyIndent),
         }),
       )
     }
@@ -516,7 +578,7 @@ export class Surface {
     const expanded = state.tool_group_expanded || state.details_expanded
     this.entriesBox.add(
       new TextRenderable(this.renderer, {
-        content: t`${icon} ${fg(color.dim)(toolGroupSummary(cards))} ${dim(expanded ? "▾" : "▸")}`,
+        content: t`${icon} ${fg(color.text)(toolGroupSummary(cards))} ${dim(expanded ? "▾" : "▸")}`,
         marginTop: 1,
         onMouseDown: this.emitAction({ _tag: "ToggleToolGroup" }),
       }),
@@ -525,18 +587,24 @@ export class Surface {
       for (const card of cards) {
         const collapsed = ViewState.isCardCollapsed(state, card)
         const expandable = ViewState.isCardExpandable(card)
+        const openFile = openFileHandler(card, (action) => this.emitAction(action))
         this.entriesBox.add(
-          new TextRenderable(this.renderer, {
-            content: t`${statusIcon(card, frame)} ${fg(color.dim)(card.title)}${card.subtitle.length > 0 ? fg(color.faint)(` ${card.subtitle}`) : fg(color.faint)("")}${expandable ? dim(` ${collapsed ? "▸" : "▾"}`) : fg(color.faint)("")}`,
+          cardHeaderRow(this.renderer, {
+            card,
+            collapsed,
+            expandable,
+            focused: false,
+            frame,
+            workspacePath: state.workspace_path,
             paddingLeft: 2,
-            ...(expandable ? { onMouseDown: this.emitAction({ _tag: "ToggleCard", card_id: card.id }) } : {}),
+            ...(expandable ? { onToggle: this.emitAction({ _tag: "ToggleCard", card_id: card.id }) } : {}),
+            ...(openFile === undefined ? {} : { onOpenFile: openFile }),
           }),
         )
-        if (!collapsed && card.body !== undefined && card.body.length > 0) {
+        if (!collapsed && card.content !== undefined && ViewState.isCardExpandable(card)) {
           this.entriesBox.add(
             new TextRenderable(this.renderer, {
-              content: t`${fg(color.dim)(card.body)}`,
-              paddingLeft: 4,
+              content: this.cardBody(card, groupedCardBodyIndent),
             }),
           )
         }
@@ -544,7 +612,14 @@ export class Surface {
     }
   }
 
-  private emitAction(action: Action): (event: { stopPropagation: () => void; preventDefault: () => void }) => void {
+  private cardBody(card: ViewState.Card, indent: number): StyledText {
+    const content = card.content
+    if (content === undefined) return t``
+    if (content.kind === "text") return indentedText(content.text, indent, color.dim)
+    return diffBody(this.diffRenderer.render(content.file_diff), indent)
+  }
+
+  private emitAction(action: Action): MouseHandler {
     return (event) => {
       event.stopPropagation()
       event.preventDefault()
@@ -674,18 +749,211 @@ const windowList = <T>(
   return { rows: items.slice(start, start + visible), start }
 }
 
-const cardHeader = (
-  card: ViewState.Card,
-  collapsed: boolean,
-  expandable: boolean,
-  focused: boolean,
-  frame: string,
-): StyledText => {
+type MouseHandler = (event: {
+  readonly x: number
+  readonly y: number
+  readonly stopPropagation: () => void
+  readonly preventDefault: () => void
+}) => void
+
+const openFileHandler = (card: ViewState.Card, emit: (action: Action) => MouseHandler): MouseHandler | undefined =>
+  card.path === undefined
+    ? undefined
+    : emit({ _tag: "OpenFile", path: card.path, ...(card.range === undefined ? {} : { range: card.range }) })
+
+interface HeaderRowInput {
+  readonly card: ViewState.Card
+  readonly collapsed: boolean
+  readonly expandable: boolean
+  readonly focused: boolean
+  readonly frame: string
+  readonly workspacePath: string
+  readonly marginTop?: number
+  readonly paddingLeft?: number
+  readonly onToggle?: MouseHandler
+  readonly onOpenFile?: MouseHandler
+}
+
+interface HeaderSegment {
+  readonly content: StyledText
+  readonly onMouseDown?: MouseHandler
+  readonly onMouseOver?: MouseHandler
+  readonly onMouseOut?: MouseHandler
+  readonly pointerTarget?: boolean
+}
+
+const cardHeaderRow = (renderer: CliRenderer, input: HeaderRowInput): BoxRenderable => {
+  const segments = cardHeaderSegments(renderer, input)
+  const pointerTargets: Array<TextRenderable> = []
+  const hasPointerTargets = segments.some((segment) => segment.pointerTarget === true)
+  const row = new BoxRenderable(renderer, {
+    flexDirection: "row",
+    flexShrink: 0,
+    ...(input.marginTop === undefined ? {} : { marginTop: input.marginTop }),
+    ...(input.paddingLeft === undefined ? {} : { paddingLeft: input.paddingLeft }),
+    ...(input.onToggle === undefined ? {} : { onMouseDown: input.onToggle }),
+    ...(hasPointerTargets
+      ? {
+          onMouseMove: pointerCursorForTargets(renderer, pointerTargets),
+          onMouseOver: pointerCursorForTargets(renderer, pointerTargets),
+        }
+      : {}),
+  })
+  for (const segment of segments) {
+    const text = new TextRenderable(renderer, {
+      content: segment.content,
+      flexShrink: 0,
+      ...(segment.onMouseDown === undefined ? {} : { onMouseDown: segment.onMouseDown }),
+      ...(segment.onMouseOver === undefined ? {} : { onMouseOver: segment.onMouseOver }),
+      ...(segment.onMouseOut === undefined ? {} : { onMouseOut: segment.onMouseOut }),
+    })
+    if (segment.pointerTarget === true) pointerTargets.push(text)
+    row.add(text)
+  }
+  return row
+}
+
+const cardHeaderSegments = (renderer: CliRenderer, input: HeaderRowInput): ReadonlyArray<HeaderSegment> => {
+  const { card, collapsed, expandable, focused, frame } = input
   const arrow = expandable ? ` ${collapsed ? "▸" : "▾"}` : ""
   const icon = statusIcon(card, frame)
   const meta = card.subtitle.length === 0 ? "" : card.kind === "tool" ? ` ${card.subtitle}` : ` · ${card.subtitle}`
-  const titleColor = focused ? color.accent : color.dim
-  return t`${icon} ${fg(titleColor)(card.title)}${fg(color.faint)(meta)}${dim(arrow)}`
+  const titleColor = focused ? color.accent : color.text
+  return [
+    textSegment(icon),
+    textSegment(fg(color.text)(" ")),
+    ...titleSegments(renderer, input, titleColor),
+    textSegment(fg(color.faint)(meta)),
+    textSegment(dim(arrow)),
+  ]
+}
+
+const textSegment = (
+  chunk: TextChunk,
+  onMouseDown?: MouseHandler,
+  onMouseOver?: MouseHandler,
+  onMouseOut?: MouseHandler,
+  pointerTarget = false,
+): HeaderSegment => ({
+  content: new StyledText([chunk]),
+  ...(onMouseDown === undefined ? {} : { onMouseDown }),
+  ...(onMouseOver === undefined ? {} : { onMouseOver }),
+  ...(onMouseOut === undefined ? {} : { onMouseOut }),
+  ...(pointerTarget ? { pointerTarget } : {}),
+})
+
+const titleSegments = (
+  renderer: CliRenderer,
+  input: HeaderRowInput,
+  titleColor: string,
+): ReadonlyArray<HeaderSegment> => {
+  const match = /^(.*?)( \+\d+)?( -\d+)?$/.exec(input.card.title)
+  const base = match?.[1]
+  const additions = match?.[2]
+  const deletions = match?.[3]
+  if (match === null || (additions === undefined && deletions === undefined) || base === undefined) {
+    return baseTitleSegments(renderer, input, input.card.title, titleColor)
+  }
+  return [
+    ...baseTitleSegments(renderer, input, base, titleColor),
+    ...(additions === undefined ? [] : [textSegment(fg(color.green)(additions))]),
+    ...(deletions === undefined ? [] : [textSegment(fg(color.red)(deletions))]),
+  ]
+}
+
+const baseTitleSegments = (
+  renderer: CliRenderer,
+  input: HeaderRowInput,
+  title: string,
+  titleColor: string,
+): ReadonlyArray<HeaderSegment> => {
+  const path = input.card.path
+  if (path !== undefined) {
+    const index = title.indexOf(path)
+    if (index >= 0) {
+      return [
+        ...plainTitleSegment(title.slice(0, index), titleColor),
+        textSegment(
+          link(fileHref(input.workspacePath, path))(underline(fg(color.orange)(path))),
+          input.onOpenFile,
+          pointerCursor(renderer),
+          undefined,
+          true,
+        ),
+        ...plainTitleSegment(title.slice(index + path.length), titleColor),
+      ]
+    }
+  }
+  const match = /^(Edited|Wrote|Write|Read) (.+)$/.exec(title)
+  if (match === null) return plainTitleSegment(title, titleColor)
+  return [...plainTitleSegment(`${match[1]} `, titleColor), textSegment(fg(color.orange)(match[2] ?? ""))]
+}
+
+const plainTitleSegment = (text: string, titleColor: string): ReadonlyArray<HeaderSegment> =>
+  text.length === 0 ? [] : [textSegment(fg(titleColor)(text))]
+
+const fileHref = (workspacePath: string, path: string): string => pathToFileURL(resolve(workspacePath, path)).href
+
+const pointerCursor =
+  (renderer: CliRenderer): MouseHandler =>
+  (event) => {
+    renderer.setMousePointer("pointer")
+    event.stopPropagation()
+  }
+
+const pointerCursorForTargets =
+  (renderer: CliRenderer, targets: ReadonlyArray<TextRenderable>): MouseHandler =>
+  (event) => {
+    const pointer = targets.some((target) => containsPoint(target, event.x, event.y))
+    renderer.setMousePointer(pointer ? "pointer" : "default")
+    if (pointer) event.stopPropagation()
+  }
+
+const containsPoint = (target: TextRenderable, x: number, y: number): boolean =>
+  x >= target.screenX && x < target.screenX + target.width && y >= target.screenY && y < target.screenY + target.height
+
+const defaultOpenCommand = (absolutePath: string): ReadonlyArray<string> => {
+  if (process.platform === "darwin") return ["open", absolutePath]
+  if (process.platform === "win32") return ["cmd", "/c", "start", "", absolutePath]
+  return ["xdg-open", absolutePath]
+}
+
+const indentedText = (text: string, indent: number, textColor: string): StyledText => {
+  const chunks: TextChunk[] = []
+  text.split("\n").forEach((line, index) => {
+    if (index > 0) chunks.push(fg(color.text)("\n"))
+    chunks.push(fg(color.text)(" ".repeat(indent)), fg(textColor)(line))
+  })
+  return new StyledText(chunks)
+}
+
+const diffBody = (diff: RenderedDiff, indent: number): StyledText => {
+  const chunks: TextChunk[] = []
+  const width = diff.rows.reduce((max, row) => (row.kind === "line" ? Math.max(max, String(row.line).length) : max), 1)
+  diff.rows.forEach((line, index) => {
+    if (index > 0) chunks.push(fg(color.text)("\n"))
+    chunks.push(fg(color.text)(" ".repeat(indent)))
+    chunks.push(...diffLineChunks(line, width))
+  })
+  return new StyledText(chunks)
+}
+
+const diffLineChunks = (line: RenderedDiff["rows"][number], width: number): Array<TextChunk> => {
+  if (line.kind === "separator") return [fg(color.faint)("...")]
+  const tokenColor = line.marker === "+" ? color.green : line.marker === "-" ? color.red : undefined
+  return [
+    fg(color.faint)(String(line.line).padStart(width)),
+    fg(color.text)(" "),
+    diffMarker(line.marker),
+    fg(color.text)(" "),
+    ...line.tokens.map((token) => fg(tokenColor ?? token.color ?? color.text)(token.text)),
+  ]
+}
+
+const diffMarker = (marker: " " | "+" | "-"): TextChunk => {
+  if (marker === "+") return fg(color.green)("+")
+  if (marker === "-") return fg(color.red)("-")
+  return fg(color.faint)(" ")
 }
 
 const paletteRow = (
@@ -1113,7 +1381,15 @@ const transcriptSignature = (state: ViewState.ViewState): string => {
     .map((entry) =>
       entry.kind === "message"
         ? `m:${entry.message.id}:${entry.message.text.length}`
-        : `c:${entry.card.id}:${entry.card.status}:${ViewState.isCardCollapsed(state, entry.card) ? "c" : "e"}`,
+        : [
+            "c",
+            entry.card.id,
+            entry.card.status,
+            ViewState.isCardCollapsed(state, entry.card) ? "c" : "e",
+            entry.card.title,
+            entry.card.path ?? "",
+            entry.card.range === undefined ? "" : `${entry.card.range.start_line}-${entry.card.range.end_line}`,
+          ].join(":"),
     )
     .join("|")
   const running = state.entries.some((entry) => entry.kind === "card" && entry.card.status === "running")

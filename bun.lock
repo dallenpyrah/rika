@@ -213,6 +213,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@opentui/core": "0.4.2",
+        "@pierre/diffs": "1.2.11",
         "@rika/agent": "workspace:*",
         "@rika/core": "workspace:*",
         "@rika/persistence": "workspace:*",

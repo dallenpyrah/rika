@@ -225,8 +225,8 @@ describe("ViewState tool display", () => {
     })
 
     const card = state.cards.find((candidate) => candidate.id === "read_agents")
-    expect(card).toMatchObject({ title: "Read AGENTS.md", status: "success", expandable: false })
-    expect(card?.body).toBeUndefined()
+    expect(card).toMatchObject({ title: "Read AGENTS.md", status: "success", expandable: false, path: "AGENTS.md" })
+    expect(card?.content).toBeUndefined()
     expect(ViewState.isCardExpandable(card!)).toBe(false)
 
     const toggled = ViewState.toggleCard(state, "read_agents")
@@ -251,12 +251,14 @@ describe("ViewState tool display", () => {
     const search = state.cards.find((candidate) => candidate.id === "search_structured_output")
     expect(search).toMatchObject({ title: "Search structured output", status: "success" })
     expect(ViewState.isCardExpandable(search!)).toBe(true)
-    expect(search?.body).toContain("packages/llm/src/openai.ts")
+    expect(search?.content).toMatchObject({ kind: "text" })
+    expect(search?.content?.kind === "text" ? search.content.text : "").toContain("packages/llm/src/openai.ts")
 
     const command = state.cards.find((candidate) => candidate.id === "run_tests")
     expect(command).toMatchObject({ title: "$ bun test packages/tui", status: "success" })
     expect(ViewState.isCardExpandable(command!)).toBe(true)
-    expect(command?.body).toContain("56 pass")
+    expect(command?.content).toMatchObject({ kind: "text" })
+    expect(command?.content?.kind === "text" ? command.content.text : "").toContain("56 pass")
   })
 
   test("edit rows own their Pierre diff expansion", () => {
@@ -276,11 +278,36 @@ describe("ViewState tool display", () => {
 
     const card = state.cards.find((candidate) => candidate.id === "edit_file")
     expect(state.cards.some((candidate) => candidate.kind === "diff")).toBe(false)
-    expect(card).toMatchObject({ title: "Edited packages/app.ts +1 -1", status: "success" })
+    expect(card).toMatchObject({ title: "Edited packages/app.ts +1 -1", status: "success", path: "packages/app.ts" })
     expect(ViewState.isCardExpandable(card!)).toBe(true)
-    expect(card?.body).toContain("diff -- packages/app.ts")
-    expect(card?.body).toContain("-console.log(value)")
-    expect(card?.body).toContain("+console.info(value)")
+    expect(card?.content).toMatchObject({ kind: "pierre-diff", file_diff: { name: "packages/app.ts" } })
+  })
+
+  test("tool paths inside the workspace are shown as relative navigation targets", () => {
+    const state = ViewState.initial({
+      thread_id: threadId,
+      workspace_path: "/workspace/rika",
+      mode: "smart",
+      events: [
+        toolRequested(1, "read_absolute", "read", {
+          path: "/workspace/rika/packages/tui/src/adapter.ts",
+          start_line: 7,
+          end_line: 9,
+        }),
+        toolCompleted(2, "read_absolute", "read", {
+          path: "/workspace/rika/packages/tui/src/adapter.ts",
+          start_line: 7,
+          end_line: 9,
+          content: "hidden",
+        }),
+      ],
+    })
+
+    expect(state.cards.find((candidate) => candidate.id === "read_absolute")).toMatchObject({
+      title: "Read packages/tui/src/adapter.ts L7-9",
+      path: "packages/tui/src/adapter.ts",
+      range: { start_line: 7, end_line: 9 },
+    })
   })
 })
 

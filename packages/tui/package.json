@@ -20,6 +20,7 @@
     "@rika/sdk": "workspace:*",
     "@rika/schema": "workspace:*",
     "@opentui/core": "0.4.2",
+    "@pierre/diffs": "1.2.11",
     "effect": "catalog:"
   },
   "devDependencies": {

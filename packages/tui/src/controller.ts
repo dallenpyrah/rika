@@ -431,6 +431,22 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
             case "ToggleToolGroup":
               state = ViewState.toggleToolGroup(state)
               break
+            case "OpenFile": {
+              yield* deps.renderer
+                .openFile({
+                  workspace_path: workspacePath,
+                  path: action.path,
+                  ...(action.range === undefined ? {} : { range: action.range }),
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.sync(() => {
+                      state = ViewState.withNotice(state, `File open failed: ${errorMessage(Cause.squash(cause))}`)
+                    }),
+                  ),
+                )
+              break
+            }
           }
           yield* render()
         })

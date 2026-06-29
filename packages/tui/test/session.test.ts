@@ -140,7 +140,6 @@ describe("TUI session", () => {
       "/ast-grep outline status",
       "/debug page logs",
       "/debug copy command",
-      "/ide connect",
       "/mcp authenticate",
       "/mcp info",
       "/exit",
@@ -153,7 +152,6 @@ describe("TUI session", () => {
     expect(frames).toContain("ast-grep outline status: ready")
     expect(frames).toContain("Debug page logs are empty.")
     expect(frames).toContain("Debug command copied.")
-    expect(frames).toContain("IDE connection requested.")
     expect(frames).toContain("MCP authentication requested.")
     expect(frames).toContain("No MCP servers connected.")
     expect(frames).not.toContain("Unknown command /welcome")

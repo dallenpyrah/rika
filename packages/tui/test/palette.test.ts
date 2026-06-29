@@ -13,6 +13,11 @@ describe("palette.filter", () => {
     expect(Palette.filter("switch threads").map((command) => command.id)).toEqual(["thread-switch"])
   })
 
+  test("does not advertise IDE connection commands", () => {
+    expect(Palette.commands.some((command) => command.command.startsWith("/ide"))).toBe(false)
+    expect(Palette.filter("connect IDE")).toEqual([])
+  })
+
   test("at clamps the selected index into range", () => {
     expect(Palette.at("/mode", 0)?.id).toBe("mode-rush")
     expect(Palette.at("/mode", 99)?.id).toBe("mode-deep")

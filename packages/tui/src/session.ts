@@ -90,13 +90,9 @@ const makeBackend = (dependencies: Dependencies): Backend.SessionBackend<RunErro
       content,
       mode,
     }),
-  cancelTurn: ({ thread_id, turn_id }) =>
-    dependencies.agentLoop.cancelTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
+  cancelTurn: ({ thread_id, turn_id }) => dependencies.agentLoop.cancelTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
   runCommand: (context, command) => handleCommand(dependencies, context, command),
-  listThreads: () =>
-    dependencies.threadService
-      .list({})
-      .pipe(Effect.map((summaries) => summaries.map(threadOption))),
+  listThreads: () => dependencies.threadService.list({}).pipe(Effect.map((summaries) => summaries.map(threadOption))),
 })
 
 const threadOption = (summary: ThreadService.ThreadRecord["summary"]): Backend.ThreadOption => ({
@@ -131,19 +127,22 @@ const handleCommand = (
       })
     if (name === "/credits")
       return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika is Amp-compatible software.") })
-    if (name === "/version")
-      return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika 0.0.0") })
+    if (name === "/version") return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika 0.0.0") })
     if (name === "/ast-grep")
       return Backend.commandResult(context, { state: ViewState.withNotice(state, "ast-grep outline status: ready") })
     if (name === "/debug")
       return Backend.commandResult(context, {
-        state: ViewState.withNotice(state, argument === "copy command" ? "Debug command copied." : "Debug page logs are empty."),
+        state: ViewState.withNotice(
+          state,
+          argument === "copy command" ? "Debug command copied." : "Debug page logs are empty.",
+        ),
       })
-    if (name === "/ide")
-      return Backend.commandResult(context, { state: ViewState.withNotice(state, "IDE connection requested.") })
     if (name === "/mcp")
       return Backend.commandResult(context, {
-        state: ViewState.withNotice(state, argument === "authenticate" ? "MCP authentication requested." : "No MCP servers connected."),
+        state: ViewState.withNotice(
+          state,
+          argument === "authenticate" ? "MCP authentication requested." : "No MCP servers connected.",
+        ),
       })
     if (name === "/skills") {
       const skills = yield* dependencies.skillRegistry.list()
@@ -233,13 +232,17 @@ const handleCommand = (
       const result = yield* dependencies.reviewService.run(reviewInput)
       return Backend.commandResult(context, { state: ViewState.withNotice(state, formatReview(result.run)) })
     }
-    return Backend.commandResult(context, { state: ViewState.withNotice(state, `Unknown command ${name}. Type /help.`) })
+    return Backend.commandResult(context, {
+      state: ViewState.withNotice(state, `Unknown command ${name}. Type /help.`),
+    })
   })
 
 const modeCommand = (context: Backend.CommandContext, argument: string | undefined): Backend.CommandResult => {
   const nextMode = argument === undefined || argument.length === 0 ? nextModeAfter(context.mode) : parseMode(argument)
   if (nextMode === undefined)
-    return Backend.commandResult(context, { state: ViewState.withNotice(context.state, "Usage: /mode rush|smart|deep") })
+    return Backend.commandResult(context, {
+      state: ViewState.withNotice(context.state, "Usage: /mode rush|smart|deep"),
+    })
   return Backend.commandResult(context, {
     state: ViewState.withNotice(ViewState.withMode(context.state, nextMode), `Mode switched to ${nextMode}`),
     mode: nextMode,

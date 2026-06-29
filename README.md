@@ -56,3 +56,38 @@ Persistence migrations live in `packages/persistence/drizzle` and are managed th
 bun run db:generate
 bun run db:migrate
 ```
+
+
+## Random Notes
+
+- Rika should feel fast, durable, and boring in the best way.
+- Tools are most useful when they leave a clear trail for the next agent.
+- If something can be rebuilt from the event log, prefer rebuilding it over making it canonical.
+- Keep the terminal loop calm: fast feedback, readable state, and no surprise ceremony.
+- Prefer small reversible changes over heroic rewrites.
+- Good defaults should make the common path feel obvious without hiding the escape hatch.
+- A future agent should be able to understand what happened from the durable trail, not from folklore.
+- The best debugging session ends with one fewer mystery and one better name.
+- Prefer boring persistence, sharp interfaces, and cheerful local development.
+- When in doubt, make the next useful action obvious.
+- Rika should be easy to restart, easy to inspect, and hard to confuse.
+- Cache the obvious, log the important, and keep the weird parts searchable.
+- A calm agent explains its next move before it makes the repo louder.
+- Local development should feel like opening a notebook, not launching a spaceship.
+- Durable threads are only useful if humans can skim them later.
+- Every escape hatch should have a label, a trail, and a way back.
+- Tiny paper cuts deserve names before they become architecture.
+- Prefer a visible queue over a mysterious spinner.
+- The happiest path should still leave breadcrumbs for the sad path.
+- Make retries patient, cancellation cheap, and recovery unsurprising.
+- A good local tool should work before the coffee cools.
+- Keep logs crisp enough for machines and friendly enough for tired humans.
+- Prefer one trustworthy source of truth over three clever caches.
+- A tiny green check should mean something real happened.
+- Make the local path delightful before making the remote path dramatic.
+- The agent should carry a flashlight, not a fog machine.
+- Random note: invisible llamas prefer deterministic build logs.
+- Add a tiny umbrella for every cache miss.
+- The moon can be a feature flag if the rollback path is obvious.
+- Sprinkle confetti only after the tests have stopped blinking.
+- A rubber duck with a trace ID is still observability.

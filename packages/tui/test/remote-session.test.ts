@@ -10,7 +10,9 @@ const workspaceId = Ids.WorkspaceId.make(workspaceRoot)
 const line = (text: string): ReadonlyArray<Keys.Key> => [...Keys.fromString(text), Keys.enter]
 
 const text = (rendered: ReadonlyArray<ViewState.ViewState>): string =>
-  rendered.map((state) => [state.notice ?? "", state.messages.map((message) => message.text).join("\n")].join("\n")).join("\n")
+  rendered
+    .map((state) => [state.notice ?? "", state.messages.map((message) => message.text).join("\n")].join("\n"))
+    .join("\n")
 
 describe("TUI remote session", () => {
   test("runs as a thin client over the shared backend SDK", async () => {
@@ -29,7 +31,6 @@ describe("TUI remote session", () => {
       "/ast-grep outline status",
       "/debug page logs",
       "/debug copy command",
-      "/ide connect",
       "/mcp authenticate",
       "/mcp info",
       "/exit",
@@ -56,7 +57,6 @@ describe("TUI remote session", () => {
     expect(frames).toContain("ast-grep outline status: ready")
     expect(frames).toContain("Debug page logs are empty.")
     expect(frames).toContain("Debug command copied.")
-    expect(frames).toContain("IDE connection requested.")
     expect(frames).toContain("MCP authentication requested.")
     expect(frames).toContain("No MCP servers connected.")
     expect(frames).not.toContain("Unknown command /welcome")
@@ -79,6 +79,42 @@ describe("TUI remote session", () => {
     expect(exitCode).toBe(0)
     expect(frames).toContain("Relaunch requested. Start Rika again after this session exits.")
     expect(backend.turns).toEqual([])
+  })
+
+  test("file UI actions open through the renderer", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+    const opened: Array<Adapter.OpenFileInput> = []
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart" }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(
+          Adapter.memoryLayer({
+            rendered,
+            keys: line("/exit"),
+            opened,
+            actions: [
+              {
+                _tag: "OpenFile",
+                path: "packages/tui/src/adapter.ts",
+                range: { start_line: 4, end_line: 4 },
+              },
+            ],
+          }),
+        ),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(opened).toEqual([
+      {
+        workspace_path: workspaceRoot,
+        path: "packages/tui/src/adapter.ts",
+        range: { start_line: 4, end_line: 4 },
+      },
+    ])
   })
 })
 
