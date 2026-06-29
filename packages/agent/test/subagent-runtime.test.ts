@@ -7,7 +7,7 @@ import { SubagentRuntime, ToolExecutor } from "../src/index"
 
 const now = Common.TimestampMillis.make(2_000_000_000_000)
 
-const defaultToolLayer = ToolExecutor.fakeLayer(
+const defaultToolLayer = ToolExecutor.fakeReadOnlyLayer(
   {
     read: (call) => Effect.succeed({ path: pathFromInput(call.input), content: "read output" }),
   },
@@ -94,7 +94,7 @@ describe("SubagentRuntime", () => {
         return response("Read README.md and found the setup notes.\n- README.md")
       }),
     )
-    const toolLayer = ToolExecutor.fakeLayer(
+    const toolLayer = ToolExecutor.fakeReadOnlyLayer(
       {
         read: (call) =>
           Effect.sync(() => {

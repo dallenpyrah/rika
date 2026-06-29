@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer, Stream } from "effect"
+import * as AiError from "effect/unstable/ai/AiError"
 import * as LanguageModel from "effect/unstable/ai/LanguageModel"
 import { Provider } from "../src/index"
 
@@ -38,6 +39,30 @@ describe("LLM Provider", () => {
       {
         type: "response.completed",
         response: { provider: "openai", model: "model-test", content: "streamed", finish_reason: "stop" },
+      },
+    ])
+  })
+
+  test("salvages a mid-stream InvalidOutputError into one completed response", async () => {
+    const failure = AiError.make({
+      module: "LanguageModel",
+      method: "streamText",
+      reason: new AiError.InvalidOutputError({ description: "unexpected image_generation tool-call part" }),
+    })
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const provider = yield* Provider.Service
+        return yield* provider.stream(request).pipe(Stream.runCollect)
+      }).pipe(Effect.provide(Provider.fakeLayer(["partial answer"], { failStreamWith: failure }))),
+    )
+
+    expect(Array.from(result)).toEqual([
+      { type: "response.started", provider: "openai", model: "model-test" },
+      { type: "content.delta", text: "partial answer" },
+      {
+        type: "response.completed",
+        response: { provider: "openai", model: "model-test", content: "partial answer", finish_reason: "stop" },
       },
     ])
   })

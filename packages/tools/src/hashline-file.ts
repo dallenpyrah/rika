@@ -781,8 +781,19 @@ const jsonValue = (value: unknown) =>
     })
   })
 
+const aliasField = (call: Tool.Call, from: string, to: string): Tool.Call => {
+  const input = call.input as unknown
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return call
+  const record = input as Record<string, unknown>
+  if (record[from] === undefined || record[to] !== undefined) return call
+  return { ...call, input: { ...record, [to]: record[from] } as typeof call.input }
+}
+
+const withReadAliases = (call: Tool.Call): Tool.Call =>
+  aliasField(aliasField(aliasField(call, "file", "path"), "line_start", "start_line"), "line_end", "end_line")
+
 const decodeReadInput = (call: Tool.Call) => {
-  const decoded = Schema.decodeUnknownOption(ReadInput)(call.input)
+  const decoded = Schema.decodeUnknownOption(ReadInput)(withReadAliases(call).input)
   if (Option.isSome(decoded)) return Effect.succeed(decoded.value)
   return invalidToolInput(call.name)
 }

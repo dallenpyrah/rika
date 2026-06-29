@@ -62,4 +62,27 @@ describe("CLI doctor command", () => {
       "telemetry",
     ])
   })
+
+  test("warns when OpenAI provider credentials are missing", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const layer = Doctor.layerFromInput({
+      cwd: "/workspace/rika",
+      version: "test-version",
+      env: {},
+    })
+      .pipe(Layer.provideMerge(Output.memoryLayer(output)))
+      .pipe(Layer.provideMerge(LocalBackend.layerFromInput({ env: {}, cwd: "/workspace/rika" })))
+
+    const exitCode = await Effect.runPromise(Doctor.executeCommand({ type: "doctor" }).pipe(Effect.provide(layer)))
+
+    expect(exitCode).toBe(0)
+    const parsed = Schema.decodeUnknownSync(Doctor.Report)(JSON.parse(output.stdout[0] ?? "{}"))
+    const modelProvider = parsed.checks.find((check) => check.name === "model-provider")
+
+    expect(parsed.config.openai_configured).toBe(false)
+    expect(modelProvider).toMatchObject({
+      status: "warning",
+      message: "OpenAI provider credentials are not configured; live model calls will fail until configured.",
+    })
+  })
 })

@@ -92,7 +92,7 @@ export const layer = Layer.effect(
     const idGenerator = yield* IdGenerator.Service
     const time = yield* Time.Service
     const router = yield* Router.Service
-    const toolExecutor = yield* ToolExecutor.Service
+    const toolExecutor = yield* ToolExecutor.ReadOnlyService
     const dependencies: Dependencies = { idGenerator, time, router, toolExecutor }
 
     return Service.of({

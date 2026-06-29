@@ -195,6 +195,25 @@ rika ide open-file --path packages/cli/src/main.ts --start-line 1 --end-line 5
 
 ## Configuration
 
+Rika reads configuration from three sources, in precedence order:
+
+1. Process environment variables.
+2. Workspace `.env.local`.
+3. Global `~/.rika/settings.json`.
+
+Use `~/.rika/settings.json` for machine-wide defaults such as a local OpenAI-compatible proxy:
+
+```json
+{
+  "openai": {
+    "api_key": "dummy",
+    "base_url": "http://127.0.0.1:8317/v1"
+  }
+}
+```
+
+Use `.env.local` in a development checkout when that workspace needs different model settings.
+
 Common environment variables:
 
 | Variable                                                                                                        | Purpose                                                |
@@ -203,7 +222,7 @@ Common environment variables:
 | `RIKA_DATA_DIR`                                                                                                 | Local data directory. Defaults to `<workspace>/.rika`. |
 | `RIKA_DATABASE_URL`                                                                                             | Optional SQLite database URL/path override.            |
 | `RIKA_OPENAI_API_KEY` / `OPENAI_API_KEY`                                                                        | OpenAI provider credentials.                           |
-| `RIKA_OPENAI_API_URL` / `RIKA_OPENAI_BASE_URL` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` / `VIBE_OPENAI_BASE_URL` | OpenAI-compatible proxy endpoint.                      |
+| `RIKA_OPENAI_API_URL` / `RIKA_OPENAI_BASE_URL` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` / `VIBE_OPENAI_BASE_URL` | Optional OpenAI-compatible proxy endpoint.             |
 | `RIKA_BACKEND_URL` / `RIKA_BACKEND_TOKEN`                                                                       | Connect interactive TUI to an existing backend.        |
 | `RIKA_BACKEND_PORT`                                                                                             | Override deterministic shared local backend port.      |
 | `RIKA_RIVET_HOST`                                                                                               | `local` or `remote`.                                   |

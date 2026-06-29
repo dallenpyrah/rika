@@ -2,31 +2,34 @@ import { describe, expect, test } from "bun:test"
 import { Client } from "@rika/sdk"
 import { Common, Event, Ids, Message, Remote } from "@rika/schema"
 import { Effect, Stream } from "effect"
-import { RemoteSession, Renderer, Terminal } from "../src/index"
+import { Adapter, Keys, RemoteSession, Ticker, ViewState } from "../src/index"
 
 const workspaceRoot = "/workspace/rika-remote-tui-test"
 const workspaceId = Ids.WorkspaceId.make(workspaceRoot)
 
+const line = (text: string): ReadonlyArray<Keys.Key> => [...Keys.fromString(text), Keys.enter]
+
+const text = (rendered: ReadonlyArray<ViewState.ViewState>): string =>
+  rendered.map((state) => [state.notice ?? "", state.messages.map((message) => message.text).join("\n")].join("\n")).join("\n")
+
 describe("TUI remote session", () => {
   test("runs as a thin client over the shared backend SDK", async () => {
     const backend = fakeBackend()
-    const terminal: Terminal.MemoryTerminal = {
-      inputs: ["hello", "/threads", "/new", "/thread thread_remote_initial", "/archive", "/unarchive", "/exit"],
-      frames: [],
-      prompts: [],
-    }
+    const rendered: Array<ViewState.ViewState> = []
+    const keys = ["hello", "/threads", "/new", "/thread thread_remote_initial", "/archive", "/unarchive", "/exit"].flatMap(
+      line,
+    )
 
     const exitCode = await Effect.runPromise(
       RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart" }).pipe(
         Effect.provide(RemoteSession.layerFromClient(backend.client)),
-        Effect.provide(Terminal.memoryLayer(terminal)),
+        Effect.provide(Adapter.memoryLayer({ rendered, keys })),
+        Effect.provide(Ticker.memoryLayer),
       ),
     )
 
-    const frames = terminal.frames.map(Renderer.stripAnsi).join("\n")
+    const frames = text(rendered)
     expect(exitCode).toBe(0)
-    expect(terminal.prompts).toEqual(["› ", "› ", "› ", "› ", "› ", "› ", "› "])
-    expect(frames).toContain("Connected to shared Rika backend")
     expect(frames).toContain("remote response")
     expect(frames).toContain("Active threads")
     expect(frames).toContain("Started new thread")
@@ -214,12 +217,12 @@ const modelChunk = (
   threadId: Ids.ThreadId,
   turnId: Ids.TurnId,
   sequence: number,
-  text: string,
+  textValue: string,
 ): Event.ModelStreamChunk => ({
   ...base(threadId, sequence, turnId),
   turn_id: turnId,
   type: "model.stream.chunk",
-  data: { text, provider: "fake", model: "fake" },
+  data: { text: textValue, provider: "fake", model: "fake" },
 })
 
 const turnCompleted = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnCompleted => ({

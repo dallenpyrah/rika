@@ -3,6 +3,7 @@ import { Provider, Router } from "@rika/llm"
 import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, ErrorEnvelope, Event, Ide, Ids, Message, Tool } from "@rika/schema"
 import { Context, Effect, Layer, Option, Queue, Schema, Stream } from "effect"
+import * as AiError from "effect/unstable/ai/AiError"
 import * as ContextResolver from "./context-resolver"
 import * as SkillRegistry from "./skill-registry"
 import * as ToolExecutor from "./tool-executor"
@@ -86,6 +87,9 @@ interface Dependencies {
 }
 
 type Emit = (event: Event.Event) => Effect.Effect<void, RunError>
+
+const MAX_TOOL_ITERATIONS = 25
+const MAX_EMPTY_ANSWER_RETRIES = 2
 
 export const layer = Layer.effect(
   Service,
@@ -183,10 +187,7 @@ const streamTurnFromDependencies = (
   Stream.callback<Event.Event, RunError>(
     (queue) =>
       runTurnInternal(dependencies, input, (event) => Queue.offer(queue, event).pipe(Effect.asVoid)).pipe(
-        Effect.catchIf(
-          () => true,
-          (error: RunError) => Queue.fail(queue, error).pipe(Effect.asVoid),
-        ),
+        Effect.catch((error: RunError) => Queue.fail(queue, error).pipe(Effect.asVoid)),
         Effect.ensuring(Queue.end(queue).pipe(Effect.ignore)),
         Effect.forkScoped,
       ),
@@ -241,52 +242,71 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
     }
 
     const history = [...existingEvents, ...appendedEvents]
-    const messages = yield* contextMessages(dependencies, history, skillSelection)
-    const response = yield* streamModelResponse(dependencies, input, turnId, messages, append)
-    const toolRequest = parseToolRequest(response.content)
+    let messages: ReadonlyArray<Provider.Message> = yield* contextMessages(dependencies, history, skillSelection)
+    let emptyRetries = 0
 
-    if (toolRequest === undefined) {
-      yield* append(
-        yield* makeAssistantMessageAdded(dependencies, input.thread_id, turnId, response.content, sequence + 1),
-      )
-      yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1))
-      return
-    }
+    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
+      const response =
+        iteration === 0
+          ? yield* streamModelResponseWithRecovery(dependencies, input, turnId, messages, append)
+          : yield* streamModelResponse(dependencies, input, turnId, messages, append)
+      const toolRequest = parseToolRequest(response.content)
 
-    const call = yield* makeToolCall(dependencies, input.thread_id, turnId, toolRequest)
-    yield* append(yield* makeToolCallRequested(dependencies, input.thread_id, turnId, call, sequence + 1))
-    const result = yield* dependencies.toolExecutor.execute(call).pipe(
-      Effect.catchIf(
-        () => true,
-        (error: ToolExecutor.ToolExecutorError) => Effect.succeed(ToolExecutor.errorResult(call, error)),
-      ),
-    )
-    yield* append(yield* makeToolCallCompleted(dependencies, input.thread_id, turnId, result, sequence + 1))
-    if (call.name === "task" && result.status === "success") {
-      for (const summary of subagentSummaries(result.output)) {
-        yield* append(yield* makeSubagentCompleted(dependencies, input.thread_id, turnId, summary, sequence + 1))
+      if (toolRequest === undefined) {
+        if (withoutToolCalls(response.content).length === 0 && emptyRetries < MAX_EMPTY_ANSWER_RETRIES) {
+          emptyRetries += 1
+          messages = [
+            ...messages,
+            { role: "assistant" as const, content: response.content },
+            { role: "user" as const, content: "Now write your final answer to the user as plain text, without any tool call." },
+          ]
+          continue
+        }
+        yield* append(
+          yield* makeAssistantMessageAdded(dependencies, input.thread_id, turnId, response.content, sequence + 1),
+        )
+        yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1))
+        return
       }
+
+      const call = yield* makeToolCall(dependencies, input.thread_id, turnId, toolRequest)
+      yield* append(yield* makeToolCallRequested(dependencies, input.thread_id, turnId, call, sequence + 1))
+      const result = yield* dependencies.toolExecutor.execute(call).pipe(
+        Effect.catch((error: ToolExecutor.ToolExecutorError) => Effect.succeed(ToolExecutor.errorResult(call, error))),
+      )
+      yield* append(yield* makeToolCallCompleted(dependencies, input.thread_id, turnId, result, sequence + 1))
+      if (call.name === "task" && result.status === "success") {
+        for (const summary of subagentSummaries(result.output)) {
+          yield* append(yield* makeSubagentCompleted(dependencies, input.thread_id, turnId, summary, sequence + 1))
+        }
+      }
+
+      messages = [
+        ...messages,
+        { role: "assistant" as const, content: response.content },
+        { role: "tool" as const, content: JSON.stringify(result) },
+      ]
     }
 
-    const followUpMessages = [
-      ...messages,
-      { role: "assistant" as const, content: response.content },
-      { role: "tool" as const, content: JSON.stringify(result) },
-    ]
-    const finalResponse = yield* streamModelResponse(dependencies, input, turnId, followUpMessages, append)
     yield* append(
-      yield* makeAssistantMessageAdded(dependencies, input.thread_id, turnId, finalResponse.content, sequence + 1),
+      yield* makeAssistantMessageAdded(
+        dependencies,
+        input.thread_id,
+        turnId,
+        `Reached the tool-iteration limit of ${MAX_TOOL_ITERATIONS} before a final answer was produced.`,
+        sequence + 1,
+      ),
     )
     yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1))
   }).pipe(
-    Effect.catchIf(
-      () => true,
-      (error: RunError) =>
-        recordFailure(dependencies, input, error, emit).pipe(
-          Effect.flatMap(() =>
-            Effect.fail(error instanceof AgentLoopError ? error : wrapRunError(input, error, "runTurn")),
-          ),
+    Effect.catch((error: RunError) =>
+      recordFailure(dependencies, input, error, emit).pipe(
+        Effect.flatMap(() =>
+          isTurnLevelError(error)
+            ? Effect.void
+            : Effect.fail(error instanceof AgentLoopError ? error : wrapRunError(input, error, "runTurn")),
         ),
+      ),
     ),
   )
 
@@ -307,12 +327,7 @@ const recordFailure = (dependencies: Dependencies, input: RunTurnInput, error: R
     )
     const appended = yield* appendAndProject(dependencies, failed)
     yield* emit(appended)
-  }).pipe(
-    Effect.catchIf(
-      () => true,
-      () => Effect.void,
-    ),
-  )
+  }).pipe(Effect.catch(() => Effect.void))
 
 const streamModelResponse = (
   dependencies: Dependencies,
@@ -339,6 +354,15 @@ const streamModelResponse = (
               Effect.flatMap(append),
               Effect.asVoid,
             )
+          case "reasoning.delta":
+            return makeModelReasoningChunk(
+              dependencies,
+              input.thread_id,
+              turnId,
+              streamEvent.text,
+              provider,
+              model,
+            ).pipe(Effect.flatMap(append), Effect.asVoid)
           case "response.completed":
             completed = streamEvent.response
             return Effect.void
@@ -357,6 +381,21 @@ const streamModelResponse = (
 
     return completed
   })
+
+const streamModelResponseWithRecovery = (
+  dependencies: Dependencies,
+  input: RunTurnInput,
+  turnId: Ids.TurnId,
+  messages: ReadonlyArray<Provider.Message>,
+  append: (event: Event.Event) => Effect.Effect<Event.Event, RunError>,
+) =>
+  streamModelResponse(dependencies, input, turnId, messages, append).pipe(
+    Effect.catch((error: RunError) =>
+      isModelError(error)
+        ? streamModelResponse(dependencies, input, turnId, [...messages, modelErrorMessage(error)], append)
+        : Effect.fail(error),
+    ),
+  )
 
 const contextMessages = (
   dependencies: Dependencies,
@@ -486,8 +525,15 @@ interface ToolRequest {
 }
 
 const parseToolRequest = (content: string): ToolRequest | undefined => {
-  const parsed = parseJsonObject(content)
-  if (parsed === undefined) return undefined
+  const leading = extractLeadingObject(content)
+  if (leading === undefined) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(leading)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(parsed)) return undefined
   const toolCall = parsed.tool_call
   if (!isRecord(toolCall) || typeof toolCall.name !== "string") return undefined
   const decodedInput = Schema.decodeUnknownOption(Common.JsonValue)(toolCall.input ?? {})
@@ -495,14 +541,72 @@ const parseToolRequest = (content: string): ToolRequest | undefined => {
   return { name: toolCall.name, input: decodedInput.value }
 }
 
-const parseJsonObject = (content: string): Record<string, unknown> | undefined => {
-  const json = extractJson(content)
-  try {
-    const parsed: unknown = JSON.parse(json)
-    return isRecord(parsed) ? parsed : undefined
-  } catch {
-    return undefined
+const withoutToolCalls = (content: string): string => {
+  let result = content
+  let index = result.indexOf('{"tool_call"')
+  while (index !== -1) {
+    let depth = 0
+    let inString = false
+    let escaped = false
+    let end = result.length
+    for (let i = index; i < result.length; i += 1) {
+      const ch = result[i]
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === "\\") {
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inString = !inString
+        continue
+      }
+      if (inString) continue
+      if (ch === "{") depth += 1
+      else if (ch === "}") {
+        depth -= 1
+        if (depth === 0) {
+          end = i + 1
+          break
+        }
+      }
+    }
+    result = `${result.slice(0, index)}${result.slice(end)}`
+    index = result.indexOf('{"tool_call"')
   }
+  return result.trim()
+}
+
+const extractLeadingObject = (content: string): string | undefined => {
+  const trimmed = extractJson(content)
+  if (!trimmed.startsWith("{")) return undefined
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const ch = trimmed[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (ch === "\\") {
+      escaped = true
+      continue
+    }
+    if (ch === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (ch === "{") depth += 1
+    else if (ch === "}") {
+      depth -= 1
+      if (depth === 0) return trimmed.slice(0, index + 1)
+    }
+  }
+  return undefined
 }
 
 const extractJson = (content: string) => {
@@ -774,6 +878,31 @@ const makeModelStreamChunk = (
     return event
   })
 
+const makeModelReasoningChunk = (
+  dependencies: Dependencies,
+  threadId: Ids.ThreadId,
+  turnId: Ids.TurnId,
+  text: string,
+  provider: string,
+  model: string,
+) =>
+  Effect.gen(function* () {
+    const createdAt = yield* dependencies.time.nowMillis
+    const id = Ids.EventId.make(yield* dependencies.idGenerator.next("event"))
+    const events = yield* readThread(dependencies, { thread_id: threadId })
+    const event: Event.ModelReasoningDelta = {
+      id,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: latestSequence(events) + 1,
+      version: 1,
+      created_at: createdAt,
+      type: "model.reasoning.delta",
+      data: { text, provider, model },
+    }
+    return event
+  })
+
 const makeToolCall = (dependencies: Dependencies, threadId: Ids.ThreadId, turnId: Ids.TurnId, request: ToolRequest) =>
   Effect.gen(function* () {
     const id = Ids.ToolCallId.make(yield* dependencies.idGenerator.next("tool_call"))
@@ -895,6 +1024,25 @@ const makeTurnFailed = (
     return event
   })
 
+const isTurnLevelError = (error: RunError): boolean =>
+  AiError.isAiError(error) ||
+  error instanceof Router.RouterError ||
+  error instanceof ToolExecutor.ToolExecutorError ||
+  error instanceof ContextResolver.ContextResolverError ||
+  error instanceof SkillRegistry.SkillRegistryError
+
+const isModelError = (error: RunError): error is AiError.AiError | Router.RouterError =>
+  AiError.isAiError(error) || error instanceof Router.RouterError
+
+const modelErrorMessage = (error: AiError.AiError | Router.RouterError): Provider.Message => ({
+  role: "tool",
+  content: JSON.stringify({
+    type: "model.error",
+    message: error.message,
+    retryable: AiError.isAiError(error) ? error.isRetryable : false,
+  }),
+})
+
 const cancelledEnvelope = (message: string): ErrorEnvelope.Envelope => ({ kind: "cancelled", message })
 
 const envelopeFromRunError = (error: RunError): ErrorEnvelope.Envelope => {
@@ -916,6 +1064,9 @@ const envelopeFromRunError = (error: RunError): ErrorEnvelope.Envelope => {
   }
   if (error instanceof Router.RouterError) return { kind: "model", message: error.message }
   if (error instanceof ToolExecutor.ToolExecutorError) return ToolExecutor.errorEnvelope(error)
+  if (AiError.isAiError(error)) {
+    return { kind: "model", message: error.message, retryable: error.isRetryable, code: error.reason._tag }
+  }
   return { kind: "model", message: String(error) }
 }
 

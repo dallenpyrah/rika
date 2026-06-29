@@ -53,6 +53,18 @@ export const ModelStreamChunk = Schema.Struct({
   }),
 }).annotate({ identifier: "Rika.Event.ModelStreamChunk" })
 
+export interface ModelReasoningDelta extends Schema.Schema.Type<typeof ModelReasoningDelta> {}
+export const ModelReasoningDelta = Schema.Struct({
+  ...fields,
+  turn_id: TurnId,
+  type: Schema.Literal("model.reasoning.delta"),
+  data: Schema.Struct({
+    text: Schema.String,
+    provider: Schema.String,
+    model: Schema.String,
+  }),
+}).annotate({ identifier: "Rika.Event.ModelReasoningDelta" })
+
 export const ContextEntryKind = Schema.Literals(["guidance", "file", "image", "thread-reference"]).annotate({
   identifier: "Rika.Event.ContextEntryKind",
 })
@@ -173,6 +185,7 @@ export type Event =
   | TurnStarted
   | MessageAdded
   | ModelStreamChunk
+  | ModelReasoningDelta
   | ContextResolved
   | SkillLoaded
   | SubagentCompleted
@@ -189,6 +202,7 @@ export const Event = Schema.Union([
   TurnStarted,
   MessageAdded,
   ModelStreamChunk,
+  ModelReasoningDelta,
   ContextResolved,
   SkillLoaded,
   SubagentCompleted,

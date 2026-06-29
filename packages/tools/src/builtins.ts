@@ -113,8 +113,8 @@ export const toolExecutorLayer = toolExecutorLayerFromPermissionConfig()
 
 export const readOnlyToolExecutorLayerFromPermissionConfig = (
   permissionConfig: PermissionPolicy.PermissionConfig = PermissionPolicy.defaultConfig,
-): Layer.Layer<ToolExecutor.Service, FffSearch.FffSearchError, Config.Service> =>
-  ToolExecutor.layer.pipe(
+): Layer.Layer<ToolExecutor.ReadOnlyService, FffSearch.FffSearchError, Config.Service> =>
+  ToolExecutor.readOnlyLayer.pipe(
     Layer.provideMerge(readOnlyRegistryLayer),
     Layer.provideMerge(PermissionPolicy.layerFromConfig(permissionConfig)),
   )

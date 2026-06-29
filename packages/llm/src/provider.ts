@@ -87,14 +87,20 @@ export const ContentDelta = Schema.Struct({
   text: Schema.String,
 }).annotate({ identifier: "Rika.LLM.StreamEvent.ContentDelta" })
 
+export interface ReasoningDelta extends Schema.Schema.Type<typeof ReasoningDelta> {}
+export const ReasoningDelta = Schema.Struct({
+  type: Schema.Literal("reasoning.delta"),
+  text: Schema.String,
+}).annotate({ identifier: "Rika.LLM.StreamEvent.ReasoningDelta" })
+
 export interface ResponseCompleted extends Schema.Schema.Type<typeof ResponseCompleted> {}
 export const ResponseCompleted = Schema.Struct({
   type: Schema.Literal("response.completed"),
   response: GenerateResponse,
 }).annotate({ identifier: "Rika.LLM.StreamEvent.ResponseCompleted" })
 
-export type StreamEvent = ResponseStarted | ContentDelta | ResponseCompleted
-export const StreamEvent = Schema.Union([ResponseStarted, ContentDelta, ResponseCompleted]).pipe(
+export type StreamEvent = ResponseStarted | ContentDelta | ReasoningDelta | ResponseCompleted
+export const StreamEvent = Schema.Union([ResponseStarted, ContentDelta, ReasoningDelta, ResponseCompleted]).pipe(
   Schema.toTaggedUnion("type"),
   Schema.annotate({ identifier: "Rika.LLM.StreamEvent" }),
 )
@@ -126,6 +132,7 @@ export type FakeResponse = string | GenerateResponse
 
 export interface FakeOptions {
   readonly name?: ProviderName
+  readonly failStreamWith?: AiError.AiError
 }
 
 export const layer = (options: LayerOptions = {}) =>
@@ -152,7 +159,7 @@ export const layer = (options: LayerOptions = {}) =>
 
 export const fakeLayer = (responses: ReadonlyArray<FakeResponse> = ["fake response"], options: FakeOptions = {}) => {
   const providerName = options.name ?? "openai"
-  return layer().pipe(Layer.provide(fakeLanguageModelLayer(responses, { name: providerName })))
+  return layer().pipe(Layer.provide(fakeLanguageModelLayer(responses, { ...options, name: providerName })))
 }
 
 export const fakeLanguageModelLayer = (
@@ -173,6 +180,12 @@ export const fakeLanguageModelLayer = (
       streamText: () => {
         const response = normalizeFakeResponse(responseAt(responses, nextIndex))
         nextIndex += 1
+        if (options.failStreamWith !== undefined) {
+          return Stream.fromIterable<AiResponse.StreamPartEncoded>([
+            { type: "text-start", id: "fake-text" },
+            { type: "text-delta", id: "fake-text", delta: response.content },
+          ]).pipe(Stream.concat(Stream.fail(options.failStreamWith)))
+        }
         return Stream.fromIterable(aiStreamPartsFromFakeResponse(response))
       },
     }),
@@ -184,23 +197,45 @@ export const fakeLanguageModelLayer = (
 export const completeWithLanguageModel = (languageModel: LanguageModel.Service, request: GenerateRequest) =>
   languageModel
     .generateText({ prompt: promptFromMessages(request.messages) })
-    .pipe(Effect.map((response) => responseFromAiResponse(request, response)))
+    .pipe(
+      Effect.map((response) => responseFromAiResponse(request, response)),
+      Effect.catch((error: ProviderError) =>
+        AiError.isAiError(error) && error.reason._tag === "InvalidOutputError"
+          ? Effect.succeed<GenerateResponse>({
+              provider: request.provider,
+              model: request.model,
+              content: "",
+              finish_reason: "stop",
+            })
+          : Effect.fail(error),
+      ),
+    )
 
 export const streamWithLanguageModel = (
   languageModel: LanguageModel.Service,
   request: GenerateRequest,
-): Stream.Stream<StreamEvent, ProviderError> => {
-  const state: StreamState = { content: "" }
-  const start: ResponseStarted = { type: "response.started", provider: request.provider, model: request.model }
-  const body = languageModel
-    .streamText({ prompt: promptFromMessages(request.messages) })
-    .pipe(Stream.flatMap((part) => Stream.fromIterable(streamEventsFromAiPart(part, state))))
+): Stream.Stream<StreamEvent, ProviderError> =>
+  Stream.suspend(() => {
+    const state: StreamState = { content: "" }
+    const start: ResponseStarted = { type: "response.started", provider: request.provider, model: request.model }
+    const body = languageModel.streamText({ prompt: promptFromMessages(request.messages) }).pipe(
+      Stream.flatMap((part) => Stream.fromIterable(streamEventsFromAiPart(part, state))),
+      Stream.catchReason("AiError", "InvalidOutputError", () => {
+        state.finish_reason ??= "stop"
+        return Stream.empty
+      }),
+      Stream.catch((error: ProviderError) => {
+        if (state.content.length === 0) return Stream.fail(error)
+        state.finish_reason ??= "stop"
+        return Stream.empty
+      }),
+    )
 
-  return Stream.make(start).pipe(
-    Stream.concat(body),
-    Stream.concat(Stream.sync(() => responseCompletedFromState(request, state))),
-  )
-}
+    return Stream.make(start).pipe(
+      Stream.concat(body),
+      Stream.concat(Stream.sync(() => responseCompletedFromState(request, state))),
+    )
+  })
 
 export const promptFromMessages = (messages: ReadonlyArray<Message>): Prompt.RawInput =>
   messages.map((message): Prompt.MessageEncoded => {
@@ -232,6 +267,10 @@ export const streamEventsFromAiPart = (
       if (part.delta.length === 0) return []
       state.content += part.delta
       return [{ type: "content.delta", text: part.delta }]
+    }
+    case "reasoning-delta": {
+      if (part.delta.length === 0) return []
+      return [{ type: "reasoning.delta", text: part.delta }]
     }
     case "finish": {
       state.finish_reason = finishReasonFromAi(part.reason)

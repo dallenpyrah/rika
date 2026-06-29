@@ -24,6 +24,10 @@
 - Keep modes as data so custom modes and providers can be added without changing actors or CLI code.
 - Normalize Effect AI streams into Rika `Provider.StreamEvent` values before exposing them outside this package.
 
+## Streaming resilience
+
+`streamWithLanguageModel` wraps construction in `Stream.suspend` so each subscription (including retry attempts) allocates a fresh `StreamState`. `Stream.catchReason("AiError", "InvalidOutputError")` salvages provider-executed tool-call parts (e.g. `image_generation`) that the zero-toolkit decoder rejects, turning them into a clean `response.completed` instead of crashing the turn. A trailing `Stream.catch` salvages any failure that occurs after content has streamed so retries never replay or duplicate deltas; only handshake failures with no content yet propagate. The retry middleware in `src/openai.ts` (`Stream.retry` with a jittered exponential `Schedule` gated by `Retry.isTransient`) therefore only retries pre-content transient errors and never `InvalidOutputError`. The agent loop in `@rika/agent` feeds a failure back to the model once so it can recover and continue.
+
 ## For AI Agents
 
 - Read `../../docs/effect-module-conventions.md` before changing services or layers.

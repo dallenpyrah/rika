@@ -6,6 +6,10 @@
 
 Rika is a greenfield Effect-native coding agent system. The repository is a Bun/Turbo monorepo that grows through the stacked GitHub issues.
 
+## Conventions
+
+Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comments). Put design rationale, conventions, and context in AGENTS.md files, in `CONTEXT.md`, or in skill files under `.agents/skills/`.
+
 ## Key Files
 
 | File                                | Purpose                                                                                                             |

@@ -26,7 +26,7 @@ import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
 import { HttpServer, RemoteControl } from "@rika/server"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
-import { RemoteSession, Session, Terminal } from "@rika/tui"
+import { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
 import { Effect, Layer } from "effect"
 import * as Args from "./args"
 import * as Doctor from "./doctor"
@@ -37,6 +37,7 @@ import * as LocalBackend from "./local-backend"
 import * as Mcp from "./mcp"
 import * as Output from "./output"
 import * as Review from "./review"
+import * as RuntimeEnv from "./runtime-env"
 import * as Server from "./server"
 import * as Skills from "./skills"
 import * as Threads from "./threads"
@@ -50,43 +51,50 @@ export interface ProcessInput {
 export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, Output.Service> = Effect.fn(
   "Cli.Runtime.runProcess",
 )((input) =>
-  Args.parse(input.argv).pipe(
+  RuntimeEnv.load(input).pipe(
     Effect.matchEffect({
-      onFailure: (error: Args.ArgsError) => Output.stderr(Execute.formatError(error)).pipe(Effect.as(error.exit_code)),
-      onSuccess: (command) =>
-        (command.type === "execute"
-          ? Execute.executeCommand(command).pipe(Effect.provide(liveLayer(command, input.env, input.cwd)))
-          : command.type === "interactive"
-            ? command.ephemeral
-              ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, input.env, input.cwd)))
-              : RemoteSession.run(command).pipe(
-                  Effect.provide(interactiveRemoteLiveLayer(command, input.env, input.cwd)),
-                )
-            : command.type === "threads"
-              ? Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, input.env, input.cwd)))
-              : command.type === "skills"
-                ? Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, input.env, input.cwd)))
-                : command.type === "mcp"
-                  ? Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, input.env, input.cwd)))
-                  : command.type === "review"
-                    ? Review.executeCommand(command).pipe(
-                        Effect.provide(reviewLiveLayer(command, input.env, input.cwd)),
-                      )
-                    : command.type === "extensions"
-                      ? Extensions.executeCommand(command).pipe(
-                          Effect.provide(extensionsLiveLayer(command, input.env, input.cwd)),
-                        )
-                      : command.type === "ide"
-                        ? Ide.executeCommand(command).pipe(Effect.provide(ideLiveLayer(command, input.env, input.cwd)))
-                        : command.type === "doctor"
-                          ? Doctor.executeCommand(command).pipe(Effect.provide(doctorLiveLayer(input.env, input.cwd)))
-                          : Server.executeCommand(command).pipe(
-                              Effect.provide(serverLiveLayer(command, input.env, input.cwd)),
-                            )
-        ).pipe(
+      onFailure: (error) => Output.stderr(RuntimeEnv.formatError(error)).pipe(Effect.as(1)),
+      onSuccess: (env) =>
+        Args.parse(input.argv).pipe(
           Effect.matchEffect({
-            onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
-            onSuccess: (code) => Effect.succeed(code),
+            onFailure: (error: Args.ArgsError) =>
+              Output.stderr(Execute.formatError(error)).pipe(Effect.as(error.exit_code)),
+            onSuccess: (command) =>
+              (command.type === "execute"
+                ? Execute.executeCommand(command).pipe(Effect.provide(liveLayer(command, env, input.cwd)))
+                : command.type === "interactive"
+                  ? command.ephemeral
+                    ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, env, input.cwd)))
+                    : RemoteSession.run(command).pipe(
+                        Effect.provide(interactiveRemoteLiveLayer(command, env, input.cwd)),
+                      )
+                  : command.type === "threads"
+                    ? Threads.executeCommand(command).pipe(Effect.provide(threadsLiveLayer(command, env, input.cwd)))
+                    : command.type === "skills"
+                      ? Skills.executeCommand(command).pipe(Effect.provide(skillsLiveLayer(command, env, input.cwd)))
+                      : command.type === "mcp"
+                        ? Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, env, input.cwd)))
+                        : command.type === "review"
+                          ? Review.executeCommand(command).pipe(
+                              Effect.provide(reviewLiveLayer(command, env, input.cwd)),
+                            )
+                          : command.type === "extensions"
+                            ? Extensions.executeCommand(command).pipe(
+                                Effect.provide(extensionsLiveLayer(command, env, input.cwd)),
+                              )
+                            : command.type === "ide"
+                              ? Ide.executeCommand(command).pipe(Effect.provide(ideLiveLayer(command, env, input.cwd)))
+                              : command.type === "doctor"
+                                ? Doctor.executeCommand(command).pipe(Effect.provide(doctorLiveLayer(env, input.cwd)))
+                                : Server.executeCommand(command).pipe(
+                                    Effect.provide(serverLiveLayer(command, env, input.cwd)),
+                                  )
+              ).pipe(
+                Effect.matchEffect({
+                  onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
+                  onSuccess: (code) => Effect.succeed(code),
+                }),
+              ),
           }),
         ),
     }),
@@ -124,7 +132,6 @@ type RuntimeError =
   | SkillRegistry.SkillRegistryError
   | SubagentRuntime.RunError
   | Skills.SkillsError
-  | Terminal.TerminalError
   | ThreadService.ThreadServiceError
   | ThreadEventLog.ThreadEventLogError
   | ThreadProjection.ThreadProjectionError
@@ -162,7 +169,6 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
   if (error instanceof Skills.SkillsError) return Skills.formatError(error)
-  if (error instanceof Terminal.TerminalError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadService.ThreadServiceError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadEventLog.ThreadEventLogError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadProjection.ThreadProjectionError) return `Rika failed: ${error.message}`
@@ -216,7 +222,7 @@ export const liveLayer = (
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
-    Layer.provideMerge(readOnlyToolLayer),
+    Layer.provide(readOnlyToolLayer),
   )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -290,7 +296,7 @@ export const interactiveLiveLayer = (
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
-    Layer.provideMerge(readOnlyToolLayer),
+    Layer.provide(readOnlyToolLayer),
   )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -312,7 +318,8 @@ export const interactiveLiveLayer = (
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const baseLayer = Layer.mergeAll(
-    Terminal.layer,
+    Adapter.layer,
+    Ticker.layer,
     storageAndThreadLayer,
     contextResolverLayer,
     reviewServiceLayer,
@@ -338,12 +345,13 @@ export const interactiveRemoteLiveLayer = (
     RemoteSession.Service,
     Effect.gen(function* () {
       const backend = yield* LocalBackend.Service
-      const terminal = yield* Terminal.Service
+      const renderer = yield* Adapter.Service
+      const ticker = yield* Ticker.Service
       const endpoint = yield* backend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode })
       const client = Client.make(Client.fetchTransport({ base_url: endpoint.url, token: endpoint.token }))
-      return RemoteSession.make(client, terminal)
+      return RemoteSession.make(client, renderer, ticker.ticks)
     }),
-  ).pipe(Layer.provideMerge(backendLayer), Layer.provideMerge(Terminal.layer))
+  ).pipe(Layer.provideMerge(backendLayer), Layer.provideMerge(Adapter.layer), Layer.provideMerge(Ticker.layer))
 
   return remoteSessionLayer
 }
@@ -476,7 +484,7 @@ export const reviewLiveLayer = (
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
-    Layer.provideMerge(readOnlyToolLayer),
+    Layer.provide(readOnlyToolLayer),
   )
   const reviewServiceLayer = ReviewService.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -581,7 +589,7 @@ export const serverLiveLayer = (
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
-    Layer.provideMerge(readOnlyToolLayer),
+    Layer.provide(readOnlyToolLayer),
   )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -642,6 +650,7 @@ export type LiveLayerOutput =
   | WorkspaceStore.Service
 
 export type InteractiveLayerOutput =
+  | Adapter.Service
   | AgentLoop.Service
   | ArtifactStore.Service
   | CheckRegistry.Service
@@ -659,7 +668,7 @@ export type InteractiveLayerOutput =
   | SkillRegistry.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
-  | Terminal.Service
+  | Ticker.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
   | ThreadService.Service
@@ -667,7 +676,11 @@ export type InteractiveLayerOutput =
   | ToolExecutor.Service
   | WorkspaceStore.Service
 
-export type InteractiveRemoteLayerOutput = LocalBackend.Service | RemoteSession.Service | Terminal.Service
+export type InteractiveRemoteLayerOutput =
+  | Adapter.Service
+  | LocalBackend.Service
+  | RemoteSession.Service
+  | Ticker.Service
 
 export type ThreadsLayerOutput =
   | Config.Service
@@ -707,7 +720,6 @@ export type ReviewLayerOutput =
   | Router.Service
   | SubagentRuntime.Service
   | Time.Service
-  | ToolExecutor.Service
 
 export type ExtensionsLayerOutput =
   | ArtifactStore.Service
@@ -766,18 +778,29 @@ export type LiveLayerError =
   | PluginHost.RunError
   | ReviewService.RunError
 
-const openAiLayer = (env: Record<string, string | undefined>) => OpenAi.layer(openAiOptions(env))
+export const openAiOptionsFromEnv = (env: Record<string, string | undefined>): OpenAi.Options => {
+  const apiKeyEnv = firstNonEmptyEnvKey(env, "RIKA_OPENAI_API_KEY", "OPENAI_API_KEY") ?? "OPENAI_API_KEY"
+  const apiUrl = firstNonEmpty(
+    env.RIKA_OPENAI_API_URL,
+    env.RIKA_OPENAI_BASE_URL,
+    env.OPENAI_BASE_URL,
+    env.OPENAI_API_BASE,
+    env.VIBE_OPENAI_BASE_URL,
+  )
 
-const openAiOptions = (env: Record<string, string | undefined>): OpenAi.Options => {
-  const apiKeyEnv = env.RIKA_OPENAI_API_KEY === undefined ? "OPENAI_API_KEY" : "RIKA_OPENAI_API_KEY"
-  const apiUrl =
-    env.RIKA_OPENAI_API_URL ??
-    env.RIKA_OPENAI_BASE_URL ??
-    env.OPENAI_BASE_URL ??
-    env.OPENAI_API_BASE ??
-    env.VIBE_OPENAI_BASE_URL
   return {
     apiKeyEnv,
-    ...(apiUrl === undefined || apiUrl.length === 0 ? {} : { apiUrl }),
+    ...(apiUrl === undefined ? {} : { apiUrl }),
   }
 }
+
+const openAiLayer = (env: Record<string, string | undefined>) => OpenAi.layer(openAiOptionsFromEnv(env))
+
+const firstNonEmpty = (...values: ReadonlyArray<string | undefined>) =>
+  values.find((value): value is string => value !== undefined && value.length > 0)
+
+const firstNonEmptyEnvKey = (env: Record<string, string | undefined>, ...keys: ReadonlyArray<string>) =>
+  keys.find((key) => {
+    const value = env[key]
+    return value !== undefined && value.length > 0
+  })

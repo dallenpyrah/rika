@@ -4,6 +4,7 @@ import { Effect, Layer, Redacted, Stream } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import * as Modes from "./modes"
 import * as Provider from "./provider"
+import * as Retry from "./retry"
 
 export interface Options {
   readonly apiKeyEnv?: string
@@ -21,7 +22,6 @@ export const requestConfigFromRikaRequest = (
   store: false,
   ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
   ...(request.max_output_tokens === undefined ? {} : { max_output_tokens: request.max_output_tokens }),
-  ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
   ...(request.reasoning_effort === undefined ? {} : { reasoning: { effort: request.reasoning_effort } }),
 })
 
@@ -57,5 +57,5 @@ export const languageModelLayer = (options: Options = {}) =>
 export const layer = (options: Options = {}) =>
   Provider.layer({
     completeMiddleware: (request) => withRequestConfig(request),
-    streamMiddleware: (request) => withStreamRequestConfig(request),
+    streamMiddleware: (request) => (stream) => Retry.middleware(request)(withStreamRequestConfig(request)(stream)),
   }).pipe(Layer.provide(languageModelLayer(options)), Layer.provide(clientLayer(options)))

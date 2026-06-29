@@ -4,6 +4,7 @@ import { Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer, Stream } from "effect"
+import * as AiError from "effect/unstable/ai/AiError"
 import { AgentLoop, ContextResolver, PermissionPolicy, SkillRegistry, ToolExecutor, ToolRegistry } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_agent_loop")
@@ -100,6 +101,59 @@ describe("AgentLoop", () => {
     expect(result.summary).toMatchObject({
       thread_id: threadId,
       latest_message_text: "tool saw hello",
+      active_turn_status: "completed",
+    })
+  })
+
+  test("loops through multiple tool calls before emitting the final answer", async () => {
+    const multiToolThread = Ids.ThreadId.make("thread_agent_multi_tool")
+    const layer = makeLayer([
+      JSON.stringify({ tool_call: { name: "fake.echo", input: { text: "first" } } }),
+      JSON.stringify({ tool_call: { name: "fake.echo", input: { text: "second" } } }),
+      "done after two tools",
+    ])
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: multiToolThread,
+          workspace_id: workspaceId,
+          content: "use two tools then answer",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: multiToolThread })
+        const summary = yield* ThreadProjection.getThread(multiToolThread)
+        return { turn, events, summary }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.map((event) => event.type)).toEqual([
+      "thread.created",
+      "turn.started",
+      "message.added",
+      "context.resolved",
+      "model.stream.chunk",
+      "tool.call.requested",
+      "tool.call.completed",
+      "model.stream.chunk",
+      "tool.call.requested",
+      "tool.call.completed",
+      "model.stream.chunk",
+      "message.added",
+      "turn.completed",
+    ])
+    expect(result.events.filter((event) => event.type === "tool.call.requested")).toHaveLength(2)
+    expect(result.events.filter((event) => event.type === "tool.call.completed")).toHaveLength(2)
+    // Intermediate tool_call responses must not be persisted as assistant messages:
+    // only the user message and the final non-tool answer are message.added events.
+    expect(result.events.filter((event) => event.type === "message.added")).toHaveLength(2)
+    expect(result.events.at(-1)).toMatchObject({ type: "turn.completed" })
+    expect(result.events.findLast((event) => event.type === "message.added")).toMatchObject({
+      data: { message: { role: "assistant" } },
+    })
+    expect(result.summary).toMatchObject({
+      latest_message_text: "done after two tools",
       active_turn_status: "completed",
     })
   })
@@ -344,6 +398,130 @@ describe("AgentLoop", () => {
     expect(result.events.at(-1)).toMatchObject({ type: "turn.failed", data: { error: { kind: "cancelled" } } })
   })
 
+  test("contains a provider model failure as a terminal turn.failed event", async () => {
+    const failure = AiError.make({
+      module: "LanguageModel",
+      method: "streamText",
+      reason: new AiError.AuthenticationError({ kind: "InvalidKey" }),
+    })
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, failingProviderLayer(failure))
+
+    const events = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const collected = yield* AgentLoop.streamTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_model_fail"),
+          workspace_id: workspaceId,
+          content: "trigger a model failure",
+        }).pipe(Stream.runCollect)
+        return Array.from(collected)
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(events.map((event) => event.type)).toEqual([
+      "thread.created",
+      "turn.started",
+      "message.added",
+      "context.resolved",
+      "turn.failed",
+    ])
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.failed",
+      data: { error: { kind: "model", retryable: false, code: "AuthenticationError" } },
+    })
+  })
+
+  test("feeds a model failure back to the model and completes after recovery", async () => {
+    const captured: Array<Provider.GenerateRequest> = []
+    const failure = AiError.make({
+      module: "LanguageModel",
+      method: "streamText",
+      reason: new AiError.AuthenticationError({ kind: "InvalidKey" }),
+    })
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, recoveringProviderLayer(failure, captured))
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_recover"),
+          workspace_id: workspaceId,
+          content: "recover from a model failure",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_recover") })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.map((event) => event.type)).toEqual([
+      "thread.created",
+      "turn.started",
+      "message.added",
+      "context.resolved",
+      "model.stream.chunk",
+      "message.added",
+      "turn.completed",
+    ])
+    expect(result.events.findLast((event) => event.type === "message.added")).toMatchObject({
+      data: { message: { role: "assistant" } },
+    })
+    const recoveryMessages = captured[0]?.messages ?? []
+    const fedBack = recoveryMessages.find(
+      (message) => message.role === "tool" && message.content.includes("model.error"),
+    )
+    expect(fedBack).toBeDefined()
+    expect(JSON.parse(fedBack?.content ?? "{}")).toMatchObject({ type: "model.error", retryable: false })
+  })
+
+  test("emits model.reasoning.delta events from provider reasoning chunks", async () => {
+    const reasoningProviderLayer = Layer.succeed(
+      Provider.Service,
+      Provider.Service.of({
+        name: "openai",
+        complete: Effect.fn("AgentLoop.test.reasoning.complete")(function* (request: Provider.GenerateRequest) {
+          return fakeResponse(request, "final answer")
+        }),
+        stream: (request: Provider.GenerateRequest) =>
+          Stream.fromIterable<Provider.StreamEvent>([
+            { type: "response.started", provider: request.provider, model: request.model },
+            { type: "reasoning.delta", text: "thinking about it" },
+            { type: "content.delta", text: "final answer" },
+            { type: "response.completed", response: fakeResponse(request, "final answer") },
+          ]),
+      }),
+    )
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, reasoningProviderLayer)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_reasoning"),
+          workspace_id: workspaceId,
+          content: "show your reasoning",
+        })
+        const events = yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_reasoning") })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.turn.status).toBe("completed")
+    expect(result.events.map((event) => event.type)).toEqual([
+      "thread.created",
+      "turn.started",
+      "message.added",
+      "context.resolved",
+      "model.reasoning.delta",
+      "model.stream.chunk",
+      "message.added",
+      "turn.completed",
+    ])
+    expect(result.events.find((event) => event.type === "model.reasoning.delta")).toMatchObject({
+      data: { text: "thinking about it", provider: "openai", model: "gpt-5.5" },
+    })
+  })
+
   test("queues follow-up turns through the service boundary without module-level state", async () => {
     const layer = makeLayer(["queued later"])
 
@@ -363,6 +541,35 @@ const fakeResponse = (request: Provider.GenerateRequest, content: string): Provi
   model: request.model,
   content,
 })
+
+const failingProviderLayer = (error: Provider.ProviderError) =>
+  Layer.succeed(
+    Provider.Service,
+    Provider.Service.of({
+      name: "openai",
+      complete: () => Effect.fail(error),
+      stream: () => Stream.fail(error),
+    }),
+  )
+
+const recoveringProviderLayer = (error: Provider.ProviderError, captured: Array<Provider.GenerateRequest>) => {
+  let calls = 0
+  return Layer.succeed(
+    Provider.Service,
+    Provider.Service.of({
+      name: "openai",
+      complete: Effect.fn("AgentLoop.test.recover.complete")(function* (request: Provider.GenerateRequest) {
+        return fakeResponse(request, "recovered answer")
+      }),
+      stream: (request: Provider.GenerateRequest) => {
+        calls += 1
+        if (calls === 1) return Stream.fail(error)
+        captured.push(request)
+        return Stream.fromIterable(Provider.streamEventsFromResponse(fakeResponse(request, "recovered answer")))
+      },
+    }),
+  )
+}
 
 const skill = (name: string, description: string, instructions: string): SkillRegistry.Skill => ({
   summary: {

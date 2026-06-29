@@ -1087,10 +1087,20 @@ const anchorForMatch = (workspaceRoot: string, match: NativeGrepResult["items"][
 const hashLine = (content: string, line: number, occurrence: number, salt: number) =>
   createHash("sha256").update(`${line}\0${occurrence}\0${salt}\0${content}`).digest("base64url").slice(0, hashLength)
 
-const decodeFileSearchInput = (call: Tool.Call) => decodeToolInput(FileSearchInput, call)
-const decodeGlobInput = (call: Tool.Call) => decodeToolInput(GlobInput, call)
-const decodeDirectorySearchInput = (call: Tool.Call) => decodeToolInput(DirectorySearchInput, call)
-const decodeGrepInput = (call: Tool.Call) => decodeToolInput(GrepInput, call)
+const aliasField = (call: Tool.Call, from: string, to: string): Tool.Call => {
+  const input = call.input as unknown
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return call
+  const record = input as Record<string, unknown>
+  if (typeof record[from] !== "string" || record[to] !== undefined) return call
+  return { ...call, input: { ...record, [to]: record[from] } as typeof call.input }
+}
+
+const decodeFileSearchInput = (call: Tool.Call) =>
+  decodeToolInput(FileSearchInput, aliasField(call, "pattern", "query"))
+const decodeGlobInput = (call: Tool.Call) => decodeToolInput(GlobInput, aliasField(call, "query", "pattern"))
+const decodeDirectorySearchInput = (call: Tool.Call) =>
+  decodeToolInput(DirectorySearchInput, aliasField(call, "pattern", "query"))
+const decodeGrepInput = (call: Tool.Call) => decodeToolInput(GrepInput, aliasField(call, "pattern", "query"))
 const decodeMultiGrepInput = (call: Tool.Call) => decodeToolInput(MultiGrepInput, call)
 const decodeHealthInput = (call: Tool.Call) => decodeToolInput(HealthInput, call)
 const decodeRescanInput = (call: Tool.Call) => decodeToolInput(RescanInput, call)

@@ -24,54 +24,64 @@ export class Service extends Context.Service<Service, Interface>()("@rika/agent/
 
 export type FakeHandler = ToolRegistry.FakeHandler
 
+const makeExecutor = (registry: ToolRegistry.Interface, policy: PermissionPolicy.Interface): Interface => ({
+  describe: registry.describe,
+  execute: Effect.fn("ToolExecutor.execute")(function* (call: Tool.Call) {
+    const mode = yield* policy.mode
+    const decision = yield* policy.decide(call).pipe(
+      Effect.match({
+        onFailure: (error) => PermissionPolicy.reject(error.message, error.details),
+        onSuccess: (allowed) => allowed,
+      }),
+    )
+    const metadata = permissionMetadata(mode, decision.action)
+
+    switch (decision.action) {
+      case "allow":
+        return yield* executeRegistryCall(registry, call).pipe(Effect.map((result) => withMetadata(result, metadata)))
+      case "modify":
+        return yield* executeRegistryCall(registry, modifiedCall(call, decision.input)).pipe(
+          Effect.map((result) => withMetadata(result, metadata)),
+        )
+      case "reject-and-continue":
+        return withMetadata(
+          errorResult(
+            call,
+            new ToolExecutorError({
+              message: decision.message,
+              kind: "permission",
+              name: call.name,
+              retryable: false,
+              ...(decision.details === undefined ? {} : { details: decision.details }),
+            }),
+          ),
+          metadata,
+        )
+      case "synthesize":
+        return withMetadata(normalizeSynthesizedResult(call, decision.result), metadata)
+      default:
+        return yield* Effect.die(new Error("Unknown permission policy decision"))
+    }
+  }),
+})
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const registry = yield* ToolRegistry.Service
     const policy = yield* PermissionPolicy.Service
+    return Service.of(makeExecutor(registry, policy))
+  }),
+)
 
-    return Service.of({
-      describe: registry.describe,
-      execute: Effect.fn("ToolExecutor.execute")(function* (call: Tool.Call) {
-        const mode = yield* policy.mode
-        const decision = yield* policy.decide(call).pipe(
-          Effect.match({
-            onFailure: (error) => PermissionPolicy.reject(error.message, error.details),
-            onSuccess: (allowed) => allowed,
-          }),
-        )
-        const metadata = permissionMetadata(mode, decision.action)
+export class ReadOnlyService extends Context.Service<ReadOnlyService, Interface>()("@rika/agent/ReadOnlyToolExecutor") {}
 
-        switch (decision.action) {
-          case "allow":
-            return yield* executeRegistryCall(registry, call).pipe(
-              Effect.map((result) => withMetadata(result, metadata)),
-            )
-          case "modify":
-            return yield* executeRegistryCall(registry, modifiedCall(call, decision.input)).pipe(
-              Effect.map((result) => withMetadata(result, metadata)),
-            )
-          case "reject-and-continue":
-            return withMetadata(
-              errorResult(
-                call,
-                new ToolExecutorError({
-                  message: decision.message,
-                  kind: "permission",
-                  name: call.name,
-                  retryable: false,
-                  ...(decision.details === undefined ? {} : { details: decision.details }),
-                }),
-              ),
-              metadata,
-            )
-          case "synthesize":
-            return withMetadata(normalizeSynthesizedResult(call, decision.result), metadata)
-          default:
-            return yield* Effect.die(new Error("Unknown permission policy decision"))
-        }
-      }),
-    })
+export const readOnlyLayer = Layer.effect(
+  ReadOnlyService,
+  Effect.gen(function* () {
+    const registry = yield* ToolRegistry.Service
+    const policy = yield* PermissionPolicy.Service
+    return ReadOnlyService.of(makeExecutor(registry, policy))
   }),
 )
 
@@ -82,6 +92,15 @@ export const emptyLayer = layer.pipe(
 
 export const fakeLayer = (handlers: Readonly<Record<string, FakeHandler>>, descriptors?: ReadonlyArray<Descriptor>) =>
   layer.pipe(
+    Layer.provideMerge(ToolRegistry.fakeLayer(handlers, descriptors)),
+    Layer.provideMerge(PermissionPolicy.allowLayer),
+  )
+
+export const fakeReadOnlyLayer = (
+  handlers: Readonly<Record<string, FakeHandler>>,
+  descriptors?: ReadonlyArray<Descriptor>,
+) =>
+  readOnlyLayer.pipe(
     Layer.provideMerge(ToolRegistry.fakeLayer(handlers, descriptors)),
     Layer.provideMerge(PermissionPolicy.allowLayer),
   )

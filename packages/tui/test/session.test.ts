@@ -4,7 +4,7 @@ import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, Stream } from "effect"
-import { Renderer, Session, Terminal } from "../src/index"
+import { Adapter, Keys, Session, Ticker, ViewState } from "../src/index"
 
 const workspaceRoot = "/workspace/rika-tui-test"
 
@@ -31,7 +31,11 @@ const fakeAgentLayer = Layer.succeed(
   }),
 )
 
-const makeLayer = (terminal: Terminal.MemoryTerminal) => {
+interface Harness {
+  readonly rendered: Array<ViewState.ViewState>
+}
+
+const makeLayer = (rendered: Array<ViewState.ViewState>, keys: ReadonlyArray<Keys.Key>) => {
   const services = Layer.mergeAll(
     configLayer,
     Database.memoryLayer,
@@ -40,7 +44,8 @@ const makeLayer = (terminal: Terminal.MemoryTerminal) => {
     ThreadProjection.layer,
     Time.fixedLayer(Common.TimestampMillis.make(1_970_000_000_000)),
     IdGenerator.sequenceLayer(1),
-    Terminal.memoryLayer(terminal),
+    Adapter.memoryLayer({ rendered, keys }),
+    Ticker.memoryLayer,
     ReviewService.fakeLayer(() => Effect.succeed(fakeReviewResult)),
     SkillRegistry.fakeLayer([deploySkill]),
     fakeAgentLayer,
@@ -48,38 +53,53 @@ const makeLayer = (terminal: Terminal.MemoryTerminal) => {
   return Session.layer.pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
 }
 
-describe("TUI session", () => {
-  test("runs an interactive prompt, switches modes, and starts a new thread through slash commands", async () => {
-    const terminal: Terminal.MemoryTerminal = {
-      inputs: ["hello", "/mode rush", "/review --staged src/app.ts", "/new", "/exit"],
-      frames: [],
-      prompts: [],
-    }
+const line = (text: string): ReadonlyArray<Keys.Key> => [...Keys.fromString(text), Keys.enter]
 
-    const exitCode = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* Migration.migrate()
-        return yield* Session.run({})
-      }).pipe(Effect.provide(makeLayer(terminal))),
+const runSession = (lines: ReadonlyArray<string>): Promise<Harness & { exitCode: number }> => {
+  const rendered: Array<ViewState.ViewState> = []
+  const keys = lines.flatMap(line)
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      yield* Migration.migrate()
+      return yield* Session.run({})
+    }).pipe(Effect.provide(makeLayer(rendered, keys))),
+  ).then((exitCode) => ({ exitCode, rendered }))
+}
+
+const text = (rendered: ReadonlyArray<ViewState.ViewState>): string =>
+  rendered
+    .map((state) =>
+      [
+        state.notice ?? "",
+        state.messages.map((message) => message.text).join("\n"),
+        state.cards.map((card) => `${card.title} ${card.subtitle}`).join("\n"),
+      ].join("\n"),
     )
+    .join("\n")
 
-    const frames = terminal.frames.map(Renderer.stripAnsi)
+describe("TUI session", () => {
+  test("runs a turn, switches modes, runs a review, and starts a new thread through slash commands", async () => {
+    const { exitCode, rendered } = await runSession([
+      "hello",
+      "/mode rush",
+      "/review --staged src/app.ts",
+      "/new",
+      "/exit",
+    ])
+
+    const frames = text(rendered)
     expect(exitCode).toBe(0)
-    expect(terminal.prompts).toEqual(["› ", "› ", "› ", "› ", "› "])
-    expect(frames.join("\n")).toContain("session response")
-    expect(frames.join("\n")).toContain("Mode switched to rush")
-    expect(frames.join("\n")).toContain("Review completed: 1 findings across 1 files")
-    expect(frames.join("\n")).toContain("Started new thread")
-    expect(frames.at(-1)).toContain("Goodbye")
+    expect(frames).toContain("session response")
+    expect(frames).toContain("Mode switched to rush")
+    expect(frames).toContain("Review completed: 1 findings across 1 files")
+    expect(frames).toContain("Started new thread")
+    expect(rendered.some((state) => (state.notice ?? "").includes("Goodbye"))).toBe(true)
   })
 
   test("resumes a durable thread by replaying persisted events into the view", async () => {
     const existingThread = Ids.ThreadId.make("thread_existing_tui")
-    const terminal: Terminal.MemoryTerminal = {
-      inputs: [`/thread ${existingThread}`, `/share ${existingThread}`, "/exit"],
-      frames: [],
-      prompts: [],
-    }
+    const rendered: Array<ViewState.ViewState> = []
+    const keys = [`/thread ${existingThread}`, `/share ${existingThread}`, "/exit"].flatMap(line)
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -92,10 +112,10 @@ describe("TUI session", () => {
           yield* ThreadProjection.apply(appended)
         }
         return yield* Session.run({})
-      }).pipe(Effect.provide(makeLayer(terminal))),
+      }).pipe(Effect.provide(makeLayer(rendered, keys))),
     )
 
-    const frames = terminal.frames.map(Renderer.stripAnsi).join("\n")
+    const frames = text(rendered)
     expect(frames).toContain("Resumed thread thread_existing_tui")
     expect(frames).toContain("old durable message")
     expect(frames).toContain("Thread export JSON")
@@ -103,20 +123,9 @@ describe("TUI session", () => {
   })
 
   test("lists and inspects installed skills through slash commands", async () => {
-    const terminal: Terminal.MemoryTerminal = {
-      inputs: ["/skills", "/skill deploy", "/exit"],
-      frames: [],
-      prompts: [],
-    }
+    const { exitCode, rendered } = await runSession(["/skills", "/skill deploy", "/exit"])
 
-    const exitCode = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* Migration.migrate()
-        return yield* Session.run({})
-      }).pipe(Effect.provide(makeLayer(terminal))),
-    )
-
-    const frames = terminal.frames.map(Renderer.stripAnsi).join("\n")
+    const frames = text(rendered)
     expect(exitCode).toBe(0)
     expect(frames).toContain("Installed skills (1)")
     expect(frames).toContain("deploy: Deploy safely")
@@ -236,12 +245,12 @@ const modelChunk = (
   threadId: Ids.ThreadId,
   turnId: Ids.TurnId,
   sequence: number,
-  text: string,
+  textValue: string,
 ): Event.ModelStreamChunk => ({
   ...base(threadId, sequence, turnId),
   turn_id: turnId,
   type: "model.stream.chunk",
-  data: { text, provider: "fake", model: "fake" },
+  data: { text: textValue, provider: "fake", model: "fake" },
 })
 
 const turnCompleted = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnCompleted => ({

@@ -262,8 +262,16 @@ const outlineInputSchema: Common.JsonValue = {
   },
 }
 
+const aliasField = (call: Tool.Call, from: string, to: string): Tool.Call => {
+  const input = call.input as unknown
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return call
+  const record = input as Record<string, unknown>
+  if (record[from] === undefined || record[to] !== undefined) return call
+  return { ...call, input: { ...record, [to]: record[from] } as typeof call.input }
+}
+
 const decodeOutlineInput = (call: Tool.Call) => {
-  const decoded = Schema.decodeUnknownOption(OutlineInput)(call.input)
+  const decoded = Schema.decodeUnknownOption(OutlineInput)(aliasField(call, "path", "paths").input)
   if (Option.isSome(decoded)) return Effect.succeed(decoded.value)
   return new ToolRegistry.ToolRegistryError({
     message: `${call.name} input did not match the tool schema`,
