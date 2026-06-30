@@ -76,7 +76,8 @@ if (!Number.isInteger(count) || count <= 0) throw new Error("count must be a pos
 if (!Number.isInteger(intervalMs) || intervalMs < 0) throw new Error("interval-ms must be a non-negative integer")
 if (!Number.isInteger(settleMs) || settleMs < 0) throw new Error("settle-ms must be a non-negative integer")
 if (!Number.isInteger(focusMs) || focusMs < 0) throw new Error("focus-ms must be a non-negative integer")
-if (!Number.isInteger(triggerSettleMs) || triggerSettleMs < 0) throw new Error("trigger-settle-ms must be a non-negative integer")
+if (!Number.isInteger(triggerSettleMs) || triggerSettleMs < 0)
+  throw new Error("trigger-settle-ms must be a non-negative integer")
 if (trigger !== undefined && trigger !== "ctrl+o" && trigger !== "ctrl+s")
   throw new Error("Only --trigger ctrl+o and --trigger ctrl+s are supported")
 
@@ -247,11 +248,11 @@ function windowListSource(pid: number): string {
     "var bestArea = 0.0",
     "for window in windows {",
     "  let ownerPid = window[kCGWindowOwnerPID as String] as? Int ?? -1",
-    "  let ownerName = window[kCGWindowOwnerName as String] as? String ?? \"\"",
-    "  if ownerPid == target && ownerName == \"Ghostty\" {",
+    '  let ownerName = window[kCGWindowOwnerName as String] as? String ?? ""',
+    '  if ownerPid == target && ownerName == "Ghostty" {',
     "    let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]",
-    "    let width = bounds[\"Width\"] as? Double ?? 0.0",
-    "    let height = bounds[\"Height\"] as? Double ?? 0.0",
+    '    let width = bounds["Width"] as? Double ?? 0.0',
+    '    let height = bounds["Height"] as? Double ?? 0.0',
     "    let area = width * height",
     "    if area > bestArea {",
     "      bestId = window[kCGWindowNumber as String] as? Int ?? 0",
@@ -262,7 +263,7 @@ function windowListSource(pid: number): string {
     "  }",
     "}",
     "if bestId > 0 {",
-    "  print(\"\\(bestId)\\t\\(Int(bestWidth))\\t\\(Int(bestHeight))\")",
+    '  print("\\(bestId)\\t\\(Int(bestWidth))\\t\\(Int(bestHeight))")',
     "}",
   ].join("\n")
 }
@@ -280,10 +281,17 @@ function launchPid(label: "amp" | "rika"): number {
 }
 
 async function focusProcess(pid: number): Promise<void> {
-  const result = Bun.spawn(["osascript", "-e", `tell application "System Events" to set frontmost of first process whose unix id is ${pid} to true`], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+  const result = Bun.spawn(
+    [
+      "osascript",
+      "-e",
+      `tell application "System Events" to set frontmost of first process whose unix id is ${pid} to true`,
+    ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
   const code = await result.exited
   if (code !== 0) {
     throw new Error(`Could not focus Ghostty PID ${pid}: ${await new Response(result.stderr).text()}`)
@@ -324,7 +332,10 @@ function imageSummary(path: string): ImageSummary {
 }
 
 function imageDimensions(path: string): { readonly width: number; readonly height: number } {
-  const result = Bun.spawnSync(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path], { stdout: "pipe", stderr: "pipe" })
+  const result = Bun.spawnSync(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
   if (!result.success) throw new Error(`sips failed for ${path}: ${result.stderr.toString()}`)
   const output = result.stdout.toString()
   const width = Number(/pixelWidth:\s+(\d+)/.exec(output)?.[1])

@@ -63,9 +63,7 @@ export interface Interface {
   readonly subagents: Effect.Effect<ReadonlyArray<Api.SubagentRegistration>>
   readonly runCommand: (name: string) => Effect.Effect<void, RunError>
   readonly decideToolCall: (call: Call) => Effect.Effect<PermissionPolicy.Decision, RunError>
-  readonly decideToolCallOverride: (
-    call: Call,
-  ) => Effect.Effect<Option.Option<PermissionPolicy.Decision>, RunError>
+  readonly decideToolCallOverride: (call: Call) => Effect.Effect<Option.Option<PermissionPolicy.Decision>, RunError>
   readonly hasToolCallHooks: Effect.Effect<boolean>
   readonly observeToolResult: (result: Result) => Effect.Effect<Result, RunError>
   readonly emitSessionStart: (event: Api.SessionStartEvent) => Effect.Effect<void, RunError>

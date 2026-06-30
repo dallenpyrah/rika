@@ -39,31 +39,11 @@
   ],
   "geometry": {
     "all_pairs_same_dimensions": true,
-    "amp_dimensions": [
-      "1942x1414",
-      "1942x1414",
-      "1942x1414",
-      "1942x1414",
-      "1942x1414",
-      "1942x1414"
-    ],
-    "rika_dimensions": [
-      "1942x1414",
-      "1942x1414",
-      "1942x1414",
-      "1942x1414",
-      "1942x1414",
-      "1942x1414"
-    ],
-    "distinct_amp_dimensions": [
-      "1942x1414"
-    ],
-    "distinct_rika_dimensions": [
-      "1942x1414"
-    ],
-    "distinct_pair_dimensions": [
-      "1942x1414:1942x1414"
-    ]
+    "amp_dimensions": ["1942x1414", "1942x1414", "1942x1414", "1942x1414", "1942x1414", "1942x1414"],
+    "rika_dimensions": ["1942x1414", "1942x1414", "1942x1414", "1942x1414", "1942x1414", "1942x1414"],
+    "distinct_amp_dimensions": ["1942x1414"],
+    "distinct_rika_dimensions": ["1942x1414"],
+    "distinct_pair_dimensions": ["1942x1414:1942x1414"]
   },
   "captures": [
     {

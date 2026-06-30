@@ -719,12 +719,7 @@ describe("AgentLoop", () => {
         stream: () => Stream.die(new Error("provider defect")),
       }),
     )
-    const layer = makeLayer(
-      [],
-      defaultToolLayer,
-      SkillRegistry.emptyLayer,
-      registryFromProviderLayer(providerLayer),
-    )
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, registryFromProviderLayer(providerLayer))
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -763,12 +758,7 @@ describe("AgentLoop", () => {
         stream: () => Stream.never,
       }),
     )
-    const layer = makeLayer(
-      [],
-      defaultToolLayer,
-      SkillRegistry.emptyLayer,
-      registryFromProviderLayer(providerLayer),
-    )
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, registryFromProviderLayer(providerLayer))
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {

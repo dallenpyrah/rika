@@ -61,11 +61,7 @@
         "width": 568,
         "height": 635,
         "pixel_count": 19413,
-        "mean_rgb": [
-          52,
-          107,
-          103
-        ]
+        "mean_rgb": [52, 107, 103]
       },
       "welcome_title": {
         "bbox": {
@@ -77,11 +73,7 @@
         "width": 236,
         "height": 26,
         "pixel_count": 2221,
-        "mean_rgb": [
-          67,
-          148,
-          115
-        ]
+        "mean_rgb": [67, 148, 115]
       },
       "grid": [
         "                ••••••                  ",
@@ -115,11 +107,7 @@
         "width": 586,
         "height": 637,
         "pixel_count": 24785,
-        "mean_rgb": [
-          48,
-          96,
-          108
-        ]
+        "mean_rgb": [48, 96, 108]
       },
       "welcome_title": {
         "bbox": {
@@ -131,11 +119,7 @@
         "width": 236,
         "height": 26,
         "pixel_count": 1840,
-        "mean_rgb": [
-          63,
-          145,
-          114
-        ]
+        "mean_rgb": [63, 145, 114]
       },
       "grid": [
         "               ••••••                   ",

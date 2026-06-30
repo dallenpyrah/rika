@@ -189,7 +189,8 @@ function measureSurface(image: ImageData) {
     welcome_title: measure(
       image,
       welcomeCrop,
-      ({ max, saturation, green, red, blue }) => max > 40 && saturation > 0.15 && green > red * 1.05 && green > blue * 0.8,
+      ({ max, saturation, green, red, blue }) =>
+        max > 40 && saturation > 0.15 && green > red * 1.05 && green > blue * 0.8,
     ),
     grid: gridSummary(image),
   }

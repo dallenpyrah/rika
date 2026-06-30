@@ -37,10 +37,7 @@ export const layerFromPrepared = (prepared: Prepared) =>
     }),
   )
 
-export const prepare = (
-  tools: ReadonlyArray<Tool.Any>,
-  execute: (call: Call) => Effect.Effect<Result>,
-): Prepared => {
+export const prepare = (tools: ReadonlyArray<Tool.Any>, execute: (call: Call) => Effect.Effect<Result>): Prepared => {
   const toolkit = Toolkit.make(...tools)
   const handlers = toolkit.of(
     Object.fromEntries(

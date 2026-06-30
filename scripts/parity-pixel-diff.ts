@@ -21,7 +21,9 @@ interface DiffBox {
 const args = Bun.argv.slice(2)
 
 if (args.length < 2 || args.includes("--help") || args.includes("-h")) {
-  console.error("Usage: bun run scripts/parity-pixel-diff.ts <amp.png> <rika.png> [--out <file.json>] [--diff-image <file.png>]")
+  console.error(
+    "Usage: bun run scripts/parity-pixel-diff.ts <amp.png> <rika.png> [--out <file.json>] [--diff-image <file.png>]",
+  )
   process.exit(args.length < 2 ? 1 : 0)
 }
 
@@ -103,7 +105,12 @@ function loadImage(path: string, bmpPath: string): ImageData {
   }
 }
 
-function compare(amp: ImageData, rika: ImageData, requestedDiffImagePath: string | undefined, diffImageBmpPath: string | undefined) {
+function compare(
+  amp: ImageData,
+  rika: ImageData,
+  requestedDiffImagePath: string | undefined,
+  diffImageBmpPath: string | undefined,
+) {
   const sameDimensions = amp.width === rika.width && amp.height === rika.height
   const width = Math.min(amp.width, rika.width)
   const height = Math.min(amp.height, rika.height)
@@ -160,10 +167,13 @@ function compare(amp: ImageData, rika: ImageData, requestedDiffImagePath: string
   if (requestedDiffImagePath !== undefined && diffImageBmpPath !== undefined) {
     mkdirSync(dirname(requestedDiffImagePath), { recursive: true })
     writeBmp(diffImageBmpPath, diffWidth, diffHeight, diffPixels ?? new Uint8Array(diffWidth * diffHeight * 4))
-    const converted = Bun.spawnSync(["sips", "-s", "format", "png", diffImageBmpPath, "--out", requestedDiffImagePath], {
-      stdout: "pipe",
-      stderr: "pipe",
-    })
+    const converted = Bun.spawnSync(
+      ["sips", "-s", "format", "png", diffImageBmpPath, "--out", requestedDiffImagePath],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
     if (!converted.success) {
       throw new Error(`sips failed for diff image ${requestedDiffImagePath}: ${converted.stderr.toString()}`)
     }

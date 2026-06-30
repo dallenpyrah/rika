@@ -243,7 +243,11 @@ const waitForHealth = (system: System, record: BackendRecord, attempt: number): 
     ),
   )
 
-const healthyRecord = (system: System, dataDir: string, backend_id: string): Effect.Effect<BackendEndpoint, BackendError> =>
+const healthyRecord = (
+  system: System,
+  dataDir: string,
+  backend_id: string,
+): Effect.Effect<BackendEndpoint, BackendError> =>
   Effect.gen(function* () {
     const record = yield* readRecord(system, dataDir)
     const healthy = yield* isHealthy(system, record, backend_id)
@@ -323,7 +327,12 @@ export const backendId = (env: Record<string, string | undefined>, cwd: string) 
   return JSON.stringify({ executable, script, cwd })
 }
 
-const backendPort = (env: Record<string, string | undefined>, workspaceRoot: string, dataDir: string, backend_id: string) => {
+const backendPort = (
+  env: Record<string, string | undefined>,
+  workspaceRoot: string,
+  dataDir: string,
+  backend_id: string,
+) => {
   const configured = env.RIKA_BACKEND_PORT
   if (configured !== undefined) {
     const parsed = Number.parseInt(configured, 10)

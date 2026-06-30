@@ -321,12 +321,9 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
     ),
     Effect.catchCause((cause: Cause.Cause<RunError>) => {
       if (Cause.hasInterruptsOnly(cause)) {
-        return recordFailureWithEnvelope(
-          dependencies,
-          input,
-          cancelledEnvelope("Turn interrupted"),
-          emit,
-        ).pipe(Effect.andThen(Effect.interrupt))
+        return recordFailureWithEnvelope(dependencies, input, cancelledEnvelope("Turn interrupted"), emit).pipe(
+          Effect.andThen(Effect.interrupt),
+        )
       }
       const error = runErrorFromCause(input, cause, "runTurn")
       return recordFailure(dependencies, input, error, emit).pipe(
@@ -355,18 +352,15 @@ const recordFailureWithEnvelope = (
     yield* emit(appended).pipe(Effect.catch(() => Effect.void))
   }).pipe(Effect.catch(() => Effect.void))
 
-const appendFailureEvent = (
-  dependencies: Dependencies,
-  input: RunTurnInput,
-  error: ErrorEnvelope.Envelope,
-) =>
+const appendFailureEvent = (dependencies: Dependencies, input: RunTurnInput, error: ErrorEnvelope.Envelope) =>
   Effect.uninterruptible(
     Effect.gen(function* () {
       const events = yield* readThread(dependencies, { thread_id: input.thread_id })
       const turnEvent = events.findLast((event) => event.turn_id !== undefined)
       if (turnEvent?.turn_id === undefined) return undefined
       if (events.some((event) => event.type === "turn.failed" && event.turn_id === turnEvent.turn_id)) return undefined
-      if (events.some((event) => event.type === "turn.completed" && event.turn_id === turnEvent.turn_id)) return undefined
+      if (events.some((event) => event.type === "turn.completed" && event.turn_id === turnEvent.turn_id))
+        return undefined
 
       const failed = yield* makeTurnFailed(
         dependencies,

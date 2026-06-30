@@ -1026,8 +1026,7 @@ const aliasField = (call: Call, from: string, to: string): Call => {
   return { ...call, input: decoded.value }
 }
 
-const decodeFileSearchInput = (call: Call) =>
-  decodeToolInput(FileSearchInput, aliasField(call, "pattern", "query"))
+const decodeFileSearchInput = (call: Call) => decodeToolInput(FileSearchInput, aliasField(call, "pattern", "query"))
 const decodeGlobInput = (call: Call) => decodeToolInput(GlobInput, aliasField(call, "query", "pattern"))
 const decodeDirectorySearchInput = (call: Call) =>
   decodeToolInput(DirectorySearchInput, aliasField(call, "pattern", "query"))

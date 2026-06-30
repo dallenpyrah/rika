@@ -226,7 +226,9 @@ const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect
     }
 
     return notFound()
-  }).pipe(Effect.catchCause((cause: Cause.Cause<RemoteControl.RunError>) => Effect.succeed(errorResponseFromCause(cause))))
+  }).pipe(
+    Effect.catchCause((cause: Cause.Cause<RemoteControl.RunError>) => Effect.succeed(errorResponseFromCause(cause))),
+  )
 
 const withLocalAuth = (request: Request, token: string | undefined) => {
   if (token === undefined || token.length === 0) return request
@@ -318,7 +320,8 @@ const errorResponse = (error: RemoteControl.RunError) =>
 const errorResponseFromCause = (cause: Cause.Cause<RemoteControl.RunError>) => {
   const failure = Cause.findErrorOption(cause)
   if (Option.isSome(failure)) return errorResponse(failure.value)
-  if (Cause.hasInterruptsOnly(cause)) return json({ error: { message: "Request interrupted", code: "interrupted" } }, 499)
+  if (Cause.hasInterruptsOnly(cause))
+    return json({ error: { message: "Request interrupted", code: "interrupted" } }, 499)
   return errorResponse(causeError(cause, "handle"))
 }
 

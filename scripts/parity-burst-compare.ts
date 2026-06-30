@@ -76,7 +76,9 @@ const tempDir = mkdtempSync(join(tmpdir(), "rika-parity-burst-"))
 
 try {
   const ampImages = ampPaths.map((path, index) => loadImage(path, join(tempDir, `amp-${index}-${basename(path)}.bmp`)))
-  const rikaImages = rikaPaths.map((path, index) => loadImage(path, join(tempDir, `rika-${index}-${basename(path)}.bmp`)))
+  const rikaImages = rikaPaths.map((path, index) =>
+    loadImage(path, join(tempDir, `rika-${index}-${basename(path)}.bmp`)),
+  )
   const pairs: Array<PairDiff> = []
 
   ampImages.forEach((amp, ampIndex) => {
@@ -224,8 +226,14 @@ function loadImage(path: string, bmpPath: string): ImageData {
 
 function compare(amp: ImageData, rika: ImageData, ampIndex: number, rikaIndex: number): PairDiff {
   const sameDimensions = amp.width === rika.width && amp.height === rika.height
-  const width = crop === null ? Math.min(amp.width, rika.width) : Math.min(crop.width, amp.width - crop.left, rika.width - crop.left)
-  const height = crop === null ? Math.min(amp.height, rika.height) : Math.min(crop.height, amp.height - crop.top, rika.height - crop.top)
+  const width =
+    crop === null
+      ? Math.min(amp.width, rika.width)
+      : Math.min(crop.width, amp.width - crop.left, rika.width - crop.left)
+  const height =
+    crop === null
+      ? Math.min(amp.height, rika.height)
+      : Math.min(crop.height, amp.height - crop.top, rika.height - crop.top)
   const left = crop?.left ?? 0
   const top = crop?.top ?? 0
   const ampPixels = amp.width * amp.height
@@ -296,8 +304,14 @@ function compare(amp: ImageData, rika: ImageData, ampIndex: number, rikaIndex: n
 }
 
 function writeDiffImage(amp: ImageData, rika: ImageData, outputPath: string, bmpPath: string): void {
-  const width = crop === null ? Math.min(amp.width, rika.width) : Math.min(crop.width, amp.width - crop.left, rika.width - crop.left)
-  const height = crop === null ? Math.min(amp.height, rika.height) : Math.min(crop.height, amp.height - crop.top, rika.height - crop.top)
+  const width =
+    crop === null
+      ? Math.min(amp.width, rika.width)
+      : Math.min(crop.width, amp.width - crop.left, rika.width - crop.left)
+  const height =
+    crop === null
+      ? Math.min(amp.height, rika.height)
+      : Math.min(crop.height, amp.height - crop.top, rika.height - crop.top)
   const left = crop?.left ?? 0
   const top = crop?.top ?? 0
   const pixels = new Uint8Array(width * height * 4)

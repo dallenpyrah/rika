@@ -57,7 +57,6 @@ bun run db:generate
 bun run db:migrate
 ```
 
-
 ## Random Notes
 
 - Rika should feel fast, durable, and boring in the best way.
