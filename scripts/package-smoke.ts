@@ -36,6 +36,7 @@ async function runArtifact(args: ReadonlyArray<string>): Promise<RunResult> {
     stderr: "pipe",
     env: {
       ...Bun.env,
+      RIKA_API_KEY: Bun.env.RIKA_API_KEY ?? "package-smoke-dummy-key",
       RIKA_DATA_DIR: `${Bun.env.PWD ?? process.cwd()}/.rika-package-smoke`,
     },
   })
@@ -77,6 +78,7 @@ async function smokeServerHealth() {
       env: {
         ...Bun.env,
         OPENAI_API_KEY: Bun.env.OPENAI_API_KEY ?? "package-smoke-dummy-key",
+        RIKA_API_KEY: Bun.env.RIKA_API_KEY ?? "package-smoke-dummy-key",
         RIKA_DATA_DIR: join(workspace, ".rika"),
       },
     },
