@@ -445,11 +445,13 @@ describe("CLI args", () => {
   test("parses debug commands", async () => {
     const threadId = Ids.ThreadId.make("thread_args_debug")
     const all = await Effect.runPromise(Args.parse(["debug", "--all"]))
+    const allAlias = await Effect.runPromise(Args.parse(["--debug", "--all"]))
     const thread = await Effect.runPromise(Args.parse(["debug", "--thread", threadId]))
     const missing = await Effect.runPromise(Args.parse(["debug"]).pipe(Effect.flip))
     const conflicting = await Effect.runPromise(Args.parse(["debug", "--all", "--thread", threadId]).pipe(Effect.flip))
 
     expect(all).toEqual({ type: "debug", all: true })
+    expect(allAlias).toEqual({ type: "debug", all: true })
     expect(thread).toEqual({ type: "debug", all: false, thread_id: threadId })
     expect(missing).toBeInstanceOf(Args.ArgsError)
     expect(conflicting).toBeInstanceOf(Args.ArgsError)

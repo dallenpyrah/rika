@@ -268,13 +268,15 @@ export const usage = [
 ].join("\n")
 
 export const parse = Effect.fn("Cli.Args.parse")(function* (argv: ReadonlyArray<string>) {
-  const helpCommand = toHelpCommand(argv)
+  const normalizedArgv = toDebugAliasArgv(argv) ?? argv
+
+  const helpCommand = toHelpCommand(normalizedArgv)
   if (helpCommand !== undefined) return helpCommand
 
-  const invalidExecuteAliasCommand = toInvalidExecuteAliasCommand(argv)
+  const invalidExecuteAliasCommand = toInvalidExecuteAliasCommand(normalizedArgv)
   if (invalidExecuteAliasCommand !== undefined) return invalidExecuteAliasCommand
 
-  const versionCommand = toVersionCommand(argv)
+  const versionCommand = toVersionCommand(normalizedArgv)
   if (versionCommand !== undefined) return versionCommand
 
   const parsedRef = yield* Ref.make(Option.none<Command>())
@@ -282,7 +284,7 @@ export const parse = Effect.fn("Cli.Args.parse")(function* (argv: ReadonlyArray<
   const captured = makeCapturedConsole()
   const command = makeCommand(parsedRef, rejectedRef)
   const result = yield* Effect.result(
-    CliCommand.runWith(command, { version: "0.0.0" })(argv).pipe(
+    CliCommand.runWith(command, { version: "0.0.0" })(normalizedArgv).pipe(
       Effect.provideService(Console.Console, captured.console),
       Effect.provide(NodeServices.layer),
     ),
@@ -1054,6 +1056,9 @@ const toHelpCommand = (argv: ReadonlyArray<string>): HelpCommand | undefined =>
 
 const toInvalidExecuteAliasCommand = (argv: ReadonlyArray<string>): InvalidExecuteAliasCommand | undefined =>
   argv.length === 1 && argv[0] === "-e" ? { type: "invalid_execute_alias" } : undefined
+
+const toDebugAliasArgv = (argv: ReadonlyArray<string>): ReadonlyArray<string> | undefined =>
+  argv[0] === "--debug" ? ["debug", ...argv.slice(1)] : undefined
 
 const toReviewCommand = (input: ReviewInput): ReviewCommand => {
   const workspaceRoot = Option.getOrUndefined(input.workspace)

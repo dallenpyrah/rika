@@ -1,4 +1,6 @@
 import { $ } from "bun"
+import { existsSync, readdirSync } from "node:fs"
+import { join } from "node:path"
 
 const root = new URL("..", import.meta.url)
 const rootDir = root.pathname
@@ -6,9 +8,12 @@ const bunNodeModulesDir = new URL("node_modules/.bun/node_modules/", root).pathn
 const packageJson = readPackageJson(await Bun.file(new URL("package.json", root)).json())
 const artifactName = `rika-${process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`
 const outDir = new URL("dist/release/", root)
-const shareDir = new URL("dist/share/rika/drizzle/", root)
+const shareRoot = new URL("dist/share/rika/", root)
+const drizzleShareDir = new URL("drizzle/", shareRoot)
+const motelShareDir = new URL("motel/", shareRoot)
 const migrationsDir = new URL("packages/persistence/drizzle/", root)
 const artifact = new URL(artifactName, outDir)
+const motelEntry = resolveBunStoreMotelEntry()
 
 // OpenTUI ships its native FFI library as a set of per-platform optional
 // packages (`@opentui/core-<platform>-<arch>`), each containing a prebuilt
@@ -39,6 +44,10 @@ const manifest = {
   arch: process.arch,
   entrypoint: "packages/cli/src/main.ts",
   artifact: `dist/release/${artifactName}`,
+  share: {
+    drizzle: "dist/share/rika/drizzle",
+    motel: "dist/share/rika/motel/motel.js",
+  },
   native: {
     bundled: bundledNative,
     external: externalNative,
@@ -53,9 +62,10 @@ if (bundledNative.length === 0) {
 }
 
 await $`mkdir -p ${outDir.pathname}`
-await $`rm -rf ${shareDir.pathname}`
-await $`mkdir -p ${shareDir.pathname}`
-await $`cp -R ${migrationsDir.pathname}. ${shareDir.pathname}`
+await $`rm -rf ${shareRoot.pathname}`
+await $`mkdir -p ${drizzleShareDir.pathname} ${motelShareDir.pathname}`
+await $`cp -R ${migrationsDir.pathname}. ${drizzleShareDir.pathname}`
+await $`bun build ${motelEntry} --target bun --format esm ${externalFlags} --outdir ${motelShareDir.pathname}`
 await $`bun build --compile packages/cli/src/main.ts ${externalFlags} --outfile ${artifact.pathname}`
 await Bun.write(new URL(`${artifactName}.json`, outDir), `${JSON.stringify(manifest, null, 2)}\n`)
 
@@ -77,4 +87,14 @@ function readPackageJson(value: unknown) {
   if (typeof value !== "object" || value === null || !("version" in value)) return {}
   const version = value.version
   return typeof version === "string" ? { version } : {}
+}
+
+function resolveBunStoreMotelEntry() {
+  const store = new URL("node_modules/.bun/", root).pathname
+  for (const entry of readdirSync(store)) {
+    if (!entry.startsWith("@kitlangton+motel@")) continue
+    const script = join(store, entry, "node_modules", "@kitlangton", "motel", "src", "motel.ts")
+    if (existsSync(script)) return script
+  }
+  throw new Error("Cannot find bundled motel source. Run bun install.")
 }

@@ -19,6 +19,7 @@ export const executeCommand = Effect.fn("Cli.Debug.executeCommand")(function* (
 
   const endpoint = trimTrailingSlash(env.RIKA_TELEMETRY_ENDPOINT ?? Telemetry.defaultEndpoint)
   yield* launchMotel({
+    ...env,
     MOTEL_OTEL_BASE_URL: endpoint,
     MOTEL_OTEL_QUERY_URL: endpoint,
     MOTEL_TUI_SERVICE_NAME: Telemetry.serviceName,
@@ -35,7 +36,7 @@ export const formatError = (error: RunError) => {
 
 const launchMotel = (env: Record<string, string | undefined>) =>
   Effect.tryPromise({
-    try: () => launchMotelProcess([process.argv[0] ?? "bun", "motel", "tui"], env),
+    try: () => launchMotelProcess(["tui"], env),
     catch: (error) => new DebugError({ message: error instanceof Error ? error.message : String(error) }),
   })
 

@@ -25,9 +25,10 @@ if (parseDoctorReport(doctorOff.stdout).telemetry !== "disabled") {
   fail("compiled CLI doctor report did not honor RIKA_TELEMETRY=off", doctorOff)
 }
 
+await smokeDebugCommand()
 await smokeServerHealth()
 
-console.log(JSON.stringify({ artifact: artifactPath, checks: ["help", "doctor", "server-health"] }))
+console.log(JSON.stringify({ artifact: artifactPath, checks: ["help", "doctor", "debug", "server-health"] }))
 
 interface RunResult {
   readonly exitCode: number
@@ -102,6 +103,49 @@ async function smokeServerHealth() {
   } finally {
     child.kill()
     await child.exited.catch(() => 0)
+    await rm(workspace, { force: true, recursive: true })
+  }
+}
+
+async function smokeDebugCommand() {
+  const workspace = await mkdtemp(join(tmpdir(), "rika-package-debug-"))
+  const fakeBun = join(workspace, "fake-bun")
+  const output = join(workspace, "debug.json")
+  const expectedMotelSuffix = join("dist", "share", "rika", "motel", "motel.js")
+  await Bun.write(
+    fakeBun,
+    `#!/usr/bin/env bun
+const output = process.env.RIKA_FAKE_MOTEL_OUTPUT
+if (output === undefined) process.exit(2)
+await Bun.write(output, JSON.stringify({ argv: process.argv.slice(2), service: process.env.MOTEL_TUI_SERVICE_NAME }))
+`,
+  )
+  await $`chmod +x ${fakeBun}`
+
+  try {
+    const result = await runArtifact(["--debug", "--all"], {
+      RIKA_BUN_EXECUTABLE: fakeBun,
+      RIKA_FAKE_MOTEL_OUTPUT: output,
+    })
+    if (result.exitCode !== 0) fail("compiled CLI debug command failed", result)
+    const invocation = JSON.parse(await Bun.file(output).text())
+    const motelScript = Array.isArray(invocation.argv) ? invocation.argv[0] : undefined
+    if (
+      invocation.service !== "rika" ||
+      !Array.isArray(invocation.argv) ||
+      invocation.argv.length !== 2 ||
+      invocation.argv[1] !== "tui" ||
+      typeof motelScript !== "string" ||
+      !motelScript.endsWith(expectedMotelSuffix) ||
+      !(await Bun.file(motelScript).exists())
+    ) {
+      fail("compiled CLI debug command did not launch motel with Rika filters", {
+        exitCode: 1,
+        stdout: JSON.stringify(invocation),
+        stderr: "",
+      })
+    }
+  } finally {
     await rm(workspace, { force: true, recursive: true })
   }
 }
