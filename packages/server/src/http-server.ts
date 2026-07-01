@@ -1,3 +1,4 @@
+import { Diagnostics } from "@rika/core"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Cause, Context, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
 import * as RemoteControl from "./remote-control"
@@ -33,7 +34,8 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const remote = yield* RemoteControl.Service
-    return makeService(remote)
+    const diagnostics = yield* Diagnostics.Service
+    return makeService(remote, diagnostics)
   }),
 )
 
@@ -47,8 +49,9 @@ export const serve = Effect.fn("HttpServer.serve.call")(function* (input: ServeI
   return yield* service.serve(input)
 })
 
-const makeService = (remote: RemoteControl.Interface): Interface => {
-  const handleRequest = (request: Request) => route(remote, request)
+const makeService = (remote: RemoteControl.Interface, diagnostics: Diagnostics.Interface): Interface => {
+  const handleRequest = (request: Request) =>
+    route(remote, request).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
   return Service.of({
     handle: handleRequest,
     serve: Effect.fn("HttpServer.serve")(function* (input: ServeInput = {}) {
@@ -75,9 +78,62 @@ const makeService = (remote: RemoteControl.Interface): Interface => {
   })
 }
 
-const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect<Response> =>
+const route = (
+  remote: RemoteControl.Interface,
+  request: Request,
+): Effect.Effect<Response, never, Diagnostics.Service> => {
+  const url = new URL(request.url)
+  const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID()
+  return Diagnostics.event(
+    "http.request",
+    (fields) =>
+      dispatch(remote, request, url).pipe(
+        Effect.tap((response) =>
+          Effect.sync(() => {
+            fields.status_code = response.status
+          }),
+        ),
+        Effect.tapCause((cause: Cause.Cause<RemoteControl.RunError>) =>
+          Effect.sync(() => {
+            fields.status_code = errorResponseFromCause(cause).status
+          }),
+        ),
+      ),
+    requestFields(request, url, requestId),
+  ).pipe(
+    Effect.catchCause((cause: Cause.Cause<RemoteControl.RunError>) => Effect.succeed(errorResponseFromCause(cause))),
+  )
+}
+
+const requestFields = (request: Request, url: URL, requestId: string): Diagnostics.Fields => {
+  const segments = url.pathname.split("/").filter(Boolean)
+  const threadIdPath =
+    segments[1] === "threads" && segments[2] !== undefined && segments[2] !== "search"
+      ? decodeURIComponent(segments[2])
+      : undefined
+  const artifactIdPath =
+    segments[1] === "artifacts" && segments[2] !== undefined ? decodeURIComponent(segments[2]) : undefined
+  const threadIdQuery = url.searchParams.get("thread_id")
+  const workspaceId = url.searchParams.get("workspace_id")
+  const userId = url.searchParams.get("user_id")
+  const threadId = threadIdPath ?? threadIdQuery ?? undefined
+  return {
+    method: request.method,
+    path: url.pathname,
+    request_id: requestId,
+    ...(threadId === undefined ? {} : { thread_id: threadId }),
+    ...(artifactIdPath === undefined ? {} : { artifact_id: artifactIdPath }),
+    ...(workspaceId === null ? {} : { workspace_id: workspaceId }),
+    ...(userId === null ? {} : { user_id: userId }),
+  }
+}
+
+const dispatch = (
+  remote: RemoteControl.Interface,
+  request: Request,
+  url: URL,
+): Effect.Effect<Response, RemoteControl.RunError> =>
   Effect.gen(function* () {
-    const url = new URL(request.url)
     const unauthorized = unauthorizedResponse(request)
     if (unauthorized !== undefined) return unauthorized
     if (url.pathname === "/health")
@@ -226,9 +282,7 @@ const route = (remote: RemoteControl.Interface, request: Request): Effect.Effect
     }
 
     return notFound()
-  }).pipe(
-    Effect.catchCause((cause: Cause.Cause<RemoteControl.RunError>) => Effect.succeed(errorResponseFromCause(cause))),
-  )
+  })
 
 const withLocalAuth = (request: Request, token: string | undefined) => {
   if (token === undefined || token.length === 0) return request

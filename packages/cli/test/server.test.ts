@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { Config, Diagnostics } from "@rika/core"
 import { HttpServer } from "@rika/server"
 import { Effect, Fiber, Layer, ManagedRuntime, Ref } from "effect"
 import { Output, Server } from "../src/index"
@@ -19,7 +20,17 @@ describe("CLI server command", () => {
           }),
       }),
     )
-    const layer = Server.layer.pipe(Layer.provideMerge(Output.memoryLayer(output)), Layer.provideMerge(httpLayer))
+    const configLayer = Config.layerFromValues({
+      workspace_root: "/workspace/rika-cli-test",
+      data_dir: "/workspace/rika-cli-test/.rika",
+      default_mode: "smart",
+    })
+    const layer = Server.layer.pipe(
+      Layer.provideMerge(Output.memoryLayer(output)),
+      Layer.provideMerge(httpLayer),
+      Layer.provideMerge(configLayer),
+      Layer.provideMerge(Diagnostics.memoryLayer([])),
+    )
     const runtime = ManagedRuntime.make(layer)
 
     const fiber = runtime.runFork(Server.executeCommand({ type: "server", ephemeral: true }))

@@ -11,5 +11,12 @@
     "require-yield": "off",
     "typescript/no-floating-promises": "warn"
   },
-  "ignorePatterns": ["**/node_modules/**", "**/dist/**", "**/build/**", "**/coverage/**", "**/.turbo/**"]
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/.turbo/**",
+    "**/skills/motel-debug/**"
+  ]
 }

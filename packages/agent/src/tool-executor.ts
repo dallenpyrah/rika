@@ -1,7 +1,7 @@
-import { Config } from "@rika/core"
+import { Config, Diagnostics } from "@rika/core"
 import { Common, ErrorEnvelope } from "@rika/schema"
 import type { Call, Result } from "@rika/schema/tool"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Option, Schema } from "effect"
 import type { Tool } from "effect/unstable/ai"
 import * as PermissionPolicy from "./permission-policy"
 import * as ToolRegistry from "./tool-registry"
@@ -31,6 +31,36 @@ const makeExecutor = (registry: ToolRegistry.Interface, policy: PermissionPolicy
   tools: registry.tools,
   describe: registry.describe,
   execute: Effect.fn("ToolExecutor.execute")(function* (call: Call) {
+    const diagnostics = Option.getOrElse(yield* Effect.serviceOption(Diagnostics.Service), () => noopDiagnostics)
+    return yield* Diagnostics.event(
+      "tool.exec",
+      (fields) => runExecute(registry, policy, call, fields),
+      executeSeed(call),
+    ).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
+  }),
+})
+
+const noopDiagnostics: Diagnostics.Interface = { emit: () => Effect.void }
+
+const executeSeed = (call: Call): Diagnostics.Fields => {
+  const threadId = call.metadata?.thread_id
+  const turnId = call.metadata?.turn_id
+  return {
+    tool_name: call.name,
+    tool_call_id: call.id,
+    input_size: jsonSize(call.input),
+    ...(threadId === undefined ? {} : { thread_id: threadId }),
+    ...(turnId === undefined ? {} : { turn_id: turnId }),
+  }
+}
+
+const runExecute = (
+  registry: ToolRegistry.Interface,
+  policy: PermissionPolicy.Interface,
+  call: Call,
+  fields: Diagnostics.Fields,
+) =>
+  Effect.gen(function* () {
     const mode = yield* policy.mode
     const decision = yield* policy.decide(call).pipe(
       Effect.match({
@@ -38,8 +68,24 @@ const makeExecutor = (registry: ToolRegistry.Interface, policy: PermissionPolicy
         onSuccess: (allowed) => allowed,
       }),
     )
-    const metadata = permissionMetadata(mode, decision.action)
+    fields.permission_mode = mode
+    fields.permission_action = decision.action
+    const result = yield* resultForDecision(registry, call, decision, permissionMetadata(mode, decision.action))
+    fields.status = result.status
+    fields.output_size = result.output === undefined ? 0 : jsonSize(result.output)
+    if (result.status === "error" && result.error !== undefined) {
+      fields.error_kind = result.error.kind
+    }
+    return result
+  })
 
+const resultForDecision = (
+  registry: ToolRegistry.Interface,
+  call: Call,
+  decision: PermissionPolicy.Decision,
+  metadata: Common.Metadata,
+) =>
+  Effect.gen(function* () {
     switch (decision.action) {
       case "allow":
         return yield* executeRegistryCall(registry, call).pipe(Effect.map((result) => withMetadata(result, metadata)))
@@ -66,8 +112,9 @@ const makeExecutor = (registry: ToolRegistry.Interface, policy: PermissionPolicy
       default:
         return yield* Effect.die(new Error("Unknown permission policy decision"))
     }
-  }),
-})
+  })
+
+const jsonSize = (value: Common.JsonValue): number => JSON.stringify(value)?.length ?? 0
 
 export const layer = Layer.effect(
   Service,

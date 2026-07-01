@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import * as Args from "./args"
 import * as Output from "./output"
 
-const version = "0.0.1782665646-g2f0017"
+export const version = "0.0.1782665646-g2f0017"
 const releasedAt = "2026-06-28T16:54:06.000Z"
 const releasedAtMs = Date.parse(releasedAt)
 

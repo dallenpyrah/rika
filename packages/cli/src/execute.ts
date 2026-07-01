@@ -1,7 +1,8 @@
 import { AgentLoop } from "@rika/agent"
-import { Config, IdGenerator } from "@rika/core"
+import { Config, Diagnostics, IdGenerator } from "@rika/core"
 import { Codec, Event, Ids } from "@rika/schema"
 import { Context, Effect, Layer, Schema, Stream } from "effect"
+import { basename } from "node:path"
 import * as Args from "./args"
 import * as Output from "./output"
 
@@ -25,10 +26,12 @@ export const layer = Layer.effect(
     const config = yield* Config.Service
     const configValues = yield* config.get
     const idGenerator = yield* IdGenerator.Service
+    const diagnostics = yield* Diagnostics.Service
 
     const executeCommand = Effect.fn("Cli.Execute.executeCommand")(function* (command: Args.ExecuteCommand) {
       const threadId = command.thread_id ?? Ids.ThreadId.make(yield* idGenerator.next("thread"))
-      const workspaceId = Ids.WorkspaceId.make(command.workspace_root ?? configValues.workspace_root)
+      const workspaceRoot = command.workspace_root ?? configValues.workspace_root
+      const workspaceId = Ids.WorkspaceId.make(workspaceRoot)
       const input: AgentLoop.RunTurnInput = {
         thread_id: threadId,
         workspace_id: workspaceId,
@@ -36,8 +39,33 @@ export const layer = Layer.effect(
         ...(command.mode === undefined ? {} : { mode: command.mode }),
       }
 
-      yield* agentLoop.streamTurn(input).pipe(Stream.runForEach((event) => output.stdout(encodeEvent(event))))
-      return 0
+      return yield* Diagnostics.event(
+        "cli.execute",
+        (fields) =>
+          Effect.gen(function* () {
+            fields.thread_id = threadId
+            let toolCount = 0
+            let turnCount = 0
+            yield* agentLoop.streamTurn(input).pipe(
+              Stream.runForEach((event) =>
+                Effect.gen(function* () {
+                  if (event.type === "tool.call.completed") toolCount += 1
+                  if (event.type === "turn.completed") turnCount += 1
+                  yield* output.stdout(encodeEvent(event))
+                }),
+              ),
+            )
+            fields.tool_count = toolCount
+            fields.turn_count = turnCount
+            fields.exit_code = 0
+            return 0
+          }),
+        {
+          mode: command.mode ?? configValues.default_mode,
+          workspace_root: basename(workspaceRoot),
+          ephemeral: command.ephemeral,
+        },
+      ).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
     })
 
     return Service.of({

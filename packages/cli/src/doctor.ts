@@ -1,4 +1,5 @@
 import { PermissionPolicy } from "@rika/agent"
+import { Telemetry } from "@rika/core"
 import { Context, Effect, Layer, Schema } from "effect"
 import * as Args from "./args"
 import * as LocalBackend from "./local-backend"
@@ -20,7 +21,8 @@ export const ConfigSummary = Schema.Struct({
   database_url_configured: Schema.Boolean,
   base_url_configured: Schema.Boolean,
   api_key_configured: Schema.Boolean,
-  telemetry: Schema.Literal("disabled"),
+  telemetry: Schema.Literals(["disabled", "enabled"]),
+  telemetry_endpoint: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Cli.Doctor.ConfigSummary" })
 
 export interface RivetSummary extends Schema.Schema.Type<typeof RivetSummary> {}
@@ -116,6 +118,7 @@ const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.
     const rivetHost = input.env.RIKA_RIVET_HOST ?? "local"
     const rivetEndpoint = input.env.RIKA_RIVET_ENDPOINT ?? input.env.RIVET_ENDPOINT ?? "http://127.0.0.1:6420"
     const apiKeyConfigured = secretConfigured(input.env.RIKA_API_KEY)
+    const telemetry = Telemetry.fromEnv(input.env, input.version ?? "0.0.0")
     const permissionConfig = PermissionPolicy.configFromEnv(input.env)
     const permissionSummary = PermissionPolicy.summary(permissionConfig)
     const backendStatus = yield* backend
@@ -136,7 +139,8 @@ const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.
         database_url_configured: input.env.RIKA_DATABASE_URL !== undefined,
         base_url_configured: input.env.RIKA_BASE_URL !== undefined,
         api_key_configured: apiKeyConfigured,
-        telemetry: "disabled",
+        telemetry: telemetry.enabled ? "enabled" : "disabled",
+        ...(telemetry.enabled ? { telemetry_endpoint: telemetry.endpoint } : {}),
       },
       backend: {
         status: backendStatus.status,
@@ -150,7 +154,7 @@ const reportFromInput = (input: Input, backend: LocalBackend.Interface): Effect.
         token_configured: secretConfigured(input.env.RIKA_RIVET_TOKEN) || secretConfigured(input.env.RIVET_TOKEN),
         namespace_configured: input.env.RIKA_RIVET_NAMESPACE !== undefined || input.env.RIVET_NAMESPACE !== undefined,
       },
-      checks: checks({ dataDir, apiKeyConfigured, permissionSummary, rivetHost, rivetEndpoint }),
+      checks: checks({ dataDir, apiKeyConfigured, permissionSummary, rivetHost, rivetEndpoint, telemetry }),
     }
     return diagnosticReport
   })
@@ -161,6 +165,7 @@ const checks = (input: {
   readonly permissionSummary: PermissionPolicy.PermissionSummary
   readonly rivetHost: string
   readonly rivetEndpoint: string
+  readonly telemetry: Telemetry.Options
 }): ReadonlyArray<Check> => [
   {
     name: "data-dir",
@@ -193,7 +198,9 @@ const checks = (input: {
   {
     name: "telemetry",
     status: "ok",
-    message: "Doctor only reads local process configuration and does not upload telemetry.",
+    message: input.telemetry.enabled
+      ? `Telemetry exports traces and logs to ${input.telemetry.endpoint} (local OTLP). Set RIKA_TELEMETRY=off to disable.`
+      : "Telemetry is disabled. Set RIKA_TELEMETRY=on to export traces and logs to a local OTLP endpoint.",
   },
 ]
 

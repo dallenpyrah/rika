@@ -1,5 +1,7 @@
+import { Config, Diagnostics } from "@rika/core"
 import { HttpServer } from "@rika/server"
 import { Context, Effect, Layer, Schema } from "effect"
+import { basename } from "node:path"
 import * as Args from "./args"
 import * as Output from "./output"
 
@@ -20,16 +22,32 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const output = yield* Output.Service
     const httpServer = yield* HttpServer.Service
+    const config = yield* Config.Service
+    const configValues = yield* config.get
+    const diagnostics = yield* Diagnostics.Service
 
     return Service.of({
       executeCommand: Effect.fn("Cli.Server.executeCommand")(function* (command: Args.ServerCommand) {
-        const handle = yield* httpServer.serve({
-          ...(command.host === undefined ? {} : { host: command.host }),
-          ...(command.port === undefined ? {} : { port: command.port }),
-          ...(command.token === undefined ? {} : { token: command.token }),
-        })
-        yield* output.stdout(JSON.stringify({ url: handle.url }))
-        return yield* Effect.never.pipe(Effect.ensuring(handle.close()))
+        return yield* Diagnostics.event(
+          "cli.server",
+          (fields) =>
+            Effect.gen(function* () {
+              const handle = yield* httpServer.serve({
+                ...(command.host === undefined ? {} : { host: command.host }),
+                ...(command.port === undefined ? {} : { port: command.port }),
+                ...(command.token === undefined ? {} : { token: command.token }),
+              })
+              fields.url = handle.url
+              yield* output.stdout(JSON.stringify({ url: handle.url }))
+              return yield* Effect.never.pipe(Effect.ensuring(handle.close()))
+            }),
+          {
+            ...(command.host === undefined ? {} : { host: command.host }),
+            ...(command.port === undefined ? {} : { port: command.port }),
+            workspace_root: basename(configValues.workspace_root),
+            ephemeral: command.ephemeral,
+          },
+        ).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
       }),
     })
   }),

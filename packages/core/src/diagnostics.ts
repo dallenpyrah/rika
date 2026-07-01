@@ -1,6 +1,6 @@
 import { appendFile, mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Clock, Context, Effect, Exit, Layer, Option, Schema } from "effect"
 import { Common } from "@rika/schema"
 import { Service as ConfigService } from "./config"
 
@@ -22,18 +22,19 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/core/Diagnostics") {}
 
+export const resolveLogPath = Effect.fn("Diagnostics.resolveLogPath")(function* () {
+  const config = yield* ConfigService
+  const values = yield* config.get
+  const rikaLogFile = yield* config.requireEnv("RIKA_LOG_FILE").pipe(Effect.option)
+  const configuredPath = Option.isSome(rikaLogFile)
+    ? rikaLogFile
+    : yield* config.requireEnv("AMP_LOG_FILE").pipe(Effect.option)
+  return Option.getOrElse(configuredPath, () => `${values.data_dir}/logs/session.ndjson`)
+})
+
 export const layer = Layer.effect(
   Service,
-  Effect.gen(function* () {
-    const config = yield* ConfigService
-    const values = yield* config.get
-    const rikaLogFile = yield* config.requireEnv("RIKA_LOG_FILE").pipe(Effect.option)
-    const configuredPath = Option.isSome(rikaLogFile)
-      ? rikaLogFile
-      : yield* config.requireEnv("AMP_LOG_FILE").pipe(Effect.option)
-    const path = Option.getOrElse(configuredPath, () => `${values.data_dir}/logs/session.ndjson`)
-    return fileService(path)
-  }),
+  Effect.map(resolveLogPath(), (path) => fileService(path)),
 )
 
 export const fileLayer = (path: string) => Layer.succeed(Service, fileService(path))
@@ -64,18 +65,49 @@ export const emit = Effect.fn("Diagnostics.emit.call")(function* (entry: Entry) 
   return yield* diagnostics.emit(entry)
 })
 
-const fileService = (path: string) =>
-  Service.of({
-    emit: Effect.fn("Diagnostics.emit.file")(function* (entry: Entry) {
-      yield* Effect.tryPromise({
-        try: async () => {
-          await mkdir(dirname(path), { recursive: true })
-          await appendFile(path, `${lineFromEntry(entry)}\n`, "utf8")
-        },
-        catch: () => undefined,
-      }).pipe(Effect.catch(() => Effect.void))
-    }),
+export type Fields = Record<string, Common.JsonValue>
+
+export const event = <A, E, R>(
+  op: string,
+  run: (fields: Fields) => Effect.Effect<A, E, R>,
+  seed: Fields = {},
+): Effect.Effect<A, E, R | Service> =>
+  Effect.gen(function* () {
+    const startedAt = yield* Clock.currentTimeMillis
+    const fields: Fields = { ...seed }
+    return yield* run(fields).pipe(
+      Effect.onExit((exit) =>
+        Effect.gen(function* () {
+          const endedAt = yield* Clock.currentTimeMillis
+          const outcome = Exit.isSuccess(exit) ? "success" : "error"
+          yield* emit({
+            level: outcome === "error" ? "error" : "info",
+            message: `${op} ${outcome}`,
+            data: {
+              ...fields,
+              op,
+              outcome,
+              duration_ms: endedAt - startedAt,
+              ...(Exit.isSuccess(exit) ? {} : { error: Cause.pretty(exit.cause) }),
+            },
+          })
+        }),
+      ),
+    )
   })
+
+export const makeFileEmit = (path: string) =>
+  Effect.fn("Diagnostics.emit.file")(function* (entry: Entry) {
+    yield* Effect.tryPromise({
+      try: async () => {
+        await mkdir(dirname(path), { recursive: true })
+        await appendFile(path, `${lineFromEntry(entry)}\n`, "utf8")
+      },
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.void))
+  })
+
+const fileService = (path: string) => Service.of({ emit: makeFileEmit(path) })
 
 const lineFromEntry = (entry: Entry) =>
   JSON.stringify({

@@ -1,7 +1,7 @@
-import { Config, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Option, Schema } from "effect"
 
 const defaultReferenceChars = 2_000
 const defaultSearchLimit = 20
@@ -131,7 +131,11 @@ export const layer = Layer.effect(
 
     return Service.of({
       create: Effect.fn("ThreadService.create")(function* (input: CreateInput) {
-        return yield* createThread(dependencies, input)
+        return yield* threadEvent(
+          "thread.create",
+          input.thread_id === undefined ? {} : { thread_id: input.thread_id },
+          (fields) => createThread(dependencies, input, fields),
+        )
       }),
       list: Effect.fn("ThreadService.list")(function* (input: ListInput = {}) {
         return yield* listThreads(dependencies, input)
@@ -143,10 +147,14 @@ export const layer = Layer.effect(
         return yield* previewThread(dependencies, input)
       }),
       archive: Effect.fn("ThreadService.archive")(function* (input: ThreadIdInput) {
-        return yield* setArchived(dependencies, input.thread_id, true)
+        return yield* threadEvent("thread.archive", { thread_id: input.thread_id }, (fields) =>
+          setArchived(dependencies, input.thread_id, true, fields),
+        )
       }),
       unarchive: Effect.fn("ThreadService.unarchive")(function* (input: ThreadIdInput) {
-        return yield* setArchived(dependencies, input.thread_id, false)
+        return yield* threadEvent("thread.unarchive", { thread_id: input.thread_id }, (fields) =>
+          setArchived(dependencies, input.thread_id, false, fields),
+        )
       }),
       deleteThread: Effect.fn("ThreadService.deleteThread")(function* (input: ThreadIdInput) {
         return yield* new ThreadServiceError({
@@ -245,14 +253,31 @@ export const reference = Effect.fn("ThreadService.reference.call")(function* (in
   return yield* service.reference(input)
 })
 
-const createThread = (dependencies: Dependencies, input: CreateInput) =>
+const noopDiagnostics: Diagnostics.Interface = { emit: () => Effect.void }
+
+const threadEvent = <A, E>(
+  op: string,
+  seed: Diagnostics.Fields,
+  run: (fields: Diagnostics.Fields) => Effect.Effect<A, E>,
+) =>
+  Effect.gen(function* () {
+    const diagnostics = Option.getOrElse(yield* Effect.serviceOption(Diagnostics.Service), () => noopDiagnostics)
+    return yield* Diagnostics.event(op, run, seed).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
+  })
+
+const createThread = (dependencies: Dependencies, input: CreateInput, fields: Diagnostics.Fields) =>
   Effect.gen(function* () {
     const config = yield* dependencies.config.get
     const threadId = input.thread_id ?? Ids.ThreadId.make(yield* dependencies.idGenerator.next("thread"))
+    fields.thread_id = threadId
     const existing = yield* getSummary(dependencies, threadId)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      fields.created = false
+      return existing
+    }
 
     const createdAt = yield* dependencies.time.nowMillis
+    const workspaceId = input.workspace_id ?? Ids.WorkspaceId.make(config.workspace_root)
     const event: Event.ThreadCreated = {
       id: Ids.EventId.make(yield* dependencies.idGenerator.next("event")),
       thread_id: threadId,
@@ -261,11 +286,14 @@ const createThread = (dependencies: Dependencies, input: CreateInput) =>
       created_at: createdAt,
       type: "thread.created",
       data: {
-        workspace_id: input.workspace_id ?? Ids.WorkspaceId.make(config.workspace_root),
+        workspace_id: workspaceId,
         ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
       },
     }
     yield* appendAndProject(dependencies, event)
+    fields.created = true
+    fields.workspace_id = workspaceId
+    fields.event_count = 1
     return yield* requireSummary(dependencies, threadId, "create")
   })
 
@@ -303,16 +331,26 @@ const previewThread = (dependencies: Dependencies, input: PreviewInput) =>
     return { summary, events }
   })
 
-const setArchived = (dependencies: Dependencies, threadId: Ids.ThreadId, archived: boolean) =>
+const setArchived = (
+  dependencies: Dependencies,
+  threadId: Ids.ThreadId,
+  archived: boolean,
+  fields: Diagnostics.Fields,
+) =>
   Effect.gen(function* () {
     const record = yield* openThread(dependencies, threadId)
-    if (record.summary.archived === archived) return record.summary
+    fields.event_count = record.events.length
+    if (record.summary.archived === archived) {
+      fields.changed = false
+      return record.summary
+    }
 
     const createdAt = yield* dependencies.time.nowMillis
+    const sequence = latestSequence(record.events) + 1
     const common = {
       id: Ids.EventId.make(yield* dependencies.idGenerator.next("event")),
       thread_id: threadId,
-      sequence: latestSequence(record.events) + 1,
+      sequence,
       version: 1 as const,
       created_at: createdAt,
       data: {},
@@ -321,6 +359,8 @@ const setArchived = (dependencies: Dependencies, threadId: Ids.ThreadId, archive
       ? { ...common, type: "thread.archived" }
       : { ...common, type: "thread.unarchived" }
     yield* appendAndProject(dependencies, event)
+    fields.changed = true
+    fields.sequence = sequence
     return yield* requireSummary(dependencies, threadId, archived ? "archive" : "unarchive")
   })
 

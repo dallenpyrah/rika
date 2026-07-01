@@ -37,7 +37,8 @@ describe("CLI doctor command", () => {
         workspace_root: "/workspace/rika",
         data_dir: "/workspace/rika/.rika-test",
         api_key_configured: true,
-        telemetry: "disabled",
+        telemetry: "enabled",
+        telemetry_endpoint: "http://127.0.0.1:27686",
       },
       backend: {
         status: "disconnected",

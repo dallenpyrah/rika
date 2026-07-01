@@ -1,5 +1,5 @@
-import { Config } from "@rika/core"
-import { Context, Effect, Layer, Schema, Stream } from "effect"
+import { Config, Diagnostics } from "@rika/core"
+import { Cause, Clock, Context, Effect, Exit, Layer, Option, Schema, Stream } from "effect"
 import * as Modes from "./modes"
 import * as Provider from "./provider"
 
@@ -58,14 +58,19 @@ export const layer = Layer.effect(
       complete: Effect.fn("LLM.Router.complete")(function* (request: Request) {
         const routed = yield* route(request)
         const provider = yield* providerFor(registry, routed)
-        return yield* provider.complete(routed)
+        const startedAt = yield* Clock.currentTimeMillis
+        const fields = llmCallSeed(routed, "message")
+        return yield* provider.complete(routed).pipe(
+          Effect.tap((response) => Effect.sync(() => enrichResponseFields(fields, response))),
+          Effect.onExit((exit) => emitLlmCall(startedAt, fields, exit)),
+        )
       }),
       stream: (request: Request) =>
         Stream.unwrap(
           Effect.gen(function* () {
             const routed = yield* route(request)
             const provider = yield* providerFor(registry, routed)
-            return provider.stream(routed)
+            return instrumentStream(routed, provider.stream(routed))
           }),
         ),
     })
@@ -109,6 +114,74 @@ const makeRoute = (config: Config.Interface) =>
       ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
       ...(request.toolkit === undefined ? {} : { toolkit: request.toolkit }),
     }
+  })
+
+const llmCallSeed = (routed: RoutedRequest, kind: "message" | "stream"): Diagnostics.Fields => ({
+  provider: routed.provider,
+  model: routed.model,
+  mode: routed.mode,
+  ...(routed.profile === undefined ? {} : { profile: routed.profile }),
+  reasoning_effort: routed.reasoning_effort,
+  ...(routed.service_tier === undefined ? {} : { service_tier: routed.service_tier }),
+  request_kind: routed.toolkit === undefined ? kind : "tool",
+  message_count: routed.messages.length,
+})
+
+const enrichResponseFields = (fields: Diagnostics.Fields, response: Provider.GenerateResponse): void => {
+  if (response.id !== undefined) fields.response_id = response.id
+  if (response.finish_reason !== undefined) fields.finish_reason = response.finish_reason
+  const usage = response.usage
+  if (usage === undefined) return
+  if (usage.input_tokens !== undefined) fields.token_in = usage.input_tokens
+  if (usage.output_tokens !== undefined) fields.token_out = usage.output_tokens
+  if (usage.reasoning_tokens !== undefined) fields.reasoning_tokens = usage.reasoning_tokens
+  if (usage.total_tokens !== undefined) fields.total_tokens = usage.total_tokens
+}
+
+const instrumentStream = (
+  routed: RoutedRequest,
+  source: Stream.Stream<Provider.StreamEvent, Provider.ProviderError>,
+): Stream.Stream<Provider.StreamEvent, Provider.ProviderError> =>
+  Stream.unwrap(
+    Effect.map(Clock.currentTimeMillis, (startedAt) => {
+      const fields = llmCallSeed(routed, "stream")
+      let toolCalls = 0
+      return source.pipe(
+        Stream.tap((event) =>
+          Effect.sync(() => {
+            if (event.type === "tool.call") toolCalls += 1
+            if (event.type === "response.completed") {
+              fields.tool_call_count = toolCalls
+              enrichResponseFields(fields, event.response)
+            }
+          }),
+        ),
+        Stream.onExit((exit) => emitLlmCall(startedAt, fields, exit)),
+      )
+    }),
+  )
+
+const emitLlmCall = <A>(
+  startedAt: number,
+  fields: Diagnostics.Fields,
+  exit: Exit.Exit<A, Provider.ProviderError>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const service = yield* Effect.serviceOption(Diagnostics.Service)
+    if (Option.isNone(service)) return
+    const endedAt = yield* Clock.currentTimeMillis
+    const outcome = Exit.isSuccess(exit) ? "success" : "error"
+    yield* service.value.emit({
+      level: outcome === "error" ? "error" : "info",
+      message: `llm.call ${outcome}`,
+      data: {
+        ...fields,
+        op: "llm.call",
+        outcome,
+        duration_ms: endedAt - startedAt,
+        ...(Exit.isSuccess(exit) ? {} : { error: Cause.pretty(exit.cause) }),
+      },
+    })
   })
 
 const providerFor = (registry: Provider.RegistryInterface, request: RoutedRequest) => {

@@ -220,6 +220,14 @@ const streamTurnFromDependencies = (
   )
 
 const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: Emit) =>
+  Diagnostics.event("agent.turn", (fields) => runTurnBody(dependencies, input, emit, fields), {
+    thread_id: input.thread_id,
+    workspace_id: input.workspace_id,
+    ...(input.mode === undefined ? {} : { mode: input.mode }),
+    ...(input.fast_mode === undefined ? {} : { fast_mode: input.fast_mode }),
+  }).pipe(Effect.provideService(Diagnostics.Service, dependencies.diagnostics))
+
+const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit, fields: Diagnostics.Fields) =>
   Effect.gen(function* () {
     const existingEvents = yield* readThread(dependencies, { thread_id: input.thread_id })
     const appendedEvents: Array<Event.Event> = []
@@ -227,6 +235,10 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
     let sequence = latestSequence(existingEvents)
     const nextSequence = () => sequence + 1
     const turnId = Ids.TurnId.make(yield* dependencies.idGenerator.next("turn"))
+    fields.turn_id = turnId
+    fields.turn_index = existingEvents.filter((event) => event.type === "turn.started").length + 1
+    let llmCallCount = 0
+    let toolCallCount = 0
 
     const append = Effect.fn("AgentLoop.appendTurnEvent")(function* (event: Event.Event) {
       const appended = yield* appendAndProject(dependencies, event)
@@ -257,6 +269,8 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
     }
 
     if (input.cancelled === true) {
+      fields.status = "cancelled"
+      fields.stop_reason = "cancelled_before_model"
       yield* append(
         yield* makeTurnFailed(
           dependencies,
@@ -280,6 +294,15 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
           ? yield* streamModelResponseWithRecovery(dependencies, input, turnId, modelInput, append, nextSequence)
           : yield* streamModelResponse(dependencies, input, turnId, modelInput, append, nextSequence)
       const response = modelTurn.response
+      llmCallCount += 1
+      toolCallCount += modelTurn.toolCalls.length
+      fields.llm_call_count = llmCallCount
+      fields.tool_call_count = toolCallCount
+      fields.provider = response.provider
+      fields.model = response.model
+      if (response.finish_reason !== undefined) fields.stop_reason = response.finish_reason
+      if (response.usage?.input_tokens !== undefined) fields.token_in = response.usage.input_tokens
+      if (response.usage?.output_tokens !== undefined) fields.token_out = response.usage.output_tokens
 
       if (modelTurn.toolCalls.length === 0) {
         if (response.content.trim().length === 0 && emptyRetries < MAX_EMPTY_ANSWER_RETRIES) {
@@ -287,6 +310,7 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
           modelInput = appendTextRetry(modelInput, response.content)
           continue
         }
+        fields.status = "completed"
         yield* append(
           yield* makeAssistantMessageAdded(dependencies, input.thread_id, turnId, response.content, sequence + 1),
         )
@@ -306,6 +330,8 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
       modelInput = appendToolResults(modelInput, response.content, modelTurn.toolCalls, modelTurn.toolResults)
     }
 
+    fields.status = "completed"
+    fields.stop_reason = "tool_iteration_limit"
     yield* append(
       yield* makeAssistantMessageAdded(
         dependencies,
@@ -317,16 +343,20 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
     )
     yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1))
   }).pipe(
-    Effect.onInterrupt(() =>
-      recordFailureWithEnvelope(dependencies, input, cancelledEnvelope("Turn interrupted"), emit),
-    ),
+    Effect.onInterrupt(() => {
+      fields.status = "cancelled"
+      return recordFailureWithEnvelope(dependencies, input, cancelledEnvelope("Turn interrupted"), emit)
+    }),
     Effect.catchCause((cause: Cause.Cause<RunError>) => {
       if (Cause.hasInterruptsOnly(cause)) {
+        fields.status = "cancelled"
         return recordFailureWithEnvelope(dependencies, input, cancelledEnvelope("Turn interrupted"), emit).pipe(
           Effect.andThen(Effect.interrupt),
         )
       }
       const error = runErrorFromCause(input, cause, "runTurn")
+      fields.status = "failed"
+      fields.error_class = error._tag
       return recordFailure(dependencies, input, error, emit).pipe(
         Effect.flatMap(() =>
           isTurnLevelError(error)

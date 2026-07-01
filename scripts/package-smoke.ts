@@ -16,8 +16,13 @@ if (help.exitCode !== 0 || !combined(help).includes("Commands:")) {
 const doctor = await runArtifact(["doctor"])
 if (doctor.exitCode !== 0) fail("compiled CLI doctor command failed", doctor)
 const doctorReport = parseDoctorReport(doctor.stdout)
-if (doctorReport.telemetry !== "disabled") {
-  fail("compiled CLI doctor report did not declare telemetry disabled", doctor)
+if (doctorReport.telemetry !== "enabled") {
+  fail("compiled CLI doctor report did not declare telemetry enabled", doctor)
+}
+
+const doctorOff = await runArtifact(["doctor"], { RIKA_TELEMETRY: "off" })
+if (parseDoctorReport(doctorOff.stdout).telemetry !== "disabled") {
+  fail("compiled CLI doctor report did not honor RIKA_TELEMETRY=off", doctorOff)
 }
 
 await smokeServerHealth()
@@ -30,7 +35,7 @@ interface RunResult {
   readonly stderr: string
 }
 
-async function runArtifact(args: ReadonlyArray<string>): Promise<RunResult> {
+async function runArtifact(args: ReadonlyArray<string>, envOverride: Record<string, string> = {}): Promise<RunResult> {
   const child = Bun.spawn([artifactPath, ...args], {
     stdout: "pipe",
     stderr: "pipe",
@@ -38,6 +43,7 @@ async function runArtifact(args: ReadonlyArray<string>): Promise<RunResult> {
       ...Bun.env,
       RIKA_API_KEY: Bun.env.RIKA_API_KEY ?? "package-smoke-dummy-key",
       RIKA_DATA_DIR: `${Bun.env.PWD ?? process.cwd()}/.rika-package-smoke`,
+      ...envOverride,
     },
   })
   const [stdout, stderr, exitCode] = await Promise.all([

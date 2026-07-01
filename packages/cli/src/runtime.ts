@@ -10,7 +10,7 @@ import {
   ToolExecutor,
   WorkspaceAccess,
 } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, Telemetry, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Live, Router } from "@rika/llm"
 import {
@@ -198,6 +198,15 @@ const formatRuntimeError = (error: RuntimeError) => {
   return Execute.formatError(error)
 }
 
+const telemetryLayers = (env: Record<string, string | undefined>, configLayer: Layer.Layer<Config.Service>) => {
+  const options = Telemetry.fromEnv(env, Version.version)
+  const diagnosticsLayer = (options.enabled ? Telemetry.diagnosticsLayer(options) : Diagnostics.layer).pipe(
+    Layer.provideMerge(configLayer),
+  )
+  const telemetryLayer = options.enabled ? Telemetry.layer(options) : Layer.empty
+  return { diagnosticsLayer, telemetryLayer }
+}
+
 export const liveLayer = (
   command: Args.ExecuteCommand,
   env: Record<string, string | undefined>,
@@ -214,7 +223,7 @@ export const liveLayer = (
     },
     env,
   )
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer))
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, configLayer)
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -268,6 +277,7 @@ export const liveLayer = (
     toolLayer,
     llmLayer,
     diagnosticsLayer,
+    telemetryLayer,
   )
   const commandLayer = Execute.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
 
@@ -290,7 +300,7 @@ export const interactiveLiveLayer = (
     },
     env,
   )
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer))
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, configLayer)
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -349,6 +359,7 @@ export const interactiveLiveLayer = (
     toolLayer,
     llmLayer,
     diagnosticsLayer,
+    telemetryLayer,
   )
   const sessionLayer = Session.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
 
@@ -676,7 +687,7 @@ export const serverLiveLayer = (
     },
     env,
   )
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer))
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, configLayer)
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -732,6 +743,7 @@ export const serverLiveLayer = (
     artifactLayer,
     IdeBridge.layer,
     diagnosticsLayer,
+    telemetryLayer,
   )
   const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
   const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
