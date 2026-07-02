@@ -19,28 +19,28 @@ CI runs the same launch gates except local database migration; migrations are co
 
 ## Amp-parity checklist
 
-| Surface                             | Rika launch status                                                          | Evidence                                             |
-| ----------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------- |
-| Agent modes                         | Implemented: `rush`, `smart`, `deep` as routing data.                       | `packages/llm/src/modes.ts`                          |
-| Interactive CLI                     | Implemented MVP line-oriented TUI with Amp-like chrome.                     | `packages/tui/`                                      |
-| Non-interactive execute             | Implemented NDJSON event stream on stdout.                                  | `packages/cli/src/execute.ts`                        |
-| Durable threads                     | Implemented create/open/list/search/archive/share/reference.                | `packages/agent/src/thread-service.ts`               |
-| AGENTS.md guidance                  | Implemented resolver and subtree/frontmatter behavior.                      | `packages/agent/src/context-resolver.ts`             |
-| File mentions/images/thread refs    | Implemented as resolved context entries.                                    | `packages/agent/test/context-resolver.test.ts`       |
-| Built-in search/edit tools          | Implemented fff, hashline, semantic-search, ast-grep outline.               | `packages/tools/`                                    |
-| Subagents                           | Implemented read-only bounded subagent runtime.                             | `packages/agent/src/subagent-runtime.ts`             |
-| Skills                              | Implemented discovery/list/inspect/load.                                    | `packages/agent/src/skill-registry.ts`               |
-| Oracle/Librarian/Painter-like tools | Implemented as specialty tools over swappable model/artifact boundaries.    | `packages/tools/src/specialty-tools.ts`              |
-| Code review checks                  | Implemented local review service and CLI.                                   | `packages/agent/src/review-service.ts`               |
-| MCP                                 | Implemented client integration and workspace command approval.              | `packages/tools/src/mcp-client.ts`                   |
-| Plugins                             | Implemented trusted-local TypeScript plugin host.                           | `packages/plugin/src/plugin-host.ts`                 |
-| Self-extension                      | Implemented skill/plugin generation, verification, enable/disable/rollback. | `packages/plugin/src/self-extension.ts`              |
-| Remote control + SDK                | Implemented HTTP/NDJSON server and TypeScript SDK.                          | `packages/server/`, `packages/sdk/`                  |
-| IDE seam                            | Implemented remote-control IDE protocol and CLI helpers.                    | `packages/ide/`, `docs/ide-integration.md`           |
-| Rivet actors                        | Implemented local/remote host config and ThreadActor contract.              | `packages/rivet-host/`                               |
-| Hosted access control               | Implemented workspace membership service/checks.                            | `packages/agent/src/workspace-access.ts`             |
-| Owner manual/security docs          | Implemented.                                                                | `docs/OWNER_MANUAL.md`, `docs/SECURITY.md`           |
-| Release artifacts                   | Implemented local Bun compile and smoke.                                    | `scripts/package-cli.ts`, `scripts/package-smoke.ts` |
+| Surface                             | Rika launch status                                                          | Evidence                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Agent modes                         | Implemented: `rush`, `smart`, `deep` as routing data.                       | `packages/llm/src/modes.ts`                                                        |
+| Interactive CLI                     | Implemented MVP line-oriented TUI with Amp-like chrome.                     | `packages/tui/`                                                                    |
+| Non-interactive execute             | Implemented NDJSON event stream on stdout.                                  | `packages/cli/src/execute.ts`                                                      |
+| Durable threads                     | Implemented create/open/list/search/archive/share/reference/manual compact. | `packages/agent/src/thread-service.ts`, `packages/agent/src/compaction-service.ts` |
+| AGENTS.md guidance                  | Implemented resolver and subtree/frontmatter behavior.                      | `packages/agent/src/context-resolver.ts`                                           |
+| File mentions/images/thread refs    | Implemented as resolved context entries.                                    | `packages/agent/test/context-resolver.test.ts`                                     |
+| Built-in search/edit tools          | Implemented fff, hashline, semantic-search, ast-grep outline.               | `packages/tools/`                                                                  |
+| Subagents                           | Implemented read-only bounded subagent runtime.                             | `packages/agent/src/subagent-runtime.ts`                                           |
+| Skills                              | Implemented discovery/list/inspect/load.                                    | `packages/agent/src/skill-registry.ts`                                             |
+| Oracle/Librarian/Painter-like tools | Implemented as specialty tools over swappable model/artifact boundaries.    | `packages/tools/src/specialty-tools.ts`                                            |
+| Code review checks                  | Implemented local review service and CLI.                                   | `packages/agent/src/review-service.ts`                                             |
+| MCP                                 | Implemented client integration and workspace command approval.              | `packages/tools/src/mcp-client.ts`                                                 |
+| Plugins                             | Implemented trusted-local TypeScript plugin host.                           | `packages/plugin/src/plugin-host.ts`                                               |
+| Self-extension                      | Implemented skill/plugin generation, verification, enable/disable/rollback. | `packages/plugin/src/self-extension.ts`                                            |
+| Remote control + SDK                | Implemented HTTP/NDJSON server and TypeScript SDK.                          | `packages/server/`, `packages/sdk/`                                                |
+| IDE seam                            | Implemented remote-control IDE protocol and CLI helpers.                    | `packages/ide/`, `docs/ide-integration.md`                                         |
+| Rivet actors                        | Implemented local/remote host config and ThreadActor contract.              | `packages/rivet-host/`                                                             |
+| Hosted access control               | Implemented workspace membership service/checks.                            | `packages/agent/src/workspace-access.ts`                                           |
+| Owner manual/security docs          | Implemented.                                                                | `docs/OWNER_MANUAL.md`, `docs/SECURITY.md`                                         |
+| Release artifacts                   | Implemented local Bun compile and smoke.                                    | `scripts/package-cli.ts`, `scripts/package-smoke.ts`                               |
 
 ## Known launch non-goals
 

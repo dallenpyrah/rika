@@ -10,6 +10,11 @@ export interface Command {
   readonly key?: string
 }
 
+export interface Visibility {
+  readonly threadActive?: boolean
+  readonly orbBackedThread?: boolean
+}
+
 const leadingCommands: ReadonlyArray<Command> = [
   { id: "thread-switch", category: "thread", action: "switch", hint: "switch threads", command: "/switch-thread" },
   {
@@ -98,6 +103,16 @@ const orbLifecycleCommands: ReadonlyArray<Command> = [
   },
 ]
 
+const threadLifecycleCommands: ReadonlyArray<Command> = [
+  {
+    id: "thread-compact",
+    category: "thread",
+    action: "compact context",
+    hint: "summarize earlier context for this thread",
+    command: "/compact",
+  },
+]
+
 const speedCommand = (fastMode: boolean): Command => ({
   id: "speed-fast",
   category: "speed",
@@ -107,8 +122,17 @@ const speedCommand = (fastMode: boolean): Command => ({
   key: "Opt+R",
 })
 
-export const commandsFor = (mode: Config.Mode, fastMode: boolean, orbBackedThread = false): ReadonlyArray<Command> => {
-  const available = [...leadingCommands, ...(orbBackedThread ? orbLifecycleCommands : []), ...trailingCommands]
+export const commandsFor = (
+  mode: Config.Mode,
+  fastMode: boolean,
+  visibility: Visibility = {},
+): ReadonlyArray<Command> => {
+  const available = [
+    ...leadingCommands,
+    ...(visibility.threadActive === true ? threadLifecycleCommands : []),
+    ...(visibility.orbBackedThread === true ? orbLifecycleCommands : []),
+    ...trailingCommands,
+  ]
   return isFastEligible(mode) ? [...available, speedCommand(fastMode)] : available
 }
 
@@ -118,9 +142,9 @@ export const filter = (
   query: string,
   mode: Config.Mode,
   fastMode: boolean,
-  threadActive = false,
+  visibility: Visibility = {},
 ): ReadonlyArray<Command> => {
-  const available = commandsFor(mode, fastMode, threadActive)
+  const available = commandsFor(mode, fastMode, visibility)
   const needle = normalize(query)
   if (needle.length === 0) return available
   return available.filter(
@@ -138,9 +162,9 @@ export const at = (
   index: number,
   mode: Config.Mode,
   fastMode: boolean,
-  threadActive = false,
+  visibility: Visibility = {},
 ): Command | undefined => {
-  const results = filter(query, mode, fastMode, threadActive)
+  const results = filter(query, mode, fastMode, visibility)
   if (results.length === 0) return undefined
   const clamped = Math.min(Math.max(index, 0), results.length - 1)
   return results[clamped]

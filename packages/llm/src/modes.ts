@@ -12,6 +12,7 @@ export const ProfileName = Schema.Literals([
   "view_media",
   "oracle",
   "librarian",
+  "compaction",
 ]).annotate({
   identifier: "Rika.LLM.ProfileName",
 })
@@ -132,6 +133,12 @@ export const defaultProfiles: Record<ProfileName, ProfileConfig> = {
     provider: "openai",
     model_preferences: [defaultModel],
     reasoning_effort: "high",
+  },
+  compaction: {
+    name: "compaction",
+    provider: "openai",
+    model_preferences: ["gpt-5.5"],
+    reasoning_effort: "low",
   },
 }
 

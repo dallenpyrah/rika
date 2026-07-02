@@ -194,6 +194,26 @@ describe("TUI remote session", () => {
     expect(frames).toContain("Orb killed.")
     expect(rendered.at(-1)?.active_orb?.status).toBe("killed")
   })
+
+  test("runs manual compaction against the active remote thread", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart", thread_id: initialThreadId }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(Adapter.memoryLayer({ rendered, keys: ["/compact", "/exit"].flatMap(line) })),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(backend.compactions).toEqual([initialThreadId])
+    expect(text(rendered)).toContain("Compacted thread context.")
+    expect(rendered.at(-1)?.cards).toContainEqual(
+      expect.objectContaining({ title: "Context compacted", subtitle: "manual" }),
+    )
+  })
 })
 
 interface FakeBackend {
@@ -201,12 +221,14 @@ interface FakeBackend {
   readonly turns: Array<string>
   readonly workspaceIds: Array<Ids.WorkspaceId | undefined>
   readonly orbActions: Array<string>
+  readonly compactions: Array<Ids.ThreadId>
 }
 
 const fakeBackend = (): FakeBackend => {
   const turns: Array<string> = []
   const workspaceIds: Array<Ids.WorkspaceId | undefined> = []
   const orbActions: Array<string> = []
+  const compactions: Array<Ids.ThreadId> = []
   const threads = new Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>()
   const subscribers = new Set<(event: Event.Event) => void>()
   const orbs = new Map<Ids.ThreadId, Remote.OrbSummary>()
@@ -282,6 +304,16 @@ const fakeBackend = (): FakeBackend => {
       }),
     archiveThread: (threadId) => Effect.sync(() => setArchived(threads, threadId, true)),
     unarchiveThread: (threadId) => Effect.sync(() => setArchived(threads, threadId, false)),
+    compactThread: (threadId) =>
+      Effect.sync(() => {
+        const record = threads.get(threadId)
+        if (record === undefined) throw new Error(`Missing thread ${threadId}`)
+        const event = contextCompacted(threadId, (record.events.at(-1)?.sequence ?? 0) + 1)
+        compactions.push(threadId)
+        record.events.push(event)
+        for (const subscriber of subscribers) subscriber(event)
+        return event
+      }),
     searchThreads: () =>
       Effect.sync(() =>
         [...threads.values()].map((record) => ({
@@ -352,7 +384,7 @@ const fakeBackend = (): FakeBackend => {
     ideNavigationRequests: () => Effect.succeed([]),
   }
 
-  return { client, turns, workspaceIds, orbActions }
+  return { client, turns, workspaceIds, orbActions, compactions }
 }
 
 const emptyIdeStatus = { connected: false, capabilities: [], workspace_roots: [] } as const
@@ -513,4 +545,16 @@ const turnFailed = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number
   turn_id: turnId,
   type: "turn.failed",
   data: { error: { kind: "cancelled", message: "cancelled" } },
+})
+
+const contextCompacted = (threadId: Ids.ThreadId, sequence: number): Event.ContextCompacted => ({
+  ...base(threadId, sequence),
+  type: "context.compacted",
+  data: {
+    summary: "older context summary",
+    model: "gpt-5.5",
+    trigger: "manual",
+    tokens_before: 4000,
+    tail_start_sequence: Math.max(1, sequence - 2),
+  },
 })

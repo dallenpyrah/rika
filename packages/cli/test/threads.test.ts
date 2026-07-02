@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { ThreadService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, OrbStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Client } from "@rika/sdk"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, Schema } from "effect"
 import { Output, Threads } from "../src/index"
@@ -108,6 +109,48 @@ describe("CLI thread commands", () => {
     expect(exported.thread_id).toBe(threadId)
     expect(exported.events.map((event) => event.type)).toEqual(["thread.created", "message.added"])
   })
+
+  test("compacts a thread through the shared backend client", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<Ids.ThreadId> = []
+    const event: Event.ContextCompacted = {
+      id: Ids.EventId.make("thread_cli_threads_context_compacted"),
+      thread_id: threadId,
+      sequence: 3,
+      version: 1,
+      created_at: now,
+      type: "context.compacted",
+      data: {
+        summary: "Goal\n- CLI compact",
+        tail_start_sequence: 1,
+        trigger: "manual",
+        tokens_before: 120,
+        model: "gpt-5.5",
+      },
+    }
+    const exitCode = await Effect.runPromise(
+      Threads.executeCommand({ type: "threads", action: "compact", thread_id: threadId }).pipe(
+        Effect.provide(
+          makeLayer(output).pipe(
+            Layer.provideMerge(
+              Threads.remoteClientLayer({
+                ...emptyClient(),
+                compactThread: (id) =>
+                  Effect.sync(() => {
+                    calls.push(id)
+                    return event
+                  }),
+              }),
+            ),
+          ),
+        ),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(calls).toEqual([threadId])
+    expect(Schema.decodeUnknownSync(Event.ContextCompacted)(JSON.parse(output.stdout[0] ?? "{}"))).toEqual(event)
+  })
 })
 
 const seedThread = () =>
@@ -138,6 +181,45 @@ const readOrbStatus = (value: unknown) => {
   const status = Object.getOwnPropertyDescriptor(value, "orb_status")?.value
   return typeof status === "string" ? status : undefined
 }
+
+const emptyClient = (): Client.Interface => ({
+  backendHealth: unexpectedClientCall,
+  createThread: unexpectedClientCall,
+  createOrbThread: unexpectedClientCall,
+  orbChanges: unexpectedClientCall,
+  listOrbs: unexpectedClientCall,
+  getOrbByThread: unexpectedClientCall,
+  pauseOrb: unexpectedClientCall,
+  resumeOrb: unexpectedClientCall,
+  killOrb: unexpectedClientCall,
+  listProjects: unexpectedClientCall,
+  createProject: unexpectedClientCall,
+  listThreads: unexpectedClientCall,
+  openThread: unexpectedClientCall,
+  previewThread: unexpectedClientCall,
+  archiveThread: unexpectedClientCall,
+  unarchiveThread: unexpectedClientCall,
+  compactThread: unexpectedClientCall,
+  searchThreads: unexpectedClientCall,
+  shareThread: unexpectedClientCall,
+  referenceThread: unexpectedClientCall,
+  subscribeThreadEvents: () => {
+    throw new Error("Unexpected SDK stream call")
+  },
+  startTurn: unexpectedClientCall,
+  interruptTurn: unexpectedClientCall,
+  listArtifacts: unexpectedClientCall,
+  getArtifact: unexpectedClientCall,
+  connectIde: unexpectedClientCall,
+  disconnectIde: unexpectedClientCall,
+  updateIdeContext: unexpectedClientCall,
+  ideStatus: unexpectedClientCall,
+  openIdeFile: unexpectedClientCall,
+  ideNavigationRequests: unexpectedClientCall,
+})
+
+const unexpectedClientCall = () =>
+  Effect.fail(new Client.SdkError({ message: "Unexpected SDK call", operation: "test" }))
 
 const modelChunk = (): Event.ModelStreamChunk => ({
   id: Ids.EventId.make("thread_cli_threads_model_chunk"),

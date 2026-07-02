@@ -555,14 +555,20 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
               state = ViewState.paletteMove(
                 state,
                 -1,
-                Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActiveOrb(state)).length,
+                Palette.filter(state.palette.query, state.mode, state.fast_mode, {
+                  threadActive: ViewState.hasActivity(state),
+                  orbBackedThread: ViewState.hasActiveOrb(state),
+                }).length,
               )
               break
             case "PaletteDown":
               state = ViewState.paletteMove(
                 state,
                 1,
-                Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActiveOrb(state)).length,
+                Palette.filter(state.palette.query, state.mode, state.fast_mode, {
+                  threadActive: ViewState.hasActivity(state),
+                  orbBackedThread: ViewState.hasActiveOrb(state),
+                }).length,
               )
               break
             case "PaletteInsert":
@@ -572,13 +578,10 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
               state = ViewState.paletteBackspace(state)
               break
             case "PaletteRun": {
-              const command = Palette.at(
-                state.palette.query,
-                state.palette.selected,
-                state.mode,
-                state.fast_mode,
-                ViewState.hasActiveOrb(state),
-              )
+              const command = Palette.at(state.palette.query, state.palette.selected, state.mode, state.fast_mode, {
+                threadActive: ViewState.hasActivity(state),
+                orbBackedThread: ViewState.hasActiveOrb(state),
+              })
               state = ViewState.closePalette(state)
               if (command !== undefined) {
                 if (command.command === "/switch-thread") {

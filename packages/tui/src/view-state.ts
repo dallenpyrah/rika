@@ -249,6 +249,8 @@ export const applyEvent = (state: ViewState, event: Event.Event): ViewState => {
       return applyMessage(state, event)
     case "context.resolved":
       return tick({ ...state, activity: "thinking", active: true })
+    case "context.compacted":
+      return pushCard(state, systemCard("Context compacted", event.data.trigger, event.id))
     case "skill.loaded":
       return tick(pushCard({ ...state, activity: "thinking", active: true }, skillCard(event)))
     case "subagent.completed":

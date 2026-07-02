@@ -33,15 +33,15 @@ Status: `unverified` (claimed in code, not visually compared) · `partial` ·
 
 ## Threads
 
-| Feature                     | Amp behavior                                                           | Rika location                          | Status     |
-| --------------------------- | ---------------------------------------------------------------------- | -------------------------------------- | ---------- |
-| Durable threads             | create/open/list/search/archive/share/reference                        | `packages/agent/src/thread-service.ts` | unverified |
-| Switch thread               | thread switcher UI                                                     | `packages/tui/` (`withThread`)         | unverified |
-| Archive                     | `Ctrl+C Ctrl+N` (archive+new), `Ctrl+C Ctrl+E` (archive+quit), palette | `packages/tui/`                        | unverified |
-| Reference threads           | by URL / `@T-…` id                                                     | `packages/agent/`                      | unverified |
-| Find threads                | search by keyword/file/repo/author/date                                | `packages/agent/`                      | unverified |
-| Thread visibility / sharing | private/workspace/group/unlisted                                       | `packages/server/`, `packages/agent/`  | unverified |
-| Remote control              | continue CLI thread from web                                           | `packages/server/`, `packages/sdk/`    | unverified |
+| Feature                     | Amp behavior                                                           | Rika location                                                                      | Status     |
+| --------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------- |
+| Durable threads             | create/open/list/search/archive/share/reference/manual compact         | `packages/agent/src/thread-service.ts`, `packages/agent/src/compaction-service.ts` | unverified |
+| Switch thread               | thread switcher UI                                                     | `packages/tui/` (`withThread`)                                                     | unverified |
+| Archive                     | `Ctrl+C Ctrl+N` (archive+new), `Ctrl+C Ctrl+E` (archive+quit), palette | `packages/tui/`                                                                    | unverified |
+| Reference threads           | by URL / `@T-…` id                                                     | `packages/agent/`                                                                  | unverified |
+| Find threads                | search by keyword/file/repo/author/date                                | `packages/agent/`                                                                  | unverified |
+| Thread visibility / sharing | private/workspace/group/unlisted                                       | `packages/server/`, `packages/agent/`                                              | unverified |
+| Remote control              | continue CLI thread from web                                           | `packages/server/`, `packages/sdk/`                                                | unverified |
 
 ## Tools & subagents
 

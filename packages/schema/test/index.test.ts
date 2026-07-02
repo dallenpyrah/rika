@@ -255,6 +255,26 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
 
+  test("round-trips context compaction events", () => {
+    const event: Event.Event = {
+      id: Ids.EventId.make("event_context_compacted"),
+      thread_id: threadId,
+      sequence: 5,
+      version: 1,
+      created_at: now,
+      type: "context.compacted",
+      data: {
+        summary: "Goal\n- Ship compaction",
+        tail_start_sequence: 3,
+        trigger: "manual",
+        tokens_before: 80_000,
+        model: "gpt-5.5",
+      },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
+
   test("round-trips skill loaded events", () => {
     const event: Event.Event = {
       id: eventId,
@@ -309,6 +329,7 @@ describe("Rika protocol schemas", () => {
   })
 
   test("round-trips remote control API payloads", () => {
+    const userId = Ids.UserId.make("user_remote_payload")
     const start: Remote.StartTurnRequest = {
       thread_id: threadId,
       workspace_id: workspaceId,
@@ -337,6 +358,10 @@ describe("Rika protocol schemas", () => {
       thread_id: threadId,
       limit: 160,
     }
+    const compact: Remote.CompactThreadRequest = {
+      thread_id: threadId,
+      user_id: userId,
+    }
     const health: Remote.BackendHealth = {
       status: "healthy",
       url: "http://127.0.0.1:4587",
@@ -357,6 +382,9 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Remote.ThreadSummary)(Codec.encode(Remote.ThreadSummary)(summary))).toEqual(summary)
     expect(Codec.decode(Remote.PreviewThreadRequest)(Codec.encode(Remote.PreviewThreadRequest)(preview))).toEqual(
       preview,
+    )
+    expect(Codec.decode(Remote.CompactThreadRequest)(Codec.encode(Remote.CompactThreadRequest)(compact))).toEqual(
+      compact,
     )
     expect(Codec.decode(Remote.BackendHealth)(Codec.encode(Remote.BackendHealth)(health))).toEqual(health)
     expect(Codec.decode(Remote.PublicBackendHealth)(Codec.encode(Remote.PublicBackendHealth)(publicHealth))).toEqual(

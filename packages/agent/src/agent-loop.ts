@@ -626,7 +626,10 @@ const contextModelInput = (
     const resolvedContext = latestResolvedContext(events)
     const system = systemMessage(config, tools, resolvedContext, skills)
     const messages = [system, ...ModelContext.messagesFromEvents(events)]
-    const prompt = [providerMessageToPromptMessage(system), ...promptMessagesFromEvents(events)]
+    const prompt = [
+      ModelContext.providerMessageToPromptMessage(system),
+      ...ModelContext.promptMessagesFromEvents(events),
+    ]
     return { messages, prompt, tools: prepared } satisfies ModelInput
   })
 
@@ -702,103 +705,6 @@ const toolInstructions = (tools: ReadonlyArray<ToolExecutor.Descriptor>) => {
   return ["Available tools:", ...lines, "Call tools through the provided tool interface when needed."].join("\n")
 }
 
-const messageText = (message: Message.Message) => Message.displayText(message)
-
-const promptMessagesFromEvents = (events: ReadonlyArray<Event.Event>): ReadonlyArray<Prompt.MessageEncoded> =>
-  events.flatMap((event) => {
-    switch (event.type) {
-      case "message.added":
-        return messageToPromptMessages(event.data.message)
-      case "tool.call.requested":
-        return [toolCallPromptMessage(event.data.call)]
-      case "tool.call.completed":
-        return [toolResultPromptMessage([event.data.result])]
-      default:
-        return []
-    }
-  })
-
-const messageToPromptMessages = (message: Message.Message): ReadonlyArray<Prompt.MessageEncoded> => {
-  switch (message.role) {
-    case "system":
-    case "assistant": {
-      const content = messageText(message)
-      if (content.length === 0) return []
-      return [{ role: message.role, content }]
-    }
-    case "tool": {
-      const content = messageText(message)
-      if (content.length === 0) return []
-      return [{ role: "user", content }]
-    }
-    case "user": {
-      const content = userPromptParts(message)
-      return content.length === 0 ? [] : [{ role: "user", content }]
-    }
-  }
-  return []
-}
-
-const userPromptParts = (message: Message.Message): ReadonlyArray<Prompt.UserMessagePartEncoded> =>
-  message.content.flatMap((part): ReadonlyArray<Prompt.UserMessagePartEncoded> => {
-    switch (part.type) {
-      case "text":
-        return part.text.length === 0 ? [] : [{ type: "text", text: part.text }]
-      case "image":
-        return [
-          {
-            type: "file",
-            mediaType: part.media_type,
-            fileName: part.filename,
-            data: imageData(part.data),
-          },
-        ]
-      default:
-        return []
-    }
-  })
-
-const providerMessageToPromptMessage = (message: Provider.Message): Prompt.MessageEncoded => {
-  switch (message.role) {
-    case "system":
-    case "developer":
-      return { role: "system", content: providerContentText(message.content) }
-    case "assistant":
-      return { role: "assistant", content: providerContentText(message.content) }
-    case "tool":
-    case "user":
-      return { role: "user", content: providerContentToPromptParts(message.content) }
-  }
-  return { role: "user", content: providerContentToPromptParts(message.content) }
-}
-
-const providerContentText = (content: Provider.MessageContent): string =>
-  typeof content === "string"
-    ? content
-    : content
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("\n")
-
-const providerContentToPromptParts = (
-  content: Provider.MessageContent,
-): string | ReadonlyArray<Prompt.UserMessagePartEncoded> => {
-  if (typeof content === "string") return content
-  return content.flatMap((part): ReadonlyArray<Prompt.UserMessagePartEncoded> => {
-    if (part.type === "text") return part.text.length === 0 ? [] : [{ type: "text", text: part.text }]
-    return [
-      {
-        type: "file",
-        mediaType: part.media_type,
-        fileName: part.filename,
-        data: imageData(part.data),
-      },
-    ]
-  })
-}
-
-const imageData = (data: string): Uint8Array => Buffer.from(data, "base64")
-
 const appendTextRetry = (modelInput: ModelInput, content: string): ModelInput => {
   const userMessage: Provider.Message = {
     role: "user",
@@ -807,7 +713,11 @@ const appendTextRetry = (modelInput: ModelInput, content: string): ModelInput =>
   return {
     ...modelInput,
     messages: [...modelInput.messages, { role: "assistant", content }, userMessage],
-    prompt: [...modelInput.prompt, { role: "assistant", content }, providerMessageToPromptMessage(userMessage)],
+    prompt: [
+      ...modelInput.prompt,
+      { role: "assistant", content },
+      ModelContext.providerMessageToPromptMessage(userMessage),
+    ],
   }
 }
 
@@ -816,7 +726,7 @@ const appendModelError = (modelInput: ModelInput, error: AiError.AiError | Route
   return {
     ...modelInput,
     messages: [...modelInput.messages, message],
-    prompt: [...modelInput.prompt, providerMessageToPromptMessage(message)],
+    prompt: [...modelInput.prompt, ModelContext.providerMessageToPromptMessage(message)],
   }
 }
 
@@ -832,48 +742,11 @@ const appendToolResults = (
     { role: "assistant", content },
     ...results.map((result): Provider.Message => ({ role: "tool", content: JSON.stringify(result) })),
   ],
-  prompt: [...modelInput.prompt, assistantToolPromptMessage(content, calls), toolResultPromptMessage(results)],
-})
-
-const toolCallPromptMessage = (call: Tool.Call): Prompt.MessageEncoded => ({
-  role: "assistant",
-  content: [
-    {
-      type: "tool-call",
-      id: call.id,
-      name: call.name,
-      params: call.input,
-      providerExecuted: false,
-    },
+  prompt: [
+    ...modelInput.prompt,
+    ModelContext.assistantToolPromptMessage(content, calls),
+    ModelContext.toolResultPromptMessage(results),
   ],
-})
-
-const assistantToolPromptMessage = (content: string, calls: ReadonlyArray<Tool.Call>): Prompt.MessageEncoded => {
-  const parts: Array<Prompt.AssistantMessagePartEncoded> = content.length === 0 ? [] : [{ type: "text", text: content }]
-  for (const call of calls) {
-    parts.push({
-      type: "tool-call",
-      id: call.id,
-      name: call.name,
-      params: call.input,
-      providerExecuted: false,
-    })
-  }
-  return { role: "assistant", content: parts }
-}
-
-const toolResultPromptMessage = (results: ReadonlyArray<Tool.Result>): Prompt.MessageEncoded => ({
-  role: "tool",
-  content: results.map((result) => ({
-    type: "tool-result",
-    id: result.id,
-    name: result.name,
-    isFailure: result.status === "error",
-    result:
-      result.status === "success"
-        ? (result.output ?? null)
-        : (result.error ?? { kind: "tool", message: "Tool failed" }),
-  })),
 })
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

@@ -405,6 +405,14 @@ export const eventRows = (events: ReadonlyArray<Event.Event>): ReadonlyArray<Tra
           title: "Context resolved",
           body: `${event.data.entries.length} entries · ${event.data.total_chars} chars`,
         }
+      case "context.compacted":
+        return {
+          id: event.id,
+          sequence: event.sequence,
+          kind: "event",
+          title: "Context compacted",
+          body: `${event.data.trigger} · tail starts at ${event.data.tail_start_sequence}`,
+        }
       case "skill.loaded":
         return { id: event.id, sequence: event.sequence, kind: "event", title: "Skill loaded", body: event.data.name }
       case "subagent.completed":

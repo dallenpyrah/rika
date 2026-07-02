@@ -49,6 +49,10 @@ export interface Interface {
     threadId: Ids.ThreadId,
     userId?: Ids.UserId,
   ) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly compactThread: (
+    threadId: Ids.ThreadId,
+    userId?: Ids.UserId,
+  ) => Effect.Effect<Event.ContextCompacted, SdkError>
   readonly searchThreads: (
     input: Remote.SearchThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, SdkError>
@@ -148,6 +152,13 @@ export const make = (transport: Transport): Interface => ({
         path: `/v1/threads/${encodeURIComponent(threadId)}/unarchive${query(userId === undefined ? {} : { user_id: userId })}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "unarchiveThread"))),
+  compactThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
+    transport
+      .requestJson({
+        method: "POST",
+        path: `/v1/threads/${encodeURIComponent(threadId)}/compact${query(userId === undefined ? {} : { user_id: userId })}`,
+      })
+      .pipe(Effect.flatMap(decodeEffect(Event.ContextCompacted, "compactThread"))),
   searchThreads: (input: Remote.SearchThreadsRequest) =>
     transport
       .requestJson({ method: "GET", path: `/v1/threads/search${query(input)}` })

@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor, WorkspaceAccess } from "@rika/agent"
+import {
+  AgentLoop,
+  CompactionService,
+  ContextResolver,
+  SkillRegistry,
+  ThreadService,
+  ToolExecutor,
+  WorkspaceAccess,
+} from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbManager } from "@rika/orb"
@@ -89,7 +97,11 @@ const makeLayer = (
   contextLayer = defaultContextLayer,
   orbManagerLayer: Layer.Layer<OrbManager.Service, never, OrbStore.Service> = fakeOrbManagerLayer(),
   orbMirrorLayer: Layer.Layer<OrbMirror.Service> = fakeOrbMirrorLayer(),
-  options: { readonly dataDir?: string } = {},
+  options: {
+    readonly dataDir?: string
+    readonly agentLayer?: Layer.Layer<AgentLoop.Service>
+    readonly compactionLayer?: Layer.Layer<CompactionService.Service>
+  } = {},
 ) => {
   const runtimeConfigLayer = options.dataDir === undefined ? configLayer : configLayerForDataDir(options.dataDir)
   const databaseLayer =
@@ -140,11 +152,16 @@ const makeLayer = (
     providedOrbManagerLayer,
     orbMirrorLayer,
   )
-  const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
-  const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
+  const agentLayer = options.agentLayer ?? AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
+  const compactionLayer = options.compactionLayer ?? CompactionService.layer.pipe(Layer.provideMerge(agentBase))
+  const remoteLayer = RemoteControl.layer.pipe(
+    Layer.provideMerge(agentLayer),
+    Layer.provideMerge(compactionLayer),
+    Layer.provideMerge(agentBase),
+  )
   const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
 
-  return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
+  return Layer.mergeAll(agentBase, agentLayer, compactionLayer, remoteLayer, httpLayer)
 }
 
 const makeThreadStorageLayer = (dataDir: string) => {
@@ -184,6 +201,17 @@ const fakeOrbMirrorLayer = (onMirror: (mirroredOrbId: Ids.OrbId) => void = () =>
       flush: () => Effect.void,
       mirrorRunningOrbsOnce: () => Effect.void,
       syncRunning: () => Effect.void,
+    }),
+  )
+
+const blockingAgentLoopLayer = (): Layer.Layer<AgentLoop.Service> =>
+  Layer.succeed(
+    AgentLoop.Service,
+    AgentLoop.Service.of({
+      runTurn: () => Effect.never,
+      streamTurn: () => Stream.never,
+      cancelTurn: () => Effect.never,
+      queueTurn: () => Effect.never,
     }),
   )
 
@@ -596,6 +624,115 @@ describe("remote control API and SDK", () => {
     }
   })
 
+  test("manual compaction appends and publishes a context.compacted event", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      const created = await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      const streamedPromise = Effect.runPromise(
+        client
+          .subscribeThreadEvents({ thread_id: threadId, after_sequence: 1 })
+          .pipe(Stream.take(1), Stream.runCollect),
+      )
+      const compacted = await Effect.runPromise(client.compactThread(created.thread_id))
+      const streamed = await streamedPromise
+      const stored = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: threadId }))
+
+      expect(compacted).toMatchObject({
+        type: "context.compacted",
+        thread_id: threadId,
+        sequence: 2,
+        data: {
+          trigger: "manual",
+          summary: "remote hello",
+          model: "gpt-5.5",
+        },
+      })
+      expect(streamed).toEqual([compacted])
+      expect(stored.at(-1)).toEqual(compacted)
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  test("manual compaction returns conflict while thread work is already active", async () => {
+    let startedResolve: (() => void) | undefined
+    let finishResolve: ((value: CompactionService.CompactionResult) => void) | undefined
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve
+    })
+    const finish = new Promise<CompactionService.CompactionResult>((resolve) => {
+      finishResolve = resolve
+    })
+    const event: Event.ContextCompacted = {
+      id: Ids.EventId.make("event_remote_compaction_blocked"),
+      thread_id: threadId,
+      sequence: 2,
+      version: 1,
+      created_at: now,
+      type: "context.compacted",
+      data: {
+        summary: "Blocked fake summary",
+        tail_start_sequence: 1,
+        trigger: "manual",
+        tokens_before: 1,
+        model: "gpt-5.5",
+      },
+    }
+    const compactionLayer = CompactionService.fakeLayer({
+      compact: () =>
+        Effect.promise(() => {
+          if (startedResolve === undefined) throw new Error("Missing compaction start resolver")
+          startedResolve()
+          return finish
+        }),
+    })
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), { compactionLayer }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      const first = Effect.runPromise(client.compactThread(threadId))
+      await started
+      const error = await Effect.runPromise(client.compactThread(threadId).pipe(Effect.flip))
+      if (finishResolve === undefined) throw new Error("Missing compaction finish resolver")
+      finishResolve({ event, tokens_before: 1 })
+      const completed = await first
+
+      expect(error).toBeInstanceOf(Client.SdkError)
+      expect(error.status).toBe(409)
+      expect(error.message).toContain("already has active work")
+      expect(completed).toEqual(event)
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  test("manual compaction returns conflict while a turn is already active", async () => {
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), {
+        agentLayer: blockingAgentLoopLayer(),
+      }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      const accepted = await Effect.runPromise(
+        client.startTurn({ thread_id: threadId, workspace_id: workspaceId, content: "hold open" }),
+      )
+      const error = await Effect.runPromise(client.compactThread(threadId).pipe(Effect.flip))
+
+      expect(accepted).toEqual({ thread_id: threadId, accepted: true })
+      expect(error).toMatchObject({ status: 409 })
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   test("startTurn resumes a paused orb and restarts mirroring before the turn runs", async () => {
     const calls: Array<string> = []
     const runtime = ManagedRuntime.make(
@@ -774,6 +911,7 @@ describe("remote control API and SDK", () => {
       { method: "GET", path: `/v1/threads/${threadId}/preview` },
       { method: "POST", path: `/v1/threads/${threadId}/archive` },
       { method: "POST", path: `/v1/threads/${threadId}/unarchive` },
+      { method: "POST", path: `/v1/threads/${threadId}/compact` },
       { method: "GET", path: `/v1/threads/${threadId}/share` },
       { method: "GET", path: `/v1/threads/${threadId}/reference` },
       { method: "GET", path: `/v1/threads/${threadId}/events` },
@@ -901,6 +1039,7 @@ describe("remote control API and SDK", () => {
     const outsiderPreview = await Effect.runPromise(
       client.previewThread(threadId, { user_id: outsiderId }).pipe(Effect.flip),
     )
+    const outsiderCompact = await Effect.runPromise(client.compactThread(threadId, outsiderId).pipe(Effect.flip))
     const outsiderTurn = await Effect.runPromise(
       client
         .startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: outsiderId, content: "break in" })
@@ -912,6 +1051,7 @@ describe("remote control API and SDK", () => {
     expect(outsiderThreads).toEqual([])
     expect(outsiderOpen).toMatchObject({ status: 403 })
     expect(outsiderPreview).toMatchObject({ status: 403 })
+    expect(outsiderCompact).toMatchObject({ status: 403 })
     expect(outsiderTurn).toMatchObject({ status: 403 })
   })
 

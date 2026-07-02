@@ -492,6 +492,17 @@ const dispatch = (
     }
 
     if (
+      request.method === "POST" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "compact" &&
+      segments.length === 4
+    ) {
+      const input = compactThreadRequest(url, segments[2])
+      return yield* remote.compactThread(input).pipe(jsonEffect(Event.ContextCompacted))
+    }
+
+    if (
       request.method === "GET" &&
       segments[1] === "threads" &&
       segments[2] !== undefined &&
@@ -760,6 +771,14 @@ const getArtifactRequest = (url: URL, encodedArtifactId: string): Remote.GetArti
 }
 
 const archiveThreadRequest = (url: URL, encodedThreadId: string): Remote.ArchiveThreadRequest => {
+  const userId = url.searchParams.get("user_id")
+  return {
+    thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+    ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+  }
+}
+
+const compactThreadRequest = (url: URL, encodedThreadId: string): Remote.CompactThreadRequest => {
   const userId = url.searchParams.get("user_id")
   return {
     thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),

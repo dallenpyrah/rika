@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OrbActivity, OrbManager } from "@rika/orb"
 import { Database, Migration, OrbStore } from "@rika/persistence"
-import { Common, Ids } from "@rika/schema"
+import { Common, Event, Ids } from "@rika/schema"
 import { Effect, Layer } from "effect"
 import { BackendEndpoint, LocalBackend, Runtime } from "../src/index"
 
@@ -266,6 +266,49 @@ describe("CLI backend endpoint resolver", () => {
     expect(urls[1]).toStartWith("https://orb-endpoint.rika.test")
     expect(resolved).toEqual([undefined, threadId])
     expect(touched).toEqual([Ids.OrbId.make("orb_backend_endpoint")])
+  })
+
+  test("reconnecting client forwards user identity for manual compaction", async () => {
+    const userId = Ids.UserId.make("user_backend_endpoint")
+    const event: Event.ContextCompacted = {
+      id: Ids.EventId.make("event_backend_endpoint_compacted"),
+      thread_id: threadId,
+      sequence: 2,
+      version: 1,
+      created_at: now,
+      type: "context.compacted",
+      data: {
+        summary: "Goal\n- compact through reconnecting client",
+        tail_start_sequence: 1,
+        trigger: "manual",
+        tokens_before: 100,
+        model: "gpt-5.5",
+      },
+    }
+    const urls: Array<string> = []
+    const client = Runtime.reconnectingClient({
+      resolveEndpoint: () =>
+        Effect.succeed({
+          kind: "local" as const,
+          url: "http://127.0.0.1:45555",
+          token: "local-token",
+          workspace_root: workspaceRoot,
+          data_dir: dataDir,
+          pid: 123,
+        }),
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input)
+        urls.push(url)
+        return new Response(JSON.stringify(event), { status: 200 })
+      },
+    })
+
+    const compacted = await Effect.runPromise(client.compactThread(threadId, userId))
+
+    expect(compacted).toEqual(event)
+    expect(urls).toEqual([
+      "http://127.0.0.1:45555/v1/threads/thread_backend_endpoint/compact?user_id=user_backend_endpoint",
+    ])
   })
 
   test("reconnecting client refreshes stale cached orb endpoints when touch reports a pause", async () => {

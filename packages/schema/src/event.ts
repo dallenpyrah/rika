@@ -97,6 +97,24 @@ export const ContextResolved = Schema.Struct({
   }),
 }).annotate({ identifier: "Rika.Event.ContextResolved" })
 
+export const ContextCompactionTrigger = Schema.Literals(["manual", "auto", "overflow"]).annotate({
+  identifier: "Rika.Event.ContextCompactionTrigger",
+})
+export type ContextCompactionTrigger = typeof ContextCompactionTrigger.Type
+
+export interface ContextCompacted extends Schema.Schema.Type<typeof ContextCompacted> {}
+export const ContextCompacted = Schema.Struct({
+  ...fields,
+  type: Schema.Literal("context.compacted"),
+  data: Schema.Struct({
+    summary: Schema.String,
+    tail_start_sequence: Schema.Int,
+    trigger: ContextCompactionTrigger,
+    tokens_before: Schema.optional(Schema.Int),
+    model: Schema.String,
+  }),
+}).annotate({ identifier: "Rika.Event.ContextCompacted" })
+
 export interface SkillLoaded extends Schema.Schema.Type<typeof SkillLoaded> {}
 export const SkillLoaded = Schema.Struct({
   ...fields,
@@ -232,6 +250,7 @@ export type Event =
   | ModelStreamChunk
   | ModelReasoningDelta
   | ContextResolved
+  | ContextCompacted
   | SkillLoaded
   | SubagentCompleted
   | ToolCallInputStarted
@@ -252,6 +271,7 @@ export const Event = Schema.Union([
   ModelStreamChunk,
   ModelReasoningDelta,
   ContextResolved,
+  ContextCompacted,
   SkillLoaded,
   SubagentCompleted,
   ToolCallInputStarted,

@@ -89,6 +89,18 @@ describe("web app state", () => {
     ])
   })
 
+  test("renders context compaction into a concise event row", () => {
+    expect(eventRows([contextCompacted(3)])).toEqual([
+      {
+        id: "event-3",
+        sequence: 3,
+        kind: "event",
+        title: "Context compacted",
+        body: "manual · tail starts at 2",
+      },
+    ])
+  })
+
   test("auto-opens the newest thread after loading the thread list", () => {
     const [next, commands] = update(
       initialModel({ api_base_url: "/api/rika" }),
@@ -205,5 +217,21 @@ const messageAdded = (sequence: number, role: RikaMessage.Role, text: string): E
       content: [RikaMessage.text(text)],
       created_at: sequence,
     },
+  },
+})
+
+const contextCompacted = (sequence: number): Event.ContextCompacted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "context.compacted",
+  data: {
+    summary: "earlier context summary",
+    model: "gpt-5.5",
+    trigger: "manual",
+    tokens_before: 4096,
+    tail_start_sequence: 2,
   },
 })

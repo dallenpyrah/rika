@@ -132,6 +132,12 @@ export const ArchiveThreadRequest = Schema.Struct({
   user_id: Schema.optional(UserId),
 }).annotate({ identifier: "Rika.Remote.ArchiveThreadRequest" })
 
+export interface CompactThreadRequest extends Schema.Schema.Type<typeof CompactThreadRequest> {}
+export const CompactThreadRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+}).annotate({ identifier: "Rika.Remote.CompactThreadRequest" })
+
 export interface SearchThreadsRequest extends Schema.Schema.Type<typeof SearchThreadsRequest> {}
 export const SearchThreadsRequest = Schema.Struct({
   query: Schema.optional(Schema.String),

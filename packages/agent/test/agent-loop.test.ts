@@ -490,6 +490,167 @@ describe("AgentLoop", () => {
     })
   })
 
+  test("builds the next model request from a compacted summary plus tail", async () => {
+    const compactedThreadId = Ids.ThreadId.make("thread_agent_compacted_next_turn")
+    const compactedWorkspaceId = Ids.WorkspaceId.make("workspace_agent_compacted_next_turn")
+    const priorTurnId = Ids.TurnId.make("turn_agent_compacted_prior")
+    const tailTurnId = Ids.TurnId.make("turn_agent_compacted_tail")
+    const captured: Array<Provider.GenerateRequest> = []
+    const providerLayer = Layer.succeed(
+      Provider.Service,
+      Provider.Service.of({
+        name: "openai",
+        complete: Effect.fn("AgentLoop.test.compacted.complete")(function* (request: Provider.GenerateRequest) {
+          captured.push(request)
+          return fakeResponse(request, "after compact")
+        }),
+        stream: (request: Provider.GenerateRequest) => {
+          captured.push(request)
+          return Stream.fromIterable(Provider.streamEventsFromResponse(fakeResponse(request, "after compact")))
+        },
+      }),
+    )
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, registryFromProviderLayer(providerLayer))
+    const seed: ReadonlyArray<Event.Event> = [
+      {
+        id: Ids.EventId.make("event_agent_compacted_thread_created"),
+        thread_id: compactedThreadId,
+        sequence: 1,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "thread.created",
+        data: {
+          workspace_id: compactedWorkspaceId,
+        },
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_prior_started"),
+        thread_id: compactedThreadId,
+        turn_id: priorTurnId,
+        sequence: 2,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "turn.started",
+        data: {},
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_old_message"),
+        thread_id: compactedThreadId,
+        turn_id: priorTurnId,
+        sequence: 3,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "message.added",
+        data: {
+          message: Message.user({
+            id: Ids.MessageId.make("message_agent_compacted_old"),
+            thread_id: compactedThreadId,
+            turn_id: priorTurnId,
+            content: "old message must be folded",
+            created_at: Common.TimestampMillis.make(1_900_000_000_000),
+          }),
+        },
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_prior_completed"),
+        thread_id: compactedThreadId,
+        turn_id: priorTurnId,
+        sequence: 4,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "turn.completed",
+        data: {
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_context"),
+        thread_id: compactedThreadId,
+        sequence: 5,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "context.compacted",
+        data: {
+          summary: "keep the anchored summary",
+          tail_start_sequence: 6,
+          trigger: "manual",
+          tokens_before: 10,
+          model: "gpt-5.5",
+        },
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_tail_started"),
+        thread_id: compactedThreadId,
+        turn_id: tailTurnId,
+        sequence: 6,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "turn.started",
+        data: {},
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_tail_message"),
+        thread_id: compactedThreadId,
+        turn_id: tailTurnId,
+        sequence: 7,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "message.added",
+        data: {
+          message: Message.user({
+            id: Ids.MessageId.make("message_agent_compacted_tail"),
+            thread_id: compactedThreadId,
+            turn_id: tailTurnId,
+            content: "tail message must remain",
+            created_at: Common.TimestampMillis.make(1_900_000_000_000),
+          }),
+        },
+      },
+      {
+        id: Ids.EventId.make("event_agent_compacted_tail_completed"),
+        thread_id: compactedThreadId,
+        turn_id: tailTurnId,
+        sequence: 8,
+        version: 1,
+        created_at: Common.TimestampMillis.make(1_900_000_000_000),
+        type: "turn.completed",
+        data: {
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      },
+    ]
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of seed) {
+          const appended = yield* ThreadEventLog.append(event)
+          yield* ThreadProjection.apply(appended)
+        }
+        return yield* AgentLoop.runTurn({
+          thread_id: compactedThreadId,
+          workspace_id: compactedWorkspaceId,
+          content: "new request after compaction",
+          mode: "rush",
+        })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const requestText = JSON.stringify(captured[0]?.messages)
+    const promptText = JSON.stringify(captured[0]?.prompt)
+    expect(result.status).toBe("completed")
+    expect(requestText).toContain("[Conversation summary")
+    expect(requestText).toContain("keep the anchored summary")
+    expect(requestText).toContain("tail message must remain")
+    expect(requestText).toContain("new request after compaction")
+    expect(requestText).not.toContain("old message must be folded")
+    expect(promptText).toContain("[Conversation summary")
+    expect(promptText).toContain("keep the anchored summary")
+    expect(promptText).toContain("tail message must remain")
+    expect(promptText).toContain("new request after compaction")
+    expect(promptText).not.toContain("old message must be folded")
+  })
+
   test("records permission-blocked tool calls as structured tool results", async () => {
     const toolLayer = ToolExecutor.layer.pipe(
       Layer.provideMerge(ToolRegistry.fakeLayer({ fake_echo: (call) => Effect.succeed({ echoed: call.input }) })),

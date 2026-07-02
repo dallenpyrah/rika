@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor, WorkspaceAccess } from "@rika/agent"
+import {
+  AgentLoop,
+  CompactionService,
+  ContextResolver,
+  SkillRegistry,
+  ThreadService,
+  ToolExecutor,
+  WorkspaceAccess,
+} from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Provider, Router } from "@rika/llm"
@@ -210,6 +218,7 @@ const makeLayer = () => {
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
+    unusedCompactionLayer(),
     fakeOrbManagerLayer().pipe(Layer.provideMerge(migratedStorageLayer)),
     fakeOrbMirrorLayer(),
   )
@@ -218,6 +227,18 @@ const makeLayer = () => {
   const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
+
+const unusedCompactionLayer = () =>
+  CompactionService.fakeLayer({
+    compact: (input) =>
+      Effect.fail(
+        new CompactionService.CompactionError({
+          message: "Compaction is not exercised by this test.",
+          operation: "compact",
+          thread_id: input.thread_id,
+        }),
+      ),
+  })
 
 const fakeOrbManagerLayer = () =>
   Layer.effect(

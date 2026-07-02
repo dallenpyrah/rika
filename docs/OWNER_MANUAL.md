@@ -102,11 +102,12 @@ rika threads list
 rika threads search "auth race"
 rika threads archive <thread-id>
 rika threads unarchive <thread-id>
+rika threads compact <thread-id>
 rika threads share <thread-id>
 rika threads reference <thread-id> [query]
 ```
 
-Interactive slash commands mirror the core lifecycle: `/threads`, `/search`, `/thread`, `/new`, `/archive`, `/unarchive`, `/share`, and `/reference`.
+Interactive slash commands mirror the core lifecycle: `/threads`, `/search`, `/thread`, `/new`, `/archive`, `/unarchive`, `/compact`, `/share`, and `/reference`.
 
 ## Files, images, and context
 

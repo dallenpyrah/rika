@@ -179,6 +179,10 @@ const handleCommand = (
       const results = yield* dependencies.threadService.search({ query: argument, workspace_id: workspaceId })
       return Backend.commandResult(context, { state: ViewState.withNotice(state, formatSearchResults(results)) })
     }
+    if (name === "/compact")
+      return Backend.commandResult(context, {
+        state: ViewState.withNotice(state, "Manual compaction requires the shared backend."),
+      })
     if (name === "/new") {
       const summary = yield* dependencies.threadService.create({ workspace_id: workspaceId })
       const next = ViewState.withThread(state, {

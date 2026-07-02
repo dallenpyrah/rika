@@ -178,6 +178,15 @@ describe("TUI session", () => {
     expect(frames).not.toContain("Unknown command /welcome")
   })
 
+  test("reports manual compaction as remote-only in the local session", async () => {
+    const { exitCode, rendered } = await runSession(["hello", "/compact", "/exit"])
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(frames).toContain("Manual compaction requires the shared backend.")
+    expect(frames).not.toContain("Unknown command /compact")
+  })
+
   test("relaunch exits after recording a relaunch notice", async () => {
     const { exitCode, rendered } = await runSession(["/relaunch"])
 

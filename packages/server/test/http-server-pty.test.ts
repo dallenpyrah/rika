@@ -220,6 +220,7 @@ const remoteLayer = Layer.succeed(
     previewThread: () => unexpected("previewThread"),
     archiveThread: () => unexpected("archiveThread"),
     unarchiveThread: () => unexpected("unarchiveThread"),
+    compactThread: () => unexpected("compactThread"),
     searchThreads: () => unexpected("searchThreads"),
     shareThread: () => unexpected("shareThread"),
     referenceThread: () => unexpected("referenceThread"),

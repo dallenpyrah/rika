@@ -458,11 +458,13 @@ describe("CLI args", () => {
     const list = await Effect.runPromise(Args.parse(["threads", "list", "--include-archived", "--limit", "5"]))
     const search = await Effect.runPromise(Args.parse(["threads", "search", "auth", "race", "--limit", "3"]))
     const archive = await Effect.runPromise(Args.parse(["threads", "archive", threadId]))
+    const compact = await Effect.runPromise(Args.parse(["threads", "compact", threadId]))
     const reference = await Effect.runPromise(Args.parse(["threads", "reference", threadId, "auth", "race"]))
 
     expect(list).toEqual({ type: "threads", action: "list", include_archived: true, limit: 5 })
     expect(search).toEqual({ type: "threads", action: "search", query: "auth race", limit: 3 })
     expect(archive).toEqual({ type: "threads", action: "archive", thread_id: threadId })
+    expect(compact).toEqual({ type: "threads", action: "compact", thread_id: threadId })
     expect(reference).toEqual({ type: "threads", action: "reference", thread_id: threadId, query: "auth race" })
   })
 

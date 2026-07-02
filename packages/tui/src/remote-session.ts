@@ -243,6 +243,13 @@ const handleCommand = (
       const results = yield* client.searchThreads({ query: argument, workspace_id: workspaceId })
       return Backend.commandResult(context, { state: ViewState.withNotice(state, formatSearchResults(results)) })
     }
+    if (name === "/compact") {
+      const event = yield* client.compactThread(threadId)
+      return Backend.commandResult(context, {
+        state: ViewState.withNotice(ViewState.applyEvent(state, event), "Compacted thread context."),
+        last_sequence: event.sequence,
+      })
+    }
     if (name === "/new") {
       const summary = yield* client.createThread({ workspace_id: workspaceId })
       const next = ViewState.withThread(state, {

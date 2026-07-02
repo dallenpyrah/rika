@@ -10,6 +10,7 @@ const orbId = Ids.OrbId.make("orb_sdk_client")
 const turnId = Ids.TurnId.make("turn_sdk_client")
 const eventId = Ids.EventId.make("event_sdk_client")
 const ideClientId = Ids.IdeClientId.make("ide_sdk_client")
+const userId = Ids.UserId.make("user_sdk_client")
 const now = Common.TimestampMillis.make(2_000_000_000_001)
 
 describe("SDK client", () => {
@@ -248,6 +249,37 @@ describe("SDK client", () => {
       { method: "POST", path: "/v1/orbs/orb_sdk_client/resume" },
       { method: "POST", path: "/v1/orbs/orb_sdk_client/kill" },
     ])
+  })
+
+  test("uses shared schema for manual thread compaction", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const event: Event.ContextCompacted = {
+      id: Ids.EventId.make("event_sdk_context_compacted"),
+      thread_id: threadId,
+      sequence: 2,
+      version: 1,
+      created_at: now,
+      type: "context.compacted",
+      data: {
+        summary: "Goal\n- compacted",
+        tail_start_sequence: 1,
+        trigger: "manual",
+        tokens_before: 100,
+        model: "gpt-5.5",
+      },
+    }
+    const client = Client.make({
+      requestJson: (input) => {
+        calls.push(input)
+        return Effect.succeed(Codec.encode(Event.ContextCompacted)(event))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    const compacted = await Effect.runPromise(client.compactThread(threadId, userId))
+
+    expect(compacted).toEqual(event)
+    expect(calls).toEqual([{ method: "POST", path: "/v1/threads/thread_sdk_client/compact?user_id=user_sdk_client" }])
   })
 
   test("fetch transport sends bearer auth and decodes API errors", async () => {

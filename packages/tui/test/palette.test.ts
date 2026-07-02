@@ -27,13 +27,30 @@ describe("palette.filter", () => {
   })
 
   test("shows orb lifecycle commands only for an active orb-backed thread", () => {
-    expect(Palette.filter("orb pause", "smart", false, false)).toEqual([])
-    expect(Palette.filter("orb pause", "smart", false, true).map((command) => command.id)).toEqual(["orb-pause"])
+    expect(Palette.filter("orb pause", "smart", false, { threadActive: true, orbBackedThread: false })).toEqual([])
     expect(
-      Palette.commandsFor("smart", false, true)
+      Palette.filter("orb pause", "smart", false, { threadActive: true, orbBackedThread: true }).map(
+        (command) => command.id,
+      ),
+    ).toEqual(["orb-pause"])
+    expect(
+      Palette.commandsFor("smart", false, { threadActive: true, orbBackedThread: true })
         .filter((command) => command.category === "orb" && command.id !== "orb-toggle")
         .map((command) => command.command),
     ).toEqual(["/orb pause", "/orb resume", "/orb kill"])
+  })
+
+  test("shows manual compaction only for an active thread", () => {
+    expect(Palette.filter("compact", "smart", false, { threadActive: false, orbBackedThread: false })).toEqual([])
+    expect(Palette.filter("compact", "smart", false, { threadActive: true, orbBackedThread: false })).toEqual([
+      {
+        id: "thread-compact",
+        category: "thread",
+        action: "compact context",
+        hint: "summarize earlier context for this thread",
+        command: "/compact",
+      },
+    ])
   })
 
   test("does not advertise IDE connection commands", () => {

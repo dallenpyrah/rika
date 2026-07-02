@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ThreadService, WorkspaceAccess } from "@rika/agent"
+import { AgentLoop, CompactionService, ThreadService, WorkspaceAccess } from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbActivity, OrbManager, SandboxClientFake } from "@rika/orb"
@@ -568,6 +568,7 @@ const makeRemoteControlLiveLayer = () => {
     Layer.provideMerge(workspaceAccessLayer),
     Layer.provideMerge(artifactLayer),
     Layer.provideMerge(agentLayer),
+    Layer.provideMerge(unusedCompactionLayer()),
     Layer.provideMerge(IdeBridge.layer),
     Layer.provideMerge(liveLayer),
     Layer.provideMerge(remoteOrbManagerLayer()),
@@ -575,6 +576,18 @@ const makeRemoteControlLiveLayer = () => {
   )
   return Layer.mergeAll(migratedStorageLayer, liveLayer, remoteLayer)
 }
+
+const unusedCompactionLayer = () =>
+  CompactionService.fakeLayer({
+    compact: (input) =>
+      Effect.fail(
+        new CompactionService.CompactionError({
+          message: "Compaction is not exercised by this test.",
+          operation: "compact",
+          thread_id: input.thread_id,
+        }),
+      ),
+  })
 
 const remoteOrbManagerLayer = () =>
   Layer.succeed(

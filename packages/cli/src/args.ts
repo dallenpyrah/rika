@@ -33,6 +33,7 @@ export const ThreadAction = Schema.Literals([
   "search",
   "archive",
   "unarchive",
+  "compact",
   "share",
   "reference",
   "delete",
@@ -783,6 +784,10 @@ const makeThreadsCommand = (
     Ref.set(parsedRef, Option.some(toThreadIdCommand("unarchive", input))),
   ).pipe(CliCommand.withDescription("Unarchive a local thread"), CliCommand.withShortDescription("Unarchive thread"))
 
+  const compact = CliCommand.make("compact", threadIdConfig, (input: ThreadIdInput) =>
+    Ref.set(parsedRef, Option.some(toThreadIdCommand("compact", input))),
+  ).pipe(CliCommand.withDescription("Compact a local thread"), CliCommand.withShortDescription("Compact thread"))
+
   const share = CliCommand.make("share", threadIdConfig, (input: ThreadIdInput) =>
     Ref.set(parsedRef, Option.some(toThreadIdCommand("share", input))),
   ).pipe(
@@ -809,7 +814,7 @@ const makeThreadsCommand = (
   ).pipe(
     CliCommand.withDescription("Manage local Rika threads"),
     CliCommand.withShortDescription("Manage threads"),
-    CliCommand.withSubcommands([list, search, archive, unarchive, share, reference, deleteThread]),
+    CliCommand.withSubcommands([list, search, archive, unarchive, compact, share, reference, deleteThread]),
   )
 }
 
@@ -1087,7 +1092,7 @@ const toThreadSearchCommand = (input: ThreadSearchInput): ThreadCommand => {
 }
 
 const toThreadIdCommand = (
-  action: Extract<ThreadAction, "archive" | "unarchive" | "share" | "delete">,
+  action: Extract<ThreadAction, "archive" | "unarchive" | "compact" | "share" | "delete">,
   input: ThreadIdInput,
 ): ThreadCommand => ({
   type: "threads",

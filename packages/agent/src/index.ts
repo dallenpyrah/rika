@@ -1,5 +1,6 @@
 export * as AgentLoop from "./agent-loop"
 export * as CheckRegistry from "./check-registry"
+export * as CompactionService from "./compaction-service"
 export * as ContextBudget from "./context-budget"
 export * as ModelContext from "./model-context"
 export * as ContextResolver from "./context-resolver"

@@ -1,4 +1,4 @@
-import { AgentLoop, ThreadService, WorkspaceAccess, WorkspaceIdentity } from "@rika/agent"
+import { AgentLoop, CompactionService, ThreadService, WorkspaceAccess, WorkspaceIdentity } from "@rika/agent"
 import { Config, IdGenerator } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbManager } from "@rika/orb"
@@ -18,6 +18,7 @@ export class RemoteControlError extends Schema.TaggedErrorClass<RemoteControlErr
 export type RunError =
   | RemoteControlError
   | AgentLoop.RunError
+  | CompactionService.RunError
   | ThreadService.Error
   | ArtifactStore.ArtifactStoreError
   | Database.DatabaseError
@@ -48,6 +49,7 @@ export interface Interface {
   readonly previewThread: (input: Remote.PreviewThreadRequest) => Effect.Effect<Remote.ThreadRecord, RunError>
   readonly archiveThread: (input: Remote.ArchiveThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly unarchiveThread: (input: Remote.ArchiveThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
+  readonly compactThread: (input: Remote.CompactThreadRequest) => Effect.Effect<Event.ContextCompacted, RunError>
   readonly searchThreads: (
     input: Remote.SearchThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, RunError>
@@ -74,6 +76,7 @@ export const layerWithLive = Layer.effect(
   Service,
   Effect.gen(function* () {
     const agentLoop = yield* AgentLoop.Service
+    const compaction = yield* CompactionService.Service
     const threads = yield* ThreadService.Service
     const artifacts = yield* ArtifactStore.Service
     const config = yield* Config.Service
@@ -279,6 +282,25 @@ export const layerWithLive = Layer.effect(
         const summary = yield* threads.unarchive({ thread_id: input.thread_id })
         yield* publishLoggedEvents(input.thread_id, previousSequence)
         return yield* withOrbStatus(orbs, summary)
+      }),
+      compactThread: Effect.fn("RemoteControl.compactThread")(function* (input: Remote.CompactThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+        }
+        const previousSequence = yield* latestLoggedSequence(input.thread_id)
+        const reserved = yield* reserveThread(input.thread_id)
+        if (!reserved) {
+          return yield* new RemoteControlError({
+            message: `Thread ${input.thread_id} already has active work`,
+            operation: "compactThread",
+            status: 409,
+          })
+        }
+        return yield* Effect.gen(function* () {
+          const result = yield* compaction.compact({ thread_id: input.thread_id, trigger: "manual" })
+          yield* publishLoggedEvents(input.thread_id, previousSequence)
+          return result.event
+        }).pipe(Effect.ensuring(releaseThread(input.thread_id)))
       }),
       searchThreads: Effect.fn("RemoteControl.searchThreads")(function* (input: Remote.SearchThreadsRequest) {
         if (input.workspace_id !== undefined && input.user_id !== undefined) {
@@ -521,6 +543,13 @@ export const unarchiveThread = Effect.fn("RemoteControl.unarchiveThread.call")(f
   return yield* service.unarchiveThread(input)
 })
 
+export const compactThread = Effect.fn("RemoteControl.compactThread.call")(function* (
+  input: Remote.CompactThreadRequest,
+) {
+  const service = yield* Service
+  return yield* service.compactThread(input)
+})
+
 export const searchThreads = Effect.fn("RemoteControl.searchThreads.call")(function* (
   input: Remote.SearchThreadsRequest,
 ) {
@@ -621,6 +650,7 @@ export const errorToApi = (error: RunError): Remote.ApiError => ({
 
 export const statusFromError = (error: RunError) => {
   if (error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError) return error.status
+  if (error instanceof CompactionService.CompactionError) return statusFromCompactionError(error)
   if (error instanceof OrbStore.OrbStoreError) return statusFromOrbStoreError(error)
   if (error instanceof OrbManager.OrbProvisionError) return statusFromOrbProvisionError(error)
   if (error instanceof WorkspaceAccess.WorkspaceAccessDenied) return 403
@@ -690,6 +720,9 @@ const publicRepoOrigin = (repoOrigin: string): string => {
 
 const statusFromOrbStoreError = (error: OrbStore.OrbStoreError) =>
   error.reason === "not_found" ? 404 : error.reason === "invalid_transition" ? 409 : 500
+
+const statusFromCompactionError = (error: CompactionService.CompactionError) =>
+  error.message.includes("does not exist") ? 404 : 500
 
 const statusFromOrbProvisionError = (error: OrbManager.OrbProvisionError) => {
   const message = error.message.toLowerCase()

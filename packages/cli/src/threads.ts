@@ -1,6 +1,7 @@
 import { ThreadService } from "@rika/agent"
 import { OrbStore } from "@rika/persistence"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Client } from "@rika/sdk"
+import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as Args from "./args"
 import * as Output from "./output"
 
@@ -9,7 +10,7 @@ export class ThreadsError extends Schema.TaggedErrorClass<ThreadsError>()("Threa
   action: Args.ThreadAction,
 }) {}
 
-export type RunError = ThreadService.Error | OrbStore.OrbStoreError | ThreadsError
+export type RunError = ThreadService.Error | OrbStore.OrbStoreError | Client.SdkError | ThreadsError
 
 export interface Interface {
   readonly executeCommand: (command: Args.ThreadCommand) => Effect.Effect<number, RunError>
@@ -17,12 +18,17 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/cli/Threads") {}
 
+export class RemoteClient extends Context.Service<RemoteClient, Client.Interface>()("@rika/cli/Threads/RemoteClient") {}
+
+export const remoteClientLayer = (client: Client.Interface) => Layer.succeed(RemoteClient, RemoteClient.of(client))
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const output = yield* Output.Service
     const threads = yield* ThreadService.Service
     const orbs = yield* OrbStore.Service
+    const remoteClient = yield* Effect.serviceOption(RemoteClient)
 
     return Service.of({
       executeCommand: Effect.fn("Cli.Threads.executeCommand")(function* (command: Args.ThreadCommand) {
@@ -46,6 +52,18 @@ export const layer = Layer.effect(
           case "unarchive": {
             const summary = yield* threads.unarchive({ thread_id: yield* requireThreadId(command) })
             yield* output.stdout(formatJson(summary))
+            return 0
+          }
+          case "compact": {
+            const remote = Option.getOrUndefined(remoteClient)
+            if (remote === undefined) {
+              return yield* new ThreadsError({
+                message: "Thread compaction requires the shared backend client",
+                action: command.action,
+              })
+            }
+            const event = yield* remote.compactThread(yield* requireThreadId(command))
+            yield* output.stdout(formatJson(event))
             return 0
           }
           case "share": {

@@ -1,6 +1,7 @@
 import {
   AgentLoop,
   CheckRegistry,
+  CompactionService,
   ContextResolver,
   PermissionPolicy,
   ReviewService,
@@ -688,10 +689,15 @@ const workspaceIdForRoot = Effect.fn("Cli.Runtime.workspaceIdForRoot")(function*
 export interface ReconnectingClientInput {
   readonly resolveEndpoint: (
     input: ReconnectingEndpointInput,
-  ) => Effect.Effect<BackendEndpoint.BackendEndpoint, BackendEndpoint.ResolveError>
+  ) => Effect.Effect<BackendEndpoint.BackendEndpoint, ReconnectingResolveError>
   readonly touchOrb?: (orbId: Ids.OrbId) => Effect.Effect<void, OrbActivity.RunError>
   readonly fetch?: Client.FetchTransportInput["fetch"]
 }
+
+export type ReconnectingResolveError =
+  | BackendEndpoint.ResolveError
+  | Migration.MigrationError
+  | SandboxClient.OrbConfigError
 
 export interface ReconnectingEndpointInput {
   readonly thread_id?: Ids.ThreadId
@@ -812,6 +818,8 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
       request({ thread_id: threadId }, (remote) => remote.archiveThread(threadId, userId)),
     unarchiveThread: (threadId, userId) =>
       request({ thread_id: threadId }, (remote) => remote.unarchiveThread(threadId, userId)),
+    compactThread: (threadId, userId) =>
+      request({ thread_id: threadId }, (remote) => remote.compactThread(threadId, userId)),
     searchThreads: (search) => request({}, (remote) => remote.searchThreads(search)),
     shareThread: (threadId, userId) =>
       request({ thread_id: threadId }, (remote) => remote.shareThread(threadId, userId)),
@@ -833,8 +841,11 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
   }
 }
 
-const resolveErrorOperation = (error: BackendEndpoint.ResolveError) =>
-  "operation" in error ? `backend.${error.operation}` : `backend.${error.step}`
+const resolveErrorOperation = (error: ReconnectingResolveError) => {
+  if ("operation" in error) return `backend.${error.operation}`
+  if ("step" in error) return `backend.${error.step}`
+  return "backend.resolveEndpoint"
+}
 
 const retryableSdkError = (error: Client.SdkError): boolean => error.status === undefined
 
@@ -891,11 +902,53 @@ export const threadsLiveLayer = (
     Time.layer,
     IdGenerator.layer,
   )
+  const projectStoreLayer = ProjectStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
   const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
-  const storageLayer = Layer.mergeAll(baseStorageLayer, orbStoreLayer)
+  const storageLayer = Layer.mergeAll(baseStorageLayer, projectStoreLayer, orbStoreLayer)
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const commandLayer = Threads.layer.pipe(Layer.provideMerge(storageAndThreadLayer))
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
+  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer))
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
+  const backendLayer = LocalBackend.layerFromInput({ env, cwd })
+  const remoteClientLayer = Layer.effect(
+    Threads.RemoteClient,
+    Effect.gen(function* () {
+      const backend = yield* LocalBackend.Service
+      const orbs = yield* OrbStore.Service
+      const health = yield* BackendEndpoint.Health
+      const resumer = yield* BackendEndpoint.OrbResumer
+      const resolveEndpoint = (input: ReconnectingEndpointInput) =>
+        BackendEndpoint.resolveEndpoint({
+          ...input,
+          workspace_root: workspaceRoot,
+          data_dir: dataDir,
+          mode: defaultModeFromEnv(env),
+          env,
+        }).pipe(
+          Effect.provideService(LocalBackend.Service, backend),
+          Effect.provideService(OrbStore.Service, orbs),
+          Effect.provideService(BackendEndpoint.Health, health),
+          Effect.provideService(BackendEndpoint.OrbResumer, resumer),
+        )
+      return Threads.RemoteClient.of(reconnectingClient({ resolveEndpoint }))
+    }),
+  ).pipe(
+    Layer.provideMerge(backendLayer),
+    Layer.provideMerge(BackendEndpoint.healthLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(BackendEndpoint.orbManagerResumerLayer),
+    Layer.provideMerge(managerLayer),
+  )
+  const commandLayer = Threads.layer.pipe(
+    Layer.provideMerge(Output.layer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provide(remoteClientLayer),
+  )
 
   return commandLayer
 }
@@ -1261,6 +1314,7 @@ export const serverLiveLayer = (
   )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
+  const compactionLayer = CompactionService.layer.pipe(Layer.provideMerge(baseLayer))
   const orbMirrorLayer = OrbMirror.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(threadLiveLayer),
@@ -1269,6 +1323,7 @@ export const serverLiveLayer = (
   )
   const remoteLayer = RemoteControl.layerWithLive.pipe(
     Layer.provideMerge(agentLayer),
+    Layer.provideMerge(compactionLayer),
     Layer.provideMerge(baseLayer),
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(threadLiveLayer),

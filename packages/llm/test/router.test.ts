@@ -79,6 +79,21 @@ describe("LLM Router", () => {
     expect(deepStandard).not.toHaveProperty("service_tier")
   })
 
+  test("routes compaction profile through a cheap dedicated OpenAI model", async () => {
+    const routed = await Effect.runPromise(
+      Router.route({ profile: "compaction", messages }).pipe(Effect.provide(routerLayer)),
+    )
+
+    expect(routed).toMatchObject({
+      mode: "smart",
+      profile: "compaction",
+      provider: "openai",
+      model: "gpt-5.5",
+      reasoning_effort: "low",
+      messages,
+    })
+  })
+
   test("complete depends only on the router service and fake provider layer", async () => {
     const response = await Effect.runPromise(
       Router.complete({ mode: "rush", messages }).pipe(Effect.provide(routerLayer)),
