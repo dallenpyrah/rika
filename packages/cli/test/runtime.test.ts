@@ -92,6 +92,26 @@ describe("CLI runtime", () => {
     }
   })
 
+  test("runs non-tournament thread commands without model credentials", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "rika-runtime-threads-"))
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+
+    try {
+      const exitCode = await Effect.runPromise(
+        Runtime.runProcess({
+          argv: ["threads", "list"],
+          env: { RIKA_DATA_DIR: join(workspace, ".rika") },
+          cwd: workspace,
+        }).pipe(Effect.provide(Output.memoryLayer(output))),
+      )
+
+      expect(exitCode).toBe(0)
+      expect(output.stderr).toEqual([])
+    } finally {
+      await rm(workspace, { force: true, recursive: true })
+    }
+  })
+
   test("writes Amp-compatible root help flags with raw stdout and reset stderr", async () => {
     for (const flag of ["--help", "-h"]) {
       const output = { stdout: [] as Array<string>, stderr: [] as Array<string> }

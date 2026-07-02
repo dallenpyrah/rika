@@ -3,12 +3,14 @@ import {
   CheckRegistry,
   CompactionService,
   ContextResolver,
+  JudgeService,
   PermissionPolicy,
   ReviewService,
   SkillRegistry,
   SubagentRuntime,
   ThreadService,
   ToolExecutor,
+  TournamentService,
   WorkspaceAccess,
   WorkspaceIdentity,
 } from "@rika/agent"
@@ -29,7 +31,7 @@ import {
 } from "@rika/persistence"
 import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
-import { Ids } from "@rika/schema"
+import { Ids, Remote } from "@rika/schema"
 import { HttpServer, OrbMirror, RemoteControl, ThreadLive } from "@rika/server"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
 import type { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
@@ -205,6 +207,7 @@ type RuntimeError =
   | ProjectStore.ProjectStoreError
   | Review.ReviewError
   | ReviewService.ReviewServiceError
+  | TournamentService.RunError
   | RemoteControl.RemoteControlError
   | RemoteSession.RemoteSessionError
   | Server.ServerError
@@ -247,6 +250,8 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof OrbStore.OrbStoreError) return `Rika failed: ${error.message}`
   if (error instanceof Review.ReviewError) return Review.formatError(error)
   if (error instanceof ReviewService.ReviewServiceError) return `Rika failed: ${error.message}`
+  if (error instanceof TournamentService.TournamentError) return `Rika failed: ${error.message}`
+  if (error instanceof TournamentService.TournamentTurnError) return `Rika failed: ${error.message}`
   if (error instanceof RemoteControl.RemoteControlError) return `Rika failed: ${error.message}`
   if (error instanceof Server.ServerError) return Server.formatError(error)
   if (error instanceof SandboxClient.SandboxClientError) return `Rika failed: ${error.message}`
@@ -559,6 +564,7 @@ const interactiveLiveLayerFromTui = (
   )
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+  const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const baseLayer = Layer.mergeAll(
     Adapter.layer,
     Ticker.layer,
@@ -571,7 +577,16 @@ const interactiveLiveLayerFromTui = (
     diagnosticsLayer,
     telemetryLayer,
   )
-  const sessionLayer = Session.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))))
+  const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
+  const judgeLayer = JudgeService.layer.pipe(Layer.provideMerge(migratedStorageLayer), Layer.provideMerge(llmLayer))
+  const tournamentLayer = TournamentService.layer.pipe(
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(judgeLayer),
+    Layer.provideMerge(localTournamentTurnControlLayer.pipe(Layer.provideMerge(threadLiveLayer))),
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(agentLoopLayer),
+  )
+  const sessionLayer = Session.layer.pipe(Layer.provideMerge(agentLoopLayer), Layer.provideMerge(tournamentLayer))
 
   return sessionLayer
 }
@@ -604,6 +619,7 @@ const interactiveRemoteLiveLayerFromTui = (
   )
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(databaseLayer),
@@ -619,6 +635,7 @@ const interactiveRemoteLiveLayerFromTui = (
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
+    artifactLayer,
     Migration.layer,
     timeLayer,
     IdGenerator.layer,
@@ -626,6 +643,7 @@ const interactiveRemoteLiveLayerFromTui = (
     orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
   const activityLayer = OrbActivity.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
@@ -648,6 +666,9 @@ const interactiveRemoteLiveLayerFromTui = (
       const resumer = yield* BackendEndpoint.OrbResumer
       const renderer = yield* Adapter.Service
       const ticker = yield* Ticker.Service
+      const artifactStore = yield* ArtifactStore.Service
+      const idGenerator = yield* IdGenerator.Service
+      const time = yield* Time.Service
       const workspaceId = yield* workspaceIdForRoot(workspaceRoot)
       const resolveEndpoint = (endpointInput: ReconnectingEndpointInput) =>
         BackendEndpoint.resolveEndpoint({
@@ -663,7 +684,18 @@ const interactiveRemoteLiveLayerFromTui = (
           Effect.provideService(BackendEndpoint.OrbResumer, resumer),
         )
       const client = reconnectingClient({ resolveEndpoint, touchOrb: (orbId) => activity.touch(orbId) })
-      return RemoteSession.make(client, renderer, ticker.ticks, workspaceId)
+      const runTournament = (input: {
+        readonly thread_id: Ids.ThreadId
+        readonly message: string
+        readonly branch_count: number
+      }) =>
+        TournamentService.run(input).pipe(
+          Effect.provide(
+            remoteTournamentLayerFromClient(client, configLayer, llmLayer, artifactStore, idGenerator, time),
+          ),
+          Effect.mapError((error) => tournamentRuntimeError(input.thread_id, error)),
+        )
+      return RemoteSession.make(client, renderer, ticker.ticks, workspaceId, runTournament)
     }),
   ).pipe(
     Layer.provideMerge(backendLayer),
@@ -679,6 +711,145 @@ const interactiveRemoteLiveLayerFromTui = (
 
   return remoteSessionLayer
 }
+
+const localTournamentTurnControlLayer = Layer.effect(
+  TournamentService.TurnControlService,
+  Effect.gen(function* () {
+    const agentLoop = yield* AgentLoop.Service
+    const threads = yield* ThreadService.Service
+    const live = yield* ThreadLive.Service
+    return TournamentService.TurnControlService.of({
+      startTurn: (input) =>
+        Effect.gen(function* () {
+          const record = yield* threads.open({ thread_id: input.thread_id })
+          yield* agentLoop
+            .streamTurn({
+              thread_id: input.thread_id,
+              workspace_id: input.workspace_id ?? record.summary.workspace_id,
+              content: input.content,
+              ...(input.content_parts === undefined ? {} : { content_parts: input.content_parts }),
+              ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+              ...(input.mode === undefined ? {} : { mode: input.mode }),
+              ...(input.fast_mode === undefined ? {} : { fast_mode: input.fast_mode }),
+              ...(input.cancelled === undefined ? {} : { cancelled: input.cancelled }),
+              ...(input.ide_context === undefined ? {} : { ide_context: input.ide_context }),
+              ...(input.tool_access === undefined ? {} : { tool_access: input.tool_access }),
+            })
+            .pipe(
+              Stream.runForEach((event) => live.publish(event)),
+              Effect.catch(() => Effect.void),
+              Effect.forkDetach,
+            )
+          return { thread_id: input.thread_id, accepted: true as const }
+        }).pipe(Effect.mapError((error) => tournamentTurnError("startTurn", input.thread_id, error))),
+      subscribeThreadEvents: (input) =>
+        live
+          .subscribe({
+            thread_id: input.thread_id,
+            ...(input.after_sequence === undefined ? {} : { after_sequence: input.after_sequence }),
+          })
+          .pipe(Stream.mapError((error) => tournamentTurnError("subscribeThreadEvents", input.thread_id, error))),
+    })
+  }),
+)
+
+const remoteTournamentLayerFromClient = (
+  client: Client.Interface,
+  configLayer: Layer.Layer<Config.Service>,
+  llmLayer: Layer.Layer<Router.Service, LiveLayerError>,
+  artifactStore: ArtifactStore.Interface,
+  idGenerator: IdGenerator.Interface,
+  time: Time.Interface,
+) => {
+  const judgeBaseLayer = Layer.mergeAll(
+    Layer.succeed(ArtifactStore.Service, ArtifactStore.Service.of(artifactStore)),
+    Layer.succeed(IdGenerator.Service, IdGenerator.Service.of(idGenerator)),
+    Layer.succeed(Time.Service, Time.Service.of(time)),
+  )
+  const judgeLayer = JudgeService.layer.pipe(Layer.provideMerge(judgeBaseLayer), Layer.provideMerge(llmLayer))
+  return TournamentService.layer.pipe(
+    Layer.provideMerge(remoteThreadServiceLayerFromClient(client)),
+    Layer.provideMerge(judgeLayer),
+    Layer.provideMerge(remoteTournamentTurnControlLayerFromClient(client)),
+    Layer.provideMerge(configLayer),
+  )
+}
+
+const remoteThreadServiceLayerFromClient = (client: Client.Interface) =>
+  ThreadService.fakeLayer({
+    open: (input) =>
+      client.openThread(input.thread_id).pipe(
+        Effect.map((record) => ({ summary: remoteThreadSummary(record.summary), events: record.events })),
+        Effect.mapError((error) => threadServiceError("open", input.thread_id, error)),
+      ),
+    fork: (input) =>
+      client
+        .forkThread(input.thread_id, {
+          ...(input.at_turn === undefined ? {} : { at_turn: input.at_turn }),
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          ...(input.title_text === undefined ? {} : { title_text: input.title_text }),
+        })
+        .pipe(
+          Effect.map(remoteThreadSummary),
+          Effect.mapError((error) => threadServiceError("fork", input.thread_id, error)),
+        ),
+  })
+
+const remoteTournamentTurnControlLayerFromClient = (client: Client.Interface) =>
+  TournamentService.turnControlLayer({
+    startTurn: (input) =>
+      client
+        .startTurn(input)
+        .pipe(Effect.mapError((error) => tournamentTurnError("startTurn", input.thread_id, error))),
+    subscribeThreadEvents: (input) =>
+      client
+        .subscribeThreadEvents(input)
+        .pipe(Stream.mapError((error) => tournamentTurnError("subscribeThreadEvents", input.thread_id, error))),
+  })
+
+const remoteThreadSummary = (summary: Remote.ThreadSummary): ThreadService.ThreadSummary => ({
+  thread_id: summary.thread_id,
+  workspace_id: summary.workspace_id,
+  ...(summary.user_id === undefined ? {} : { user_id: summary.user_id }),
+  ...(summary.title_text === undefined ? {} : { title_text: summary.title_text }),
+  ...(summary.latest_message_text === undefined ? {} : { latest_message_text: summary.latest_message_text }),
+  diff: summary.diff,
+  ...(summary.active_turn_id === undefined ? {} : { active_turn_id: summary.active_turn_id }),
+  ...(summary.active_turn_status === undefined ? {} : { active_turn_status: summary.active_turn_status }),
+  ...(summary.context_tokens === undefined ? {} : { context_tokens: summary.context_tokens }),
+  ...(summary.context_window === undefined ? {} : { context_window: summary.context_window }),
+  archived: summary.archived,
+  created_at: summary.created_at,
+  updated_at: summary.updated_at,
+})
+
+const tournamentTurnError = (operation: string, threadId: Ids.ThreadId, error: unknown) =>
+  new TournamentService.TournamentTurnError({
+    message: error instanceof Error ? error.message : String(error),
+    operation,
+    thread_id: threadId,
+    cause: error,
+  })
+
+const tournamentRuntimeError = (threadId: Ids.ThreadId, error: unknown): TournamentService.RunError => {
+  if (
+    error instanceof TournamentService.TournamentError ||
+    error instanceof TournamentService.TournamentTurnError ||
+    error instanceof ThreadService.ThreadServiceError ||
+    error instanceof ThreadService.ThreadForkError ||
+    error instanceof JudgeService.JudgeError
+  ) {
+    return error
+  }
+  return tournamentTurnError("runTournament", threadId, error)
+}
+
+const threadServiceError = (operation: string, threadId: Ids.ThreadId, error: unknown) =>
+  new ThreadService.ThreadServiceError({
+    message: error instanceof Error ? error.message : String(error),
+    operation,
+    thread_id: threadId,
+  })
 
 const workspaceIdForRoot = Effect.fn("Cli.Runtime.workspaceIdForRoot")(function* (workspaceRoot: string) {
   const projectId = yield* Project.resolveCurrentProjectId(workspaceRoot)
@@ -879,10 +1050,10 @@ export const skillsLiveLayer = (
 }
 
 export const threadsLiveLayer = (
-  _command: Args.ThreadCommand,
+  command: Args.ThreadCommand,
   env: Record<string, string | undefined>,
   cwd: string,
-): Layer.Layer<ThreadsLayerOutput, LiveLayerError> => {
+): Layer.Layer<Threads.Service, LiveLayerError> => {
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
   const configLayer = Config.layerFromValues(
@@ -896,14 +1067,22 @@ export const threadsLiveLayer = (
     env,
   )
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const baseStorageLayer = Layer.mergeAll(
     configLayer,
     Output.layer,
+    Input.layer,
     databaseLayer,
+    artifactLayer,
+    mcpApprovalLayer,
+    workspaceStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    Time.layer,
+    timeLayer,
     IdGenerator.layer,
   )
   const projectStoreLayer = ProjectStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
@@ -911,12 +1090,116 @@ export const threadsLiveLayer = (
   const storageLayer = Layer.mergeAll(baseStorageLayer, projectStoreLayer, orbStoreLayer)
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer))
+  const telemetryLayer = Layer.empty
+  const permissionConfig = PermissionPolicy.configFromEnv(env)
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
+    Layer.provideMerge(configLayer),
+  )
+  const subagentLayer = SubagentRuntime.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+    Layer.provide(subagentToolLayer),
+  )
+  const specialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+  )
+  const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(pluginLayer),
+    Layer.provideMerge(specialtyToolLayer),
+    Layer.provideMerge(subagentLayer),
+  )
+  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
+  const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const managerLayer = OrbManager.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(diagnosticsLayer),
+  )
+  const compactionLayer = CompactionService.fakeLayer({
+    compact: (input) =>
+      Effect.fail(
+        new CompactionService.CompactionError({
+          message: "Thread compaction is not available through the tournament runner",
+          operation: "compact",
+          thread_id: input.thread_id,
+        }),
+      ),
+  })
+  const orbMirrorLayer = Layer.succeed(
+    OrbMirror.Service,
+    OrbMirror.Service.of({
+      mirror: () => Effect.void,
+      flush: () => Effect.void,
+      mirrorRunningOrbsOnce: () => Effect.void,
+      syncRunning: () => Effect.void,
+    }),
+  )
+  const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const agentBase = Layer.mergeAll(
+    migratedStorageLayer,
+    storageAndThreadLayer,
+    workspaceAccessLayer,
+    contextResolverLayer,
+    skillLayer,
+    toolLayer,
+    diagnosticsLayer,
+    telemetryLayer,
+    llmLayer,
+    IdeBridge.layer,
+  )
+  const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
+  const remoteControlLayer = RemoteControl.layerWithLive.pipe(
+    Layer.provideMerge(agentLoopLayer),
+    Layer.provideMerge(agentBase),
+    Layer.provideMerge(compactionLayer),
+    Layer.provideMerge(managerLayer),
+    Layer.provideMerge(orbMirrorLayer),
+    Layer.provideMerge(threadLiveLayer),
+  )
+  const tournamentTurnControlLayer = Layer.effect(
+    TournamentService.TurnControlService,
+    Effect.map(RemoteControl.Service, (remote) =>
+      TournamentService.TurnControlService.of({
+        startTurn: (input) =>
+          remote.startTurn(input).pipe(
+            Effect.mapError(
+              (error) =>
+                new TournamentService.TournamentTurnError({
+                  message: error instanceof Error ? error.message : String(error),
+                  operation: "startTurn",
+                  thread_id: input.thread_id,
+                  cause: error,
+                }),
+            ),
+          ),
+        subscribeThreadEvents: (input) =>
+          remote.subscribeThreadEvents(input).pipe(
+            Stream.mapError(
+              (error) =>
+                new TournamentService.TournamentTurnError({
+                  message: error instanceof Error ? error.message : String(error),
+                  operation: "subscribeThreadEvents",
+                  thread_id: input.thread_id,
+                  cause: error,
+                }),
+            ),
+          ),
+      }),
+    ),
+  ).pipe(Layer.provideMerge(remoteControlLayer))
+  const judgeLayer = JudgeService.layer.pipe(Layer.provideMerge(migratedStorageLayer), Layer.provideMerge(llmLayer))
+  const tournamentLayer = TournamentService.layer.pipe(
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(judgeLayer),
+    Layer.provideMerge(tournamentTurnControlLayer),
+    Layer.provideMerge(configLayer),
   )
   const backendLayer = LocalBackend.layerFromInput({ env, cwd })
   const remoteClientLayer = Layer.effect(
@@ -948,11 +1231,14 @@ export const threadsLiveLayer = (
     Layer.provideMerge(BackendEndpoint.orbManagerResumerLayer),
     Layer.provideMerge(managerLayer),
   )
-  const commandLayer = Threads.layer.pipe(
+  const baseCommandLayer = Threads.layer.pipe(
     Layer.provideMerge(Output.layer),
+    Layer.provideMerge(Input.layer),
     Layer.provideMerge(storageAndThreadLayer),
     Layer.provide(remoteClientLayer),
   )
+  const commandLayer =
+    command.action === "tournament" ? baseCommandLayer.pipe(Layer.provideMerge(tournamentLayer)) : baseCommandLayer
 
   return commandLayer
 }
@@ -1494,17 +1780,34 @@ export type InteractiveRemoteLayerOutput =
   | Time.Service
 
 export type ThreadsLayerOutput =
+  | AgentLoop.Service
+  | ArtifactStore.Service
   | Config.Service
+  | ContextResolver.Service
   | Database.Service
+  | Diagnostics.Service
   | IdGenerator.Service
+  | IdeBridge.Service
+  | Input.Service
+  | JudgeService.Service
   | Migration.Service
+  | McpApprovalStore.Service
+  | OrbManager.Service
   | OrbStore.Service
   | Output.Service
+  | PluginHost.Service
+  | PluginUi.Service
   | ThreadEventLog.Service
+  | ThreadLive.Service
   | ThreadProjection.Service
   | ThreadService.Service
+  | ToolExecutor.Service
+  | TournamentService.Service
+  | TournamentService.TurnControlService
   | Threads.Service
   | Time.Service
+  | WorkspaceAccess.Service
+  | WorkspaceStore.Service
 
 export type OrbLayerOutput =
   | ArtifactStore.Service

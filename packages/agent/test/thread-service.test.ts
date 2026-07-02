@@ -191,6 +191,28 @@ describe("ThreadService", () => {
     expect(result.secondFork.latest_message_text).toBe("first turn")
   })
 
+  test("seeds a fork title from durable thread-created data", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of forkSourceEvents().slice(0, 5)) {
+          yield* appendProjected(event)
+        }
+        const forked = yield* ThreadService.fork({
+          thread_id: threadId,
+          title_text: "tournament:source/1",
+        })
+        const record = yield* ThreadService.open({ thread_id: forked.thread_id })
+        return { forked, record }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const created = result.record.events.find((event): event is Event.ThreadCreated => event.type === "thread.created")
+    expect(created?.data.title_text).toBe("tournament:source/1")
+    expect(result.forked.title_text).toBe("tournament:source/1")
+    expect(result.record.summary.title_text).toBe("tournament:source/1")
+  })
+
   test("rejects forks that would copy an open turn", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

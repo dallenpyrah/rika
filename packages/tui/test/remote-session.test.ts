@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { TournamentService } from "@rika/agent"
 import { Client } from "@rika/sdk"
 import { Common, Event, Ids, Message, Remote } from "@rika/schema"
 import { Effect, Queue, Stream } from "effect"
@@ -215,6 +216,39 @@ describe("TUI remote session", () => {
     )
   })
 
+  test("runs tournament through the runtime-supplied remote runner", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+    const calls: Array<{ readonly thread_id: Ids.ThreadId; readonly message: string; readonly branch_count: number }> =
+      []
+
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        const renderer = yield* Adapter.Service
+        const ticker = yield* Ticker.Service
+        return yield* RemoteSession.make(backend.client, renderer, ticker.ticks, workspaceId, (input) =>
+          Effect.sync(() => {
+            calls.push(input)
+            return tournamentResult(input.thread_id, input.message)
+          }),
+        ).run({
+          workspace_root: workspaceRoot,
+          mode: "smart",
+          thread_id: initialThreadId,
+        })
+      }).pipe(
+        Effect.provide(
+          Adapter.memoryLayer({ rendered, keys: ["/tournament -n 2 compare answers", "/exit"].flatMap(line) }),
+        ),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(calls).toEqual([{ thread_id: initialThreadId, message: "compare answers", branch_count: 2 }])
+    expect(text(rendered)).toContain("Tournament winner: thread_remote_tournament_winner")
+  })
+
   test("forks the active remote thread and opens the fork", async () => {
     const backend = fakeBackend()
     const rendered: Array<ViewState.ViewState> = []
@@ -421,6 +455,56 @@ const fakeBackend = (): FakeBackend => {
 }
 
 const emptyIdeStatus = { connected: false, capabilities: [], workspace_roots: [] } as const
+
+const tournamentResult = (sourceThreadId: Ids.ThreadId, task: string): TournamentService.TournamentResult => {
+  const winnerThreadId = Ids.ThreadId.make("thread_remote_tournament_winner")
+  return {
+    source_thread_id: sourceThreadId,
+    task,
+    branches: [
+      {
+        index: 1,
+        thread_id: winnerThreadId,
+        mode: "smart",
+        status: "completed",
+        candidate_id: "branch-1",
+        turn_id: Ids.TurnId.make("turn_remote_tournament_winner"),
+        content: "remote tournament answer",
+      },
+    ],
+    ranking: [
+      {
+        rank: 1,
+        candidate_id: "branch-1",
+        thread_id: winnerThreadId,
+        mode: "smart",
+        median_score: 10,
+        first_place_votes: 1,
+        strengths: "best remote answer",
+      },
+    ],
+    winner_thread_id: winnerThreadId,
+    verdict: {
+      winner_id: "branch-1",
+      ranking: [{ candidate_id: "branch-1", median_score: 10, first_place_votes: 1 }],
+      judges: [
+        {
+          winner_id: "branch-1",
+          rationale: "best remote answer",
+          scores: [
+            {
+              candidate_id: "branch-1",
+              score: 10,
+              strengths: "best remote answer",
+              weaknesses: "none",
+            },
+          ],
+        },
+      ],
+      rationale: "best remote answer",
+    },
+  }
+}
 
 const projectRecord = (name: string, repoOrigin: string): Remote.ProjectSummary => ({
   project_id: Ids.ProjectId.make(`project_${name}`),

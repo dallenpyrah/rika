@@ -35,6 +35,7 @@ export const ThreadAction = Schema.Literals([
   "unarchive",
   "compact",
   "fork",
+  "tournament",
   "share",
   "reference",
   "delete",
@@ -48,6 +49,10 @@ export const ThreadCommand = Schema.Struct({
   thread_id: Schema.optional(Ids.ThreadId),
   query: Schema.optional(Schema.String),
   at_turn: Schema.optional(Ids.TurnId),
+  message: Schema.optional(Schema.String),
+  branch_count: Schema.optional(Schema.Int),
+  modes: Schema.optional(Schema.Array(Config.Mode)),
+  rubric: Schema.optional(Schema.String),
   include_archived: Schema.optional(Schema.Boolean),
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Cli.Args.ThreadCommand" })
@@ -275,6 +280,7 @@ export const usage = [
   "  rika threads archive <thread-id>",
   "  rika threads unarchive <thread-id>",
   "  rika threads fork <thread-id> [--at-turn <turn-id>]",
+  "  rika threads tournament <thread-id> --message <text|-> -n <2..4> [--modes smart,deep2,deep3] [--rubric <text>]",
   "  rika threads share <thread-id>",
   "  rika threads reference <thread-id> [query]",
   "  rika project create <name> [--repo <origin>] [--branch <branch>] [--template <id>]",
@@ -410,6 +416,17 @@ const threadIdConfig = {
 const threadForkConfig = {
   ...threadIdConfig,
   atTurn: Flag.string("at-turn").pipe(Flag.optional, Flag.withDescription("Fork through the completed turn id")),
+}
+
+const threadTournamentConfig = {
+  ...threadIdConfig,
+  message: Flag.string("message").pipe(Flag.withDescription("Tournament instruction; use - to read stdin")),
+  branchCount: Flag.integer("branches").pipe(
+    Flag.withAlias("n"),
+    Flag.withDescription("Number of tournament branches"),
+  ),
+  modes: Flag.string("modes").pipe(Flag.optional, Flag.withDescription("Comma-separated branch modes")),
+  rubric: Flag.string("rubric").pipe(Flag.optional, Flag.withDescription("Additional judging rubric")),
 }
 
 const threadReferenceConfig = {
@@ -577,6 +594,13 @@ interface ThreadIdInput {
 
 interface ThreadForkInput extends ThreadIdInput {
   readonly atTurn: Option.Option<string>
+}
+
+interface ThreadTournamentInput extends ThreadIdInput {
+  readonly message: string
+  readonly branchCount: number
+  readonly modes: Option.Option<string>
+  readonly rubric: Option.Option<string>
 }
 
 interface ThreadReferenceInput extends ThreadIdInput {
@@ -808,6 +832,15 @@ const makeThreadsCommand = (
     CliCommand.withShortDescription("Fork thread"),
   )
 
+  const tournament = CliCommand.make("tournament", threadTournamentConfig, (input: ThreadTournamentInput) => {
+    const parsed = toThreadTournamentCommand(input)
+    if (parsed instanceof ArgsError) return Ref.set(rejectedRef, Option.some(parsed))
+    return Ref.set(parsedRef, Option.some(parsed))
+  }).pipe(
+    CliCommand.withDescription("Run a read-only answer tournament across forked thread branches"),
+    CliCommand.withShortDescription("Run tournament"),
+  )
+
   const share = CliCommand.make("share", threadIdConfig, (input: ThreadIdInput) =>
     Ref.set(parsedRef, Option.some(toThreadIdCommand("share", input))),
   ).pipe(
@@ -834,7 +867,18 @@ const makeThreadsCommand = (
   ).pipe(
     CliCommand.withDescription("Manage local Rika threads"),
     CliCommand.withShortDescription("Manage threads"),
-    CliCommand.withSubcommands([list, search, archive, unarchive, compact, fork, share, reference, deleteThread]),
+    CliCommand.withSubcommands([
+      list,
+      search,
+      archive,
+      unarchive,
+      compact,
+      fork,
+      tournament,
+      share,
+      reference,
+      deleteThread,
+    ]),
   )
 }
 
@@ -1130,6 +1174,21 @@ const toThreadForkCommand = (input: ThreadForkInput): ThreadCommand => {
   }
 }
 
+const toThreadTournamentCommand = (input: ThreadTournamentInput): ThreadCommand | ArgsError => {
+  const modes = parseModeList(Option.getOrUndefined(input.modes))
+  if (modes instanceof ArgsError) return modes
+  const rubric = Option.getOrUndefined(input.rubric)
+  return {
+    type: "threads",
+    action: "tournament",
+    thread_id: Ids.ThreadId.make(input.threadId),
+    message: input.message,
+    branch_count: input.branchCount,
+    ...(modes === undefined ? {} : { modes }),
+    ...(rubric === undefined ? {} : { rubric }),
+  }
+}
+
 const toThreadReferenceCommand = (input: ThreadReferenceInput): ThreadCommand => {
   const query = input.query.join(" ").trim()
   return {
@@ -1139,6 +1198,24 @@ const toThreadReferenceCommand = (input: ThreadReferenceInput): ThreadCommand =>
     ...(query.length === 0 ? {} : { query }),
   }
 }
+
+const parseModeList = (value: string | undefined): ReadonlyArray<Config.Mode> | undefined | ArgsError => {
+  if (value === undefined) return undefined
+  const modes: Array<Config.Mode> = []
+  for (const part of value.split(",")) {
+    const mode = parseMode(part.trim())
+    if (mode === undefined) {
+      return new ArgsError({ message: `Invalid tournament mode: ${part.trim()}`, exit_code: 2, usage })
+    }
+    modes.push(mode)
+  }
+  return modes
+}
+
+const parseMode = (value: string): Config.Mode | undefined =>
+  value === "rush" || value === "smart" || value === "deep1" || value === "deep2" || value === "deep3"
+    ? value
+    : undefined
 
 const toProjectCreateCommand = (input: ProjectCreateInput): ProjectCommand => {
   const repoOrigin = Option.getOrUndefined(input.repo)

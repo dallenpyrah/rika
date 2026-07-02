@@ -92,6 +92,35 @@ describe("CLI args", () => {
     })
   })
 
+  test("parses thread tournament commands", async () => {
+    const threadId = Ids.ThreadId.make("thread_args_tournament")
+    const command = await Effect.runPromise(
+      Args.parse([
+        "threads",
+        "tournament",
+        threadId,
+        "--message",
+        "-",
+        "-n",
+        "3",
+        "--modes",
+        "smart,deep2,deep3",
+        "--rubric",
+        "prefer concrete answers",
+      ]),
+    )
+
+    expect(command).toEqual({
+      type: "threads",
+      action: "tournament",
+      thread_id: threadId,
+      message: "-",
+      branch_count: 3,
+      modes: ["smart", "deep2", "deep3"],
+      rubric: "prefer concrete answers",
+    })
+  })
+
   test("parses orb list, kill, and shell commands", async () => {
     const threadId = Ids.ThreadId.make("thread_args_orb_kill")
     const list = await Effect.runPromise(Args.parse(["orb", "list"]))

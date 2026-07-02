@@ -15,6 +15,7 @@ export * as Toolkit from "./toolkit"
 export * as ToolAccess from "./tool-access"
 export * as ToolExecutor from "./tool-executor"
 export * as ToolRegistry from "./tool-registry"
+export * as TournamentService from "./tournament-service"
 export * as WorkspaceAccess from "./workspace-access"
 export * as WorkspaceIdentity from "./workspace-identity"
 

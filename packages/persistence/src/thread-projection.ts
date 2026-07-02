@@ -240,8 +240,8 @@ const applyFirstEvent = (database: ProjectionDatabase, event: Event.Event) => {
 
 const applyThreadCreated = (database: ProjectionDatabase, event: Event.ThreadCreated) =>
   database.run(sql`
-    insert into thread_projections (thread_id, workspace_id, user_id, archived, last_sequence, created_at, updated_at)
-    values (${event.thread_id}, ${event.data.workspace_id}, ${event.data.user_id ?? null}, 0, ${event.sequence}, ${event.created_at}, ${event.created_at})
+    insert into thread_projections (thread_id, workspace_id, user_id, title_text, archived, last_sequence, created_at, updated_at)
+    values (${event.thread_id}, ${event.data.workspace_id}, ${event.data.user_id ?? null}, ${event.data.title_text ?? null}, 0, ${event.sequence}, ${event.created_at}, ${event.created_at})
   `)
 
 const applyMessageAdded = (database: ProjectionDatabase, event: Event.MessageAdded) =>

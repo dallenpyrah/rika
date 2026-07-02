@@ -23,6 +23,7 @@ export const ThreadCreated = Schema.Struct({
   data: Schema.Struct({
     workspace_id: WorkspaceId,
     user_id: Schema.optional(UserId),
+    title_text: Schema.optional(Schema.String),
     forked_from: Schema.optional(
       Schema.Struct({
         thread_id: ThreadId,

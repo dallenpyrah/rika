@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AgentLoop, ReviewService, SkillRegistry, ThreadService } from "@rika/agent"
+import { AgentLoop, ReviewService, SkillRegistry, ThreadService, TournamentService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
@@ -56,6 +56,7 @@ const makeLayer = (
     Adapter.memoryLayer({ rendered, keys }),
     Ticker.memoryLayer,
     ReviewService.fakeLayer(() => Effect.succeed(fakeReviewResult)),
+    fakeTournamentLayer(),
     SkillRegistry.fakeLayer([deploySkill]),
     fakeAgentLayer(turns),
   )
@@ -197,6 +198,16 @@ describe("TUI session", () => {
     expect(frames).not.toContain("Unknown command /fork")
   })
 
+  test("runs a local thread tournament through the backend runner", async () => {
+    const { exitCode, rendered } = await runSession(["/new", "/tournament -n 2 compare branches", "/exit"])
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(frames).toContain("Tournament winner: thread_tui_tournament_winner")
+    expect(frames).toContain("1. thread_tui_tournament_winner deep2 10 best answer")
+    expect(frames).not.toContain("Unknown command /tournament")
+  })
+
   test("relaunch exits after recording a relaunch notice", async () => {
     const { exitCode, rendered } = await runSession(["/relaunch"])
 
@@ -259,6 +270,62 @@ const fakeReviewResult: ReviewService.ReviewResult = {
     created_at: fakeReviewRun.completed_at,
   },
 }
+
+const fakeTournamentLayer = () =>
+  Layer.succeed(
+    TournamentService.Service,
+    TournamentService.Service.of({
+      run: (input) =>
+        Effect.succeed({
+          source_thread_id: input.thread_id,
+          task: input.message,
+          winner_thread_id: Ids.ThreadId.make("thread_tui_tournament_winner"),
+          branches: [
+            {
+              index: 1,
+              thread_id: Ids.ThreadId.make("thread_tui_tournament_one"),
+              mode: "smart",
+              status: "completed",
+              candidate_id: "branch-1",
+              turn_id: Ids.TurnId.make("turn_tui_tournament_one"),
+              content: "first",
+            },
+            {
+              index: 2,
+              thread_id: Ids.ThreadId.make("thread_tui_tournament_winner"),
+              mode: "deep2",
+              status: "completed",
+              candidate_id: "branch-2",
+              turn_id: Ids.TurnId.make("turn_tui_tournament_two"),
+              content: "winner",
+            },
+          ],
+          ranking: [
+            {
+              rank: 1,
+              candidate_id: "branch-2",
+              thread_id: Ids.ThreadId.make("thread_tui_tournament_winner"),
+              mode: "deep2",
+              median_score: 10,
+              first_place_votes: 1,
+              strengths: "best answer",
+            },
+          ],
+          verdict: {
+            winner_id: "branch-2",
+            ranking: [{ candidate_id: "branch-2", median_score: 10, first_place_votes: 1 }],
+            judges: [
+              {
+                winner_id: "branch-2",
+                rationale: "branch 2 wins",
+                scores: [{ candidate_id: "branch-2", score: 10, strengths: "best answer", weaknesses: "none" }],
+              },
+            ],
+            rationale: "branch 2 wins",
+          },
+        }),
+    }),
+  )
 
 const turnEvents = (input: AgentLoop.RunTurnInput, response: string): ReadonlyArray<Event.Event> => {
   const turnId = Ids.TurnId.make("turn_tui_session")

@@ -301,14 +301,16 @@ describe("SDK client", () => {
       streamJson: () => Stream.empty,
     })
 
-    const forked = await Effect.runPromise(client.forkThread(threadId, { at_turn: turnId, user_id: userId }))
+    const forked = await Effect.runPromise(
+      client.forkThread(threadId, { at_turn: turnId, user_id: userId, title_text: "tournament:sdk/1" }),
+    )
 
     expect(forked).toEqual(summary)
     expect(calls).toEqual([
       {
         method: "POST",
         path: "/v1/threads/thread_sdk_client/fork",
-        body: { thread_id: threadId, at_turn: turnId, user_id: userId },
+        body: { thread_id: threadId, at_turn: turnId, user_id: userId, title_text: "tournament:sdk/1" },
       },
     ])
   })

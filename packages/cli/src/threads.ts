@@ -1,16 +1,24 @@
-import { ThreadService } from "@rika/agent"
+import { ThreadService, TournamentService } from "@rika/agent"
 import { OrbStore } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as Args from "./args"
+import * as Input from "./input"
 import * as Output from "./output"
+import * as Tournament from "./tournament"
 
 export class ThreadsError extends Schema.TaggedErrorClass<ThreadsError>()("ThreadsError", {
   message: Schema.String,
   action: Args.ThreadAction,
 }) {}
 
-export type RunError = ThreadService.Error | OrbStore.OrbStoreError | Client.SdkError | ThreadsError
+export type RunError =
+  | ThreadService.Error
+  | TournamentService.RunError
+  | OrbStore.OrbStoreError
+  | Client.SdkError
+  | Input.InputError
+  | ThreadsError
 
 export interface Interface {
   readonly executeCommand: (command: Args.ThreadCommand) => Effect.Effect<number, RunError>
@@ -26,7 +34,9 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const output = yield* Output.Service
+    const input = yield* Input.Service
     const threads = yield* ThreadService.Service
+    const tournament = yield* Effect.serviceOption(TournamentService.Service)
     const orbs = yield* OrbStore.Service
     const remoteClient = yield* Effect.serviceOption(RemoteClient)
 
@@ -72,6 +82,25 @@ export const layer = Layer.effect(
               ...(command.at_turn === undefined ? {} : { at_turn: command.at_turn }),
             })
             yield* output.stdout(formatJson(summary.thread_id))
+            return 0
+          }
+          case "tournament": {
+            const tournamentRunner = Option.getOrUndefined(tournament)
+            if (tournamentRunner === undefined) {
+              return yield* new ThreadsError({
+                message: "Thread tournament requires the local tournament runner",
+                action: command.action,
+              })
+            }
+            const message = yield* tournamentMessage(input, command)
+            const result = yield* tournamentRunner.run({
+              thread_id: yield* requireThreadId(command),
+              message,
+              branch_count: command.branch_count ?? 3,
+              ...(command.modes === undefined ? {} : { modes: command.modes }),
+              ...(command.rubric === undefined ? {} : { rubric: command.rubric }),
+            })
+            yield* output.stdout(Tournament.formatResult(result))
             return 0
           }
           case "share": {
@@ -127,6 +156,13 @@ const searchInput = (command: Args.ThreadCommand): ThreadService.SearchInput => 
   ...(command.include_archived === undefined ? {} : { include_archived: command.include_archived }),
   ...(command.limit === undefined ? {} : { limit: command.limit }),
 })
+
+const tournamentMessage = (input: Input.Interface, command: Args.ThreadCommand) =>
+  command.message === undefined
+    ? Effect.fail(new ThreadsError({ message: "Tournament message is required", action: command.action }))
+    : command.message === "-"
+      ? input.readAll.pipe(Effect.map((value) => value.trimEnd()))
+      : Effect.succeed(command.message)
 
 const withOrbStatus = (orbs: OrbStore.Interface, summary: ThreadService.ThreadSummary) =>
   orbs

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { ThreadService } from "@rika/agent"
+import { ThreadService, TournamentService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, OrbStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, Schema } from "effect"
-import { Output, Threads } from "../src/index"
+import { Input, Output, Threads } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_cli_threads")
 const workspaceId = Ids.WorkspaceId.make("workspace_cli_threads")
@@ -20,7 +20,11 @@ const configLayer = Config.layerFromValues({
   default_mode: "smart",
 })
 
-const makeLayer = (output: Output.MemoryOutput) => {
+const makeLayer = (
+  output: Output.MemoryOutput,
+  tournamentLayer: Layer.Layer<TournamentService.Service> = fakeTournamentLayer([]),
+  stdin = "",
+) => {
   const baseServices = Layer.mergeAll(
     configLayer,
     Output.memoryLayer(output),
@@ -34,7 +38,9 @@ const makeLayer = (output: Output.MemoryOutput) => {
   const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseServices))
   const services = Layer.mergeAll(baseServices, orbStoreLayer)
 
-  return Threads.layer.pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
+  return Threads.layer
+    .pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
+    .pipe(Layer.provideMerge(Input.memoryLayer(stdin, false)), Layer.provideMerge(tournamentLayer))
 }
 
 describe("CLI thread commands", () => {
@@ -177,6 +183,37 @@ describe("CLI thread commands", () => {
     expect(calls).toEqual([threadId])
     expect(Schema.decodeUnknownSync(Event.ContextCompacted)(JSON.parse(output.stdout[0] ?? "{}"))).toEqual(event)
   })
+
+  test("runs a thread tournament with stdin message and prints the ranking", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const inputs: Array<TournamentService.RunInput> = []
+    const exitCode = await Effect.runPromise(
+      Threads.executeCommand({
+        type: "threads",
+        action: "tournament",
+        thread_id: threadId,
+        message: "-",
+        branch_count: 3,
+        modes: ["smart", "deep2", "deep3"],
+        rubric: "prefer concrete answers",
+      }).pipe(Effect.provide(makeLayer(output, fakeTournamentLayer(inputs), "stdin tournament task\n"))),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(inputs).toEqual([
+      {
+        thread_id: threadId,
+        message: "stdin tournament task",
+        branch_count: 3,
+        modes: ["smart", "deep2", "deep3"],
+        rubric: "prefer concrete answers",
+      },
+    ])
+    expect(output.stdout[0]).toContain("Rank")
+    expect(output.stdout[0]).toContain("thread_cli_tournament_winner")
+    expect(output.stdout[0]).toContain("Winner")
+    expect(output.stdout[0]).toContain("rika --thread thread_cli_tournament_winner")
+  })
 })
 
 const seedThread = () =>
@@ -253,6 +290,92 @@ const emptyClient = (): Client.Interface => ({
   openIdeFile: unexpectedClientCall,
   ideNavigationRequests: unexpectedClientCall,
 })
+
+const fakeTournamentLayer = (inputs: Array<TournamentService.RunInput>) =>
+  Layer.succeed(
+    TournamentService.Service,
+    TournamentService.Service.of({
+      run: (input) =>
+        Effect.sync(() => {
+          inputs.push(input)
+          return tournamentResult(input)
+        }),
+    }),
+  )
+
+const tournamentResult = (input: TournamentService.RunInput): TournamentService.TournamentResult => {
+  const winnerThreadId = Ids.ThreadId.make("thread_cli_tournament_winner")
+  return {
+    source_thread_id: input.thread_id,
+    task: input.message,
+    winner_thread_id: winnerThreadId,
+    branches: [
+      {
+        index: 1,
+        thread_id: Ids.ThreadId.make("thread_cli_tournament_one"),
+        mode: "smart",
+        status: "completed",
+        candidate_id: "branch-1",
+        turn_id: Ids.TurnId.make("turn_cli_tournament_one"),
+        content: "first",
+      },
+      {
+        index: 2,
+        thread_id: winnerThreadId,
+        mode: "deep2",
+        status: "completed",
+        candidate_id: "branch-2",
+        turn_id: Ids.TurnId.make("turn_cli_tournament_two"),
+        content: "winner",
+      },
+      {
+        index: 3,
+        thread_id: Ids.ThreadId.make("thread_cli_tournament_three"),
+        mode: "deep3",
+        status: "failed",
+        error: "failed branch",
+      },
+    ],
+    ranking: [
+      {
+        rank: 1,
+        candidate_id: "branch-2",
+        thread_id: winnerThreadId,
+        mode: "deep2",
+        median_score: 10,
+        first_place_votes: 3,
+        strengths: "best answer",
+      },
+      {
+        rank: 2,
+        candidate_id: "branch-1",
+        thread_id: Ids.ThreadId.make("thread_cli_tournament_one"),
+        mode: "smart",
+        median_score: 7,
+        first_place_votes: 0,
+        strengths: "solid",
+      },
+    ],
+    verdict: {
+      winner_id: "branch-2",
+      ranking: [
+        { candidate_id: "branch-2", median_score: 10, first_place_votes: 3 },
+        { candidate_id: "branch-1", median_score: 7, first_place_votes: 0 },
+      ],
+      judges: [
+        {
+          winner_id: "branch-2",
+          rationale: "branch 2 wins",
+          scores: [
+            { candidate_id: "branch-1", score: 7, strengths: "solid", weaknesses: "less direct" },
+            { candidate_id: "branch-2", score: 10, strengths: "best answer", weaknesses: "none" },
+          ],
+        },
+      ],
+      rationale: "branch 2 wins",
+    },
+  }
+}
 
 const unexpectedClientCall = () =>
   Effect.fail(new Client.SdkError({ message: "Unexpected SDK call", operation: "test" }))

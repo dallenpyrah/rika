@@ -1,4 +1,5 @@
 import { Config } from "@rika/core"
+import { TournamentService } from "@rika/agent"
 import { Event, Ids, Message, Orb, Tool } from "@rika/schema"
 import { Effect, Stream } from "effect"
 import * as ViewState from "./view-state"
@@ -36,6 +37,12 @@ export interface ThreadEventsRequest {
 export interface CancelRequest {
   readonly thread_id: Ids.ThreadId
   readonly turn_id: Ids.TurnId
+}
+
+export interface TournamentRequest {
+  readonly thread_id: Ids.ThreadId
+  readonly message: string
+  readonly branch_count: number
 }
 
 export interface PreviewInput {
@@ -132,6 +139,7 @@ export interface SessionBackend<E> {
   readonly submitTurn?: (input: TurnRequest) => Effect.Effect<void, E>
   readonly subscribeThreadEvents?: (input: ThreadEventsRequest) => Stream.Stream<Event.Event, E>
   readonly cancelTurn: (input: CancelRequest) => Effect.Effect<void, E>
+  readonly runTournament?: (input: TournamentRequest) => Effect.Effect<TournamentService.TournamentResult, E>
   readonly runCommand: (context: CommandContext, command: string) => Effect.Effect<CommandResult, E>
   readonly listProjects?: (input: { readonly workspace_path: string }) => Effect.Effect<ReadonlyArray<ProjectOption>, E>
   readonly createProject?: (input: CreateProjectInput) => Effect.Effect<ProjectOption, E>

@@ -66,6 +66,19 @@ describe("palette.filter", () => {
     ])
   })
 
+  test("shows thread tournament only for an active thread", () => {
+    expect(Palette.filter("tournament", "smart", false, { threadActive: false, orbBackedThread: false })).toEqual([])
+    expect(Palette.filter("tournament", "smart", false, { threadActive: true, orbBackedThread: false })).toEqual([
+      {
+        id: "thread-tournament",
+        category: "thread",
+        action: "tournament",
+        hint: "compare read-only branch answers",
+        command: "/tournament",
+      },
+    ])
+  })
+
   test("does not advertise IDE connection commands", () => {
     expect(Palette.commands.some((command) => command.command.startsWith("/ide"))).toBe(false)
     expect(Palette.filter("connect IDE", "smart", false)).toEqual([])

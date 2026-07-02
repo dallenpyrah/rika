@@ -1,3 +1,4 @@
+import { TournamentService } from "@rika/agent"
 import { Config } from "@rika/core"
 import { Client } from "@rika/sdk"
 import { Ids, type Remote } from "@rika/schema"
@@ -16,7 +17,7 @@ export class RemoteSessionError extends Schema.TaggedErrorClass<RemoteSessionErr
   operation: Schema.String,
 }) {}
 
-export type RunError = RemoteSessionError | Client.SdkError
+export type RunError = RemoteSessionError | Client.SdkError | TournamentService.RunError
 
 export interface Interface {
   readonly run: (input: RunInput) => Effect.Effect<number, RunError>
@@ -39,8 +40,9 @@ export const make = (
   renderer: Adapter.Adapter,
   ticks: Controller.Dependencies<RunError>["ticks"],
   workspaceId?: Ids.WorkspaceId,
+  runTournament?: Backend.SessionBackend<RunError>["runTournament"],
 ): Interface => {
-  const backend = makeBackend(client)
+  const backend = makeBackend(client, runTournament)
   return Service.of({
     run: Effect.fn("Tui.RemoteSession.run")(function* (input: RunInput) {
       const defaultWorkspace = input.workspace_root ?? process.cwd()
@@ -59,7 +61,11 @@ export const run = Effect.fn("Tui.RemoteSession.run.call")(function* (input: Run
   return yield* session.run(input)
 })
 
-const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError> => ({
+const makeBackend = (
+  client: Client.Interface,
+  runTournament?: Backend.SessionBackend<RunError>["runTournament"],
+): Backend.SessionBackend<RunError> => ({
+  ...(runTournament === undefined ? {} : { runTournament }),
   loadInitial: ({ thread_id, workspace_path, workspace_id, mode }) =>
     Effect.gen(function* () {
       if (thread_id !== undefined) {
@@ -131,7 +137,7 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
   subscribeThreadEvents: ({ thread_id, after_sequence }) =>
     client.subscribeThreadEvents({ thread_id, ...(after_sequence === undefined ? {} : { after_sequence }) }),
   cancelTurn: ({ thread_id, turn_id }) => client.interruptTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
-  runCommand: (context, command) => handleCommand(client, context, command),
+  runCommand: (context, command) => handleCommand(client, context, command, runTournament),
   listProjects: () => client.listProjects().pipe(Effect.map((projects) => projects.map(projectOptionFromRecord))),
   createProject: (input) => client.createProject(input).pipe(Effect.map(projectOptionFromRecord)),
   createOrbThread: ({ project_id, mode }) =>
@@ -201,6 +207,7 @@ const handleCommand = (
   client: Client.Interface,
   context: Backend.CommandContext,
   command: string,
+  runTournament: Backend.SessionBackend<RunError>["runTournament"] | undefined,
 ): Effect.Effect<Backend.CommandResult, RunError> =>
   Effect.gen(function* () {
     const { state, thread_id: threadId, workspace_path: workspacePath, workspace_id: workspaceId } = context
@@ -259,6 +266,33 @@ const handleCommand = (
       return Backend.commandResult(context, {
         state: ViewState.withNotice(ViewState.applyEvent(state, event), "Compacted thread context."),
         last_sequence: event.sequence,
+      })
+    }
+    if (name === "/tournament") {
+      if (runTournament === undefined) {
+        return Backend.commandResult(context, { state: ViewState.withNotice(state, "Tournament runner unavailable.") })
+      }
+      const input = parseTournamentArgument(argument)
+      if (input === undefined) {
+        return Backend.commandResult(context, {
+          state: ViewState.withNotice(state, "Usage: /tournament [-n 2..4] <message>"),
+        })
+      }
+      const result = yield* runTournament({
+        thread_id: threadId,
+        message: input.message,
+        branch_count: input.branch_count,
+      })
+      const summary = formatTournament(result)
+      return Backend.commandResult(context, {
+        state: ViewState.withNotice(
+          ViewState.withSystemCard(state, {
+            title: "Tournament",
+            subtitle: summary,
+            id: `tournament:${result.winner_thread_id}`,
+          }),
+          `Tournament winner: ${result.winner_thread_id}`,
+        ),
       })
     }
     if (name === "/new") {
@@ -403,6 +437,33 @@ const modeCommand = (context: Backend.CommandContext, argument: string | undefin
     mode: nextMode,
   })
 }
+
+const parseTournamentArgument = (
+  argument: string | undefined,
+): Omit<Backend.TournamentRequest, "thread_id"> | undefined => {
+  const tokens = (argument ?? "").trim().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return undefined
+  let branchCount = 3
+  const message: Array<string> = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (token === undefined) continue
+    if ((token === "-n" || token === "--branches") && tokens[index + 1] !== undefined) {
+      branchCount = Number(tokens[index + 1])
+      index += 1
+      continue
+    }
+    message.push(token)
+  }
+  const text = message.join(" ").trim()
+  return text.length === 0 || !Number.isInteger(branchCount) ? undefined : { message: text, branch_count: branchCount }
+}
+
+const formatTournament = (result: TournamentService.TournamentResult) =>
+  [
+    ...result.ranking.map((row) => `${row.rank}. ${row.thread_id} ${row.mode} ${row.median_score} ${row.strengths}`),
+    `Winner: ${result.winner_thread_id}`,
+  ].join("\n")
 
 const parseMode = (value: string): Config.Mode | undefined => {
   const decoded = Schema.decodeUnknownOption(Config.Mode)(value)

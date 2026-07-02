@@ -21,6 +21,7 @@ export * as Server from "./server"
 export * as Skills from "./skills"
 export * as Sync from "./sync"
 export * as Threads from "./threads"
+export * as Tournament from "./tournament"
 export * as Version from "./version"
 
 export const cliPackage = "@rika/cli"

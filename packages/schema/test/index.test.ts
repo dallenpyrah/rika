@@ -170,6 +170,7 @@ describe("Rika protocol schemas", () => {
       data: {
         workspace_id: workspaceId,
         forked_from: { thread_id: threadId, sequence: 5 },
+        title_text: "tournament:source/1",
       },
     }
 
@@ -430,6 +431,7 @@ describe("Rika protocol schemas", () => {
       thread_id: threadId,
       at_turn: turnId,
       user_id: userId,
+      title_text: "tournament:sdk/1",
     }
     const health: Remote.BackendHealth = {
       status: "healthy",

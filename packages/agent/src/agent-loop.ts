@@ -921,6 +921,7 @@ const stringArray = (value: unknown): ReadonlyArray<string> | undefined =>
 const routerRequest = (input: RunTurnInput, modelInput: ModelInput): Router.Request => ({
   ...(input.mode === undefined ? {} : { mode: input.mode }),
   ...(input.fast_mode === undefined ? {} : { fast_mode: input.fast_mode }),
+  metadata: { thread_id: input.thread_id },
   messages: modelInput.messages,
   prompt: modelInput.prompt,
   toolkit: modelInput.tools.toolkit,

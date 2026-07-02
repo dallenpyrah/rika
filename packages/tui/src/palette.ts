@@ -118,6 +118,13 @@ const threadLifecycleCommands: ReadonlyArray<Command> = [
     hint: "copy this conversation into a new thread",
     command: "/fork",
   },
+  {
+    id: "thread-tournament",
+    category: "thread",
+    action: "tournament",
+    hint: "compare read-only branch answers",
+    command: "/tournament",
+  },
 ]
 
 const speedCommand = (fastMode: boolean): Command => ({

@@ -1,4 +1,4 @@
-import { AgentLoop, ReviewService, SkillRegistry, ThreadService } from "@rika/agent"
+import { AgentLoop, ReviewService, SkillRegistry, ThreadService, TournamentService } from "@rika/agent"
 import { Config, IdGenerator } from "@rika/core"
 import { Ids } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema } from "effect"
@@ -20,6 +20,7 @@ export type RunError =
   | SessionError
   | AgentLoop.RunError
   | ReviewService.RunError
+  | TournamentService.RunError
   | Config.ConfigError
   | SkillRegistry.SkillRegistryError
   | ThreadService.Error
@@ -36,6 +37,7 @@ interface Dependencies {
   readonly reviewService: ReviewService.Interface
   readonly skillRegistry: SkillRegistry.Interface
   readonly threadService: ThreadService.Interface
+  readonly tournamentService?: TournamentService.Interface
 }
 
 export const layer = Layer.effect(
@@ -47,11 +49,19 @@ export const layer = Layer.effect(
     const reviewService = yield* ReviewService.Service
     const skillRegistry = yield* SkillRegistry.Service
     const threadService = yield* ThreadService.Service
+    const tournamentService = Option.getOrUndefined(yield* Effect.serviceOption(TournamentService.Service))
     const renderer = yield* Adapter.Service
     const ticker = yield* Ticker.Service
     const configValues = yield* config.get
 
-    const dependencies: Dependencies = { agentLoop, idGenerator, reviewService, skillRegistry, threadService }
+    const dependencies: Dependencies = {
+      agentLoop,
+      idGenerator,
+      reviewService,
+      skillRegistry,
+      threadService,
+      ...(tournamentService === undefined ? {} : { tournamentService }),
+    }
     const backend = makeBackend(dependencies)
 
     return Service.of({
@@ -76,64 +86,83 @@ export const run = Effect.fn("Tui.Session.run.call")(function* (input: RunInput)
   return yield* session.run(input)
 })
 
-const makeBackend = (dependencies: Dependencies): Backend.SessionBackend<RunError> => ({
-  loadInitial: ({ thread_id, workspace_path, mode }) =>
-    Effect.gen(function* () {
-      const threadId = thread_id ?? Ids.ThreadId.make(yield* dependencies.idGenerator.next("thread"))
-      const record =
-        thread_id === undefined
-          ? undefined
-          : yield* dependencies.threadService
-              .open({ thread_id: threadId })
-              .pipe(Effect.catch(() => Effect.succeed(undefined)))
-      const events =
-        record?.events ?? (yield* readThreadEvents(dependencies, threadId).pipe(Effect.catch(() => Effect.succeed([]))))
-      return {
-        thread_id: threadId,
-        state: ViewState.beginConnecting(
-          ViewState.initial({
-            thread_id: threadId,
+const makeBackend = (dependencies: Dependencies): Backend.SessionBackend<RunError> => {
+  const tournamentService = dependencies.tournamentService
+  return {
+    ...(tournamentService === undefined
+      ? {}
+      : {
+          runTournament: (input: Backend.TournamentRequest) =>
+            tournamentService.run({
+              thread_id: input.thread_id,
+              message: input.message,
+              branch_count: input.branch_count,
+            }),
+        }),
+    loadInitial: ({ thread_id, workspace_path, mode }) =>
+      Effect.gen(function* () {
+        const threadId = thread_id ?? Ids.ThreadId.make(yield* dependencies.idGenerator.next("thread"))
+        const record =
+          thread_id === undefined
+            ? undefined
+            : yield* dependencies.threadService
+                .open({ thread_id: threadId })
+                .pipe(Effect.catch(() => Effect.succeed(undefined)))
+        const events =
+          record?.events ??
+          (yield* readThreadEvents(dependencies, threadId).pipe(Effect.catch(() => Effect.succeed([]))))
+        return {
+          thread_id: threadId,
+          state: ViewState.beginConnecting(
+            ViewState.initial({
+              thread_id: threadId,
+              workspace_path,
+              mode,
+              events,
+              ...(record?.summary.context_tokens === undefined
+                ? {}
+                : { context_tokens: record.summary.context_tokens }),
+              ...(record?.summary.context_window === undefined
+                ? {}
+                : { context_window: record.summary.context_window }),
+            }),
+          ),
+          last_sequence: events.at(-1)?.sequence ?? 0,
+        }
+      }),
+    streamTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode, tool_access }) =>
+      dependencies.agentLoop.streamTurn({
+        thread_id,
+        workspace_id,
+        content,
+        ...(content_parts === undefined ? {} : { content_parts }),
+        mode,
+        ...(fast_mode === undefined ? {} : { fast_mode }),
+        ...(tool_access === undefined ? {} : { tool_access }),
+      }),
+    cancelTurn: ({ thread_id, turn_id }) =>
+      dependencies.agentLoop.cancelTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
+    runCommand: (context, command) => handleCommand(dependencies, context, command),
+    listThreads: ({ workspace_id }) =>
+      dependencies.threadService
+        .list({ workspace_id })
+        .pipe(Effect.map((summaries) => summaries.map(threadOptionFromSummary))),
+    loadThreadPreview: ({ thread_id, workspace_path, mode }) =>
+      dependencies.threadService.preview({ thread_id }).pipe(
+        Effect.map((record) => ({
+          thread_id,
+          state: ViewState.initial({
+            thread_id,
             workspace_path,
             mode,
-            events,
-            ...(record?.summary.context_tokens === undefined ? {} : { context_tokens: record.summary.context_tokens }),
-            ...(record?.summary.context_window === undefined ? {} : { context_window: record.summary.context_window }),
+            events: record.events,
+            ...(record.summary.context_tokens === undefined ? {} : { context_tokens: record.summary.context_tokens }),
+            ...(record.summary.context_window === undefined ? {} : { context_window: record.summary.context_window }),
           }),
-        ),
-        last_sequence: events.at(-1)?.sequence ?? 0,
-      }
-    }),
-  streamTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode, tool_access }) =>
-    dependencies.agentLoop.streamTurn({
-      thread_id,
-      workspace_id,
-      content,
-      ...(content_parts === undefined ? {} : { content_parts }),
-      mode,
-      ...(fast_mode === undefined ? {} : { fast_mode }),
-      ...(tool_access === undefined ? {} : { tool_access }),
-    }),
-  cancelTurn: ({ thread_id, turn_id }) => dependencies.agentLoop.cancelTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
-  runCommand: (context, command) => handleCommand(dependencies, context, command),
-  listThreads: ({ workspace_id }) =>
-    dependencies.threadService
-      .list({ workspace_id })
-      .pipe(Effect.map((summaries) => summaries.map(threadOptionFromSummary))),
-  loadThreadPreview: ({ thread_id, workspace_path, mode }) =>
-    dependencies.threadService.preview({ thread_id }).pipe(
-      Effect.map((record) => ({
-        thread_id,
-        state: ViewState.initial({
-          thread_id,
-          workspace_path,
-          mode,
-          events: record.events,
-          ...(record.summary.context_tokens === undefined ? {} : { context_tokens: record.summary.context_tokens }),
-          ...(record.summary.context_window === undefined ? {} : { context_window: record.summary.context_window }),
-        }),
-      })),
-    ),
-})
+        })),
+      ),
+  }
+}
 
 const threadOptionFromSummary = (summary: ThreadService.ThreadRecord["summary"]): Backend.ThreadOption =>
   Backend.threadOption({
@@ -207,6 +236,34 @@ const handleCommand = (
       return Backend.commandResult(context, {
         state: ViewState.withNotice(state, "Manual compaction requires the shared backend."),
       })
+    if (name === "/tournament") {
+      const tournamentService = dependencies.tournamentService
+      if (tournamentService === undefined) {
+        return Backend.commandResult(context, { state: ViewState.withNotice(state, "Tournament runner unavailable.") })
+      }
+      const input = parseTournamentArgument(argument)
+      if (input === undefined) {
+        return Backend.commandResult(context, {
+          state: ViewState.withNotice(state, "Usage: /tournament [-n 2..4] <message>"),
+        })
+      }
+      const result = yield* tournamentService.run({
+        thread_id: threadId,
+        message: input.message,
+        branch_count: input.branch_count,
+      })
+      const summary = formatTournament(result)
+      return Backend.commandResult(context, {
+        state: ViewState.withNotice(
+          ViewState.withSystemCard(state, {
+            title: "Tournament",
+            subtitle: summary,
+            id: `tournament:${result.winner_thread_id}`,
+          }),
+          `Tournament winner: ${result.winner_thread_id}`,
+        ),
+      })
+    }
     if (name === "/new") {
       const summary = yield* dependencies.threadService.create({ workspace_id: workspaceId })
       const next = ViewState.withThread(state, {
@@ -407,6 +464,33 @@ const parseReviewArgument = (argument: string | undefined): ReviewService.Review
     ...(paths.length === 0 ? {} : { paths }),
   }
 }
+
+const parseTournamentArgument = (
+  argument: string | undefined,
+): Omit<Backend.TournamentRequest, "thread_id"> | undefined => {
+  const tokens = (argument ?? "").trim().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return undefined
+  let branchCount = 3
+  const message: Array<string> = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (token === undefined) continue
+    if ((token === "-n" || token === "--branches") && tokens[index + 1] !== undefined) {
+      branchCount = Number(tokens[index + 1])
+      index += 1
+      continue
+    }
+    message.push(token)
+  }
+  const text = message.join(" ").trim()
+  return text.length === 0 || !Number.isInteger(branchCount) ? undefined : { message: text, branch_count: branchCount }
+}
+
+const formatTournament = (result: TournamentService.TournamentResult) =>
+  [
+    ...result.ranking.map((row) => `${row.rank}. ${row.thread_id} ${row.mode} ${row.median_score} ${row.strengths}`),
+    `Winner: ${result.winner_thread_id}`,
+  ].join("\n")
 
 const formatReview = (reviewRun: ReviewService.ReviewRun) =>
   [

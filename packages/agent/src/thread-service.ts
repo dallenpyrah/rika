@@ -25,6 +25,7 @@ export const ForkInput = Schema.Struct({
   thread_id: Ids.ThreadId,
   at_turn: Schema.optional(Ids.TurnId),
   user_id: Schema.optional(Ids.UserId),
+  title_text: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Agent.ThreadService.ForkInput" })
 
 export interface PreviewInput extends Schema.Schema.Type<typeof PreviewInput> {}
@@ -461,6 +462,7 @@ const forkThread = (dependencies: Dependencies, input: ForkInput, fields: Diagno
         sourceThreadId: input.thread_id,
         sourceCreated: created,
         ...(input.user_id === undefined ? {} : { userId: input.user_id }),
+        ...(input.title_text === undefined ? {} : { titleText: input.title_text }),
         cutoff,
       }),
     )
@@ -601,6 +603,7 @@ interface ForkEventInput {
   readonly sourceThreadId: Ids.ThreadId
   readonly sourceCreated: Event.ThreadCreated
   readonly userId?: Ids.UserId
+  readonly titleText?: string
   readonly cutoff: number
 }
 
@@ -619,6 +622,7 @@ const forkEvent = (dependencies: Dependencies, input: ForkEventInput) =>
         data: {
           workspace_id: input.sourceCreated.data.workspace_id,
           ...(input.userId === undefined ? {} : { user_id: input.userId }),
+          ...(input.titleText === undefined ? {} : { title_text: input.titleText }),
           forked_from: { thread_id: input.sourceThreadId, sequence: input.cutoff },
         },
       }

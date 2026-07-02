@@ -144,6 +144,7 @@ export const ForkThreadRequest = Schema.Struct({
   thread_id: ThreadId,
   at_turn: Schema.optional(TurnId),
   user_id: Schema.optional(UserId),
+  title_text: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Remote.ForkThreadRequest" })
 
 export interface SearchThreadsRequest extends Schema.Schema.Type<typeof SearchThreadsRequest> {}
