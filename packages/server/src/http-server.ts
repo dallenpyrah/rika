@@ -503,6 +503,17 @@ const dispatch = (
     }
 
     if (
+      request.method === "POST" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "fork" &&
+      segments.length === 4
+    ) {
+      const input = yield* forkThreadRequest(request, segments[2])
+      return yield* remote.forkThread(input).pipe(jsonEffect(Remote.ThreadSummary))
+    }
+
+    if (
       request.method === "GET" &&
       segments[1] === "threads" &&
       segments[2] !== undefined &&
@@ -785,6 +796,21 @@ const compactThreadRequest = (url: URL, encodedThreadId: string): Remote.Compact
     ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
   }
 }
+
+const forkThreadRequest = (
+  request: Request,
+  encodedThreadId: string,
+): Effect.Effect<Remote.ForkThreadRequest, RemoteControl.RemoteControlError> =>
+  Effect.gen(function* () {
+    const input = yield* decodeBody(request, Remote.ForkThreadRequest)
+    const pathThreadId = Ids.ThreadId.make(decodeURIComponent(encodedThreadId))
+    if (input.thread_id === pathThreadId) return input
+    return yield* new RemoteControl.RemoteControlError({
+      message: `Fork request thread_id ${input.thread_id} does not match path thread ${pathThreadId}`,
+      operation: "forkThread",
+      status: 400,
+    })
+  })
 
 const searchThreadsRequest = (url: URL): Remote.SearchThreadsRequest => {
   const queryValue = url.searchParams.get("query")

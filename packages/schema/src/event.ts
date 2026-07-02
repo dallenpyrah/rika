@@ -23,6 +23,12 @@ export const ThreadCreated = Schema.Struct({
   data: Schema.Struct({
     workspace_id: WorkspaceId,
     user_id: Schema.optional(UserId),
+    forked_from: Schema.optional(
+      Schema.Struct({
+        thread_id: ThreadId,
+        sequence: Schema.Int,
+      }),
+    ),
   }),
 }).annotate({ identifier: "Rika.Event.ThreadCreated" })
 

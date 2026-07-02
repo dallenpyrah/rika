@@ -221,6 +221,7 @@ Commands:
   usage       Show usage information for a thread
   visibility  [alias: v] Show or set default visibility for this repository
   search      [alias: find] Search threads
+  fork        Fork a thread conversation without forking the working tree
   label       Add labels to a thread
   share       [alias: s] Share a thread
   report      Generate and send a diagnostic report for a thread to provide to Amp support
@@ -271,6 +272,19 @@ Global options:
       finishes.
   -l, --label <label>
       Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+
+`
+
+export const threadsForkHelpStdoutText = () => `Usage: amp threads fork <thread-id> [--at-turn <turn-id>]
+
+Fork a thread conversation at the end or through a completed turn boundary.
+
+This copies conversation history only. It does not fork, branch, clone, or mutate the working tree.
+
+Options:
+
+  --at-turn <turn-id>
+      Fork through the completed turn id
 
 `
 
@@ -1406,49 +1420,51 @@ export const executeCommand = Effect.fn("Cli.Help.executeCommand")(function* (co
                   ? threadsContinueHelpStdoutText()
                   : command.topic === "threads-list"
                     ? threadsListHelpStdoutText()
-                    : command.topic === "threads-usage"
-                      ? threadsUsageHelpStdoutText()
-                      : command.topic === "threads-visibility"
-                        ? threadsVisibilityHelpStdoutText()
-                        : command.topic === "threads-search"
-                          ? threadsSearchHelpStdoutText()
-                          : command.topic === "threads-label"
-                            ? threadsLabelHelpStdoutText()
-                            : command.topic === "threads-share"
-                              ? threadsShareHelpStdoutText()
-                              : command.topic === "clone"
-                                ? cloneHelpStdoutText()
-                                : command.topic === "login"
-                                  ? loginHelpStdoutText()
-                                  : command.topic === "logout"
-                                    ? logoutHelpStdoutText()
-                                    : command.topic === "config-edit"
-                                      ? configEditHelpStdoutText()
-                                      : command.topic === "config-keymap"
-                                        ? configKeymapHelpStdoutText()
-                                        : command.topic === "mcp-approve"
-                                          ? mcpApproveHelpStdoutText()
-                                          : command.topic === "mcp-add"
-                                            ? mcpAddHelpStdoutText()
-                                            : command.topic === "mcp-doctor"
-                                              ? mcpDoctorHelpStdoutText()
-                                              : command.topic === "mcp-list"
-                                                ? mcpListHelpStdoutText()
-                                                : command.topic === "mcp-oauth"
-                                                  ? mcpOauthHelpStdoutText
-                                                  : command.topic === "mcp-oauth-login"
-                                                    ? mcpOauthLoginHelpStdoutText
-                                                    : command.topic === "mcp-oauth-logout"
-                                                      ? mcpOauthLogoutHelpStdoutText
-                                                      : command.topic === "mcp-oauth-status"
-                                                        ? mcpOauthStatusHelpStdoutText
-                                                        : command.topic === "mcp-remove"
-                                                          ? mcpRemoveHelpStdoutText()
-                                                          : command.topic === "mcp"
-                                                            ? mcpHelpStdoutText()
-                                                            : command.topic === "config"
-                                                              ? configHelpStdoutText()
-                                                              : rootHelpStdoutText(),
+                    : command.topic === "threads-fork"
+                      ? threadsForkHelpStdoutText()
+                      : command.topic === "threads-usage"
+                        ? threadsUsageHelpStdoutText()
+                        : command.topic === "threads-visibility"
+                          ? threadsVisibilityHelpStdoutText()
+                          : command.topic === "threads-search"
+                            ? threadsSearchHelpStdoutText()
+                            : command.topic === "threads-label"
+                              ? threadsLabelHelpStdoutText()
+                              : command.topic === "threads-share"
+                                ? threadsShareHelpStdoutText()
+                                : command.topic === "clone"
+                                  ? cloneHelpStdoutText()
+                                  : command.topic === "login"
+                                    ? loginHelpStdoutText()
+                                    : command.topic === "logout"
+                                      ? logoutHelpStdoutText()
+                                      : command.topic === "config-edit"
+                                        ? configEditHelpStdoutText()
+                                        : command.topic === "config-keymap"
+                                          ? configKeymapHelpStdoutText()
+                                          : command.topic === "mcp-approve"
+                                            ? mcpApproveHelpStdoutText()
+                                            : command.topic === "mcp-add"
+                                              ? mcpAddHelpStdoutText()
+                                              : command.topic === "mcp-doctor"
+                                                ? mcpDoctorHelpStdoutText()
+                                                : command.topic === "mcp-list"
+                                                  ? mcpListHelpStdoutText()
+                                                  : command.topic === "mcp-oauth"
+                                                    ? mcpOauthHelpStdoutText
+                                                    : command.topic === "mcp-oauth-login"
+                                                      ? mcpOauthLoginHelpStdoutText
+                                                      : command.topic === "mcp-oauth-logout"
+                                                        ? mcpOauthLogoutHelpStdoutText
+                                                        : command.topic === "mcp-oauth-status"
+                                                          ? mcpOauthStatusHelpStdoutText
+                                                          : command.topic === "mcp-remove"
+                                                            ? mcpRemoveHelpStdoutText()
+                                                            : command.topic === "mcp"
+                                                              ? mcpHelpStdoutText()
+                                                              : command.topic === "config"
+                                                                ? configHelpStdoutText()
+                                                                : rootHelpStdoutText(),
     )
     if (
       command.topic !== "mcp-oauth" &&

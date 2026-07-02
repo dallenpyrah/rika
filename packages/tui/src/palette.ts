@@ -111,6 +111,13 @@ const threadLifecycleCommands: ReadonlyArray<Command> = [
     hint: "summarize earlier context for this thread",
     command: "/compact",
   },
+  {
+    id: "thread-fork",
+    category: "thread",
+    action: "fork",
+    hint: "copy this conversation into a new thread",
+    command: "/fork",
+  },
 ]
 
 const speedCommand = (fastMode: boolean): Command => ({

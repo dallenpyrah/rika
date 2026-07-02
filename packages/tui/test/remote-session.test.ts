@@ -214,6 +214,25 @@ describe("TUI remote session", () => {
       expect.objectContaining({ title: "Context compacted", subtitle: "manual" }),
     )
   })
+
+  test("forks the active remote thread and opens the fork", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart", thread_id: initialThreadId }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(Adapter.memoryLayer({ rendered, keys: ["/fork", "/exit"].flatMap(line) })),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(backend.forks).toEqual([initialThreadId])
+    expect(frames).toContain("Forked thread")
+    expect(rendered.at(-1)?.thread_id).not.toBe(initialThreadId)
+  })
 })
 
 interface FakeBackend {
@@ -222,6 +241,7 @@ interface FakeBackend {
   readonly workspaceIds: Array<Ids.WorkspaceId | undefined>
   readonly orbActions: Array<string>
   readonly compactions: Array<Ids.ThreadId>
+  readonly forks: Array<Ids.ThreadId>
 }
 
 const fakeBackend = (): FakeBackend => {
@@ -229,6 +249,7 @@ const fakeBackend = (): FakeBackend => {
   const workspaceIds: Array<Ids.WorkspaceId | undefined> = []
   const orbActions: Array<string> = []
   const compactions: Array<Ids.ThreadId> = []
+  const forks: Array<Ids.ThreadId> = []
   const threads = new Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>()
   const subscribers = new Set<(event: Event.Event) => void>()
   const orbs = new Map<Ids.ThreadId, Remote.OrbSummary>()
@@ -314,6 +335,18 @@ const fakeBackend = (): FakeBackend => {
         for (const subscriber of subscribers) subscriber(event)
         return event
       }),
+    forkThread: (threadId) =>
+      Effect.sync(() => {
+        const record = threads.get(threadId)
+        if (record === undefined) throw new Error(`Missing thread ${threadId}`)
+        const forkThreadId = Ids.ThreadId.make(`thread_remote_fork_${nextThread++}`)
+        const cutoff = record.events.at(-1)?.sequence ?? 0
+        const events = record.events.map((event, index) => forkEvent(event, forkThreadId, index + 1, threadId, cutoff))
+        const forkSummary = summary(forkThreadId, record.summary.latest_message_text, record.summary.workspace_id)
+        threads.set(forkThreadId, { summary: forkSummary, events })
+        forks.push(threadId)
+        return forkSummary
+      }),
     searchThreads: () =>
       Effect.sync(() =>
         [...threads.values()].map((record) => ({
@@ -384,7 +417,7 @@ const fakeBackend = (): FakeBackend => {
     ideNavigationRequests: () => Effect.succeed([]),
   }
 
-  return { client, turns, workspaceIds, orbActions, compactions }
+  return { client, turns, workspaceIds, orbActions, compactions, forks }
 }
 
 const emptyIdeStatus = { connected: false, capabilities: [], workspace_roots: [] } as const
@@ -482,6 +515,40 @@ const base = (threadId: Ids.ThreadId, sequence: number, turnId?: Ids.TurnId): Om
   version: 1,
   created_at: Common.TimestampMillis.make(sequence),
 })
+
+const forkEvent = (
+  event: Event.Event,
+  forkThreadId: Ids.ThreadId,
+  sequence: number,
+  sourceThreadId: Ids.ThreadId,
+  cutoff: number,
+): Event.Event => {
+  const fields = {
+    id: Ids.EventId.make(`event_remote_session_${forkThreadId}_${sequence}`),
+    thread_id: forkThreadId,
+    sequence,
+  }
+  if (event.type === "thread.created") {
+    const forked: Event.ThreadCreated = {
+      ...event,
+      ...fields,
+      data: {
+        workspace_id: event.data.workspace_id,
+        forked_from: { thread_id: sourceThreadId, sequence: cutoff },
+      },
+    }
+    return forked
+  }
+  if (event.type === "message.added") {
+    const forked: Event.MessageAdded = {
+      ...event,
+      ...fields,
+      data: { message: { ...event.data.message, thread_id: forkThreadId } },
+    }
+    return forked
+  }
+  return { ...event, ...fields } as Event.Event
+}
 
 const threadCreated = (
   threadId: Ids.ThreadId,

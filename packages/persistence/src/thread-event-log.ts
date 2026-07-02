@@ -32,6 +32,9 @@ export interface Interface {
   readonly append: (
     event: Event.Event,
   ) => Effect.Effect<Event.Event, Database.DatabaseError | ThreadEventLogError, Database.Service>
+  readonly appendMany: (
+    events: ReadonlyArray<Event.Event>,
+  ) => Effect.Effect<ReadonlyArray<Event.Event>, Database.DatabaseError | ThreadEventLogError, Database.Service>
   readonly appendIfAbsent: (
     event: Event.Event,
   ) => Effect.Effect<AppendIfAbsentResult, Database.DatabaseError | ThreadEventLogError, Database.Service>
@@ -58,6 +61,14 @@ export const layer = Layer.succeed(
         Effect.try({
           try: () => appendEvent(database, event),
           catch: (cause) => toError(cause, "append", event),
+        }),
+      )
+    }),
+    appendMany: Effect.fn("ThreadEventLog.appendMany")(function* (events: ReadonlyArray<Event.Event>) {
+      return yield* Database.withDatabaseEffect((database) =>
+        Effect.try({
+          try: () => appendEvents(database, events),
+          catch: (cause) => toError(cause, "appendMany", events[0]),
         }),
       )
     }),
@@ -104,6 +115,11 @@ export const append = Effect.fn("ThreadEventLog.append.call")(function* (event: 
   return yield* eventLog.append(event)
 })
 
+export const appendMany = Effect.fn("ThreadEventLog.appendMany.call")(function* (events: ReadonlyArray<Event.Event>) {
+  const eventLog = yield* Service
+  return yield* eventLog.appendMany(events)
+})
+
 export const appendIfAbsent = Effect.fn("ThreadEventLog.appendIfAbsent.call")(function* (event: Event.Event) {
   const eventLog = yield* Service
   return yield* eventLog.appendIfAbsent(event)
@@ -140,6 +156,9 @@ interface ChangesRow {
 
 const appendEvent = (database: Database.DrizzleDatabase, event: Event.Event) =>
   database.transaction((transaction) => appendEventRow(transaction, event))
+
+const appendEvents = (database: Database.DrizzleDatabase, events: ReadonlyArray<Event.Event>) =>
+  database.transaction((transaction) => events.map((event) => appendEventRow(transaction, event, "appendMany")))
 
 const appendEventIfAbsent = (database: Database.DrizzleDatabase, event: Event.Event): AppendIfAbsentResult =>
   database.transaction((transaction) => {
@@ -189,12 +208,12 @@ const readThreadTailRows = (database: Database.DrizzleDatabase, input: ReadThrea
     )
     .reverse()
 
-const appendEventRow = (database: EventLogDatabase, event: Event.Event) => {
+const appendEventRow = (database: EventLogDatabase, event: Event.Event, operation = "append") => {
   const existing = database.get<PayloadRow>(sql`select payload from thread_events where id = ${event.id}`)
-  if (existing !== undefined) return requireMatchingExisting(existing.payload, event)
+  if (existing !== undefined) return requireMatchingExisting(existing.payload, event, operation)
 
   const latest = latestSequence(database, event.thread_id)
-  requireNextSequence((latest?.sequence ?? 0) + 1, event, "append")
+  requireNextSequence((latest?.sequence ?? 0) + 1, event, operation)
 
   const references = Event.references(event)
   database

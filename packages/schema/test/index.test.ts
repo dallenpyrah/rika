@@ -159,6 +159,23 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
 
+  test("round-trips forked thread-created lineage", () => {
+    const event: Event.Event = {
+      id: eventId,
+      thread_id: Ids.ThreadId.make("thread_fork"),
+      sequence: 1,
+      version: 1,
+      created_at: now,
+      type: "thread.created",
+      data: {
+        workspace_id: workspaceId,
+        forked_from: { thread_id: threadId, sequence: 5 },
+      },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
+
   test("round-trips thread archive lifecycle events", () => {
     const archived: Event.Event = {
       id: Ids.EventId.make("event_archived"),
@@ -409,6 +426,11 @@ describe("Rika protocol schemas", () => {
       thread_id: threadId,
       user_id: userId,
     }
+    const fork: Remote.ForkThreadRequest = {
+      thread_id: threadId,
+      at_turn: turnId,
+      user_id: userId,
+    }
     const health: Remote.BackendHealth = {
       status: "healthy",
       url: "http://127.0.0.1:4587",
@@ -433,6 +455,7 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Remote.CompactThreadRequest)(Codec.encode(Remote.CompactThreadRequest)(compact))).toEqual(
       compact,
     )
+    expect(Codec.decode(Remote.ForkThreadRequest)(Codec.encode(Remote.ForkThreadRequest)(fork))).toEqual(fork)
     expect(Codec.decode(Remote.BackendHealth)(Codec.encode(Remote.BackendHealth)(health))).toEqual(health)
     expect(Codec.decode(Remote.PublicBackendHealth)(Codec.encode(Remote.PublicBackendHealth)(publicHealth))).toEqual(
       publicHealth,

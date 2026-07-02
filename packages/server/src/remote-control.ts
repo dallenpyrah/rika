@@ -50,6 +50,7 @@ export interface Interface {
   readonly archiveThread: (input: Remote.ArchiveThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly unarchiveThread: (input: Remote.ArchiveThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly compactThread: (input: Remote.CompactThreadRequest) => Effect.Effect<Event.ContextCompacted, RunError>
+  readonly forkThread: (input: Remote.ForkThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly searchThreads: (
     input: Remote.SearchThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, RunError>
@@ -302,6 +303,24 @@ export const layerWithLive = Layer.effect(
           return result.event
         }).pipe(Effect.ensuring(releaseThread(input.thread_id)))
       }),
+      forkThread: Effect.fn("RemoteControl.forkThread")(function* (input: Remote.ForkThreadRequest) {
+        if (input.user_id !== undefined) {
+          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
+        }
+        const reserved = yield* reserveThread(input.thread_id)
+        if (!reserved) {
+          return yield* new RemoteControlError({
+            message: `Thread ${input.thread_id} already has active work`,
+            operation: "forkThread",
+            status: 409,
+          })
+        }
+        return yield* Effect.gen(function* () {
+          const summary = yield* threads.fork(input)
+          yield* publishLoggedEvents(summary.thread_id, 0)
+          return yield* withOrbStatus(orbs, summary)
+        }).pipe(Effect.ensuring(releaseThread(input.thread_id)))
+      }),
       searchThreads: Effect.fn("RemoteControl.searchThreads")(function* (input: Remote.SearchThreadsRequest) {
         if (input.workspace_id !== undefined && input.user_id !== undefined) {
           yield* workspaceAccess.requireWorkspace({
@@ -551,6 +570,11 @@ export const compactThread = Effect.fn("RemoteControl.compactThread.call")(funct
   return yield* service.compactThread(input)
 })
 
+export const forkThread = Effect.fn("RemoteControl.forkThread.call")(function* (input: Remote.ForkThreadRequest) {
+  const service = yield* Service
+  return yield* service.forkThread(input)
+})
+
 export const searchThreads = Effect.fn("RemoteControl.searchThreads.call")(function* (
   input: Remote.SearchThreadsRequest,
 ) {
@@ -642,6 +666,7 @@ export const errorToApi = (error: RunError): Remote.ApiError => ({
             : "unknown",
     ...(error instanceof RemoteControlError ||
     error instanceof IdeBridge.IdeBridgeError ||
+    error instanceof ThreadService.ThreadForkError ||
     error instanceof WorkspaceAccess.WorkspaceAccessDenied ||
     error instanceof WorkspaceAccess.WorkspaceAccessError
       ? { details: { status: statusFromError(error) } }
@@ -652,6 +677,7 @@ export const errorToApi = (error: RunError): Remote.ApiError => ({
 export const statusFromError = (error: RunError) => {
   if (error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError) return error.status
   if (error instanceof CompactionService.CompactionError) return statusFromCompactionError(error)
+  if (error instanceof ThreadService.ThreadForkError) return error.reason === "turn_open" ? 409 : 404
   if (error instanceof OrbStore.OrbStoreError) return statusFromOrbStoreError(error)
   if (error instanceof OrbManager.OrbProvisionError) return statusFromOrbProvisionError(error)
   if (error instanceof WorkspaceAccess.WorkspaceAccessDenied) return 403

@@ -53,6 +53,19 @@ describe("palette.filter", () => {
     ])
   })
 
+  test("shows thread fork only for an active thread", () => {
+    expect(Palette.filter("fork", "smart", false, { threadActive: false, orbBackedThread: false })).toEqual([])
+    expect(Palette.filter("fork", "smart", false, { threadActive: true, orbBackedThread: false })).toEqual([
+      {
+        id: "thread-fork",
+        category: "thread",
+        action: "fork",
+        hint: "copy this conversation into a new thread",
+        command: "/fork",
+      },
+    ])
+  })
+
   test("does not advertise IDE connection commands", () => {
     expect(Palette.commands.some((command) => command.command.startsWith("/ide"))).toBe(false)
     expect(Palette.filter("connect IDE", "smart", false)).toEqual([])

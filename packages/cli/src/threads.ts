@@ -66,6 +66,14 @@ export const layer = Layer.effect(
             yield* output.stdout(formatJson(event))
             return 0
           }
+          case "fork": {
+            const summary = yield* threads.fork({
+              thread_id: yield* requireThreadId(command),
+              ...(command.at_turn === undefined ? {} : { at_turn: command.at_turn }),
+            })
+            yield* output.stdout(formatJson(summary.thread_id))
+            return 0
+          }
           case "share": {
             const exported = yield* threads.share({ thread_id: yield* requireThreadId(command) })
             yield* output.stdout(formatJson(exported))

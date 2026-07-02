@@ -217,6 +217,7 @@ type RuntimeError =
   | SubagentRuntime.RunError
   | Skills.SkillsError
   | Sync.SyncError
+  | ThreadService.ThreadForkError
   | ThreadService.ThreadServiceError
   | ThreadEventLog.ThreadEventLogError
   | ThreadProjection.ThreadProjectionError
@@ -268,6 +269,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
   if (error instanceof Skills.SkillsError) return Skills.formatError(error)
   if (error instanceof Sync.SyncError) return Sync.formatError(error)
+  if (error instanceof ThreadService.ThreadForkError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadService.ThreadServiceError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadEventLog.ThreadEventLogError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadProjection.ThreadProjectionError) return `Rika failed: ${error.message}`
@@ -820,6 +822,8 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
       request({ thread_id: threadId }, (remote) => remote.unarchiveThread(threadId, userId)),
     compactThread: (threadId, userId) =>
       request({ thread_id: threadId }, (remote) => remote.compactThread(threadId, userId)),
+    forkThread: (threadId, forkInput) =>
+      request({ thread_id: threadId }, (remote) => remote.forkThread(threadId, forkInput)),
     searchThreads: (search) => request({}, (remote) => remote.searchThreads(search)),
     shareThread: (threadId, userId) =>
       request({ thread_id: threadId }, (remote) => remote.shareThread(threadId, userId)),

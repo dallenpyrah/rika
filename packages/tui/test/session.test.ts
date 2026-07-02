@@ -187,6 +187,16 @@ describe("TUI session", () => {
     expect(frames).not.toContain("Unknown command /compact")
   })
 
+  test("forks the active local thread and opens the fork", async () => {
+    const { exitCode, rendered } = await runSession(["/new", "/fork", "/exit"])
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(frames).toContain("Forked thread")
+    expect(rendered.at(-1)?.thread_id).not.toBe(rendered[0]?.thread_id)
+    expect(frames).not.toContain("Unknown command /fork")
+  })
+
   test("relaunch exits after recording a relaunch notice", async () => {
     const { exitCode, rendered } = await runSession(["/relaunch"])
 

@@ -11,6 +11,7 @@ const threadId = Ids.ThreadId.make("thread_cli_threads")
 const workspaceId = Ids.WorkspaceId.make("workspace_cli_threads")
 const projectId = Ids.ProjectId.make("project_cli_threads")
 const turnId = Ids.TurnId.make("turn_cli_threads")
+const forkTurnId = Ids.TurnId.make("turn_cli_threads_fork")
 const now = Common.TimestampMillis.make(1_965_000_000_000)
 
 const configLayer = Config.layerFromValues({
@@ -110,6 +111,31 @@ describe("CLI thread commands", () => {
     expect(exported.events.map((event) => event.type)).toEqual(["thread.created", "message.added"])
   })
 
+  test("prints a forked local thread id as JSON", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedForkableThread()
+        const exitCode = yield* Threads.executeCommand({
+          type: "threads",
+          action: "fork",
+          thread_id: threadId,
+          at_turn: forkTurnId,
+        })
+        const forkThreadId = Ids.ThreadId.make(JSON.parse(output.stdout[0] ?? '""'))
+        const record = yield* ThreadService.open({ thread_id: forkThreadId })
+        return { exitCode, forkThreadId, record }
+      }).pipe(Effect.provide(makeLayer(output))),
+    )
+
+    const created = result.record.events.find((event): event is Event.ThreadCreated => event.type === "thread.created")
+    expect(result.exitCode).toBe(0)
+    expect(result.forkThreadId).not.toBe(threadId)
+    expect(created?.data.forked_from).toEqual({ thread_id: threadId, sequence: 4 })
+    expect(result.record.summary.latest_message_text).toBe("CLI fork body")
+  })
+
   test("compacts a thread through the shared backend client", async () => {
     const output: Output.MemoryOutput = { stdout: [], stderr: [] }
     const calls: Array<Ids.ThreadId> = []
@@ -176,6 +202,15 @@ const seedThreadWithOrbStatus = () =>
     yield* OrbStore.setStatus(orb.orb_id, "running")
   })
 
+const seedForkableThread = () =>
+  Effect.gen(function* () {
+    yield* ThreadService.create({ thread_id: threadId, workspace_id: workspaceId })
+    for (const event of [forkTurnStarted(), forkMessageAdded(), forkTurnCompleted()]) {
+      const appended = yield* ThreadEventLog.append(event)
+      yield* ThreadProjection.apply(appended)
+    }
+  })
+
 const readOrbStatus = (value: unknown) => {
   if (typeof value !== "object" || value === null) return undefined
   const status = Object.getOwnPropertyDescriptor(value, "orb_status")?.value
@@ -200,6 +235,7 @@ const emptyClient = (): Client.Interface => ({
   archiveThread: unexpectedClientCall,
   unarchiveThread: unexpectedClientCall,
   compactThread: unexpectedClientCall,
+  forkThread: unexpectedClientCall,
   searchThreads: unexpectedClientCall,
   shareThread: unexpectedClientCall,
   referenceThread: unexpectedClientCall,
@@ -260,4 +296,45 @@ const messageAdded = (): Event.MessageAdded => ({
       content: "CLI thread command search body",
     }),
   },
+})
+
+const forkTurnStarted = (): Event.TurnStarted => ({
+  id: Ids.EventId.make("thread_cli_threads_fork_started"),
+  thread_id: threadId,
+  turn_id: forkTurnId,
+  sequence: 2,
+  version: 1,
+  created_at: now,
+  type: "turn.started",
+  data: {},
+})
+
+const forkMessageAdded = (): Event.MessageAdded => ({
+  id: Ids.EventId.make("thread_cli_threads_fork_message_event"),
+  thread_id: threadId,
+  turn_id: forkTurnId,
+  sequence: 3,
+  version: 1,
+  created_at: now,
+  type: "message.added",
+  data: {
+    message: Message.user({
+      id: Ids.MessageId.make("thread_cli_threads_fork_message"),
+      thread_id: threadId,
+      turn_id: forkTurnId,
+      created_at: now,
+      content: "CLI fork body",
+    }),
+  },
+})
+
+const forkTurnCompleted = (): Event.TurnCompleted => ({
+  id: Ids.EventId.make("thread_cli_threads_fork_completed"),
+  thread_id: threadId,
+  turn_id: forkTurnId,
+  sequence: 4,
+  version: 1,
+  created_at: now,
+  type: "turn.completed",
+  data: {},
 })

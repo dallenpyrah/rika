@@ -25,6 +25,34 @@ describe("ThreadEventLog", () => {
     expect(events.replay).toEqual([events.created, events.message])
   })
 
+  test("appendMany appends contiguous events in one call", async () => {
+    const replay = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ThreadEventLog.appendMany([threadCreated(1), messageAdded(2, "hello")])
+        return yield* ThreadEventLog.readThread({ thread_id: threadId })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(replay.map((event) => event.sequence)).toEqual([1, 2])
+    expect(replay.map((event) => event.type)).toEqual(["thread.created", "message.added"])
+  })
+
+  test("appendMany rolls back the whole batch when one event fails validation", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const error = yield* ThreadEventLog.appendMany([threadCreated(1), messageAdded(3, "gap")]).pipe(Effect.flip)
+        const replay = yield* ThreadEventLog.readThread({ thread_id: threadId })
+        return { error, replay }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.error).toBeInstanceOf(ThreadEventLog.ThreadEventLogError)
+    expect(result.error.operation).toBe("appendMany")
+    expect(result.replay).toEqual([])
+  })
+
   test("treats appending the same event as idempotent", async () => {
     const count = await Effect.runPromise(
       Effect.gen(function* () {

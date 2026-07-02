@@ -20,6 +20,13 @@ export const ThreadIdInput = Schema.Struct({
   thread_id: Ids.ThreadId,
 }).annotate({ identifier: "Rika.Agent.ThreadService.ThreadIdInput" })
 
+export interface ForkInput extends Schema.Schema.Type<typeof ForkInput> {}
+export const ForkInput = Schema.Struct({
+  thread_id: Ids.ThreadId,
+  at_turn: Schema.optional(Ids.TurnId),
+  user_id: Schema.optional(Ids.UserId),
+}).annotate({ identifier: "Rika.Agent.ThreadService.ForkInput" })
+
 export interface PreviewInput extends Schema.Schema.Type<typeof PreviewInput> {}
 export const PreviewInput = Schema.Struct({
   thread_id: Ids.ThreadId,
@@ -108,8 +115,21 @@ export class ThreadServiceError extends Schema.TaggedErrorClass<ThreadServiceErr
   thread_id: Schema.optional(Ids.ThreadId),
 }) {}
 
+export const ThreadForkErrorReason = Schema.Literals(["source_missing", "turn_missing", "turn_open"]).annotate({
+  identifier: "Rika.Agent.ThreadService.ThreadForkErrorReason",
+})
+export type ThreadForkErrorReason = typeof ThreadForkErrorReason.Type
+
+export class ThreadForkError extends Schema.TaggedErrorClass<ThreadForkError>()("ThreadForkError", {
+  message: Schema.String,
+  reason: ThreadForkErrorReason,
+  thread_id: Ids.ThreadId,
+  turn_id: Schema.optional(Ids.TurnId),
+}) {}
+
 export type Error =
   | ThreadServiceError
+  | ThreadForkError
   | Config.ConfigError
   | Database.DatabaseError
   | ThreadEventLog.ThreadEventLogError
@@ -120,6 +140,7 @@ export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<ReadonlyArray<ThreadSummary>, Error>
   readonly open: (input: ThreadIdInput) => Effect.Effect<ThreadRecord, Error>
   readonly preview: (input: PreviewInput) => Effect.Effect<ThreadRecord, Error>
+  readonly fork: (input: ForkInput) => Effect.Effect<ThreadSummary, Error>
   readonly archive: (input: ThreadIdInput) => Effect.Effect<ThreadSummary, Error>
   readonly unarchive: (input: ThreadIdInput) => Effect.Effect<ThreadSummary, Error>
   readonly deleteThread: (input: ThreadIdInput) => Effect.Effect<never, ThreadServiceError>
@@ -166,6 +187,11 @@ export const layer = Layer.effect(
       }),
       preview: Effect.fn("ThreadService.preview")(function* (input: PreviewInput) {
         return yield* previewThread(dependencies, input)
+      }),
+      fork: Effect.fn("ThreadService.fork")(function* (input: ForkInput) {
+        return yield* threadEvent("thread.fork", { thread_id: input.thread_id }, (fields) =>
+          forkThread(dependencies, input, fields),
+        )
       }),
       archive: Effect.fn("ThreadService.archive")(function* (input: ThreadIdInput) {
         return yield* threadEvent("thread.archive", { thread_id: input.thread_id }, (fields) =>
@@ -214,6 +240,7 @@ export const fakeLayer = (overrides: Partial<Interface> = {}) => {
       list: overrides.list ?? (() => fail("list")),
       open: overrides.open ?? ((input) => fail("open", input.thread_id)),
       preview: overrides.preview ?? ((input) => fail("preview", input.thread_id)),
+      fork: overrides.fork ?? ((input) => fail("fork", input.thread_id)),
       archive: overrides.archive ?? ((input) => fail("archive", input.thread_id)),
       unarchive: overrides.unarchive ?? ((input) => fail("unarchive", input.thread_id)),
       deleteThread: overrides.deleteThread ?? ((input) => fail("deleteThread", input.thread_id)),
@@ -242,6 +269,11 @@ export const open = Effect.fn("ThreadService.open.call")(function* (input: Threa
 export const preview = Effect.fn("ThreadService.preview.call")(function* (input: PreviewInput) {
   const service = yield* Service
   return yield* service.preview(input)
+})
+
+export const fork = Effect.fn("ThreadService.fork.call")(function* (input: ForkInput) {
+  const service = yield* Service
+  return yield* service.fork(input)
 })
 
 export const archive = Effect.fn("ThreadService.archive.call")(function* (input: ThreadIdInput) {
@@ -412,6 +444,41 @@ const exportThread = (dependencies: Dependencies, threadId: Ids.ThreadId) =>
     return { schema_version: 1 as const, exported_at: exportedAt, thread_id: threadId, ...record }
   })
 
+const forkThread = (dependencies: Dependencies, input: ForkInput, fields: Diagnostics.Fields) =>
+  Effect.gen(function* () {
+    const sourceEvents = yield* readThread(dependencies, input.thread_id)
+    if (sourceEvents.length === 0) return yield* forkError(input.thread_id, "source_missing")
+
+    const cutoff = yield* forkCutoff(sourceEvents, input.thread_id, input.at_turn)
+    const sourcePrefix = sourceEvents.filter((event) => event.sequence <= cutoff)
+    const forkThreadId = Ids.ThreadId.make(yield* dependencies.idGenerator.next("thread"))
+    const created = requireThreadCreated(sourcePrefix, input.thread_id)
+    const forkedEvents = yield* Effect.forEach(sourcePrefix, (event, index) =>
+      forkEvent(dependencies, {
+        event,
+        sequence: index + 1,
+        forkThreadId,
+        sourceThreadId: input.thread_id,
+        sourceCreated: created,
+        ...(input.user_id === undefined ? {} : { userId: input.user_id }),
+        cutoff,
+      }),
+    )
+    const appended = yield* dependencies.eventLog
+      .appendMany(forkedEvents)
+      .pipe(Effect.provideService(Database.Service, dependencies.database))
+    yield* Effect.forEach(
+      appended,
+      (event) =>
+        dependencies.projection.apply(event).pipe(Effect.provideService(Database.Service, dependencies.database)),
+      { discard: true },
+    )
+    fields.fork_thread_id = forkThreadId
+    fields.cutoff_sequence = cutoff
+    fields.event_count = forkedEvents.length
+    return yield* requireSummary(dependencies, forkThreadId, "fork")
+  })
+
 const referenceThread = (dependencies: Dependencies, input: ReferenceInput) =>
   Effect.gen(function* () {
     const record = yield* openThread(dependencies, input.thread_id)
@@ -526,6 +593,103 @@ const appendAndProject = (dependencies: Dependencies, event: Event.Event) =>
     yield* dependencies.projection.apply(appended).pipe(Effect.provideService(Database.Service, dependencies.database))
     return appended
   })
+
+interface ForkEventInput {
+  readonly event: Event.Event
+  readonly sequence: number
+  readonly forkThreadId: Ids.ThreadId
+  readonly sourceThreadId: Ids.ThreadId
+  readonly sourceCreated: Event.ThreadCreated
+  readonly userId?: Ids.UserId
+  readonly cutoff: number
+}
+
+const forkEvent = (dependencies: Dependencies, input: ForkEventInput) =>
+  Effect.gen(function* () {
+    const id = Ids.EventId.make(yield* dependencies.idGenerator.next("event"))
+    const fields = {
+      id,
+      thread_id: input.forkThreadId,
+      sequence: input.sequence,
+    }
+    if (input.event.type === "thread.created") {
+      const event: Event.ThreadCreated = {
+        ...input.event,
+        ...fields,
+        data: {
+          workspace_id: input.sourceCreated.data.workspace_id,
+          ...(input.userId === undefined ? {} : { user_id: input.userId }),
+          forked_from: { thread_id: input.sourceThreadId, sequence: input.cutoff },
+        },
+      }
+      return event
+    }
+    if (input.event.type === "message.added") {
+      const event: Event.MessageAdded = {
+        ...input.event,
+        ...fields,
+        data: {
+          message: {
+            ...input.event.data.message,
+            thread_id: input.forkThreadId,
+          },
+        },
+      }
+      return event
+    }
+    return { ...input.event, ...fields } as Event.Event
+  })
+
+const forkCutoff = (
+  events: ReadonlyArray<Event.Event>,
+  threadId: Ids.ThreadId,
+  atTurn: Ids.TurnId | undefined,
+): Effect.Effect<number, ThreadForkError> => {
+  if (atTurn !== undefined) {
+    const terminal = events.find((event) => isTurnTerminal(event) && event.turn_id === atTurn)
+    if (terminal !== undefined) return Effect.succeed(terminal.sequence)
+    const hasTurn = events.some((event) => event.turn_id === atTurn)
+    return hasTurn ? forkError(threadId, "turn_open", atTurn) : forkError(threadId, "turn_missing", atTurn)
+  }
+
+  const lastStarted = events.findLast((event): event is Event.TurnStarted => event.type === "turn.started")
+  if (
+    lastStarted !== undefined &&
+    !events.some((event) => isTurnTerminal(event) && event.turn_id === lastStarted.turn_id)
+  ) {
+    return forkError(threadId, "turn_open", lastStarted.turn_id)
+  }
+  return Effect.succeed(latestSequence(events))
+}
+
+const requireThreadCreated = (events: ReadonlyArray<Event.Event>, threadId: Ids.ThreadId) => {
+  const created = events.find((event): event is Event.ThreadCreated => event.type === "thread.created")
+  if (created !== undefined) return created
+  throw new ThreadForkError({
+    message: `Thread ${threadId} has no thread.created event`,
+    reason: "source_missing",
+    thread_id: threadId,
+  })
+}
+
+const forkError = (threadId: Ids.ThreadId, reason: ThreadForkErrorReason, turnId?: Ids.TurnId) =>
+  Effect.fail(
+    new ThreadForkError({
+      message: forkErrorMessage(threadId, reason, turnId),
+      reason,
+      thread_id: threadId,
+      ...(turnId === undefined ? {} : { turn_id: turnId }),
+    }),
+  )
+
+const forkErrorMessage = (threadId: Ids.ThreadId, reason: ThreadForkErrorReason, turnId?: Ids.TurnId) => {
+  if (reason === "source_missing") return `Thread ${threadId} does not exist`
+  if (reason === "turn_missing") return `Thread ${threadId} has no turn ${turnId}`
+  return `Thread ${threadId} turn ${turnId} is still open`
+}
+
+const isTurnTerminal = (event: Event.Event): event is Event.TurnCompleted | Event.TurnFailed =>
+  event.type === "turn.completed" || event.type === "turn.failed"
 
 const readThread = (dependencies: Dependencies, threadId: Ids.ThreadId) =>
   dependencies.eventLog

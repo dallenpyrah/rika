@@ -260,6 +260,14 @@ describe("CLI args", () => {
     expect(short).toEqual({ type: "help", topic: "threads-list" })
   })
 
+  test("parses thread fork help commands before Effect CLI globals", async () => {
+    const long = await Effect.runPromise(Args.parse(["threads", "fork", "--help"]))
+    const short = await Effect.runPromise(Args.parse(["threads", "fork", "-h"]))
+
+    expect(long).toEqual({ type: "help", topic: "threads-fork" })
+    expect(short).toEqual({ type: "help", topic: "threads-fork" })
+  })
+
   test("parses Amp-compatible threads usage help commands before Effect CLI globals", async () => {
     const long = await Effect.runPromise(Args.parse(["threads", "usage", "--help"]))
     const short = await Effect.runPromise(Args.parse(["threads", "usage", "-h"]))
@@ -459,12 +467,19 @@ describe("CLI args", () => {
     const search = await Effect.runPromise(Args.parse(["threads", "search", "auth", "race", "--limit", "3"]))
     const archive = await Effect.runPromise(Args.parse(["threads", "archive", threadId]))
     const compact = await Effect.runPromise(Args.parse(["threads", "compact", threadId]))
+    const fork = await Effect.runPromise(Args.parse(["threads", "fork", threadId, "--at-turn", "turn_args_threads"]))
     const reference = await Effect.runPromise(Args.parse(["threads", "reference", threadId, "auth", "race"]))
 
     expect(list).toEqual({ type: "threads", action: "list", include_archived: true, limit: 5 })
     expect(search).toEqual({ type: "threads", action: "search", query: "auth race", limit: 3 })
     expect(archive).toEqual({ type: "threads", action: "archive", thread_id: threadId })
     expect(compact).toEqual({ type: "threads", action: "compact", thread_id: threadId })
+    expect(fork).toEqual({
+      type: "threads",
+      action: "fork",
+      thread_id: threadId,
+      at_turn: Ids.TurnId.make("turn_args_threads"),
+    })
     expect(reference).toEqual({ type: "threads", action: "reference", thread_id: threadId, query: "auth race" })
   })
 

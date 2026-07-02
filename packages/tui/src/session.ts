@@ -235,6 +235,27 @@ const handleCommand = (
         last_sequence: record.events.at(-1)?.sequence ?? 0,
       })
     }
+    if (name === "/fork") {
+      const target = argument === undefined || argument.length === 0 ? threadId : Ids.ThreadId.make(argument)
+      const summary = yield* dependencies.threadService.fork({ thread_id: target })
+      const record = yield* dependencies.threadService.open({ thread_id: summary.thread_id })
+      const next = ViewState.withNotice(
+        ViewState.beginConnecting(
+          ViewState.withThread(state, {
+            thread_id: summary.thread_id,
+            events: record.events,
+            ...(record.summary.context_tokens === undefined ? {} : { context_tokens: record.summary.context_tokens }),
+            ...(record.summary.context_window === undefined ? {} : { context_window: record.summary.context_window }),
+          }),
+        ),
+        `Forked thread ${target} into ${summary.thread_id}`,
+      )
+      return Backend.commandResult(context, {
+        state: next,
+        thread_id: summary.thread_id,
+        last_sequence: record.events.at(-1)?.sequence ?? 0,
+      })
+    }
     if (name === "/archive" || name === "/unarchive") {
       const target = argument === undefined || argument.length === 0 ? threadId : Ids.ThreadId.make(argument)
       const summary =

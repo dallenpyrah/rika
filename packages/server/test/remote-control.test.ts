@@ -784,6 +784,62 @@ describe("remote control API and SDK", () => {
     }
   })
 
+  test("forks completed thread history over the remote API", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      const streamedPromise = Effect.runPromise(
+        client.subscribeThreadEvents({ thread_id: threadId, after_sequence: 1 }).pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed" || event.type === "turn.failed"),
+          Stream.runCollect,
+        ),
+      )
+      await Effect.runPromise(client.startTurn({ thread_id: threadId, workspace_id: workspaceId, content: "fork me" }))
+      const streamed = await streamedPromise
+      const terminal = streamed.find((event): event is Event.TurnCompleted => event.type === "turn.completed")
+      if (terminal === undefined) throw new Error("Missing terminal turn event")
+
+      const forked = await Effect.runPromise(client.forkThread(threadId, { at_turn: terminal.turn_id }))
+      const opened = await Effect.runPromise(client.openThread(forked.thread_id))
+      const created = opened.events.find((event): event is Event.ThreadCreated => event.type === "thread.created")
+
+      expect(forked.thread_id).not.toBe(threadId)
+      expect(opened.events.map((event) => event.sequence)).toEqual(
+        Array.from({ length: terminal.sequence }, (_, index) => index + 1),
+      )
+      expect(opened.events.every((event) => event.thread_id === forked.thread_id)).toBe(true)
+      expect(created?.data.forked_from).toEqual({ thread_id: threadId, sequence: terminal.sequence })
+      expect(opened.summary.latest_message_text).toBe("remote hello")
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  test("remote fork returns conflict while a turn is already active", async () => {
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), {
+        agentLayer: blockingAgentLoopLayer(),
+      }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      await Effect.runPromise(
+        client.startTurn({ thread_id: threadId, workspace_id: workspaceId, content: "hold open" }),
+      )
+      const error = await Effect.runPromise(client.forkThread(threadId).pipe(Effect.flip))
+
+      expect(error).toBeInstanceOf(Client.SdkError)
+      expect(error.status).toBe(409)
+      expect(error.message).toContain("active")
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   test("startTurn resumes a paused orb and restarts mirroring before the turn runs", async () => {
     const calls: Array<string> = []
     const runtime = ManagedRuntime.make(

@@ -282,6 +282,37 @@ describe("SDK client", () => {
     expect(calls).toEqual([{ method: "POST", path: "/v1/threads/thread_sdk_client/compact?user_id=user_sdk_client" }])
   })
 
+  test("uses shared schema for thread fork requests", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const summary: Remote.ThreadSummary = {
+      thread_id: Ids.ThreadId.make("thread_sdk_fork"),
+      workspace_id: workspaceId,
+      title_text: "forked",
+      diff: { additions: 0, modifications: 0, deletions: 0 },
+      archived: false,
+      created_at: now,
+      updated_at: now,
+    }
+    const client = Client.make({
+      requestJson: (input) => {
+        calls.push(input)
+        return Effect.succeed(Codec.encode(Remote.ThreadSummary)(summary))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    const forked = await Effect.runPromise(client.forkThread(threadId, { at_turn: turnId, user_id: userId }))
+
+    expect(forked).toEqual(summary)
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/v1/threads/thread_sdk_client/fork",
+        body: { thread_id: threadId, at_turn: turnId, user_id: userId },
+      },
+    ])
+  })
+
   test("fetch transport sends bearer auth and decodes API errors", async () => {
     let authorization: string | undefined
     const client = Client.make(

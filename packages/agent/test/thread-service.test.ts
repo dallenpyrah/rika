@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
-import { Common, Event, Ids, Message } from "@rika/schema"
+import { Artifact, Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer } from "effect"
 import { ThreadService } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_service")
 const workspaceId = Ids.WorkspaceId.make("workspace_thread_service")
+const userId = Ids.UserId.make("user_thread_service")
 const turnId = Ids.TurnId.make("turn_thread_service")
+const turnOneId = Ids.TurnId.make("turn_thread_service_one")
+const turnTwoId = Ids.TurnId.make("turn_thread_service_two")
+const activeTurnId = Ids.TurnId.make("turn_thread_service_active")
+const artifactId = Ids.ArtifactId.make("artifact_thread_service")
 const now = Common.TimestampMillis.make(1_960_000_000_000)
 
 const configLayer = Config.layerFromValues({
@@ -117,6 +122,194 @@ describe("ThreadService", () => {
     expect(preview.summary.latest_message_text).toBe("third")
     expect(preview.events.map((event) => event.sequence)).toEqual([3, 4])
   })
+
+  test("forks a thread at a completed turn boundary with a faithful event prefix", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const sourceEvents = forkSourceEvents()
+        for (const event of sourceEvents) {
+          yield* appendProjected(event)
+        }
+        const forked = yield* ThreadService.fork({ thread_id: threadId, at_turn: turnOneId, user_id: userId })
+        const record = yield* ThreadService.open({ thread_id: forked.thread_id })
+        yield* ThreadProjection.clear()
+        yield* ThreadProjection.rebuild()
+        const rebuilt = yield* ThreadService.open({ thread_id: forked.thread_id })
+        return { sourceEvents, forked, record, rebuilt }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const copiedSource = result.sourceEvents.slice(0, 5)
+    const forkEvents = result.record.events
+    const created = forkEvents.find((event): event is Event.ThreadCreated => event.type === "thread.created")
+    const message = forkEvents.find((event): event is Event.MessageAdded => event.type === "message.added")
+    const artifact = forkEvents.find((event): event is Event.ArtifactCreated => event.type === "artifact.created")
+
+    expect(forkEvents.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5])
+    expect(forkEvents.every((event) => event.thread_id === result.forked.thread_id)).toBe(true)
+    expect(forkEvents.map((event) => event.id)).not.toEqual(copiedSource.map((event) => event.id))
+    expect(created?.data).toEqual({
+      workspace_id: workspaceId,
+      user_id: userId,
+      forked_from: { thread_id: threadId, sequence: 5 },
+    })
+    expect(message?.data.message.id).toBe(Ids.MessageId.make("thread_service_message_one"))
+    expect(message?.data.message.thread_id).toBe(result.forked.thread_id)
+    expect(message?.data.message.turn_id).toBe(turnOneId)
+    expect(artifact?.data.artifact.id).toBe(artifactId)
+    expect(artifact?.data.artifact.thread_id).toBe(threadId)
+    expect(result.forked).toMatchObject({
+      thread_id: result.forked.thread_id,
+      workspace_id: workspaceId,
+      user_id: userId,
+      title_text: "first turn",
+      latest_message_text: "first turn",
+      active_turn_id: turnOneId,
+      active_turn_status: "completed",
+      context_tokens: 10,
+    })
+    expect(result.rebuilt.summary).toEqual(result.record.summary)
+  })
+
+  test("forks a fork from the immediate parent history", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of forkSourceEvents().slice(0, 5)) {
+          yield* appendProjected(event)
+        }
+        const firstFork = yield* ThreadService.fork({ thread_id: threadId })
+        const secondFork = yield* ThreadService.fork({ thread_id: firstFork.thread_id })
+        const record = yield* ThreadService.open({ thread_id: secondFork.thread_id })
+        return { firstFork, secondFork, record }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const created = result.record.events.find((event): event is Event.ThreadCreated => event.type === "thread.created")
+    expect(created?.data.forked_from).toEqual({ thread_id: result.firstFork.thread_id, sequence: 5 })
+    expect(result.secondFork.latest_message_text).toBe("first turn")
+  })
+
+  test("rejects forks that would copy an open turn", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of openTurnEvents()) {
+          yield* appendProjected(event)
+        }
+        const endError = yield* ThreadService.fork({ thread_id: threadId }).pipe(Effect.flip)
+        const turnError = yield* ThreadService.fork({ thread_id: threadId, at_turn: activeTurnId }).pipe(Effect.flip)
+        return { endError, turnError }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.endError).toBeInstanceOf(ThreadService.ThreadForkError)
+    expect(result.endError instanceof ThreadService.ThreadForkError ? result.endError.reason : undefined).toBe(
+      "turn_open",
+    )
+    expect(result.turnError).toBeInstanceOf(ThreadService.ThreadForkError)
+    expect(result.turnError instanceof ThreadService.ThreadForkError ? result.turnError.reason : undefined).toBe(
+      "turn_open",
+    )
+  })
+})
+
+const appendProjected = (event: Event.Event) =>
+  Effect.gen(function* () {
+    const appended = yield* ThreadEventLog.append(event)
+    yield* ThreadProjection.apply(appended)
+    return appended
+  })
+
+const forkSourceEvents = (): ReadonlyArray<Event.Event> => [
+  threadCreated(),
+  turnStarted(2, turnOneId),
+  messageAddedForThread(3, turnOneId, "thread_service_message_one", "first turn"),
+  artifactCreated(4, turnOneId),
+  turnCompleted(5, turnOneId, 10),
+  turnStarted(6, turnTwoId),
+  messageAddedForThread(7, turnTwoId, "thread_service_message_two", "second turn"),
+  turnCompleted(8, turnTwoId, 20),
+]
+
+const openTurnEvents = (): ReadonlyArray<Event.Event> => [threadCreated(), turnStarted(2, activeTurnId)]
+
+const threadCreated = (): Event.ThreadCreated => ({
+  id: Ids.EventId.make("thread_service_event_created"),
+  thread_id: threadId,
+  sequence: 1,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now - 10),
+  type: "thread.created",
+  data: { workspace_id: workspaceId },
+})
+
+const turnStarted = (sequence: number, startedTurnId: Ids.TurnId): Event.TurnStarted => ({
+  id: Ids.EventId.make(`thread_service_event_turn_started_${sequence}`),
+  thread_id: threadId,
+  turn_id: startedTurnId,
+  sequence,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now + sequence),
+  type: "turn.started",
+  data: {},
+})
+
+const messageAddedForThread = (
+  sequence: number,
+  messageTurnId: Ids.TurnId,
+  messageIdValue: string,
+  content: string,
+): Event.MessageAdded => ({
+  id: Ids.EventId.make(`thread_service_event_message_${sequence}`),
+  thread_id: threadId,
+  turn_id: messageTurnId,
+  sequence,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now + sequence),
+  type: "message.added",
+  data: {
+    message: Message.user({
+      id: Ids.MessageId.make(messageIdValue),
+      thread_id: threadId,
+      turn_id: messageTurnId,
+      created_at: Common.TimestampMillis.make(now + sequence),
+      content,
+    }),
+  },
+})
+
+const artifactCreated = (sequence: number, artifactTurnId: Ids.TurnId): Event.ArtifactCreated => ({
+  id: Ids.EventId.make(`thread_service_event_artifact_${sequence}`),
+  thread_id: threadId,
+  turn_id: artifactTurnId,
+  sequence,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now + sequence),
+  type: "artifact.created",
+  data: {
+    artifact: {
+      id: artifactId,
+      thread_id: threadId,
+      turn_id: artifactTurnId,
+      kind: "research" satisfies Artifact.Kind,
+      title: "Research note",
+      content: { source: "source thread" },
+      created_at: Common.TimestampMillis.make(now + sequence),
+    },
+  },
+})
+
+const turnCompleted = (sequence: number, completedTurnId: Ids.TurnId, inputTokens: number): Event.TurnCompleted => ({
+  id: Ids.EventId.make(`thread_service_event_turn_completed_${sequence}`),
+  thread_id: threadId,
+  turn_id: completedTurnId,
+  sequence,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now + sequence),
+  type: "turn.completed",
+  data: { model: "gpt-5.5", usage: { input_tokens: inputTokens } },
 })
 
 const modelChunk = (): Event.ModelStreamChunk => ({

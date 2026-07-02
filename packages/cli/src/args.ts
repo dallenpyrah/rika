@@ -34,6 +34,7 @@ export const ThreadAction = Schema.Literals([
   "archive",
   "unarchive",
   "compact",
+  "fork",
   "share",
   "reference",
   "delete",
@@ -46,6 +47,7 @@ export const ThreadCommand = Schema.Struct({
   action: ThreadAction,
   thread_id: Schema.optional(Ids.ThreadId),
   query: Schema.optional(Schema.String),
+  at_turn: Schema.optional(Ids.TurnId),
   include_archived: Schema.optional(Schema.Boolean),
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Cli.Args.ThreadCommand" })
@@ -146,6 +148,7 @@ export const HelpCommand = Schema.Struct({
       "threads-continue",
       "threads-label",
       "threads-list",
+      "threads-fork",
       "threads-new",
       "threads-search",
       "threads-share",
@@ -271,6 +274,7 @@ export const usage = [
   "  rika threads search [--include-archived] [--limit <n>] <query>",
   "  rika threads archive <thread-id>",
   "  rika threads unarchive <thread-id>",
+  "  rika threads fork <thread-id> [--at-turn <turn-id>]",
   "  rika threads share <thread-id>",
   "  rika threads reference <thread-id> [query]",
   "  rika project create <name> [--repo <origin>] [--branch <branch>] [--template <id>]",
@@ -401,6 +405,11 @@ const threadSearchConfig = {
 
 const threadIdConfig = {
   threadId: Argument.string("thread-id").pipe(Argument.withDescription("Thread id")),
+}
+
+const threadForkConfig = {
+  ...threadIdConfig,
+  atTurn: Flag.string("at-turn").pipe(Flag.optional, Flag.withDescription("Fork through the completed turn id")),
 }
 
 const threadReferenceConfig = {
@@ -564,6 +573,10 @@ interface ThreadSearchInput extends ThreadListInput {
 
 interface ThreadIdInput {
   readonly threadId: string
+}
+
+interface ThreadForkInput extends ThreadIdInput {
+  readonly atTurn: Option.Option<string>
 }
 
 interface ThreadReferenceInput extends ThreadIdInput {
@@ -788,6 +801,13 @@ const makeThreadsCommand = (
     Ref.set(parsedRef, Option.some(toThreadIdCommand("compact", input))),
   ).pipe(CliCommand.withDescription("Compact a local thread"), CliCommand.withShortDescription("Compact thread"))
 
+  const fork = CliCommand.make("fork", threadForkConfig, (input: ThreadForkInput) =>
+    Ref.set(parsedRef, Option.some(toThreadForkCommand(input))),
+  ).pipe(
+    CliCommand.withDescription("Fork a local thread conversation without forking the working tree"),
+    CliCommand.withShortDescription("Fork thread"),
+  )
+
   const share = CliCommand.make("share", threadIdConfig, (input: ThreadIdInput) =>
     Ref.set(parsedRef, Option.some(toThreadIdCommand("share", input))),
   ).pipe(
@@ -814,7 +834,7 @@ const makeThreadsCommand = (
   ).pipe(
     CliCommand.withDescription("Manage local Rika threads"),
     CliCommand.withShortDescription("Manage threads"),
-    CliCommand.withSubcommands([list, search, archive, unarchive, compact, share, reference, deleteThread]),
+    CliCommand.withSubcommands([list, search, archive, unarchive, compact, fork, share, reference, deleteThread]),
   )
 }
 
@@ -1100,6 +1120,16 @@ const toThreadIdCommand = (
   thread_id: Ids.ThreadId.make(input.threadId),
 })
 
+const toThreadForkCommand = (input: ThreadForkInput): ThreadCommand => {
+  const atTurn = Option.getOrUndefined(input.atTurn)
+  return {
+    type: "threads",
+    action: "fork",
+    thread_id: Ids.ThreadId.make(input.threadId),
+    ...(atTurn === undefined ? {} : { at_turn: Ids.TurnId.make(atTurn) }),
+  }
+}
+
 const toThreadReferenceCommand = (input: ThreadReferenceInput): ThreadCommand => {
   const query = input.query.join(" ").trim()
   return {
@@ -1197,106 +1227,113 @@ const toHelpCommand = (argv: ReadonlyArray<string>): HelpCommand | undefined =>
                 ? { type: "help", topic: "threads-list" }
                 : argv.length === 3 &&
                     argv[0] === "threads" &&
-                    argv[1] === "usage" &&
+                    argv[1] === "fork" &&
                     (argv[2] === "--help" || argv[2] === "-h")
-                  ? { type: "help", topic: "threads-usage" }
+                  ? { type: "help", topic: "threads-fork" }
                   : argv.length === 3 &&
                       argv[0] === "threads" &&
-                      argv[1] === "visibility" &&
+                      argv[1] === "usage" &&
                       (argv[2] === "--help" || argv[2] === "-h")
-                    ? { type: "help", topic: "threads-visibility" }
+                    ? { type: "help", topic: "threads-usage" }
                     : argv.length === 3 &&
                         argv[0] === "threads" &&
-                        argv[1] === "label" &&
+                        argv[1] === "visibility" &&
                         (argv[2] === "--help" || argv[2] === "-h")
-                      ? { type: "help", topic: "threads-label" }
+                      ? { type: "help", topic: "threads-visibility" }
                       : argv.length === 3 &&
                           argv[0] === "threads" &&
-                          argv[1] === "share" &&
+                          argv[1] === "label" &&
                           (argv[2] === "--help" || argv[2] === "-h")
-                        ? { type: "help", topic: "threads-share" }
+                        ? { type: "help", topic: "threads-label" }
                         : argv.length === 3 &&
                             argv[0] === "threads" &&
-                            argv[1] === "search" &&
+                            argv[1] === "share" &&
                             (argv[2] === "--help" || argv[2] === "-h")
-                          ? { type: "help", topic: "threads-search" }
-                          : argv.length === 2 && argv[0] === "clone" && (argv[1] === "--help" || argv[1] === "-h")
-                            ? { type: "help", topic: "clone" }
-                            : argv.length === 2 && argv[0] === "login" && (argv[1] === "--help" || argv[1] === "-h")
-                              ? { type: "help", topic: "login" }
-                              : argv.length === 2 && argv[0] === "logout" && (argv[1] === "--help" || argv[1] === "-h")
-                                ? { type: "help", topic: "logout" }
-                                : argv.length === 3 &&
-                                    argv[0] === "config" &&
-                                    argv[1] === "edit" &&
-                                    (argv[2] === "--help" || argv[2] === "-h")
-                                  ? { type: "help", topic: "config-edit" }
+                          ? { type: "help", topic: "threads-share" }
+                          : argv.length === 3 &&
+                              argv[0] === "threads" &&
+                              argv[1] === "search" &&
+                              (argv[2] === "--help" || argv[2] === "-h")
+                            ? { type: "help", topic: "threads-search" }
+                            : argv.length === 2 && argv[0] === "clone" && (argv[1] === "--help" || argv[1] === "-h")
+                              ? { type: "help", topic: "clone" }
+                              : argv.length === 2 && argv[0] === "login" && (argv[1] === "--help" || argv[1] === "-h")
+                                ? { type: "help", topic: "login" }
+                                : argv.length === 2 &&
+                                    argv[0] === "logout" &&
+                                    (argv[1] === "--help" || argv[1] === "-h")
+                                  ? { type: "help", topic: "logout" }
                                   : argv.length === 3 &&
                                       argv[0] === "config" &&
-                                      argv[1] === "keymap" &&
+                                      argv[1] === "edit" &&
                                       (argv[2] === "--help" || argv[2] === "-h")
-                                    ? { type: "help", topic: "config-keymap" }
-                                    : argv.length === 2 &&
+                                    ? { type: "help", topic: "config-edit" }
+                                    : argv.length === 3 &&
                                         argv[0] === "config" &&
-                                        (argv[1] === "--help" || argv[1] === "-h")
-                                      ? { type: "help", topic: "config" }
-                                      : argv.length === 3 &&
-                                          argv[0] === "mcp" &&
-                                          argv[1] === "add" &&
-                                          (argv[2] === "--help" || argv[2] === "-h")
-                                        ? { type: "help", topic: "mcp-add" }
+                                        argv[1] === "keymap" &&
+                                        (argv[2] === "--help" || argv[2] === "-h")
+                                      ? { type: "help", topic: "config-keymap" }
+                                      : argv.length === 2 &&
+                                          argv[0] === "config" &&
+                                          (argv[1] === "--help" || argv[1] === "-h")
+                                        ? { type: "help", topic: "config" }
                                         : argv.length === 3 &&
                                             argv[0] === "mcp" &&
-                                            argv[1] === "approve" &&
+                                            argv[1] === "add" &&
                                             (argv[2] === "--help" || argv[2] === "-h")
-                                          ? { type: "help", topic: "mcp-approve" }
+                                          ? { type: "help", topic: "mcp-add" }
                                           : argv.length === 3 &&
                                               argv[0] === "mcp" &&
-                                              argv[1] === "doctor" &&
+                                              argv[1] === "approve" &&
                                               (argv[2] === "--help" || argv[2] === "-h")
-                                            ? { type: "help", topic: "mcp-doctor" }
+                                            ? { type: "help", topic: "mcp-approve" }
                                             : argv.length === 3 &&
                                                 argv[0] === "mcp" &&
-                                                argv[1] === "list" &&
+                                                argv[1] === "doctor" &&
                                                 (argv[2] === "--help" || argv[2] === "-h")
-                                              ? { type: "help", topic: "mcp-list" }
-                                              : argv.length === 4 &&
+                                              ? { type: "help", topic: "mcp-doctor" }
+                                              : argv.length === 3 &&
                                                   argv[0] === "mcp" &&
-                                                  argv[1] === "oauth" &&
-                                                  argv[2] === "login" &&
-                                                  (argv[3] === "--help" || argv[3] === "-h")
-                                                ? { type: "help", topic: "mcp-oauth-login" }
+                                                  argv[1] === "list" &&
+                                                  (argv[2] === "--help" || argv[2] === "-h")
+                                                ? { type: "help", topic: "mcp-list" }
                                                 : argv.length === 4 &&
                                                     argv[0] === "mcp" &&
                                                     argv[1] === "oauth" &&
-                                                    argv[2] === "logout" &&
+                                                    argv[2] === "login" &&
                                                     (argv[3] === "--help" || argv[3] === "-h")
-                                                  ? { type: "help", topic: "mcp-oauth-logout" }
+                                                  ? { type: "help", topic: "mcp-oauth-login" }
                                                   : argv.length === 4 &&
                                                       argv[0] === "mcp" &&
                                                       argv[1] === "oauth" &&
-                                                      argv[2] === "status" &&
+                                                      argv[2] === "logout" &&
                                                       (argv[3] === "--help" || argv[3] === "-h")
-                                                    ? { type: "help", topic: "mcp-oauth-status" }
-                                                    : argv.length === 3 &&
+                                                    ? { type: "help", topic: "mcp-oauth-logout" }
+                                                    : argv.length === 4 &&
                                                         argv[0] === "mcp" &&
                                                         argv[1] === "oauth" &&
-                                                        (argv[2] === "--help" || argv[2] === "-h")
-                                                      ? { type: "help", topic: "mcp-oauth" }
+                                                        argv[2] === "status" &&
+                                                        (argv[3] === "--help" || argv[3] === "-h")
+                                                      ? { type: "help", topic: "mcp-oauth-status" }
                                                       : argv.length === 3 &&
                                                           argv[0] === "mcp" &&
-                                                          argv[1] === "remove" &&
+                                                          argv[1] === "oauth" &&
                                                           (argv[2] === "--help" || argv[2] === "-h")
-                                                        ? { type: "help", topic: "mcp-remove" }
-                                                        : argv.length === 2 &&
+                                                        ? { type: "help", topic: "mcp-oauth" }
+                                                        : argv.length === 3 &&
                                                             argv[0] === "mcp" &&
-                                                            (argv[1] === "--help" || argv[1] === "-h")
-                                                          ? { type: "help", topic: "mcp" }
+                                                            argv[1] === "remove" &&
+                                                            (argv[2] === "--help" || argv[2] === "-h")
+                                                          ? { type: "help", topic: "mcp-remove" }
                                                           : argv.length === 2 &&
-                                                              argv[0] === "version" &&
+                                                              argv[0] === "mcp" &&
                                                               (argv[1] === "--help" || argv[1] === "-h")
-                                                            ? { type: "help", topic: "version" }
-                                                            : undefined
+                                                            ? { type: "help", topic: "mcp" }
+                                                            : argv.length === 2 &&
+                                                                argv[0] === "version" &&
+                                                                (argv[1] === "--help" || argv[1] === "-h")
+                                                              ? { type: "help", topic: "version" }
+                                                              : undefined
 
 const toInvalidExecuteAliasCommand = (argv: ReadonlyArray<string>): InvalidExecuteAliasCommand | undefined =>
   argv.length === 1 && argv[0] === "-e" ? { type: "invalid_execute_alias" } : undefined

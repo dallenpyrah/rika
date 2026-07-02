@@ -53,6 +53,10 @@ export interface Interface {
     threadId: Ids.ThreadId,
     userId?: Ids.UserId,
   ) => Effect.Effect<Event.ContextCompacted, SdkError>
+  readonly forkThread: (
+    threadId: Ids.ThreadId,
+    input?: Omit<Remote.ForkThreadRequest, "thread_id">,
+  ) => Effect.Effect<Remote.ThreadSummary, SdkError>
   readonly searchThreads: (
     input: Remote.SearchThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, SdkError>
@@ -159,6 +163,14 @@ export const make = (transport: Transport): Interface => ({
         path: `/v1/threads/${encodeURIComponent(threadId)}/compact${query(userId === undefined ? {} : { user_id: userId })}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Event.ContextCompacted, "compactThread"))),
+  forkThread: (threadId: Ids.ThreadId, input: Omit<Remote.ForkThreadRequest, "thread_id"> = {}) =>
+    transport
+      .requestJson({
+        method: "POST",
+        path: `/v1/threads/${encodeURIComponent(threadId)}/fork`,
+        body: Codec.encode(Remote.ForkThreadRequest)({ thread_id: threadId, ...input }),
+      })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "forkThread"))),
   searchThreads: (input: Remote.SearchThreadsRequest) =>
     transport
       .requestJson({ method: "GET", path: `/v1/threads/search${query(input)}` })

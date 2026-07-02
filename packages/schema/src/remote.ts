@@ -139,6 +139,13 @@ export const CompactThreadRequest = Schema.Struct({
   user_id: Schema.optional(UserId),
 }).annotate({ identifier: "Rika.Remote.CompactThreadRequest" })
 
+export interface ForkThreadRequest extends Schema.Schema.Type<typeof ForkThreadRequest> {}
+export const ForkThreadRequest = Schema.Struct({
+  thread_id: ThreadId,
+  at_turn: Schema.optional(TurnId),
+  user_id: Schema.optional(UserId),
+}).annotate({ identifier: "Rika.Remote.ForkThreadRequest" })
+
 export interface SearchThreadsRequest extends Schema.Schema.Type<typeof SearchThreadsRequest> {}
 export const SearchThreadsRequest = Schema.Struct({
   query: Schema.optional(Schema.String),
