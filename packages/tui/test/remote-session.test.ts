@@ -46,6 +46,7 @@ describe("TUI remote session", () => {
     expect(exitCode).toBe(0)
     expect(frames).toContain("remote response")
     expect(frames).toContain("Active threads")
+    expect(frames).toContain("[orb:running]")
     expect(frames).toContain("Started new thread")
     expect(rendered.some((state) => state.connecting_ticks > 0)).toBe(true)
     expect(frames).toContain("Archived thread_remote_initial")
@@ -344,6 +345,7 @@ const summary = (
   ...(latest === undefined ? {} : { title_text: latest }),
   diff: { additions: 0, modifications: 0, deletions: 0 },
   archived: false,
+  ...(latest === "old remote message" ? { orb_status: "running" as const } : {}),
   created_at: Common.TimestampMillis.make(1),
   updated_at: Common.TimestampMillis.make(2),
 })

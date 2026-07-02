@@ -76,6 +76,7 @@ describe("OrbManager", () => {
         envs: {},
         metadata: { thread_id: threadId, project_id: projectId },
         timeoutMs: 300_000,
+        lifecycle: { onTimeout: "pause", autoResume: false },
       },
     ])
     expect(sandbox.calls.writeFile).toHaveLength(1)
@@ -265,6 +266,7 @@ describe("OrbManager", () => {
       envs: {},
       metadata: { thread_id: threadId, project_id: projectId },
       timeoutMs: 42_000,
+      lifecycle: { onTimeout: "pause", autoResume: false },
     })
     expect(sandbox.calls.exec[0]).toEqual({
       sandboxId: "sandbox_1",

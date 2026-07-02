@@ -1,4 +1,5 @@
 import { ThreadService } from "@rika/agent"
+import { OrbStore } from "@rika/persistence"
 import { Context, Effect, Layer, Schema } from "effect"
 import * as Args from "./args"
 import * as Output from "./output"
@@ -8,7 +9,7 @@ export class ThreadsError extends Schema.TaggedErrorClass<ThreadsError>()("Threa
   action: Args.ThreadAction,
 }) {}
 
-export type RunError = ThreadService.Error | ThreadsError
+export type RunError = ThreadService.Error | OrbStore.OrbStoreError | ThreadsError
 
 export interface Interface {
   readonly executeCommand: (command: Args.ThreadCommand) => Effect.Effect<number, RunError>
@@ -21,13 +22,15 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const output = yield* Output.Service
     const threads = yield* ThreadService.Service
+    const orbs = yield* OrbStore.Service
 
     return Service.of({
       executeCommand: Effect.fn("Cli.Threads.executeCommand")(function* (command: Args.ThreadCommand) {
         switch (command.action) {
           case "list": {
             const summaries = yield* threads.list(listInput(command))
-            yield* output.stdout(formatJson(summaries))
+            const enriched = yield* Effect.forEach(summaries, (summary) => withOrbStatus(orbs, summary))
+            yield* output.stdout(formatJson(enriched))
             return 0
           }
           case "search": {
@@ -98,5 +101,10 @@ const searchInput = (command: Args.ThreadCommand): ThreadService.SearchInput => 
   ...(command.include_archived === undefined ? {} : { include_archived: command.include_archived }),
   ...(command.limit === undefined ? {} : { limit: command.limit }),
 })
+
+const withOrbStatus = (orbs: OrbStore.Interface, summary: ThreadService.ThreadSummary) =>
+  orbs
+    .getByThread(summary.thread_id)
+    .pipe(Effect.map((orb) => (orb === undefined ? summary : { ...summary, orb_status: orb.status })))
 
 const formatJson = (value: unknown) => JSON.stringify(value)

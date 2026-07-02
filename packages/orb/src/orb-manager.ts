@@ -101,6 +101,7 @@ export const layerWithSystem = (system: System) =>
               envs: {},
               metadata: { thread_id: input.thread_id, project_id: input.project_id },
               timeoutMs,
+              lifecycle: { onTimeout: "pause", autoResume: false },
             }),
             { orbId },
           )

@@ -1,5 +1,5 @@
 import { Database, OrbStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
-import { SandboxClient } from "@rika/orb"
+import { OrbActivity, SandboxClient } from "@rika/orb"
 import { Client } from "@rika/sdk"
 import { Ids, Orb } from "@rika/schema"
 import { Context, Duration, Effect, FiberMap, Layer, Schedule, Schema, Stream } from "effect"
@@ -15,6 +15,7 @@ export class OrbMirrorError extends Schema.TaggedErrorClass<OrbMirrorError>()("O
 export type RunError =
   | Client.SdkError
   | Database.DatabaseError
+  | OrbActivity.RunError
   | OrbMirrorError
   | OrbStore.OrbStoreError
   | SandboxClient.RunError
@@ -45,6 +46,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
       const projection = yield* ThreadProjection.Service
       const orbs = yield* OrbStore.Service
       const sandbox = yield* SandboxClient.Service
+      const activity = yield* OrbActivity.Service
       const live = yield* ThreadLive.Service
       const fibers = yield* FiberMap.make<Ids.OrbId, void, RunError>()
       const withDatabase = <A, E>(effect: Effect.Effect<A, E, Database.Service>) =>
@@ -55,9 +57,10 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
         )
       const appendLocal = Effect.fn("OrbMirror.appendLocal")(function* (event: OrbMirroredEvent) {
         const result = yield* withDatabase(eventLog.appendIfAbsent(event))
-        if (result.status === "skipped") return
+        if (result.status === "skipped") return false
         yield* withDatabase(projection.apply(event))
         yield* live.publish(event)
+        return true
       })
       const appendOrbEvent = Effect.fn("OrbMirror.appendOrbEvent")(function* (
         orb: Orb.OrbRecord,
@@ -71,7 +74,9 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
             thread_id: orb.thread_id,
           })
         }
-        return yield* appendLocal(event)
+        const inserted = yield* appendLocal(event)
+        if (inserted) yield* activity.touch(orb.orb_id)
+        return yield* Effect.void
       })
       const mirrorOrbOnce = Effect.fn("OrbMirror.mirrorOrbOnce")(function* (orb: Orb.OrbRecord) {
         const endpoint = yield* orbs.endpointCredentials(orb.orb_id)

@@ -1156,6 +1156,7 @@ const threadSwitcherItem = (option: ThreadOption): ViewState.ThreadSwitcherItem 
   preview: option.preview,
   updated_label: option.updated_label,
   archived: option.archived,
+  ...(option.orb_status === undefined ? {} : { orb_status: option.orb_status }),
   ...(option.diff === undefined ? {} : { diff: option.diff }),
   preview_state: { status: "unloaded" },
 })

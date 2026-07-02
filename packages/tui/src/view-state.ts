@@ -1,5 +1,5 @@
 import { Config } from "@rika/core"
-import { Common, Event, Ids, Message } from "@rika/schema"
+import { Common, Event, Ids, Message, Orb } from "@rika/schema"
 import { isAbsolute, relative } from "node:path"
 
 export type Activity = "idle" | "thinking" | "streaming" | "running-tools" | "failed"
@@ -104,6 +104,7 @@ export interface ThreadSwitcherItem {
   readonly preview: string
   readonly updated_label: string
   readonly archived: boolean
+  readonly orb_status?: Orb.OrbStatus
   readonly diff?: ThreadDiffStats
   readonly preview_state: ThreadSwitcherPreview
 }

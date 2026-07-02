@@ -1,6 +1,13 @@
 import { Config } from "@rika/core"
 import { Ids } from "@rika/schema"
-import { CommandExitError, Sandbox, type CommandHandle, type CommandResult, type SandboxInfo } from "e2b"
+import {
+  CommandExitError,
+  Sandbox,
+  type CommandHandle,
+  type CommandResult,
+  type SandboxInfo,
+  type SandboxLifecycle as E2bSandboxLifecycle,
+} from "e2b"
 import { Cause, Context, Effect, Layer, Queue, Schema, Stream } from "effect"
 
 export interface SandboxMetadata extends Record<string, string> {
@@ -13,7 +20,18 @@ export interface CreateInput {
   readonly envs: Record<string, string>
   readonly metadata: Record<string, string>
   readonly timeoutMs: number
+  readonly lifecycle?: SandboxLifecycle
 }
+
+export type SandboxLifecycle =
+  | {
+      readonly onTimeout: "pause"
+      readonly autoResume?: boolean
+    }
+  | {
+      readonly onTimeout: "kill"
+      readonly autoResume?: false
+    }
 
 export interface ExecOptions {
   readonly cwd?: string
@@ -178,6 +196,7 @@ const makeLive = (apiKey: string): Interface =>
           envs: input.envs,
           metadata: input.metadata,
           timeoutMs: input.timeoutMs,
+          ...(input.lifecycle === undefined ? {} : { lifecycle: toE2bLifecycle(input.lifecycle) }),
         }),
       )
       return { sandboxId: sandbox.sandboxId }
@@ -279,6 +298,11 @@ const apiKeyFromConfig = (config: Config.Interface) =>
         }),
     ),
   )
+
+const toE2bLifecycle = (lifecycle: SandboxLifecycle): E2bSandboxLifecycle => ({
+  onTimeout: lifecycle.onTimeout,
+  ...(lifecycle.autoResume === undefined ? {} : { autoResume: lifecycle.autoResume }),
+})
 
 const connect = (apiKey: string, sandboxId: string, operation: string) =>
   tryPromise(operation, () => Sandbox.connect(sandboxId, { apiKey }), sandboxId)

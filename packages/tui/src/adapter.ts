@@ -1397,7 +1397,8 @@ const threadSwitcherRow = (
   width: number,
 ): TextRenderable => {
   const stats = threadDiffText(thread.diff)
-  const suffix = `${stats.length > 0 ? ` ${stats}` : ""}${thread.updated_label.length > 0 ? ` ${thread.updated_label}` : ""}${thread.archived ? " [archived]" : ""}`
+  const orbStatus = thread.orb_status === undefined ? "" : ` [orb:${thread.orb_status}]`
+  const suffix = `${stats.length > 0 ? ` ${stats}` : ""}${orbStatus}${thread.updated_label.length > 0 ? ` ${thread.updated_label}` : ""}${thread.archived ? " [archived]" : ""}`
   const titleWidth = Math.max(8, width - suffix.length)
   const title = truncate(thread.title, titleWidth).padEnd(titleWidth)
   const plain = `${title}${suffix}`.slice(0, width).padEnd(width)
@@ -1414,6 +1415,7 @@ const threadSwitcherRow = (
     chunks.push(fg(color.dim)(" "))
     chunks.push(...threadDiffChunks(thread.diff))
   }
+  if (thread.orb_status !== undefined) chunks.push(fg(color.dim)(` [orb:${thread.orb_status}]`))
   if (thread.updated_label.length > 0) chunks.push(fg(color.dim)(` ${thread.updated_label}`))
   if (thread.archived) chunks.push(fg(color.dim)(" [archived]"))
   return new TextRenderable(renderer, {

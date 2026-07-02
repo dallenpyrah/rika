@@ -8,6 +8,7 @@ import {
   ArtifactStore,
   Database,
   Migration,
+  OrbStore,
   ProjectStore,
   ThreadEventLog,
   ThreadProjection,
@@ -85,6 +86,11 @@ const makeLayer = (
     artifactLayer,
     workspaceStoreLayer,
     Migration.layer,
+    OrbStore.layer.pipe(
+      Layer.provideMerge(databaseLayer),
+      Layer.provideMerge(Time.fixedLayer(now)),
+      Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+    ),
     ThreadEventLog.layer,
     ThreadProjection.layer,
     Time.fixedLayer(now),
@@ -156,6 +162,20 @@ const orbRecord = (
   created_at: now,
   last_active_at: now,
 })
+
+const createRunningOrbRecord = (recordThreadId: Ids.ThreadId) =>
+  Effect.gen(function* () {
+    const created = yield* OrbStore.create({
+      thread_id: recordThreadId,
+      project_id: projectId,
+    })
+    yield* OrbStore.setSandbox(created.orb_id, "sandbox_remote_contract")
+    yield* OrbStore.setEndpoint(created.orb_id, {
+      endpoint_url: "https://orb.remote-contract.test",
+      token: "orb-token",
+    })
+    yield* OrbStore.setStatus(created.orb_id, "running")
+  })
 
 const makeClient = (handle: (request: Request) => Promise<Response>) =>
   Client.make(
@@ -258,6 +278,30 @@ describe("remote control API and SDK", () => {
     expect(streamed.find((event) => event.type === "thread.created")).toMatchObject({
       data: { workspace_id: projectWorkspaceId },
     })
+  })
+
+  test("remote thread summaries include orb status across read paths", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+    await runtime.runPromise(createRunningOrbRecord(threadId))
+
+    const listed = await Effect.runPromise(client.listThreads())
+    const opened = await Effect.runPromise(client.openThread(threadId))
+    const preview = await Effect.runPromise(client.previewThread(threadId))
+    const searched = await Effect.runPromise(client.searchThreads({ query: "" }))
+    const shared = await Effect.runPromise(client.shareThread(threadId))
+    const archived = await Effect.runPromise(client.archiveThread(threadId))
+    const unarchived = await Effect.runPromise(client.unarchiveThread(threadId))
+
+    expect(listed.find((summary) => summary.thread_id === threadId)?.orb_status).toBe("running")
+    expect(opened.summary.orb_status).toBe("running")
+    expect(preview.summary.orb_status).toBe("running")
+    expect(searched.find((result) => result.summary.thread_id === threadId)?.summary.orb_status).toBe("running")
+    expect(shared.summary.orb_status).toBe("running")
+    expect(archived.orb_status).toBe("running")
+    expect(unarchived.orb_status).toBe("running")
   })
 
   test("creates projects and provisions orb-backed threads over the remote API", async () => {

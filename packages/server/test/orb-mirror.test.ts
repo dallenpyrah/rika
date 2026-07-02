@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { AgentLoop, ThreadService, WorkspaceAccess } from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
-import { OrbManager, SandboxClientFake } from "@rika/orb"
+import { OrbActivity, OrbManager, SandboxClientFake } from "@rika/orb"
 import {
   ArtifactStore,
   OrbStore,
@@ -26,18 +26,31 @@ const now = Common.TimestampMillis.make(2_010_000_000_000)
 describe("OrbMirror", () => {
   test("mirrors running orb events idempotently and republishes them locally", async () => {
     const remoteEvents = [threadCreated(1), messageAdded(2, "mirrored")]
+    const sandboxState = makeRunningSandboxState()
     const subscriptions: Array<number | undefined> = []
     const runtime = ManagedRuntime.make(
-      makeLayer((_endpointUrl, _token) =>
-        Client.make({
-          requestJson: () => Effect.never,
-          streamJson: (input) => {
-            const url = new URL(input.path, "http://orb.test")
-            const afterSequence = url.searchParams.get("after_sequence")
-            subscriptions.push(afterSequence === null ? undefined : Number(afterSequence))
-            return Stream.fromIterable(remoteEvents)
-          },
-        }),
+      makeLayer(
+        (_endpointUrl, _token) =>
+          Client.make({
+            requestJson: () => Effect.never,
+            streamJson: (input) => {
+              const url = new URL(input.path, "http://orb.test")
+              const afterSequence = url.searchParams.get("after_sequence")
+              subscriptions.push(afterSequence === null ? undefined : Number(afterSequence))
+              return Stream.fromIterable(remoteEvents)
+            },
+          }),
+        sandboxState,
+        {
+          times: [
+            Common.TimestampMillis.make(2_010_000_000_000),
+            Common.TimestampMillis.make(2_010_000_001_000),
+            Common.TimestampMillis.make(2_010_000_002_000),
+            Common.TimestampMillis.make(2_010_000_003_000),
+            Common.TimestampMillis.make(2_010_000_004_000),
+            Common.TimestampMillis.make(2_010_000_005_000),
+          ],
+        },
       ),
     )
 
@@ -56,6 +69,7 @@ describe("OrbMirror", () => {
       )
       const replay = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: threadId }))
       const projection = await runtime.runPromise(ThreadProjection.getThread(threadId))
+      const orb = await runtime.runPromise(OrbStore.get(Ids.OrbId.make("orb_1")))
       const published = await publishedPromise
 
       expect(replay.map((event) => event.id)).toEqual(remoteEvents.map((event) => event.id))
@@ -65,6 +79,8 @@ describe("OrbMirror", () => {
       })
       expect(Array.from(published).map((event) => event.id)).toEqual(remoteEvents.map((event) => event.id))
       expect(subscriptions).toEqual([0, 2])
+      expect(sandboxState.calls.setTimeout).toEqual([{ sandboxId: "sandbox_orb_mirror", timeoutMs: 300_000 }])
+      expect(orb?.last_active_at).toBe(Common.TimestampMillis.make(2_010_000_005_000))
     } finally {
       await runtime.dispose()
     }
@@ -243,6 +259,7 @@ describe("OrbMirror", () => {
           yield* Migration.migrate()
           const orbId = yield* createRunningOrb()
           yield* OrbMirror.mirrorRunningOrbsOnce()
+          yield* OrbMirror.syncRunning()
           return yield* OrbStore.get(orbId)
         }),
       )
@@ -312,6 +329,7 @@ describe("OrbMirror", () => {
 const makeLayer = (
   clientFactory: OrbMirror.ClientFactory,
   sandboxState: SandboxClientFake.State = makeRunningSandboxState(),
+  options: { readonly times?: ReadonlyArray<Common.TimestampMillis> } = {},
 ) => {
   const configLayer = Config.layerFromValues({
     workspace_root: "/workspace/rika-orb-mirror",
@@ -319,26 +337,51 @@ const makeLayer = (
     default_mode: "smart",
   })
   const databaseLayer = Database.memoryLayer
+  const timeLayer = timeSequenceLayer(options.times ?? [now])
+  const idLayer = IdGenerator.sequenceLayer(1)
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    OrbStore.layer.pipe(
-      Layer.provideMerge(databaseLayer),
-      Layer.provideMerge(Time.fixedLayer(now)),
-      Layer.provideMerge(IdGenerator.sequenceLayer(1)),
-    ),
+    OrbStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer), Layer.provideMerge(idLayer)),
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const liveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const activityLayer = OrbActivity.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(SandboxClientFake.layer(sandboxState)),
+    Layer.provideMerge(timeLayer),
+  )
   const mirrorLayer = OrbMirror.layerWithClientFactory(clientFactory).pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(liveLayer),
     Layer.provideMerge(SandboxClientFake.layer(sandboxState)),
+    Layer.provideMerge(activityLayer),
   )
-  return Layer.mergeAll(migratedStorageLayer, liveLayer, mirrorLayer)
+  return Layer.mergeAll(
+    migratedStorageLayer,
+    liveLayer,
+    SandboxClientFake.layer(sandboxState),
+    activityLayer,
+    mirrorLayer,
+  )
+}
+
+const timeSequenceLayer = (times: ReadonlyArray<Common.TimestampMillis>) => {
+  let index = 0
+  return Layer.succeed(
+    Time.Service,
+    Time.Service.of({
+      nowMillis: Effect.sync(() => {
+        const value = times[Math.min(index, times.length - 1)] ?? now
+        index += 1
+        return value
+      }),
+    }),
+  )
 }
 
 const makeRunningSandboxState = () => {
@@ -362,13 +405,20 @@ const makeRemoteControlLiveLayer = () => {
     default_mode: "smart",
   })
   const databaseLayer = Database.memoryLayer
+  const timeLayer = Time.fixedLayer(now)
+  const idLayer = IdGenerator.sequenceLayer(1)
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(databaseLayer),
-    Layer.provideMerge(Time.fixedLayer(now)),
-    Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(idLayer),
+  )
+  const orbStoreLayer = OrbStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(idLayer),
   )
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -379,8 +429,9 @@ const makeRemoteControlLiveLayer = () => {
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    Time.fixedLayer(now),
-    IdGenerator.sequenceLayer(1),
+    timeLayer,
+    idLayer,
+    orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))

@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { ThreadService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
-import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Database, Migration, OrbStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, Schema } from "effect"
 import { Output, Threads } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_cli_threads")
 const workspaceId = Ids.WorkspaceId.make("workspace_cli_threads")
+const projectId = Ids.ProjectId.make("project_cli_threads")
 const turnId = Ids.TurnId.make("turn_cli_threads")
 const now = Common.TimestampMillis.make(1_965_000_000_000)
 
@@ -18,7 +19,7 @@ const configLayer = Config.layerFromValues({
 })
 
 const makeLayer = (output: Output.MemoryOutput) => {
-  const services = Layer.mergeAll(
+  const baseServices = Layer.mergeAll(
     configLayer,
     Output.memoryLayer(output),
     Database.memoryLayer,
@@ -28,6 +29,8 @@ const makeLayer = (output: Output.MemoryOutput) => {
     Time.fixedLayer(now),
     IdGenerator.sequenceLayer(1),
   )
+  const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseServices))
+  const services = Layer.mergeAll(baseServices, orbStoreLayer)
 
   return Threads.layer.pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
 }
@@ -74,6 +77,22 @@ describe("CLI thread commands", () => {
     })
   })
 
+  test("prints orb status in thread lists", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedThreadWithOrbStatus()
+        return yield* Threads.executeCommand({ type: "threads", action: "list" })
+      }).pipe(Effect.provide(makeLayer(output))),
+    )
+
+    expect(exitCode).toBe(0)
+    const parsed: unknown = JSON.parse(output.stdout[0] ?? "[]")
+    const first = Array.isArray(parsed) ? parsed[0] : undefined
+    expect(readOrbStatus(first)).toBe("running")
+  })
+
   test("prints local share exports as JSON", async () => {
     const output: Output.MemoryOutput = { stdout: [], stderr: [] }
     const exitCode = await Effect.runPromise(
@@ -106,6 +125,19 @@ const seedThreadWithContextUsage = () =>
       yield* ThreadProjection.apply(appended)
     }
   })
+
+const seedThreadWithOrbStatus = () =>
+  Effect.gen(function* () {
+    yield* seedThread()
+    const orb = yield* OrbStore.create({ thread_id: threadId, project_id: projectId })
+    yield* OrbStore.setStatus(orb.orb_id, "running")
+  })
+
+const readOrbStatus = (value: unknown) => {
+  if (typeof value !== "object" || value === null) return undefined
+  const status = Object.getOwnPropertyDescriptor(value, "orb_status")?.value
+  return typeof status === "string" ? status : undefined
+}
 
 const modelChunk = (): Event.ModelStreamChunk => ({
   id: Ids.EventId.make("thread_cli_threads_model_chunk"),

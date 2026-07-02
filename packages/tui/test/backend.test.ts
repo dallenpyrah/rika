@@ -12,6 +12,7 @@ describe("Backend thread options", () => {
       latest_message_text: '{"tool_call":{"name":"read","input":{"path":"package.json"}}}',
       updated_at: Date.now(),
       archived: false,
+      orb_status: "running",
       diff: { additions: 3, modifications: 1, deletions: 1 },
     })
 
@@ -20,5 +21,6 @@ describe("Backend thread options", () => {
     expect(option.preview).toContain("Fix switch thread preview")
     expect(option.preview).not.toContain("tool_call")
     expect(option.diff).toEqual({ additions: 3, modifications: 1, deletions: 1 })
+    expect(option.orb_status).toBe("running")
   })
 })

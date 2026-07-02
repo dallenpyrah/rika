@@ -8,6 +8,7 @@ import {
   ArtifactStore,
   Database,
   Migration,
+  OrbStore,
   ProjectStore,
   ThreadEventLog,
   ThreadProjection,
@@ -92,13 +93,20 @@ const makeLayer = () => {
     default_mode: "smart",
   })
   const databaseLayer = Database.memoryLayer
+  const timeLayer = Time.fixedLayer(now)
+  const idLayer = IdGenerator.sequenceLayer(1)
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(databaseLayer),
-    Layer.provideMerge(Time.fixedLayer(now)),
-    Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(idLayer),
+  )
+  const orbStoreLayer = OrbStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(idLayer),
   )
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -109,8 +117,9 @@ const makeLayer = () => {
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    Time.fixedLayer(now),
-    IdGenerator.sequenceLayer(1),
+    timeLayer,
+    idLayer,
+    orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))

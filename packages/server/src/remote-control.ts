@@ -2,7 +2,7 @@ import { AgentLoop, ThreadService, WorkspaceAccess, WorkspaceIdentity } from "@r
 import { Config, IdGenerator } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbManager } from "@rika/orb"
-import { ArtifactStore, Database, ProjectStore, ThreadEventLog } from "@rika/persistence"
+import { ArtifactStore, Database, OrbStore, ProjectStore, ThreadEventLog } from "@rika/persistence"
 import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import * as ThreadLive from "./thread-live"
@@ -19,6 +19,7 @@ export type RunError =
   | ThreadService.Error
   | ArtifactStore.ArtifactStoreError
   | Database.DatabaseError
+  | OrbStore.OrbStoreError
   | OrbManager.OrbProvisionError
   | ProjectStore.ProjectStoreError
   | ThreadEventLog.ThreadEventLogError
@@ -74,6 +75,7 @@ export const layerWithLive = Layer.effect(
     const workspaceAccess = yield* WorkspaceAccess.Service
     const live = yield* ThreadLive.Service
     const projects = yield* ProjectStore.Service
+    const orbs = yield* OrbStore.Service
     const orbManager = yield* OrbManager.Service
     const activeThreads = new Set<Ids.ThreadId>()
     const activeThreadsMutex = yield* Semaphore.make(1)
@@ -179,14 +181,14 @@ export const layerWithLive = Layer.effect(
         }
         const summaries = yield* threads.list(input)
         const readable = yield* workspaceAccess.filterReadableThreads(summaries, input.user_id)
-        return readable.map(toRemoteSummary)
+        return yield* Effect.forEach(readable, (summary) => withOrbStatus(orbs, summary))
       }),
       openThread: Effect.fn("RemoteControl.openThread")(function* (input: Remote.OpenThreadRequest) {
         if (input.user_id !== undefined) {
           yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
         }
         const record = yield* threads.open({ thread_id: input.thread_id })
-        return { summary: toRemoteSummary(record.summary), events: record.events }
+        return { summary: yield* withOrbStatus(orbs, record.summary), events: record.events }
       }),
       previewThread: Effect.fn("RemoteControl.previewThread")(function* (input: Remote.PreviewThreadRequest) {
         if (input.user_id !== undefined) {
@@ -196,7 +198,7 @@ export const layerWithLive = Layer.effect(
           thread_id: input.thread_id,
           ...(input.limit === undefined ? {} : { limit: input.limit }),
         })
-        return { summary: toRemoteSummary(record.summary), events: record.events }
+        return { summary: yield* withOrbStatus(orbs, record.summary), events: record.events }
       }),
       archiveThread: Effect.fn("RemoteControl.archiveThread")(function* (input: Remote.ArchiveThreadRequest) {
         if (input.user_id !== undefined) {
@@ -205,7 +207,7 @@ export const layerWithLive = Layer.effect(
         const previousSequence = yield* latestLoggedSequence(input.thread_id)
         const summary = yield* threads.archive({ thread_id: input.thread_id })
         yield* publishLoggedEvents(input.thread_id, previousSequence)
-        return toRemoteSummary(summary)
+        return yield* withOrbStatus(orbs, summary)
       }),
       unarchiveThread: Effect.fn("RemoteControl.unarchiveThread")(function* (input: Remote.ArchiveThreadRequest) {
         if (input.user_id !== undefined) {
@@ -214,7 +216,7 @@ export const layerWithLive = Layer.effect(
         const previousSequence = yield* latestLoggedSequence(input.thread_id)
         const summary = yield* threads.unarchive({ thread_id: input.thread_id })
         yield* publishLoggedEvents(input.thread_id, previousSequence)
-        return toRemoteSummary(summary)
+        return yield* withOrbStatus(orbs, summary)
       }),
       searchThreads: Effect.fn("RemoteControl.searchThreads")(function* (input: Remote.SearchThreadsRequest) {
         if (input.workspace_id !== undefined && input.user_id !== undefined) {
@@ -228,16 +230,17 @@ export const layerWithLive = Layer.effect(
         const summaries = results.map((result) => result.summary)
         const readable = yield* workspaceAccess.filterReadableThreads(summaries, input.user_id)
         const readableIds = new Set(readable.map((summary) => summary.thread_id))
-        return results
-          .filter((result) => readableIds.has(result.summary.thread_id))
-          .map((result) => ({ ...result, summary: toRemoteSummary(result.summary) }))
+        return yield* Effect.forEach(
+          results.filter((result) => readableIds.has(result.summary.thread_id)),
+          (result) => withOrbStatus(orbs, result.summary).pipe(Effect.map((summary) => ({ ...result, summary }))),
+        )
       }),
       shareThread: Effect.fn("RemoteControl.shareThread")(function* (input: Remote.ShareThreadRequest) {
         if (input.user_id !== undefined) {
           yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
         }
         const exported = yield* threads.share({ thread_id: input.thread_id })
-        return { ...exported, summary: toRemoteSummary(exported.summary) }
+        return { ...exported, summary: yield* withOrbStatus(orbs, exported.summary) }
       }),
       referenceThread: Effect.fn("RemoteControl.referenceThread")(function* (input: Remote.ReferenceThreadRequest) {
         if (input.user_id !== undefined) {
@@ -551,6 +554,15 @@ const toRemoteSummary = (summary: ThreadService.ThreadRecord["summary"]): Remote
   archived: summary.archived,
   created_at: Common.TimestampMillis.make(summary.created_at),
   updated_at: Common.TimestampMillis.make(summary.updated_at),
+})
+
+const withOrbStatus = Effect.fn("RemoteControl.withOrbStatus")(function* (
+  orbs: OrbStore.Interface,
+  summary: ThreadService.ThreadRecord["summary"],
+) {
+  const remote = toRemoteSummary(summary)
+  const orb = yield* orbs.getByThread(summary.thread_id)
+  return orb === undefined ? remote : { ...remote, orb_status: orb.status }
 })
 
 const toProjectSummary = (project: Orb.ProjectRecord): Remote.ProjectSummary => ({

@@ -134,7 +134,17 @@ const cloneCreateInput = (input: SandboxClient.CreateInput): SandboxClient.Creat
   envs: { ...input.envs },
   metadata: { ...input.metadata },
   timeoutMs: input.timeoutMs,
+  ...cloneLifecycle(input.lifecycle),
 })
+
+const cloneLifecycle = (lifecycle: SandboxClient.CreateInput["lifecycle"]) =>
+  lifecycle === undefined
+    ? {}
+    : {
+        lifecycle: {
+          ...lifecycle,
+        },
+      }
 
 const cloneExecOptions = (opts: SandboxClient.ExecOptions): SandboxClient.ExecOptions => ({
   ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),

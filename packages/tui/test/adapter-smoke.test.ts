@@ -289,6 +289,7 @@ describe("adapter Surface (headless)", () => {
             preview: "Research OpenTUI and make image placeholders render correctly in Rika terminal input.",
             updated_label: "17h ago",
             archived: false,
+            orb_status: "running",
             diff: { additions: 21, modifications: 8, deletions: 15 },
             preview_state: {
               status: "ready",
@@ -313,8 +314,9 @@ describe("adapter Surface (headless)", () => {
 
       expect(frame).toContain("Switch Thread")
       expect(frame).toContain("Thread Preview")
-      expect(frame).toContain("Rika terminal image drag-paste")
+      expect(frame).toContain("Rika terminal im...")
       expect(frame).toContain("+21 ~8 -15")
+      expect(frame).toContain("[orb:running]")
       expect(frame).toContain("Preview heading")
       expect(frame).toContain("Read README.md")
       expect(frame).toContain("Opt+W/Ctrl+T")

@@ -150,6 +150,7 @@ const threadOptionFromSummary = (summary: Remote.ThreadSummary): Backend.ThreadO
     ...(summary.latest_message_text === undefined ? {} : { latest_message_text: summary.latest_message_text }),
     updated_at: summary.updated_at,
     archived: summary.archived,
+    ...(summary.orb_status === undefined ? {} : { orb_status: summary.orb_status }),
     diff: summary.diff,
   })
 
@@ -331,5 +332,7 @@ const formatSearchResults = (results: ReadonlyArray<Remote.ThreadSearchResult>) 
   ].join("\n")
 }
 
-const summaryLine = (summary: Remote.ThreadSummary) =>
-  `${summary.thread_id}${summary.archived ? " [archived]" : ""}: ${summary.latest_message_text ?? "(no messages)"}`
+const summaryLine = (summary: Remote.ThreadSummary) => {
+  const orbStatus = summary.orb_status === undefined ? "" : ` [orb:${summary.orb_status}]`
+  return `${summary.thread_id}${orbStatus}${summary.archived ? " [archived]" : ""}: ${summary.latest_message_text ?? "(no messages)"}`
+}

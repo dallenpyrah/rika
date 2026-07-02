@@ -1,5 +1,5 @@
 import { Config } from "@rika/core"
-import { Event, Ids, Message } from "@rika/schema"
+import { Event, Ids, Message, Orb } from "@rika/schema"
 import { Effect, Stream } from "effect"
 import * as ViewState from "./view-state"
 
@@ -71,6 +71,7 @@ export interface ThreadOption {
   readonly preview: string
   readonly updated_label: string
   readonly archived: boolean
+  readonly orb_status?: Orb.OrbStatus
   readonly diff?: ViewState.ThreadDiffStats
 }
 
@@ -102,6 +103,7 @@ export interface ThreadOptionInput {
   readonly latest_message_text?: string
   readonly updated_at?: number
   readonly archived?: boolean
+  readonly orb_status?: Orb.OrbStatus
   readonly diff?: ViewState.ThreadDiffStats
 }
 
@@ -116,6 +118,7 @@ export const threadOption = (input: ThreadOptionInput): ThreadOption => {
     preview,
     updated_label: input.updated_at === undefined ? "" : ageLabel(input.updated_at),
     archived: input.archived ?? false,
+    ...(input.orb_status === undefined ? {} : { orb_status: input.orb_status }),
     ...(input.diff === undefined || isEmptyDiff(input.diff) ? {} : { diff: input.diff }),
   }
 }

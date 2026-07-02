@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Config, IdGenerator, Time } from "@rika/core"
+import { OrbActivity } from "@rika/orb"
 import { Database, Migration, OrbStore } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer } from "effect"
@@ -172,6 +173,7 @@ describe("CLI backend endpoint resolver", () => {
   test("reconnecting client resolves endpoints by request thread id", async () => {
     const urls: Array<string> = []
     const resolved: Array<Ids.ThreadId | undefined> = []
+    const touched: Array<Ids.OrbId> = []
     const client = Runtime.reconnectingClient({
       resolveEndpoint: (input) =>
         Effect.sync(() => {
@@ -193,6 +195,10 @@ describe("CLI backend endpoint resolver", () => {
             data_dir: dataDir,
             pid: 123,
           }
+        }),
+      touchOrb: (orbId) =>
+        Effect.sync(() => {
+          touched.push(orbId)
         }),
       fetch: async (input) => {
         const url = input instanceof Request ? input.url : String(input)
@@ -220,6 +226,62 @@ describe("CLI backend endpoint resolver", () => {
     expect(urls[0]).toStartWith("http://127.0.0.1:45555")
     expect(urls[1]).toStartWith("https://orb-endpoint.rika.test")
     expect(resolved).toEqual([undefined, threadId])
+    expect(touched).toEqual([Ids.OrbId.make("orb_backend_endpoint")])
+  })
+
+  test("reconnecting client rejects stale cached orb endpoints before fetch", async () => {
+    const urls: Array<string> = []
+    const resolved: Array<Ids.ThreadId | undefined> = []
+    let running = true
+    const client = Runtime.reconnectingClient({
+      resolveEndpoint: (input) =>
+        Effect.sync(() => {
+          resolved.push(input.thread_id)
+          return {
+            kind: "orb" as const,
+            url: "https://orb-endpoint.rika.test",
+            token: "orb-token",
+            orb_id: Ids.OrbId.make("orb_backend_endpoint"),
+            thread_id: threadId,
+          }
+        }),
+      touchOrb: (orbId) =>
+        running
+          ? Effect.void
+          : Effect.fail(
+              new OrbActivity.OrbActivityError({
+                message: `Orb ${orbId} is paused`,
+                operation: "touch",
+                orb_id: orbId,
+              }),
+            ),
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input)
+        urls.push(url)
+        return new Response(
+          JSON.stringify({
+            summary: threadSummary(threadId),
+            events: [],
+          }),
+          { status: 200 },
+        )
+      },
+    })
+
+    await Effect.runPromise(client.openThread(threadId))
+    running = false
+    const secondError = await Effect.runPromise(client.openThread(threadId).pipe(Effect.flip))
+    const resolvedAfterSecond = Array.from(resolved)
+    const urlsAfterSecond = Array.from(urls)
+    const thirdError = await Effect.runPromise(client.openThread(threadId).pipe(Effect.flip))
+
+    expect(secondError.operation).toBe("backend.touchOrb")
+    expect(secondError.message).toContain("paused")
+    expect(resolvedAfterSecond).toEqual([threadId])
+    expect(urlsAfterSecond).toHaveLength(1)
+    expect(thirdError.operation).toBe("backend.touchOrb")
+    expect(resolved).toEqual([threadId, threadId])
+    expect(urls).toHaveLength(1)
   })
 })
 

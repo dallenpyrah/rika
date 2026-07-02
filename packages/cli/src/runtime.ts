@@ -14,7 +14,7 @@ import {
 import { Config, Diagnostics, IdGenerator, Telemetry, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Live, Router } from "@rika/llm"
-import { OrbManager, SandboxClient } from "@rika/orb"
+import { OrbActivity, OrbManager, SandboxClient } from "@rika/orb"
 import {
   ArtifactStore,
   Database,
@@ -423,6 +423,7 @@ export const orbExecuteLiveLayer = (
     Layer.provideMerge(timeLayer),
     Layer.provideMerge(IdGenerator.layer),
   )
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -433,7 +434,6 @@ export const orbExecuteLiveLayer = (
     orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const managerLayer = OrbManager.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(sandboxLayer),
@@ -578,6 +578,7 @@ const interactiveRemoteLiveLayerFromTui = (
     Layer.provideMerge(timeLayer),
     Layer.provideMerge(IdGenerator.layer),
   )
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -588,12 +589,19 @@ const interactiveRemoteLiveLayerFromTui = (
     orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const activityLayer = OrbActivity.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const backendLayer = LocalBackend.layerFromInput({ env, cwd })
   const remoteSessionLayer = Layer.effect(
     RemoteSession.Service,
     Effect.gen(function* () {
       const backend = yield* LocalBackend.Service
       const orbs = yield* OrbStore.Service
+      const activity = yield* OrbActivity.Service
       const health = yield* BackendEndpoint.Health
       const renderer = yield* Adapter.Service
       const ticker = yield* Ticker.Service
@@ -610,7 +618,7 @@ const interactiveRemoteLiveLayerFromTui = (
           Effect.provideService(OrbStore.Service, orbs),
           Effect.provideService(BackendEndpoint.Health, health),
         )
-      const client = reconnectingClient({ resolveEndpoint })
+      const client = reconnectingClient({ resolveEndpoint, touchOrb: (orbId) => activity.touch(orbId) })
       return RemoteSession.make(client, renderer, ticker.ticks, workspaceId)
     }),
   ).pipe(
@@ -619,6 +627,8 @@ const interactiveRemoteLiveLayerFromTui = (
     Layer.provideMerge(Adapter.layer),
     Layer.provideMerge(Ticker.layer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(activityLayer),
   )
 
   return remoteSessionLayer
@@ -636,6 +646,7 @@ export interface ReconnectingClientInput {
   readonly resolveEndpoint: (
     input: ReconnectingEndpointInput,
   ) => Effect.Effect<BackendEndpoint.BackendEndpoint, BackendEndpoint.ResolveError>
+  readonly touchOrb?: (orbId: Ids.OrbId) => Effect.Effect<void, OrbActivity.RunError>
   readonly fetch?: Client.FetchTransportInput["fetch"]
 }
 
@@ -678,16 +689,41 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
         ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       }),
     )
+  const touchEndpoint = (
+    endpointInput: ReconnectingEndpointInput,
+    resolvedEndpoint: BackendEndpoint.BackendEndpoint,
+  ) =>
+    resolvedEndpoint.kind === "orb" && input.touchOrb !== undefined
+      ? input.touchOrb(resolvedEndpoint.orb_id).pipe(
+          Effect.mapError(
+            (error) =>
+              new Client.SdkError({
+                message: error instanceof Error ? error.message : String(error),
+                operation: "backend.touchOrb",
+              }),
+          ),
+          Effect.tapError(() =>
+            Effect.sync(() => {
+              current.delete(cacheKey(endpointInput))
+            }),
+          ),
+        )
+      : Effect.void
   const request = <A>(
     endpointInput: ReconnectingEndpointInput,
     use: (remote: Client.Interface) => Effect.Effect<A, Client.SdkError>,
   ) =>
     resolveEndpoint(endpointInput, false).pipe(
+      Effect.tap((next) => touchEndpoint(endpointInput, next)),
       Effect.map(clientForEndpoint),
       Effect.flatMap(use),
       Effect.catchTag("SdkError", (error) =>
         retryableSdkError(error)
-          ? resolveEndpoint(endpointInput, true).pipe(Effect.map(clientForEndpoint), Effect.flatMap(use))
+          ? resolveEndpoint(endpointInput, true).pipe(
+              Effect.tap((next) => touchEndpoint(endpointInput, next)),
+              Effect.map(clientForEndpoint),
+              Effect.flatMap(use),
+            )
           : Effect.fail(error),
       ),
     )
@@ -695,10 +731,20 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
     endpointInput: ReconnectingEndpointInput,
     use: (remote: Client.Interface) => Stream.Stream<A, Client.SdkError>,
   ) =>
-    Stream.unwrap(resolveEndpoint(endpointInput, false).pipe(Effect.map((next) => use(clientForEndpoint(next))))).pipe(
+    Stream.unwrap(
+      resolveEndpoint(endpointInput, false).pipe(
+        Effect.tap((next) => touchEndpoint(endpointInput, next)),
+        Effect.map((next) => use(clientForEndpoint(next))),
+      ),
+    ).pipe(
       Stream.catch((error: Client.SdkError) =>
         retryableSdkError(error)
-          ? Stream.unwrap(resolveEndpoint(endpointInput, true).pipe(Effect.map((next) => use(clientForEndpoint(next)))))
+          ? Stream.unwrap(
+              resolveEndpoint(endpointInput, true).pipe(
+                Effect.tap((next) => touchEndpoint(endpointInput, next)),
+                Effect.map((next) => use(clientForEndpoint(next))),
+              ),
+            )
           : Stream.fail(error),
       ),
     )
@@ -738,7 +784,8 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
   }
 }
 
-const retryableSdkError = (error: Client.SdkError): boolean => error.status === undefined
+const retryableSdkError = (error: Client.SdkError): boolean =>
+  error.status === undefined && error.operation !== "backend.touchOrb"
 
 export const skillsLiveLayer = (
   _command: Args.SkillCommand,
@@ -783,7 +830,7 @@ export const threadsLiveLayer = (
     env,
   )
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
-  const storageLayer = Layer.mergeAll(
+  const baseStorageLayer = Layer.mergeAll(
     configLayer,
     Output.layer,
     databaseLayer,
@@ -793,6 +840,8 @@ export const threadsLiveLayer = (
     Time.layer,
     IdGenerator.layer,
   )
+  const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
+  const storageLayer = Layer.mergeAll(baseStorageLayer, orbStoreLayer)
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const commandLayer = Threads.layer.pipe(Layer.provideMerge(storageAndThreadLayer))
@@ -1066,6 +1115,12 @@ export const serverLiveLayer = (
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const activityLayer = OrbActivity.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
   const remoteLayer = RemoteControl.layerWithLive.pipe(
@@ -1078,6 +1133,7 @@ export const serverLiveLayer = (
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(threadLiveLayer),
     Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(activityLayer),
   )
   const orbMirrorStartupLayer = Layer.effectDiscard(
     Effect.repeat(
@@ -1168,8 +1224,10 @@ export type InteractiveRemoteLayerOutput =
   | IdGenerator.Service
   | LocalBackend.Service
   | Migration.Service
+  | OrbActivity.Service
   | ProjectStore.Service
   | RemoteSession.Service
+  | SandboxClient.Service
   | Ticker.Service
   | Time.Service
 
@@ -1178,6 +1236,7 @@ export type ThreadsLayerOutput =
   | Database.Service
   | IdGenerator.Service
   | Migration.Service
+  | OrbStore.Service
   | Output.Service
   | ThreadEventLog.Service
   | ThreadProjection.Service
@@ -1254,6 +1313,7 @@ export type ServerLayerOutput =
   | Router.Service
   | OrbManager.Service
   | OrbMirror.Service
+  | OrbActivity.Service
   | OrbStore.Service
   | ProjectStore.Service
   | SandboxClient.Service
