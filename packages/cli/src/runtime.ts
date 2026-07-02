@@ -27,7 +27,7 @@ import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
 import { HttpServer, RemoteControl } from "@rika/server"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
-import { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
+import type { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
 import { Effect, Layer, Stream } from "effect"
 import * as Args from "./args"
 import * as CliConfig from "./config"
@@ -55,6 +55,8 @@ export interface ProcessInput {
   readonly cwd: string
 }
 
+type TuiModule = typeof import("@rika/tui")
+
 export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, Output.Service> = Effect.fn(
   "Cli.Runtime.runProcess",
 )((input) =>
@@ -76,11 +78,7 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                     : command.type === "execute"
                       ? Execute.executeCommand(command).pipe(Effect.provide(liveLayer(command, env, input.cwd)))
                       : command.type === "interactive"
-                        ? command.ephemeral
-                          ? Session.run(command).pipe(Effect.provide(interactiveLiveLayer(command, env, input.cwd)))
-                          : RemoteSession.run(command).pipe(
-                              Effect.provide(interactiveRemoteLiveLayer(command, env, input.cwd)),
-                            )
+                        ? runInteractiveCommand(command, env, input.cwd)
                         : command.type === "threads"
                           ? Threads.executeCommand(command).pipe(
                               Effect.provide(threadsLiveLayer(command, env, input.cwd)),
@@ -131,6 +129,26 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
     }),
   ),
 )
+
+const runInteractiveCommand = (
+  command: Args.InteractiveCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Effect.Effect<number, RuntimeError> =>
+  loadTui().pipe(
+    Effect.flatMap((tui) => {
+      if (command.ephemeral) {
+        return tui.Session.run(command).pipe(
+          Effect.provide(interactiveLiveLayerFromTui(command, env, cwd, tui)),
+        ) as Effect.Effect<number, RuntimeError>
+      }
+      return tui.RemoteSession.run(command).pipe(
+        Effect.provide(interactiveRemoteLiveLayerFromTui(command, env, cwd, tui)),
+      ) as Effect.Effect<number, RuntimeError>
+    }),
+  )
+
+const loadTui = (): Effect.Effect<TuiModule> => Effect.promise(() => import("@rika/tui"))
 
 type RuntimeError =
   | AgentLoop.RunError
@@ -187,7 +205,6 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Review.ReviewError) return Review.formatError(error)
   if (error instanceof ReviewService.ReviewServiceError) return `Rika failed: ${error.message}`
   if (error instanceof RemoteControl.RemoteControlError) return `Rika failed: ${error.message}`
-  if (error instanceof RemoteSession.RemoteSessionError) return `Rika failed: ${error.message}`
   if (error instanceof Server.ServerError) return Server.formatError(error)
   if (error instanceof HttpServer.HttpServerError) return `Rika failed: ${error.message}`
   if (error instanceof ArtifactStore.ArtifactStoreError) return `Rika failed: ${error.message}`
@@ -202,7 +219,8 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
   if (error instanceof Doctor.DoctorError) return Doctor.formatError(error)
   if (error instanceof Inspect.InspectError) return Inspect.formatError(error)
-  if (error instanceof Session.SessionError) return `Rika failed: ${error.message}`
+  if (tagged(error, "RemoteSessionError")) return `Rika failed: ${error.message}`
+  if (tagged(error, "SessionError")) return `Rika failed: ${error.message}`
   if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
   if (error instanceof Skills.SkillsError) return Skills.formatError(error)
@@ -213,8 +231,12 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof WorkspaceAccess.WorkspaceAccessDenied) return `Rika failed: ${error.message}`
   if (error instanceof WorkspaceAccess.WorkspaceAccessError) return `Rika failed: ${error.message}`
   if (error instanceof WorkspaceStore.WorkspaceStoreError) return `Rika failed: ${error.message}`
-  return Execute.formatError(error)
+  if (error instanceof Execute.ExecuteError) return Execute.formatError(error)
+  return error instanceof Error ? `Rika failed: ${error.message}` : `Rika failed: ${String(error)}`
 }
+
+const tagged = (error: unknown, tag: string): boolean =>
+  typeof error === "object" && error !== null && "_tag" in error && error._tag === tag
 
 const telemetryLayers = (env: Record<string, string | undefined>, configLayer: Layer.Layer<Config.Service>) => {
   const options = Telemetry.fromEnv(env, Version.version)
@@ -306,7 +328,16 @@ export const interactiveLiveLayer = (
   command: Args.InteractiveCommand,
   env: Record<string, string | undefined>,
   cwd: string,
+): Layer.Layer<InteractiveLayerOutput, LiveLayerError> =>
+  Layer.unwrap(loadTui().pipe(Effect.map((tui) => interactiveLiveLayerFromTui(command, env, cwd, tui))))
+
+const interactiveLiveLayerFromTui = (
+  command: Args.InteractiveCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+  tui: TuiModule,
 ): Layer.Layer<InteractiveLayerOutput, LiveLayerError> => {
+  const { Adapter, Session, Ticker } = tui
   const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
   const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
   const configLayer = Config.layerFromValues(
@@ -388,7 +419,16 @@ export const interactiveRemoteLiveLayer = (
   command: Args.InteractiveCommand,
   env: Record<string, string | undefined>,
   cwd: string,
+): Layer.Layer<InteractiveRemoteLayerOutput, LiveLayerError> =>
+  Layer.unwrap(loadTui().pipe(Effect.map((tui) => interactiveRemoteLiveLayerFromTui(command, env, cwd, tui))))
+
+const interactiveRemoteLiveLayerFromTui = (
+  command: Args.InteractiveCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+  tui: TuiModule,
 ): Layer.Layer<InteractiveRemoteLayerOutput, LiveLayerError> => {
+  const { Adapter, RemoteSession, Ticker } = tui
   const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
   const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
   const mode = command.mode ?? "smart"

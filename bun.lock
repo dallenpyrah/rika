@@ -5,6 +5,8 @@
     "": {
       "name": "rika",
       "dependencies": {
+        "@rika/core": "workspace:*",
+        "@rika/persistence": "workspace:*",
         "effect": "catalog:",
       },
       "devDependencies": {

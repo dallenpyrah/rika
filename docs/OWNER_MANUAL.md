@@ -26,6 +26,28 @@ bun run update:local
 
 For launch builds, `bun run package` writes the compiled artifact and manifest under `dist/release/`.
 
+## Orb template
+
+Build the E2B sandbox template for orb execution with:
+
+```bash
+E2B_API_KEY=e2b_... bun run orb:template
+```
+
+The build prepares a Linux x64 Rika release artifact, copies it with the required share assets into `infra/orb-template/.build/`, and invokes the E2B template CLI. The template name resolves from `RIKA_ORB_TEMPLATE`, then the `template_id` on the project named by `RIKA_ORB_PROJECT`, then `rika-orb`. The image installs the runtime tools, puts `rika` on `PATH` at `/opt/rika/bin/rika`, and uses `/home/user/repo` as the canonical workspace root.
+
+Validate the committed template contract without Docker or E2B:
+
+```bash
+bun run orb:template:contract
+```
+
+Run the image-level smoke with Docker:
+
+```bash
+bun run orb:template:smoke
+```
+
 ## Get started
 
 ```bash

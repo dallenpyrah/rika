@@ -1,0 +1,4 @@
+template_name = "rika-orb"
+dockerfile = "e2b.Dockerfile"
+cpu_count = 2
+memory_mb = 2048

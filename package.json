@@ -14,6 +14,9 @@
     "format:check": "prettier --check .",
     "install:local": "bun run scripts/install-release.ts",
     "lint": "oxlint .",
+    "orb:template": "bun run scripts/build-orb-template.ts",
+    "orb:template:contract": "bun test scripts/orb-template.test.ts",
+    "orb:template:smoke": "bun run scripts/orb-template-smoke.ts",
     "package": "bun run scripts/package-cli.ts",
     "package:smoke": "bun run scripts/package-smoke.ts",
     "parity:burst-compare": "bun run scripts/parity-burst-compare.ts",
@@ -76,6 +79,8 @@
     "typescript": "catalog:"
   },
   "dependencies": {
+    "@rika/core": "workspace:*",
+    "@rika/persistence": "workspace:*",
     "effect": "catalog:"
   },
   "prettier": {

@@ -4,7 +4,10 @@ const root = new URL("..", import.meta.url)
 const rootDir = root.pathname
 const bunNodeModulesDir = new URL("node_modules/.bun/node_modules/", root).pathname
 const packageJson = readPackageJson(await Bun.file(new URL("package.json", root)).json())
-const artifactName = `rika-${process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`
+const artifactPlatform = Bun.env.RIKA_PACKAGE_PLATFORM ?? process.platform
+const artifactArch = Bun.env.RIKA_PACKAGE_ARCH ?? process.arch
+const artifactTarget = Bun.env.RIKA_PACKAGE_TARGET
+const artifactName = `rika-${artifactPlatform}-${artifactArch}${artifactPlatform === "win32" ? ".exe" : ""}`
 const outDir = new URL("dist/release/", root)
 const shareRoot = new URL("dist/share/rika/", root)
 const drizzleShareDir = new URL("drizzle/", shareRoot)
@@ -25,16 +28,17 @@ const nativeTargets = [
   "@opentui/core-win32-arm64",
   "@opentui/core-win32-x64",
 ]
-const bundledNative = nativeTargets.filter(isResolvable)
-const externalNative = nativeTargets.filter((name) => !isResolvable(name))
+const bundledNative = nativeTargets.filter((name) => matchesArtifactTarget(name) && isResolvable(name))
+const externalNative = nativeTargets.filter((name) => !bundledNative.includes(name))
 const externalFlags = externalNative.flatMap((name) => ["--external", name])
 
 const manifest = {
   name: "rika",
   version: packageJson.version ?? "0.0.0",
   bun_version: Bun.version,
-  platform: process.platform,
-  arch: process.arch,
+  platform: artifactPlatform,
+  arch: artifactArch,
+  ...(artifactTarget === undefined ? {} : { target: artifactTarget }),
   entrypoint: "packages/cli/src/main.ts",
   artifact: `dist/release/${artifactName}`,
   share: {
@@ -50,7 +54,7 @@ const manifest = {
 
 if (bundledNative.length === 0) {
   console.warn(
-    `[package-cli] no @opentui/core native package resolved for ${process.platform}-${process.arch}; ` +
+    `[package-cli] no @opentui/core native package resolved for ${artifactPlatform}-${artifactArch}; ` +
       "the packaged binary will fail to launch the TUI. Run `bun install` on the target platform.",
   )
 }
@@ -63,7 +67,7 @@ await $`cp -R ${inspectWebDistDir.pathname}. ${inspectWebShareDir.pathname}`
 await $`bun build ${inspectEntry} --target bun --format esm ${externalFlags} --outdir ${inspectShareDir.pathname}`
 await $`mv ${new URL("motel.js", inspectShareDir).pathname} ${new URL("inspect.js", inspectShareDir).pathname}`
 await sanitizeSourcemapDirectives(new URL("inspect.js", inspectShareDir))
-await $`bun build --compile packages/cli/src/main.ts ${externalFlags} --outfile ${artifact.pathname}`
+await $`bun build --compile packages/cli/src/main.ts ${compileTargetFlags(artifactTarget)} ${externalFlags} --outfile ${artifact.pathname}`
 await Bun.write(new URL(`${artifactName}.json`, outDir), `${JSON.stringify(manifest, null, 2)}\n`)
 
 console.log(JSON.stringify(manifest))
@@ -80,6 +84,13 @@ function isResolvable(name: string): boolean {
   return false
 }
 
+function matchesArtifactTarget(name: string): boolean {
+  if (artifactPlatform === "darwin") return name === `@opentui/core-darwin-${artifactArch}`
+  if (artifactPlatform === "win32") return name === `@opentui/core-win32-${artifactArch}`
+  if (artifactPlatform === "linux") return name === `@opentui/core-linux-${artifactArch}`
+  return false
+}
+
 function readPackageJson(value: unknown) {
   if (typeof value !== "object" || value === null || !("version" in value)) return {}
   const version = value.version
@@ -89,4 +100,8 @@ function readPackageJson(value: unknown) {
 async function sanitizeSourcemapDirectives(file: URL) {
   const text = await Bun.file(file).text()
   await Bun.write(file, text.replaceAll("//# sourceMappingURL=", "// sourceMappingURL="))
+}
+
+function compileTargetFlags(target: string | undefined) {
+  return target === undefined ? [] : ["--target", target]
 }
