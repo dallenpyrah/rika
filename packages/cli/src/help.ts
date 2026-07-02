@@ -1161,11 +1161,12 @@ Commands:
   config        Manage Amp configuration
     edit        Open the Amp settings file in $EDITOR
     keymap      List command keymap entries
-  projects      Project management commands
+  project       Project management commands
     create      Create a project for a repository
-    list        List projects accessible to you
-    get         Get project details
-    delete      [alias: rm] Delete a project
+    list        List projects
+    show        Show project details
+    set-env     Set a project environment variable
+    set-secret  Set a project secret from stdin
   usage         Show your current Amp usage and credit balance
   update        [alias: up] Update Amp CLI
 

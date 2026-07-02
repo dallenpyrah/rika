@@ -116,3 +116,21 @@ export const workspace_memberships = sqliteTable(
 
 export type WorkspaceMembershipRow = typeof workspace_memberships.$inferSelect
 export type NewWorkspaceMembershipRow = typeof workspace_memberships.$inferInsert
+
+export const projects = sqliteTable(
+  "projects",
+  {
+    project_id: text().primaryKey(),
+    name: text().notNull(),
+    repo_origin: text().notNull(),
+    default_branch: text().notNull().default("main"),
+    template_id: text(),
+    env: text().notNull(),
+    created_at: integer().notNull(),
+    updated_at: integer().notNull(),
+  },
+  (table) => [uniqueIndex("projects_name_idx").on(table.name), index("projects_repo_origin_idx").on(table.repo_origin)],
+)
+
+export type ProjectRow = typeof projects.$inferSelect
+export type NewProjectRow = typeof projects.$inferInsert

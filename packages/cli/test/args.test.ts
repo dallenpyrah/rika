@@ -187,6 +187,39 @@ describe("CLI args", () => {
     expect(short).toEqual({ type: "help", topic: "threads-search" })
   })
 
+  test("parses project commands", async () => {
+    const create = await Effect.runPromise(
+      Args.parse([
+        "project",
+        "create",
+        "demo",
+        "--repo",
+        "https://github.com/x/y",
+        "--branch",
+        "trunk",
+        "--template",
+        "linux",
+      ]),
+    )
+    const list = await Effect.runPromise(Args.parse(["project", "list"]))
+    const show = await Effect.runPromise(Args.parse(["project", "show", "demo"]))
+    const setEnv = await Effect.runPromise(Args.parse(["project", "set-env", "demo", "FOO=bar"]))
+    const setSecret = await Effect.runPromise(Args.parse(["project", "set-secret", "demo", "TOKEN"]))
+
+    expect(create).toEqual({
+      type: "project",
+      action: "create",
+      name: "demo",
+      repo_origin: "https://github.com/x/y",
+      default_branch: "trunk",
+      template_id: "linux",
+    })
+    expect(list).toEqual({ type: "project", action: "list" })
+    expect(show).toEqual({ type: "project", action: "show", name: "demo" })
+    expect(setEnv).toEqual({ type: "project", action: "set-env", name: "demo", env_assignment: "FOO=bar" })
+    expect(setSecret).toEqual({ type: "project", action: "set-secret", name: "demo", secret_name: "TOKEN" })
+  })
+
   test("parses Amp-compatible config help commands before Effect CLI globals", async () => {
     const long = await Effect.runPromise(Args.parse(["config", "--help"]))
     const short = await Effect.runPromise(Args.parse(["config", "-h"]))

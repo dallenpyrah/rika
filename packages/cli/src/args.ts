@@ -44,6 +44,23 @@ export const ThreadCommand = Schema.Struct({
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Cli.Args.ThreadCommand" })
 
+export const ProjectAction = Schema.Literals(["create", "list", "show", "set-env", "set-secret"]).annotate({
+  identifier: "Rika.Cli.Args.ProjectAction",
+})
+export type ProjectAction = typeof ProjectAction.Type
+
+export interface ProjectCommand extends Schema.Schema.Type<typeof ProjectCommand> {}
+export const ProjectCommand = Schema.Struct({
+  type: Schema.Literal("project"),
+  action: ProjectAction,
+  name: Schema.optional(Schema.String),
+  repo_origin: Schema.optional(Schema.String),
+  default_branch: Schema.optional(Schema.String),
+  template_id: Schema.optional(Schema.String),
+  env_assignment: Schema.optional(Schema.String),
+  secret_name: Schema.optional(Schema.String),
+}).annotate({ identifier: "Rika.Cli.Args.ProjectCommand" })
+
 export const SkillAction = Schema.Literals(["list", "inspect"]).annotate({
   identifier: "Rika.Cli.Args.SkillAction",
 })
@@ -202,6 +219,7 @@ export type Command =
   | ExecuteCommand
   | InteractiveCommand
   | ThreadCommand
+  | ProjectCommand
   | SkillCommand
   | McpCommand
   | ConfigCommand
@@ -234,6 +252,11 @@ export const usage = [
   "  rika threads unarchive <thread-id>",
   "  rika threads share <thread-id>",
   "  rika threads reference <thread-id> [query]",
+  "  rika project create <name> [--repo <origin>] [--branch <branch>] [--template <id>]",
+  "  rika project list",
+  "  rika project show <name>",
+  "  rika project set-env <name> KEY=VALUE",
+  "  rika project set-secret <name> KEY",
   "  rika skills list",
   "  rika skills inspect <name>",
   "  rika mcp list",
@@ -350,6 +373,27 @@ const threadReferenceConfig = {
     Argument.variadic({ min: 0 }),
     Argument.withDescription("Optional reference query"),
   ),
+}
+
+const projectCreateConfig = {
+  name: Argument.string("name").pipe(Argument.withDescription("Project name")),
+  repo: Flag.string("repo").pipe(Flag.optional, Flag.withDescription("Repository origin URL")),
+  branch: Flag.string("branch").pipe(Flag.optional, Flag.withDescription("Default branch")),
+  template: Flag.string("template").pipe(Flag.optional, Flag.withDescription("Sandbox template id")),
+}
+
+const projectNameConfig = {
+  name: Argument.string("name").pipe(Argument.withDescription("Project name")),
+}
+
+const projectSetEnvConfig = {
+  ...projectNameConfig,
+  assignment: Argument.string("KEY=VALUE").pipe(Argument.withDescription("Environment variable assignment")),
+}
+
+const projectSetSecretConfig = {
+  ...projectNameConfig,
+  key: Argument.string("KEY").pipe(Argument.withDescription("Secret name")),
 }
 
 const skillNameConfig = {
@@ -475,6 +519,25 @@ interface ThreadReferenceInput extends ThreadIdInput {
   readonly query: ReadonlyArray<string>
 }
 
+interface ProjectCreateInput {
+  readonly name: string
+  readonly repo: Option.Option<string>
+  readonly branch: Option.Option<string>
+  readonly template: Option.Option<string>
+}
+
+interface ProjectNameInput {
+  readonly name: string
+}
+
+interface ProjectSetEnvInput extends ProjectNameInput {
+  readonly assignment: string
+}
+
+interface ProjectSetSecretInput extends ProjectNameInput {
+  readonly key: string
+}
+
 interface SkillNameInput {
   readonly name: string
 }
@@ -564,6 +627,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
 
   const version = makeVersionCommand(parsedRef)
   const threads = makeThreadsCommand(parsedRef, rejectedRef)
+  const project = makeProjectCommand(parsedRef, rejectedRef)
   const skills = makeSkillsCommand(parsedRef, rejectedRef)
   const mcp = makeMcpCommand(parsedRef, rejectedRef)
   const config = makeConfigCommand(parsedRef, rejectedRef)
@@ -595,6 +659,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
       run,
       interactive,
       threads,
+      project,
       skills,
       mcp,
       config,
@@ -661,6 +726,40 @@ const makeThreadsCommand = (
     CliCommand.withDescription("Manage local Rika threads"),
     CliCommand.withShortDescription("Manage threads"),
     CliCommand.withSubcommands([list, search, archive, unarchive, share, reference, deleteThread]),
+  )
+}
+
+const makeProjectCommand = (
+  parsedRef: Ref.Ref<Option.Option<Command>>,
+  rejectedRef: Ref.Ref<Option.Option<ArgsError>>,
+) => {
+  const create = CliCommand.make("create", projectCreateConfig, (input: ProjectCreateInput) =>
+    Ref.set(parsedRef, Option.some(toProjectCreateCommand(input))),
+  ).pipe(CliCommand.withDescription("Create a project"), CliCommand.withShortDescription("Create project"))
+
+  const list = CliCommand.make("list", {}, () => Ref.set(parsedRef, Option.some(toProjectListCommand()))).pipe(
+    CliCommand.withDescription("List projects"),
+    CliCommand.withShortDescription("List projects"),
+  )
+
+  const show = CliCommand.make("show", projectNameConfig, (input: ProjectNameInput) =>
+    Ref.set(parsedRef, Option.some(toProjectNameCommand("show", input))),
+  ).pipe(CliCommand.withDescription("Show a project"), CliCommand.withShortDescription("Show project"))
+
+  const setEnv = CliCommand.make("set-env", projectSetEnvConfig, (input: ProjectSetEnvInput) =>
+    Ref.set(parsedRef, Option.some(toProjectSetEnvCommand(input))),
+  ).pipe(CliCommand.withDescription("Set a project environment variable"), CliCommand.withShortDescription("Set env"))
+
+  const setSecret = CliCommand.make("set-secret", projectSetSecretConfig, (input: ProjectSetSecretInput) =>
+    Ref.set(parsedRef, Option.some(toProjectSetSecretCommand(input))),
+  ).pipe(CliCommand.withDescription("Set a project secret from stdin"), CliCommand.withShortDescription("Set secret"))
+
+  return CliCommand.make("project", {}, () =>
+    Ref.set(rejectedRef, Option.some(new ArgsError({ message: "Expected a project subcommand", exit_code: 2, usage }))),
+  ).pipe(
+    CliCommand.withDescription("Manage projects"),
+    CliCommand.withShortDescription("Manage projects"),
+    CliCommand.withSubcommands([create, list, show, setEnv, setSecret]),
   )
 }
 
@@ -902,6 +1001,42 @@ const toThreadReferenceCommand = (input: ThreadReferenceInput): ThreadCommand =>
     ...(query.length === 0 ? {} : { query }),
   }
 }
+
+const toProjectCreateCommand = (input: ProjectCreateInput): ProjectCommand => {
+  const repoOrigin = Option.getOrUndefined(input.repo)
+  const defaultBranch = Option.getOrUndefined(input.branch)
+  const templateId = Option.getOrUndefined(input.template)
+  return {
+    type: "project",
+    action: "create",
+    name: input.name,
+    ...(repoOrigin === undefined ? {} : { repo_origin: repoOrigin }),
+    ...(defaultBranch === undefined ? {} : { default_branch: defaultBranch }),
+    ...(templateId === undefined ? {} : { template_id: templateId }),
+  }
+}
+
+const toProjectListCommand = (): ProjectCommand => ({ type: "project", action: "list" })
+
+const toProjectNameCommand = (action: Extract<ProjectAction, "show">, input: ProjectNameInput): ProjectCommand => ({
+  type: "project",
+  action,
+  name: input.name,
+})
+
+const toProjectSetEnvCommand = (input: ProjectSetEnvInput): ProjectCommand => ({
+  type: "project",
+  action: "set-env",
+  name: input.name,
+  env_assignment: input.assignment,
+})
+
+const toProjectSetSecretCommand = (input: ProjectSetSecretInput): ProjectCommand => ({
+  type: "project",
+  action: "set-secret",
+  name: input.name,
+  secret_name: input.key,
+})
 
 const toSkillListCommand = (): SkillCommand => ({ type: "skills", action: "list" })
 

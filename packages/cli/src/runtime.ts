@@ -18,6 +18,7 @@ import {
   Database,
   McpApprovalStore,
   Migration,
+  ProjectStore,
   ThreadEventLog,
   ThreadProjection,
   WorkspaceStore,
@@ -35,10 +36,12 @@ import * as Execute from "./execute"
 import * as Extensions from "./extensions"
 import * as Help from "./help"
 import * as Ide from "./ide"
+import * as Input from "./input"
 import * as Inspect from "./inspect"
 import * as LocalBackend from "./local-backend"
 import * as Mcp from "./mcp"
 import * as Output from "./output"
+import * as Project from "./project"
 import * as Review from "./review"
 import * as RuntimeEnv from "./runtime-env"
 import * as Server from "./server"
@@ -82,35 +85,41 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                           ? Threads.executeCommand(command).pipe(
                               Effect.provide(threadsLiveLayer(command, env, input.cwd)),
                             )
-                          : command.type === "skills"
-                            ? Skills.executeCommand(command).pipe(
-                                Effect.provide(skillsLiveLayer(command, env, input.cwd)),
+                          : command.type === "project"
+                            ? Project.executeCommand(command).pipe(
+                                Effect.provide(projectLiveLayer(command, env, input.cwd)),
                               )
-                            : command.type === "mcp"
-                              ? Mcp.executeCommand(command).pipe(Effect.provide(mcpLiveLayer(command, env, input.cwd)))
-                              : command.type === "config"
-                                ? CliConfig.executeCommand(command)
-                                : command.type === "review"
-                                  ? Review.executeCommand(command).pipe(
-                                      Effect.provide(reviewLiveLayer(command, env, input.cwd)),
-                                    )
-                                  : command.type === "extensions"
-                                    ? Extensions.executeCommand(command).pipe(
-                                        Effect.provide(extensionsLiveLayer(command, env, input.cwd)),
+                            : command.type === "skills"
+                              ? Skills.executeCommand(command).pipe(
+                                  Effect.provide(skillsLiveLayer(command, env, input.cwd)),
+                                )
+                              : command.type === "mcp"
+                                ? Mcp.executeCommand(command).pipe(
+                                    Effect.provide(mcpLiveLayer(command, env, input.cwd)),
+                                  )
+                                : command.type === "config"
+                                  ? CliConfig.executeCommand(command)
+                                  : command.type === "review"
+                                    ? Review.executeCommand(command).pipe(
+                                        Effect.provide(reviewLiveLayer(command, env, input.cwd)),
                                       )
-                                    : command.type === "ide"
-                                      ? Ide.executeCommand(command).pipe(
-                                          Effect.provide(ideLiveLayer(command, env, input.cwd)),
+                                    : command.type === "extensions"
+                                      ? Extensions.executeCommand(command).pipe(
+                                          Effect.provide(extensionsLiveLayer(command, env, input.cwd)),
                                         )
-                                      : command.type === "doctor"
-                                        ? Doctor.executeCommand(command).pipe(
-                                            Effect.provide(doctorLiveLayer(env, input.cwd)),
+                                      : command.type === "ide"
+                                        ? Ide.executeCommand(command).pipe(
+                                            Effect.provide(ideLiveLayer(command, env, input.cwd)),
                                           )
-                                        : command.type === "inspect"
-                                          ? Inspect.executeCommand(command, env)
-                                          : Server.executeCommand(command).pipe(
-                                              Effect.provide(serverLiveLayer(command, env, input.cwd)),
+                                        : command.type === "doctor"
+                                          ? Doctor.executeCommand(command).pipe(
+                                              Effect.provide(doctorLiveLayer(env, input.cwd)),
                                             )
+                                          : command.type === "inspect"
+                                            ? Inspect.executeCommand(command, env)
+                                            : Server.executeCommand(command).pipe(
+                                                Effect.provide(serverLiveLayer(command, env, input.cwd)),
+                                              )
               ).pipe(
                 Effect.matchEffect({
                   onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -144,6 +153,8 @@ type RuntimeError =
   | McpClient.McpClientError
   | Migration.MigrationError
   | PluginHost.RunError
+  | Project.ProjectError
+  | ProjectStore.ProjectStoreError
   | Review.ReviewError
   | ReviewService.ReviewServiceError
   | RemoteControl.RemoteControlError
@@ -184,6 +195,8 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof SubagentRuntime.SubagentRuntimeError) return `Rika failed: ${error.message}`
   if (error instanceof PluginHost.PluginHostError) return `Rika failed: ${error.message}`
   if (error instanceof PluginUi.PluginUiError) return `Rika failed: ${error.message}`
+  if (error instanceof Project.ProjectError) return Project.formatError(error)
+  if (error instanceof ProjectStore.ProjectStoreError) return `Rika failed: ${error.message}`
   if (error instanceof ContextResolver.ContextResolverError) return `Rika failed: ${error.message}`
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
@@ -541,6 +554,46 @@ export const threadsLiveLayer = (
   return commandLayer
 }
 
+export const projectLiveLayer = (
+  _command: Args.ProjectCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<ProjectLayerOutput, LiveLayerError> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: defaultModeFromEnv(env),
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
+  )
+  const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    Output.layer,
+    Input.layer,
+    databaseLayer,
+    Migration.layer,
+    timeLayer,
+    IdGenerator.layer,
+    projectStoreLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const commandLayer = Project.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+
+  return commandLayer
+}
+
 export const mcpLiveLayer = (
   _command: Args.McpCommand,
   env: Record<string, string | undefined>,
@@ -821,6 +874,17 @@ export type ThreadsLayerOutput =
   | ThreadProjection.Service
   | ThreadService.Service
   | Threads.Service
+  | Time.Service
+
+export type ProjectLayerOutput =
+  | Config.Service
+  | Database.Service
+  | IdGenerator.Service
+  | Input.Service
+  | Migration.Service
+  | Output.Service
+  | Project.Service
+  | ProjectStore.Service
   | Time.Service
 
 export type SkillsLayerOutput = Config.Service | Output.Service | SkillRegistry.Service | Skills.Service
