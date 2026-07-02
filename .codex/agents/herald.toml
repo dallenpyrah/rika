@@ -1,7 +1,7 @@
 name = "herald"
 description = "Deep web-search subagent for finding current public information, official docs, announcements, and external references. May spawn nested subagents for parallel search tracks."
 model = "gpt-5.5"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 web_search = "live"
 nickname_candidates = ["Herald", "Beacon", "Signal", "Scout"]
