@@ -1,5 +1,5 @@
 import { Config, IdGenerator, Time } from "@rika/core"
-import { Modes, Provider, Router } from "@rika/llm"
+import { ExtractJson, Modes, Provider, Router } from "@rika/llm"
 import { Common, Ids } from "@rika/schema"
 import type { Call } from "@rika/schema/tool"
 import { Context, Effect, Layer, Option, Schema } from "effect"
@@ -430,22 +430,13 @@ const parseToolRequest = (content: string): ToolRequest | undefined => {
 }
 
 const parseJsonObject = (content: string): Record<string, unknown> | undefined => {
-  const json = extractJson(content)
+  const json = ExtractJson.extractJson(content)
   try {
     const parsed: unknown = JSON.parse(json)
     return isRecord(parsed) ? parsed : undefined
   } catch {
     return undefined
   }
-}
-
-const extractJson = (content: string) => {
-  const trimmed = content.trim()
-  if (!trimmed.startsWith("```")) return trimmed
-  const firstLineEnd = trimmed.indexOf("\n")
-  const lastFenceStart = trimmed.lastIndexOf("```")
-  if (firstLineEnd < 0 || lastFenceStart <= firstLineEnd) return trimmed
-  return trimmed.slice(firstLineEnd + 1, lastFenceStart).trim()
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

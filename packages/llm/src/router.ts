@@ -1,5 +1,7 @@
 import { Config, Diagnostics } from "@rika/core"
-import { Cause, Clock, Context, Effect, Exit, Layer, Option, Schema, Stream } from "effect"
+import { Cause, Clock, Context, Effect, Exit, JsonSchema, Layer, Option, Schema, Stream } from "effect"
+import { AiError, Prompt } from "effect/unstable/ai"
+import * as ExtractJson from "./extract-json"
 import * as Modes from "./modes"
 import * as Provider from "./provider"
 
@@ -36,11 +38,30 @@ export class RouterError extends Schema.TaggedErrorClass<RouterError>()("RouterE
   provider: Schema.optional(Provider.ProviderName),
 }) {}
 
+export class StructuredOutputError extends Schema.TaggedErrorClass<StructuredOutputError>()("StructuredOutputError", {
+  raw_content: Schema.String,
+  decode_error: Schema.String,
+}) {}
+
+export interface StructuredRequest<A extends Record<string, any>> extends Request {
+  readonly schema: Schema.Codec<A, Record<string, any>>
+  readonly retries?: number
+  readonly objectName?: string
+}
+
+export interface StructuredResponse<A extends Record<string, any>> {
+  readonly value: A
+  readonly raw: Provider.GenerateResponse
+}
+
 export interface Interface {
   readonly route: (request: Request) => Effect.Effect<RoutedRequest, RouterError>
   readonly complete: (
     request: Request,
   ) => Effect.Effect<Provider.GenerateResponse, Provider.ProviderError | RouterError>
+  readonly completeStructured: <A extends Record<string, any>>(
+    request: StructuredRequest<A>,
+  ) => Effect.Effect<StructuredResponse<A>, Provider.ProviderError | RouterError | StructuredOutputError>
   readonly stream: (request: Request) => Stream.Stream<Provider.StreamEvent, Provider.ProviderError | RouterError>
 }
 
@@ -52,17 +73,45 @@ export const layer = Layer.effect(
     const config = yield* Config.Service
     const registry = yield* Provider.Registry
     const route = makeRoute(config)
+    const completeRequest = Effect.fn("LLM.Router.complete")(function* (request: Request) {
+      const routed = yield* route(request)
+      const provider = yield* providerFor(registry, routed)
+      const startedAt = yield* Clock.currentTimeMillis
+      const fields = llmCallSeed(routed, "message")
+      return yield* provider.complete(routed).pipe(
+        Effect.tap((response) => Effect.sync(() => enrichResponseFields(fields, response))),
+        Effect.onExit((exit) => emitLlmCall(startedAt, fields, exit)),
+      )
+    })
+    const completeStructuredNative = Effect.fn("LLM.Router.completeStructured.native")(function* <
+      A extends Record<string, any>,
+    >(request: StructuredRequest<A>) {
+      const routed = yield* route(request)
+      const provider = yield* providerFor(registry, routed)
+      const startedAt = yield* Clock.currentTimeMillis
+      const fields = llmCallSeed(routed, "message")
+      const structuredRequest: Provider.StructuredRequest<A> = {
+        ...routed,
+        schema: request.schema,
+        ...(request.objectName === undefined ? {} : { objectName: request.objectName }),
+      }
+      return yield* provider.completeStructured(structuredRequest).pipe(
+        Effect.tap((response) => Effect.sync(() => enrichResponseFields(fields, response.raw))),
+        Effect.onExit((exit) => emitLlmCall(startedAt, fields, exit)),
+      )
+    })
 
     return Service.of({
       route,
-      complete: Effect.fn("LLM.Router.complete")(function* (request: Request) {
-        const routed = yield* route(request)
-        const provider = yield* providerFor(registry, routed)
-        const startedAt = yield* Clock.currentTimeMillis
-        const fields = llmCallSeed(routed, "message")
-        return yield* provider.complete(routed).pipe(
-          Effect.tap((response) => Effect.sync(() => enrichResponseFields(fields, response))),
-          Effect.onExit((exit) => emitLlmCall(startedAt, fields, exit)),
+      complete: completeRequest,
+      completeStructured: Effect.fn("LLM.Router.completeStructured")(function* <A extends Record<string, any>>(
+        request: StructuredRequest<A>,
+      ) {
+        return yield* completeStructuredNative(request).pipe(
+          Effect.catch((error) => {
+            if (!shouldUsePromptStructuredFallback(error)) return Effect.fail(error)
+            return completeStructuredPromptRequest(completeRequest, request)
+          }),
         )
       }),
       stream: (request: Request) =>
@@ -87,7 +136,130 @@ export const complete = Effect.fn("LLM.Router.complete.call")(function* (request
   return yield* router.complete(request)
 })
 
+export const completeStructured = Effect.fn("LLM.Router.completeStructured.call")(function* <
+  A extends Record<string, any>,
+>(request: StructuredRequest<A>) {
+  const router = yield* Service
+  return yield* router.completeStructured(request)
+})
+
 export const stream = (request: Request) => Stream.unwrap(Effect.map(Service, (router) => router.stream(request)))
+
+const completeStructuredPromptRequest = <A extends Record<string, any>>(
+  completeRequest: (request: Request) => Effect.Effect<Provider.GenerateResponse, Provider.ProviderError | RouterError>,
+  request: StructuredRequest<A>,
+) => completeStructuredAttempt(completeRequest, request, structuredInitialMessages(request), request.retries ?? 1)
+
+const completeStructuredAttempt = <A extends Record<string, any>>(
+  completeRequest: (request: Request) => Effect.Effect<Provider.GenerateResponse, Provider.ProviderError | RouterError>,
+  request: StructuredRequest<A>,
+  messages: ReadonlyArray<Provider.Message>,
+  retriesRemaining: number,
+): Effect.Effect<StructuredResponse<A>, Provider.ProviderError | RouterError | StructuredOutputError> =>
+  Effect.gen(function* () {
+    const raw = yield* completeRequest(structuredRequestWithMessages(request, messages))
+    return yield* decodeStructuredContent(request.schema, raw.content).pipe(
+      Effect.map((value) => ({ value, raw })),
+      Effect.catchTag("StructuredOutputError", (error) => {
+        if (retriesRemaining <= 0) return Effect.fail(error)
+        return completeStructuredAttempt(
+          completeRequest,
+          request,
+          correctiveStructuredMessages(messages, raw.content, error),
+          retriesRemaining - 1,
+        )
+      }),
+    )
+  })
+
+const structuredInitialMessages = <A extends Record<string, any>>(
+  request: StructuredRequest<A>,
+): ReadonlyArray<Provider.Message> =>
+  request.prompt === undefined
+    ? [...request.messages, structuredOutputInstruction(request.schema)]
+    : [structuredOutputInstruction(request.schema)]
+
+const structuredOutputInstruction = <A extends Record<string, any>>(
+  schema: Schema.Codec<A, Record<string, any>>,
+): Provider.Message => ({
+  role: "system",
+  content: `Return only JSON matching this JSON Schema.\n${JSON.stringify(jsonSchemaFor(schema))}`,
+})
+
+const correctiveStructuredMessages = (
+  messages: ReadonlyArray<Provider.Message>,
+  rawContent: string,
+  error: StructuredOutputError,
+): ReadonlyArray<Provider.Message> => [
+  ...messages,
+  { role: "assistant", content: rawContent },
+  {
+    role: "user",
+    content: `The previous response did not match the required schema: ${error.decode_error}\nReturn only corrected JSON.`,
+  },
+]
+
+const jsonSchemaFor = <A extends Record<string, any>>(
+  schema: Schema.Codec<A, Record<string, any>>,
+): JsonSchema.JsonSchema => {
+  const document = JsonSchema.resolveTopLevel$ref(Schema.toJsonSchemaDocument(schema))
+  return Object.keys(document.definitions).length === 0
+    ? document.schema
+    : { ...document.schema, $defs: document.definitions }
+}
+
+const structuredRequestWithMessages = <A extends Record<string, any>>(
+  request: StructuredRequest<A>,
+  messages: ReadonlyArray<Provider.Message>,
+): Request => ({
+  ...(request.mode === undefined ? {} : { mode: request.mode }),
+  ...(request.profile === undefined ? {} : { profile: request.profile }),
+  ...(request.provider === undefined ? {} : { provider: request.provider }),
+  ...(request.model === undefined ? {} : { model: request.model }),
+  messages: request.prompt === undefined ? messages : request.messages,
+  ...(request.reasoning_effort === undefined ? {} : { reasoning_effort: request.reasoning_effort }),
+  ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+  ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+  ...(request.fast_mode === undefined ? {} : { fast_mode: request.fast_mode }),
+  ...(request.prompt === undefined ? {} : { prompt: structuredPrompt(request.prompt, messages) }),
+  ...(request.toolkit === undefined ? {} : { toolkit: request.toolkit }),
+})
+
+const structuredPrompt = (prompt: Prompt.RawInput, messages: ReadonlyArray<Provider.Message>): Prompt.Prompt =>
+  Prompt.concat(Prompt.make(prompt), Provider.promptFromMessages(messages))
+
+const decodeStructuredContent = <A extends Record<string, any>>(
+  schema: Schema.Codec<A, Record<string, any>>,
+  content: string,
+) =>
+  Effect.gen(function* () {
+    const json = ExtractJson.extractJson(content)
+    const parsed = yield* Effect.try({
+      try: () => JSON.parse(json) as unknown,
+      catch: (error) =>
+        new StructuredOutputError({
+          raw_content: content,
+          decode_error: errorMessage(error),
+        }),
+    })
+    return yield* Schema.decodeUnknownEffect(schema)(parsed).pipe(
+      Effect.mapError(
+        (error) =>
+          new StructuredOutputError({
+            raw_content: content,
+            decode_error: String(error),
+          }),
+      ),
+    )
+  })
+
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
+const shouldUsePromptStructuredFallback = (error: unknown) =>
+  AiError.isAiError(error) &&
+  (error.reason._tag === "InvalidOutputError" ||
+    error.reason._tag === "StructuredOutputError" ||
+    error.reason._tag === "UnsupportedSchemaError")
 
 const makeRoute = (config: Config.Interface) =>
   Effect.fn("LLM.Router.route")(function* (request: Request) {

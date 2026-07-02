@@ -31,6 +31,47 @@ describe("LLM Provider", () => {
     expect(result.second).toMatchObject({ provider: "openai", model: "model-test", content: "two" })
   })
 
+  test("fake layer returns schema-decoded structured responses through the provider interface", async () => {
+    const Decision = Schema.Struct({ answer: Schema.String, score: Schema.Number })
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const provider = yield* Provider.Service
+        return yield* provider.completeStructured({
+          ...request,
+          schema: Decision,
+        })
+      }).pipe(Effect.provide(Provider.fakeLayer(['{"answer":"ship","score":1}']))),
+    )
+
+    expect(result.value).toEqual({ answer: "ship", score: 1 })
+    expect(result.raw).toMatchObject({
+      provider: "openai",
+      model: "model-test",
+      content: '{"answer":"ship","score":1}',
+    })
+  })
+
+  test("structured completions run through structured middleware", async () => {
+    const Decision = Schema.Struct({ answer: Schema.String })
+    let called = false
+    const layer = Provider.layer({
+      completeStructuredMiddleware: () => (effect) =>
+        Effect.gen(function* () {
+          called = true
+          return yield* effect
+        }),
+    }).pipe(Layer.provide(Provider.fakeLanguageModelLayer(['{"answer":"ok"}'])))
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const provider = yield* Provider.Service
+        return yield* provider.completeStructured({ ...request, schema: Decision })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(called).toBe(true)
+  })
+
   test("fake stream normalizes complete responses into stream events", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

@@ -88,6 +88,23 @@ describe("SpecialtyTools", () => {
     })
   })
 
+  test("oracle preserves the answer-only fallback for invalid structured output", async () => {
+    const output = object(
+      await Effect.runPromise(
+        SpecialtyTools.oracle({ task: "Review this design" }, call("oracle", { task: "Review" })).pipe(
+          Effect.provide(modelLayer(["plain second opinion"])),
+        ),
+      ),
+    )
+
+    expect(output).toMatchObject({
+      type: "specialty.oracle",
+      answer: "plain second opinion",
+      artifact_id: "artifact_1",
+    })
+    expect(output.findings).toEqual([])
+  })
+
   test("librarian keeps external research separate from local search output and records citations", async () => {
     const output = object(
       await Effect.runPromise(
@@ -122,6 +139,18 @@ describe("SpecialtyTools", () => {
       path: "src/router.ts",
       line_start: 10,
     })
+  })
+
+  test("librarian fails on invalid structured model output instead of silently falling back", async () => {
+    const error = await Effect.runPromise(
+      SpecialtyTools.librarian(
+        { question: "How does routing work?", repository: "github.com/example/framework" },
+        call("librarian", { question: "How does routing work?" }),
+      ).pipe(Effect.provide(modelLayer(["not json"])), Effect.flip),
+    )
+
+    expect(error).toBeInstanceOf(SpecialtyTools.SpecialtyToolsError)
+    expect(error.operation).toBe("librarian")
   })
 
   test("painter is opt-in, artifact-backed, and backend-swappable", async () => {

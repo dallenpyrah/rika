@@ -31,6 +31,16 @@ const defaultToolLayer = ToolExecutor.fakeLayer({
 const registryFromProviderLayer = (providerLayer: Layer.Layer<Provider.Service>) =>
   Provider.registryLayerFromService.pipe(Layer.provide(providerLayer))
 
+const providerServiceOf = (
+  implementation: Omit<Provider.Interface, "completeStructured"> &
+    Partial<Pick<Provider.Interface, "completeStructured">>,
+) =>
+  Provider.Service.of({
+    ...implementation,
+    completeStructured:
+      implementation.completeStructured ?? (() => Effect.die(new Error("structured completion not configured"))),
+  })
+
 const makeLayer = (
   responses: ReadonlyArray<Provider.FakeResponse>,
   toolLayer = defaultToolLayer,
@@ -262,7 +272,7 @@ describe("AgentLoop", () => {
     const content = chunkText.repeat(chunkCount)
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.bursty.complete")(function* (request: Provider.GenerateRequest) {
           return fakeResponse(request, content)
@@ -328,7 +338,7 @@ describe("AgentLoop", () => {
     const toolCallId = "call_bursty_tool_input"
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.burstyToolInput.complete")(function* (request: Provider.GenerateRequest) {
           return fakeResponse(request, "done")
@@ -430,7 +440,7 @@ describe("AgentLoop", () => {
     const captured: Array<Provider.GenerateRequest> = []
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.image.complete")(function* (request: Provider.GenerateRequest) {
           captured.push(request)
@@ -499,7 +509,7 @@ describe("AgentLoop", () => {
     const captured: Array<Provider.GenerateRequest> = []
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.compacted.complete")(function* (request: Provider.GenerateRequest) {
           captured.push(request)
@@ -659,7 +669,7 @@ describe("AgentLoop", () => {
     const captured: Array<Provider.GenerateRequest> = []
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.preTurnAuto.complete")(function* (request: Provider.GenerateRequest) {
           return fakeResponse(request, "pre-turn summary")
@@ -739,7 +749,7 @@ describe("AgentLoop", () => {
     let completeCalls = 0
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.preTurnPrune.complete")(function* (request: Provider.GenerateRequest) {
           completeCalls += 1
@@ -824,7 +834,7 @@ describe("AgentLoop", () => {
     let completeCalls = 0
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.preTurnDisabled.complete")(function* (request: Provider.GenerateRequest) {
           completeCalls += 1
@@ -892,7 +902,7 @@ describe("AgentLoop", () => {
     const reservedWorkspace = Ids.WorkspaceId.make("workspace_agent_pre_turn_reserved")
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.preTurnReserved.complete")(function* (request: Provider.GenerateRequest) {
           return fakeResponse(request, "reserved summary")
@@ -1187,7 +1197,7 @@ describe("AgentLoop", () => {
     const captured: Array<Provider.GenerateRequest> = []
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.provider.complete")(function* (request: Provider.GenerateRequest) {
           captured.push(request)
@@ -1319,7 +1329,7 @@ describe("AgentLoop", () => {
     const defectThread = Ids.ThreadId.make("thread_agent_model_defect")
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: () => Effect.die(new Error("provider defect")),
         stream: () => Stream.die(new Error("provider defect")),
@@ -1358,7 +1368,7 @@ describe("AgentLoop", () => {
     const interruptedThread = Ids.ThreadId.make("thread_agent_stream_interrupted")
     const providerLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: () => Effect.never,
         stream: () => Stream.never,
@@ -1464,7 +1474,7 @@ describe("AgentLoop", () => {
   test("emits model.reasoning.delta events from provider reasoning chunks", async () => {
     const reasoningProviderLayer = Layer.succeed(
       Provider.Service,
-      Provider.Service.of({
+      providerServiceOf({
         name: "openai",
         complete: Effect.fn("AgentLoop.test.reasoning.complete")(function* (request: Provider.GenerateRequest) {
           return fakeResponse(request, "final answer")
@@ -1560,7 +1570,7 @@ const takeUntilEvent = (queue: Queue.Queue<Event.Event>, type: Event.Event["type
 const failingProviderLayer = (error: Provider.ProviderError) =>
   Layer.succeed(
     Provider.Service,
-    Provider.Service.of({
+    providerServiceOf({
       name: "openai",
       complete: () => Effect.fail(error),
       stream: () => Stream.fail(error),
@@ -1571,7 +1581,7 @@ const recoveringProviderLayer = (error: Provider.ProviderError, captured: Array<
   let calls = 0
   return Layer.succeed(
     Provider.Service,
-    Provider.Service.of({
+    providerServiceOf({
       name: "openai",
       complete: Effect.fn("AgentLoop.test.recover.complete")(function* (request: Provider.GenerateRequest) {
         return fakeResponse(request, "recovered answer")
@@ -1754,7 +1764,7 @@ const midTurnCompactingProviderLayer = (captured: Array<Provider.GenerateRequest
   let streamCalls = 0
   return Layer.succeed(
     Provider.Service,
-    Provider.Service.of({
+    providerServiceOf({
       name: "openai",
       complete: Effect.fn("AgentLoop.test.midTurnAuto.complete")(function* (request: Provider.GenerateRequest) {
         const sawPendingToolOutput = JSON.stringify(request.messages).includes("PENDING_TOOL_OUTPUT")
@@ -1792,7 +1802,7 @@ const overflowRecoveringProviderLayer = (captured: Array<Provider.GenerateReques
   let streamCalls = 0
   return Layer.succeed(
     Provider.Service,
-    Provider.Service.of({
+    providerServiceOf({
       name: "openai",
       complete: Effect.fn("AgentLoop.test.overflow.complete")(function* (request: Provider.GenerateRequest) {
         return fakeResponse(request, "overflow summary")

@@ -62,6 +62,16 @@ export const GenerateRequest = Schema.Struct({
   service_tier: Schema.optional(ServiceTier),
 }).annotate({ identifier: "Rika.LLM.GenerateRequest" })
 
+export interface StructuredRequest<A extends Record<string, any>> extends GenerateRequest {
+  readonly schema: Schema.Codec<A, Record<string, any>>
+  readonly objectName?: string
+}
+
+export interface StructuredResponse<A extends Record<string, any>> {
+  readonly value: A
+  readonly raw: GenerateResponse
+}
+
 export type ToolkitInput = LanguageModel.ToolkitInput<any, never, never>
 
 export interface RuntimeOptions {
@@ -193,18 +203,28 @@ export type CompleteMiddleware = (
   request: GenerateRequest,
 ) => (effect: Effect.Effect<GenerateResponse, ProviderError>) => Effect.Effect<GenerateResponse, ProviderError>
 
+export type CompleteStructuredMiddleware = <A extends Record<string, any>>(
+  request: StructuredRequest<A>,
+) => (
+  effect: Effect.Effect<StructuredResponse<A>, ProviderError>,
+) => Effect.Effect<StructuredResponse<A>, ProviderError>
+
 export type StreamMiddleware = (
   request: GenerateRequest,
 ) => (stream: Stream.Stream<StreamEvent, ProviderError>) => Stream.Stream<StreamEvent, ProviderError>
 
 export interface LayerOptions {
   readonly completeMiddleware?: CompleteMiddleware
+  readonly completeStructuredMiddleware?: CompleteStructuredMiddleware
   readonly streamMiddleware?: StreamMiddleware
 }
 
 export interface Interface {
   readonly name: ProviderName
   readonly complete: (request: GenerateRequest) => Effect.Effect<GenerateResponse, ProviderError>
+  readonly completeStructured: <A extends Record<string, any>>(
+    request: StructuredRequest<A>,
+  ) => Effect.Effect<StructuredResponse<A>, ProviderError>
   readonly stream: (request: GenerateRequest) => Stream.Stream<StreamEvent, ProviderError>
 }
 
@@ -245,6 +265,13 @@ export const make = (options: LayerOptions = {}) =>
       complete: Effect.fn("LLM.Provider.complete")(function* (request: GenerateRequest) {
         const complete = completeWithLanguageModel(languageModel, request)
         const withMiddleware = options.completeMiddleware?.(request)(complete) ?? complete
+        return yield* withMiddleware
+      }),
+      completeStructured: Effect.fn("LLM.Provider.completeStructured")(function* <A extends Record<string, any>>(
+        request: StructuredRequest<A>,
+      ) {
+        const complete = completeStructuredWithLanguageModel(languageModel, request)
+        const withMiddleware = options.completeStructuredMiddleware?.(request)(complete) ?? complete
         return yield* withMiddleware
       }),
       stream: (request: GenerateRequest) => {
@@ -353,6 +380,23 @@ export const completeWithLanguageModel = (languageModel: LanguageModel.Service, 
             })
           : Effect.fail(error),
       ),
+    )
+
+export const completeStructuredWithLanguageModel = <A extends Record<string, any>>(
+  languageModel: LanguageModel.Service,
+  request: StructuredRequest<A>,
+): Effect.Effect<StructuredResponse<A>, ProviderError> =>
+  languageModel
+    .generateObject({
+      prompt: sanitizePromptInput(request.prompt ?? promptFromMessages(request.messages)),
+      schema: request.schema,
+      ...(request.objectName === undefined ? {} : { objectName: request.objectName }),
+    })
+    .pipe(
+      Effect.map((response) => ({
+        value: response.value,
+        raw: responseFromGenerateText(request, response),
+      })),
     )
 
 export const streamWithLanguageModel = (

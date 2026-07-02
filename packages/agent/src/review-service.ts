@@ -1,6 +1,7 @@
 import { ArtifactStore, Database } from "@rika/persistence"
 import { Artifact, Common, Ids } from "@rika/schema"
 import { Config, IdGenerator, Time } from "@rika/core"
+import { ExtractJson } from "@rika/llm"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as CheckRegistry from "./check-registry"
 import * as SubagentRuntime from "./subagent-runtime"
@@ -352,21 +353,12 @@ const runGit = (workspaceRoot: string, args: ReadonlyArray<string>) =>
   })
 
 const parseJson = (content: string): Option.Option<unknown> => {
-  const json = extractJson(content)
+  const json = ExtractJson.extractJson(content)
   try {
     return Option.some(JSON.parse(json))
   } catch {
     return Option.none()
   }
-}
-
-const extractJson = (content: string) => {
-  const trimmed = content.trim()
-  if (!trimmed.startsWith("```")) return trimmed
-  const firstLineEnd = trimmed.indexOf("\n")
-  const lastFenceStart = trimmed.lastIndexOf("```")
-  if (firstLineEnd < 0 || lastFenceStart <= firstLineEnd) return trimmed
-  return trimmed.slice(firstLineEnd + 1, lastFenceStart).trim()
 }
 
 const capDiff = (diff: string) => (diff.length > 120_000 ? `${diff.slice(0, 120_000)}\n[diff truncated]` : diff)

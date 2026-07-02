@@ -15,6 +15,16 @@ import { BackendEndpoint, Execute, Input, Output } from "../src/index"
 const defaultWorkspaceRoot = "/workspace/rika-cli-test"
 const defaultDataDir = "/workspace/rika-cli-test/.rika"
 
+const providerServiceOf = (
+  implementation: Omit<Provider.Interface, "completeStructured"> &
+    Partial<Pick<Provider.Interface, "completeStructured">>,
+) =>
+  Provider.Service.of({
+    ...implementation,
+    completeStructured:
+      implementation.completeStructured ?? (() => Effect.die(new Error("structured completion not configured"))),
+  })
+
 const makeLayer = (
   output: Output.MemoryOutput,
   workspaceRoot = defaultWorkspaceRoot,
@@ -372,7 +382,7 @@ describe("CLI execute", () => {
     const providerNames: ReadonlyArray<Provider.ProviderName> = ["anthropic", "openai"]
     const providerRegistryLayer = Provider.registryLayerFromProviders(
       providerNames.map((name) =>
-        Provider.Service.of({
+        providerServiceOf({
           name,
           complete: () => Effect.fail(failure),
           stream: () => Stream.fail(failure),

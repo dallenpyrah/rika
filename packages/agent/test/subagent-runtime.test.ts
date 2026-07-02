@@ -253,6 +253,7 @@ const fakeRouterLayer = (complete: (request: Router.Request) => Effect.Effect<Pr
         }
       }),
       complete: Effect.fn("SubagentRuntime.test.complete")(complete),
+      completeStructured: () => Effect.die(new Error("structured completion not configured")),
       stream: (request: Router.Request) =>
         Stream.fromIterable(
           Provider.streamEventsFromResponse(response(providerMessageText(request.messages.at(-1)?.content ?? ""))),

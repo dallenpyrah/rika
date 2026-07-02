@@ -269,22 +269,25 @@ const makeService = (dependencies: Dependencies): Interface =>
 
 const modelRoutedBackend = (router: Router.Interface, workspaceRoot: string): Backend => ({
   oracle: Effect.fn("SpecialtyTools.backend.oracle")(function* (input: OracleInput) {
-    const response = yield* router
-      .complete({
+    const result = yield* router
+      .completeStructured({
         profile: "oracle",
+        schema: OracleDraft,
         messages: [
           { role: "system", content: oracleSystemPrompt },
           { role: "user", content: oracleUserPrompt(input, workspaceRoot) },
         ],
         metadata: { specialty_tool: "oracle" },
       })
+      .pipe(Effect.catchTag("StructuredOutputError", (error) => Effect.succeed(oracleFallback(error.raw_content))))
       .pipe(Effect.mapError((error) => fromExternalError(error, "oracle")))
-    return parseOracleDraft(response.content, response.model)
+    return { ...result.value, model: result.value.model ?? result.raw.model }
   }),
   librarian: Effect.fn("SpecialtyTools.backend.librarian")(function* (input: LibrarianInput) {
-    const response = yield* router
-      .complete({
+    const result = yield* router
+      .completeStructured({
         profile: "librarian",
+        schema: ResearchDraft,
         messages: [
           { role: "system", content: librarianSystemPrompt },
           { role: "user", content: librarianUserPrompt(input) },
@@ -292,12 +295,13 @@ const modelRoutedBackend = (router: Router.Interface, workspaceRoot: string): Ba
         metadata: { specialty_tool: "librarian" },
       })
       .pipe(Effect.mapError((error) => fromExternalError(error, "librarian")))
-    return parseResearchDraft(response.content, response.model)
+    return { ...result.value, model: result.value.model ?? result.raw.model }
   }),
   painter: Effect.fn("SpecialtyTools.backend.painter")(function* (input: PainterInput) {
-    const response = yield* router
-      .complete({
+    const result = yield* router
+      .completeStructured({
         mode: "smart",
+        schema: PainterDraft,
         messages: [
           { role: "system", content: painterSystemPrompt },
           { role: "user", content: painterUserPrompt(input) },
@@ -305,7 +309,7 @@ const modelRoutedBackend = (router: Router.Interface, workspaceRoot: string): Ba
         metadata: { specialty_tool: "painter" },
       })
       .pipe(Effect.mapError((error) => fromExternalError(error, "painter")))
-    return parsePainterDraft(response.content, input, response.model)
+    return { ...result.value, model: result.value.model ?? result.raw.model }
   }),
 })
 
@@ -353,36 +357,10 @@ const turnIdFromCall = (call: Call) => {
   return typeof value === "string" ? Option.some(Ids.TurnId.make(value)) : Option.none<Ids.TurnId>()
 }
 
-const parseOracleDraft = (content: string, model: string): OracleDraft => {
-  const parsed = parseJsonObject(content)
-  const decoded = Option.isSome(parsed)
-    ? Schema.decodeUnknownOption(OracleDraft)(parsed.value)
-    : Option.none<OracleDraft>()
-  if (Option.isSome(decoded)) return { ...decoded.value, model: decoded.value.model ?? model }
-  return { answer: content.trim(), findings: [], model }
-}
-
-const parseResearchDraft = (content: string, model: string): ResearchDraft => {
-  const parsed = parseJsonObject(content)
-  const decoded = Option.isSome(parsed)
-    ? Schema.decodeUnknownOption(ResearchDraft)(parsed.value)
-    : Option.none<ResearchDraft>()
-  if (Option.isSome(decoded)) return { ...decoded.value, model: decoded.value.model ?? model }
-  return { answer: content.trim(), citations: [], model }
-}
-
-const parsePainterDraft = (content: string, input: PainterInput, model: string): PainterDraft => {
-  const parsed = parseJsonObject(content)
-  const decoded = Option.isSome(parsed)
-    ? Schema.decodeUnknownOption(PainterDraft)(parsed.value)
-    : Option.none<PainterDraft>()
-  if (Option.isSome(decoded)) return { ...decoded.value, model: decoded.value.model ?? model }
-  return {
-    prompt: input.prompt,
-    images: [svgImage(input.prompt, `Painter prompt plan: ${content.trim()}`)],
-    model,
-  }
-}
+const oracleFallback = (content: string): Router.StructuredResponse<OracleDraft> => ({
+  value: { answer: content.trim(), findings: [] },
+  raw: { provider: "openai", model: "structured-output-fallback", content },
+})
 
 const defaultOracleDraft = (input: OracleInput): OracleDraft => ({
   answer: `Fake oracle response for: ${input.task}`,
@@ -481,24 +459,6 @@ const imageToJson = (image: ImageAsset): Common.JsonValue => ({
   ...(image.url === undefined ? {} : { url: image.url }),
   ...(image.description === undefined ? {} : { description: image.description }),
 })
-
-const parseJsonObject = (content: string): Option.Option<unknown> => {
-  const json = extractJson(content)
-  try {
-    return Option.some(JSON.parse(json))
-  } catch {
-    return Option.none()
-  }
-}
-
-const extractJson = (content: string) => {
-  const trimmed = content.trim()
-  if (!trimmed.startsWith("```")) return trimmed
-  const firstLineEnd = trimmed.indexOf("\n")
-  const lastFenceStart = trimmed.lastIndexOf("```")
-  if (firstLineEnd < 0 || lastFenceStart <= firstLineEnd) return trimmed
-  return trimmed.slice(firstLineEnd + 1, lastFenceStart).trim()
-}
 
 const decodeOracleInput = (call: Call) => {
   const decoded = Schema.decodeUnknownOption(OracleInput)(call.input)

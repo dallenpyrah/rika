@@ -42,6 +42,7 @@ const makeLayer = (
           if (response instanceof Router.RouterError) return yield* response
           return response
         }),
+      completeStructured: () => Effect.die(new Error("structured completion not configured")),
       stream: () => Stream.empty,
     }),
   )
