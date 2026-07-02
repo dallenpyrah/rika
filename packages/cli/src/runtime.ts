@@ -28,11 +28,13 @@ import {
 } from "@rika/persistence"
 import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
+import { Ids } from "@rika/schema"
 import { HttpServer, OrbMirror, RemoteControl, ThreadLive } from "@rika/server"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
 import type { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
 import { Effect, Layer, Schedule, Stream } from "effect"
 import * as Args from "./args"
+import * as BackendEndpoint from "./backend-endpoint"
 import * as CliConfig from "./config"
 import * as Doctor from "./doctor"
 import * as Execute from "./execute"
@@ -550,6 +552,11 @@ const interactiveRemoteLiveLayerFromTui = (
     Layer.provideMerge(timeLayer),
     Layer.provideMerge(IdGenerator.layer),
   )
+  const orbStoreLayer = OrbStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -557,6 +564,7 @@ const interactiveRemoteLiveLayerFromTui = (
     timeLayer,
     IdGenerator.layer,
     projectStoreLayer,
+    orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const backendLayer = LocalBackend.layerFromInput({ env, cwd })
@@ -564,14 +572,29 @@ const interactiveRemoteLiveLayerFromTui = (
     RemoteSession.Service,
     Effect.gen(function* () {
       const backend = yield* LocalBackend.Service
+      const orbs = yield* OrbStore.Service
+      const health = yield* BackendEndpoint.Health
       const renderer = yield* Adapter.Service
       const ticker = yield* Ticker.Service
       const workspaceId = yield* workspaceIdForRoot(workspaceRoot)
-      const client = reconnectingClient({ backend, workspace_root: workspaceRoot, data_dir: dataDir, mode })
+      const resolveEndpoint = (endpointInput: ReconnectingEndpointInput) =>
+        BackendEndpoint.resolveEndpoint({
+          ...endpointInput,
+          workspace_root: workspaceRoot,
+          data_dir: dataDir,
+          mode,
+          env,
+        }).pipe(
+          Effect.provideService(LocalBackend.Service, backend),
+          Effect.provideService(OrbStore.Service, orbs),
+          Effect.provideService(BackendEndpoint.Health, health),
+        )
+      const client = reconnectingClient({ resolveEndpoint })
       return RemoteSession.make(client, renderer, ticker.ticks, workspaceId)
     }),
   ).pipe(
     Layer.provideMerge(backendLayer),
+    Layer.provideMerge(BackendEndpoint.healthLayer),
     Layer.provideMerge(Adapter.layer),
     Layer.provideMerge(Ticker.layer),
     Layer.provideMerge(migratedStorageLayer),
@@ -589,39 +612,44 @@ const workspaceIdForRoot = Effect.fn("Cli.Runtime.workspaceIdForRoot")(function*
 })
 
 export interface ReconnectingClientInput {
-  readonly backend: LocalBackend.Interface
-  readonly workspace_root: string
-  readonly data_dir: string
-  readonly mode: Config.Mode
+  readonly resolveEndpoint: (
+    input: ReconnectingEndpointInput,
+  ) => Effect.Effect<BackendEndpoint.BackendEndpoint, BackendEndpoint.ResolveError>
   readonly fetch?: Client.FetchTransportInput["fetch"]
 }
 
+export interface ReconnectingEndpointInput {
+  readonly thread_id?: Ids.ThreadId
+}
+
+const endpointInputFor = (threadId: Ids.ThreadId | undefined): ReconnectingEndpointInput =>
+  threadId === undefined ? {} : { thread_id: threadId }
+
+const cacheKey = (endpointInput: ReconnectingEndpointInput) => endpointInput.thread_id ?? "default"
+
 export const reconnectingClient = (input: ReconnectingClientInput): Client.Interface => {
-  let current: LocalBackend.BackendEndpoint | undefined
-  const resolveEndpoint = (refresh: boolean) =>
-    current !== undefined && !refresh
-      ? Effect.succeed(current)
-      : input.backend
-          .connectOrStart({
-            workspace_root: input.workspace_root,
-            data_dir: input.data_dir,
-            mode: input.mode,
-          })
-          .pipe(
-            Effect.tap((next) =>
-              Effect.sync(() => {
-                current = next
+  const current = new Map<string, BackendEndpoint.BackendEndpoint>()
+  const resolveEndpoint = (endpointInput: ReconnectingEndpointInput, refresh: boolean) => {
+    const key = cacheKey(endpointInput)
+    const cached = current.get(key)
+    return cached !== undefined && !refresh
+      ? Effect.succeed(cached)
+      : input.resolveEndpoint(endpointInput).pipe(
+          Effect.tap((next) =>
+            Effect.sync(() => {
+              current.set(key, next)
+            }),
+          ),
+          Effect.mapError(
+            (error) =>
+              new Client.SdkError({
+                message: error.message,
+                operation: `backend.${error.operation}`,
               }),
-            ),
-            Effect.mapError(
-              (error) =>
-                new Client.SdkError({
-                  message: error.message,
-                  operation: `backend.${error.operation}`,
-                }),
-            ),
-          )
-  const clientForEndpoint = (resolvedEndpoint: LocalBackend.BackendEndpoint) =>
+          ),
+        )
+  }
+  const clientForEndpoint = (resolvedEndpoint: BackendEndpoint.BackendEndpoint) =>
     Client.make(
       Client.fetchTransport({
         base_url: resolvedEndpoint.url,
@@ -629,47 +657,60 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
         ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       }),
     )
-  const request = <A>(use: (remote: Client.Interface) => Effect.Effect<A, Client.SdkError>) =>
-    resolveEndpoint(false).pipe(
+  const request = <A>(
+    endpointInput: ReconnectingEndpointInput,
+    use: (remote: Client.Interface) => Effect.Effect<A, Client.SdkError>,
+  ) =>
+    resolveEndpoint(endpointInput, false).pipe(
       Effect.map(clientForEndpoint),
       Effect.flatMap(use),
       Effect.catchTag("SdkError", (error) =>
         retryableSdkError(error)
-          ? resolveEndpoint(true).pipe(Effect.map(clientForEndpoint), Effect.flatMap(use))
+          ? resolveEndpoint(endpointInput, true).pipe(Effect.map(clientForEndpoint), Effect.flatMap(use))
           : Effect.fail(error),
       ),
     )
-  const stream = <A>(use: (remote: Client.Interface) => Stream.Stream<A, Client.SdkError>) =>
-    Stream.unwrap(resolveEndpoint(false).pipe(Effect.map((next) => use(clientForEndpoint(next))))).pipe(
+  const stream = <A>(
+    endpointInput: ReconnectingEndpointInput,
+    use: (remote: Client.Interface) => Stream.Stream<A, Client.SdkError>,
+  ) =>
+    Stream.unwrap(resolveEndpoint(endpointInput, false).pipe(Effect.map((next) => use(clientForEndpoint(next))))).pipe(
       Stream.catch((error: Client.SdkError) =>
         retryableSdkError(error)
-          ? Stream.unwrap(resolveEndpoint(true).pipe(Effect.map((next) => use(clientForEndpoint(next)))))
+          ? Stream.unwrap(resolveEndpoint(endpointInput, true).pipe(Effect.map((next) => use(clientForEndpoint(next)))))
           : Stream.fail(error),
       ),
     )
 
   return {
-    backendHealth: () => request((remote) => remote.backendHealth()),
-    createThread: (thread) => request((remote) => remote.createThread(thread)),
-    listThreads: (thread) => request((remote) => remote.listThreads(thread)),
-    openThread: (threadId, userId) => request((remote) => remote.openThread(threadId, userId)),
-    previewThread: (threadId, preview) => request((remote) => remote.previewThread(threadId, preview)),
-    archiveThread: (threadId, userId) => request((remote) => remote.archiveThread(threadId, userId)),
-    unarchiveThread: (threadId, userId) => request((remote) => remote.unarchiveThread(threadId, userId)),
-    searchThreads: (search) => request((remote) => remote.searchThreads(search)),
-    shareThread: (threadId, userId) => request((remote) => remote.shareThread(threadId, userId)),
-    referenceThread: (reference) => request((remote) => remote.referenceThread(reference)),
-    subscribeThreadEvents: (subscription) => stream((remote) => remote.subscribeThreadEvents(subscription)),
-    startTurn: (turn) => request((remote) => remote.startTurn(turn)),
-    interruptTurn: (turn) => request((remote) => remote.interruptTurn(turn)),
-    listArtifacts: (artifacts) => request((remote) => remote.listArtifacts(artifacts)),
-    getArtifact: (artifactId, userId) => request((remote) => remote.getArtifact(artifactId, userId)),
-    connectIde: (connection) => request((remote) => remote.connectIde(connection)),
-    disconnectIde: (disconnection) => request((remote) => remote.disconnectIde(disconnection)),
-    updateIdeContext: (context) => request((remote) => remote.updateIdeContext(context)),
-    ideStatus: () => request((remote) => remote.ideStatus()),
-    openIdeFile: (file) => request((remote) => remote.openIdeFile(file)),
-    ideNavigationRequests: () => request((remote) => remote.ideNavigationRequests()),
+    backendHealth: () => request({}, (remote) => remote.backendHealth()),
+    createThread: (thread) => request(endpointInputFor(thread?.thread_id), (remote) => remote.createThread(thread)),
+    listThreads: (thread) => request({}, (remote) => remote.listThreads(thread)),
+    openThread: (threadId, userId) => request({ thread_id: threadId }, (remote) => remote.openThread(threadId, userId)),
+    previewThread: (threadId, preview) =>
+      request({ thread_id: threadId }, (remote) => remote.previewThread(threadId, preview)),
+    archiveThread: (threadId, userId) =>
+      request({ thread_id: threadId }, (remote) => remote.archiveThread(threadId, userId)),
+    unarchiveThread: (threadId, userId) =>
+      request({ thread_id: threadId }, (remote) => remote.unarchiveThread(threadId, userId)),
+    searchThreads: (search) => request({}, (remote) => remote.searchThreads(search)),
+    shareThread: (threadId, userId) =>
+      request({ thread_id: threadId }, (remote) => remote.shareThread(threadId, userId)),
+    referenceThread: (reference) =>
+      request({ thread_id: reference.thread_id }, (remote) => remote.referenceThread(reference)),
+    subscribeThreadEvents: (subscription) =>
+      stream({ thread_id: subscription.thread_id }, (remote) => remote.subscribeThreadEvents(subscription)),
+    startTurn: (turn) => request({ thread_id: turn.thread_id }, (remote) => remote.startTurn(turn)),
+    interruptTurn: (turn) => request({ thread_id: turn.thread_id }, (remote) => remote.interruptTurn(turn)),
+    listArtifacts: (artifacts) =>
+      request({ thread_id: artifacts.thread_id }, (remote) => remote.listArtifacts(artifacts)),
+    getArtifact: (artifactId, userId) => request({}, (remote) => remote.getArtifact(artifactId, userId)),
+    connectIde: (connection) => request({}, (remote) => remote.connectIde(connection)),
+    disconnectIde: (disconnection) => request({}, (remote) => remote.disconnectIde(disconnection)),
+    updateIdeContext: (context) => request({}, (remote) => remote.updateIdeContext(context)),
+    ideStatus: () => request({}, (remote) => remote.ideStatus()),
+    openIdeFile: (file) => request({}, (remote) => remote.openIdeFile(file)),
+    ideNavigationRequests: () => request({}, (remote) => remote.ideNavigationRequests()),
   }
 }
 

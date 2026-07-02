@@ -29,6 +29,7 @@ describe("CLI local backend", () => {
     )
 
     expect(endpoint).toEqual({
+      kind: "local",
       url: record.url,
       token: record.token,
       workspace_root: workspaceRoot,
@@ -111,6 +112,8 @@ describe("CLI local backend", () => {
     )
 
     expect(before).toMatchObject({ status: "stale", endpoint: stale.url, pid: 111 })
+    expect(endpoint.kind).toBe("local")
+    if (endpoint.kind !== "local") throw new Error("expected local endpoint")
     expect(endpoint.url).toBe("http://127.0.0.1:45679")
     expect(after).toMatchObject({ status: "healthy", endpoint: endpoint.url, pid: endpoint.pid })
   })
@@ -144,10 +147,12 @@ describe("CLI local backend", () => {
       Effect.gen(function* () {
         const backend = yield* LocalBackend.Service
         const client = Runtime.reconnectingClient({
-          backend,
-          workspace_root: workspaceRoot,
-          data_dir: dataDir,
-          mode: "smart",
+          resolveEndpoint: () =>
+            backend.connectOrStart({
+              workspace_root: workspaceRoot,
+              data_dir: dataDir,
+              mode: "smart",
+            }),
           fetch: async (input) => {
             const url = input instanceof Request ? input.url : String(input)
             urls.push(url)

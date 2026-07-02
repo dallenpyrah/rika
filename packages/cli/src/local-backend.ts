@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile, chmod } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Config } from "@rika/core"
-import { Remote } from "@rika/schema"
+import { Ids, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 
 const defaultHost = "127.0.0.1"
@@ -11,14 +11,29 @@ const staleLockMillis = 10_000
 const startupAttempts = 100
 const startupDelayMillis = 100
 
-export interface BackendEndpoint extends Schema.Schema.Type<typeof BackendEndpoint> {}
-export const BackendEndpoint = Schema.Struct({
-  url: Schema.String,
-  token: Schema.String,
-  workspace_root: Schema.String,
-  data_dir: Schema.String,
-  pid: Schema.Int,
-}).annotate({ identifier: "Rika.Cli.LocalBackend.BackendEndpoint" })
+export const BackendEndpoint = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("local"),
+    url: Schema.String,
+    token: Schema.String,
+    workspace_root: Schema.String,
+    data_dir: Schema.String,
+    pid: Schema.Int,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("env"),
+    url: Schema.String,
+    token: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("orb"),
+    url: Schema.String,
+    token: Schema.String,
+    orb_id: Ids.OrbId,
+    thread_id: Ids.ThreadId,
+  }),
+]).annotate({ identifier: "Rika.Cli.LocalBackend.BackendEndpoint" })
+export type BackendEndpoint = typeof BackendEndpoint.Type
 
 export interface BackendRecord extends Schema.Schema.Type<typeof BackendRecord> {}
 export const BackendRecord = Schema.Struct({
@@ -119,23 +134,24 @@ export const status = Effect.fn("Cli.LocalBackend.status.call")(function* (input
 export const recordPath = (dataDir: string) => join(dataDir, recordFile)
 export const lockPath = (dataDir: string) => join(dataDir, lockDirectory)
 
-export const redactEndpoint = (endpoint: BackendEndpoint | BackendRecord): Omit<BackendEndpoint, "token"> => ({
-  url: endpoint.url,
-  workspace_root: endpoint.workspace_root,
-  data_dir: endpoint.data_dir,
-  pid: endpoint.pid,
-})
+export const redactEndpoint = (endpoint: BackendEndpoint | BackendRecord) => {
+  if ("kind" in endpoint && endpoint.kind !== "local") return { kind: endpoint.kind, url: endpoint.url }
+  return {
+    kind: "local" as const,
+    url: endpoint.url,
+    workspace_root: endpoint.workspace_root,
+    data_dir: endpoint.data_dir,
+    pid: endpoint.pid,
+  }
+}
 
 const makeService = (env: Record<string, string | undefined>, cwd: string, system: System): Interface => ({
   connectOrStart: Effect.fn("Cli.LocalBackend.connectOrStart")(function* (input: ConnectInput) {
-    const remoteEndpoint = endpointFromEnv(env, input)
-    if (remoteEndpoint !== undefined) return remoteEndpoint
-
     yield* system.makeDir(input.data_dir)
     return yield* connectAttempt({ env, cwd, input, system, attempt: 0 })
   }),
   status: Effect.fn("Cli.LocalBackend.status")(function* (input: StatusInput) {
-    const remoteEndpoint = endpointFromEnv(env, { ...input, mode: "smart" })
+    const remoteEndpoint = endpointFromEnv(env)
     const backend_id = backendId(env, cwd)
     if (remoteEndpoint !== undefined) {
       return {
@@ -143,7 +159,6 @@ const makeService = (env: Record<string, string | undefined>, cwd: string, syste
         workspace_root: input.workspace_root,
         data_dir: input.data_dir,
         endpoint: remoteEndpoint.url,
-        pid: remoteEndpoint.pid,
       }
     }
 
@@ -260,15 +275,28 @@ const healthyRecord = (
 const isHealthy = (system: System, record: BackendRecord, backend_id: string): Effect.Effect<boolean, BackendError> =>
   record.backend_id !== backend_id
     ? Effect.succeed(false)
-    : system.health(record.url, record.token).pipe(
-        Effect.map(
-          (health) =>
-            health.workspace_root === record.workspace_root &&
-            health.data_dir === record.data_dir &&
-            health.backend_id === record.backend_id,
-        ),
+    : validateEndpointHealth(system, endpointFromRecord(record), backend_id).pipe(
+        Effect.as(true),
         Effect.catch(() => Effect.succeed(false)),
       )
+
+const validateEndpointHealth = (
+  system: System,
+  endpoint: BackendEndpoint,
+  backend_id: string,
+): Effect.Effect<Remote.BackendHealth, BackendError> =>
+  system
+    .health(endpoint.url, endpoint.token)
+    .pipe(
+      Effect.flatMap((health) =>
+        endpoint.kind !== "local" ||
+        (health.workspace_root === endpoint.workspace_root &&
+          health.data_dir === endpoint.data_dir &&
+          health.backend_id === backend_id)
+          ? Effect.succeed(health)
+          : Effect.fail(new BackendError({ message: "Shared backend record is stale", operation: "health" })),
+      ),
+    )
 
 const readRecord = (system: System, dataDir: string): Effect.Effect<BackendRecord, BackendError> =>
   system.readText(recordPath(dataDir)).pipe(
@@ -303,6 +331,7 @@ const removeStaleLock = (system: System, dataDir: string): Effect.Effect<void, B
     )
 
 const endpointFromRecord = (record: BackendRecord): BackendEndpoint => ({
+  kind: "local",
   url: record.url,
   token: record.token,
   workspace_root: record.workspace_root,
@@ -310,14 +339,12 @@ const endpointFromRecord = (record: BackendRecord): BackendEndpoint => ({
   pid: record.pid,
 })
 
-const endpointFromEnv = (env: Record<string, string | undefined>, input: ConnectInput): BackendEndpoint | undefined => {
+const endpointFromEnv = (env: Record<string, string | undefined>): BackendEndpoint | undefined => {
   if (env.RIKA_BACKEND_URL === undefined || env.RIKA_BACKEND_URL.length === 0) return undefined
   return {
+    kind: "env",
     url: env.RIKA_BACKEND_URL.replace(/\/$/, ""),
     token: env.RIKA_BACKEND_TOKEN ?? "",
-    workspace_root: input.workspace_root,
-    data_dir: input.data_dir,
-    pid: 0,
   }
 }
 

@@ -1,4 +1,5 @@
 export * as Args from "./args"
+export * as BackendEndpoint from "./backend-endpoint"
 export * as CliConfig from "./config"
 export * as Doctor from "./doctor"
 export * as Execute from "./execute"
