@@ -46,6 +46,7 @@ import * as LocalBackend from "./local-backend"
 import * as Mcp from "./mcp"
 import * as Orb from "./orb"
 import * as OrbExecute from "./orb-execute"
+import * as OrbShell from "./orb-shell"
 import * as Output from "./output"
 import * as Project from "./project"
 import * as Review from "./review"
@@ -196,6 +197,7 @@ type RuntimeError =
   | OrbMirror.OrbMirrorError
   | Orb.OrbError
   | OrbExecute.OrbExecuteError
+  | OrbShell.OrbShellError
   | OrbStore.OrbStoreError
   | PluginHost.RunError
   | Project.ProjectError
@@ -238,6 +240,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof OrbMirror.OrbMirrorError) return `Rika failed: ${error.message}`
   if (error instanceof Orb.OrbError) return Orb.formatError(error)
   if (error instanceof OrbExecute.OrbExecuteError) return OrbExecute.formatError(error)
+  if (error instanceof OrbShell.OrbShellError) return `Rika failed: ${error.message}`
   if (error instanceof OrbManager.OrbProvisionError) return `Rika failed: ${error.message}`
   if (error instanceof OrbStore.OrbStoreError) return `Rika failed: ${error.message}`
   if (error instanceof Review.ReviewError) return Review.formatError(error)
@@ -279,6 +282,7 @@ const runtimeExitCode = (error: RuntimeError) => {
   if (error instanceof Execute.ExecuteError) return error.exit_code
   if (error instanceof Orb.OrbError) return error.exit_code
   if (error instanceof OrbExecute.OrbExecuteError) return error.exit_code
+  if (error instanceof OrbShell.OrbShellError) return error.exit_code
   if (error instanceof Sync.SyncError) return error.exit_code
   return 1
 }
@@ -956,11 +960,25 @@ export const orbLiveLayer = (
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(activityLayer),
   )
+  const resolverLayer = BackendEndpoint.resolverLayerFromEnv(env).pipe(
+    Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd })),
+    Layer.provideMerge(BackendEndpoint.healthLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(BackendEndpoint.orbManagerResumerLayer),
+    Layer.provideMerge(managerLayer),
+  )
+  const shellLayer = OrbShell.layerFromEnv(env).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(resolverLayer),
+    Layer.provideMerge(activityLayer),
+    Layer.provideMerge(OrbShell.systemLayer),
+  )
 
   return Orb.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(mirrorLayer),
+    Layer.provideMerge(shellLayer),
   )
 }
 
@@ -1257,7 +1275,7 @@ export const serverLiveLayer = (
       Schedule.spaced("5 seconds"),
     ).pipe(Effect.forkScoped),
   ).pipe(Layer.provideMerge(orbMirrorLayer), Layer.provide(diagnosticsLayer))
-  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
+  const httpLayer = HttpServer.layerFromEnv(env).pipe(Layer.provideMerge(remoteLayer))
   const commandLayer = Layer.mergeAll(
     Server.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(httpLayer)),
     orbMirrorStartupLayer,
@@ -1426,15 +1444,21 @@ export type ThreadsLayerOutput =
 
 export type OrbLayerOutput =
   | ArtifactStore.Service
+  | BackendEndpoint.Health
+  | BackendEndpoint.OrbResumer
+  | BackendEndpoint.Resolver
   | Config.Service
   | Database.Service
   | IdGenerator.Service
   | Input.Service
+  | LocalBackend.Service
   | Migration.Service
   | Orb.Service
   | OrbActivity.Service
   | OrbManager.Service
   | OrbMirror.Service
+  | OrbShell.Service
+  | OrbShell.System
   | OrbStore.Service
   | Output.Service
   | ProjectStore.Service

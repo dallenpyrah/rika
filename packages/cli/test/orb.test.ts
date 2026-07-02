@@ -6,7 +6,7 @@ import { Client } from "@rika/sdk"
 import { Artifact, Common, Ids, Orb, Remote } from "@rika/schema"
 import { OrbMirror } from "@rika/server"
 import { Effect, Layer, Option, Stream } from "effect"
-import { Input, Orb as CliOrb, Output } from "../src/index"
+import { Input, Orb as CliOrb, OrbShell, Output } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_cli_orb")
 const projectId = Ids.ProjectId.make("project_cli_orb")
@@ -212,6 +212,24 @@ describe("CLI orb commands", () => {
     expect(result.stored?.status).toBe("running")
     expect(result.artifacts).toHaveLength(1)
   })
+
+  test("shell delegates to the orb shell service with the required thread id", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const shellThreads: Array<Ids.ThreadId> = []
+
+    const exitCode = await Effect.runPromise(
+      CliOrb.executeCommand({
+        type: "orb",
+        action: "shell",
+        thread_id: threadId,
+      }).pipe(Effect.provide(makeLayer({ output, shellThreads }))),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(shellThreads).toEqual([threadId])
+    expect(output.stdout).toEqual([])
+    expect(output.stderr).toEqual([])
+  })
 })
 
 const makeLayer = (input: {
@@ -222,6 +240,7 @@ const makeLayer = (input: {
   readonly artifactPutFails?: boolean
   readonly changesFails?: boolean
   readonly killFails?: boolean
+  readonly shellThreads?: Array<Ids.ThreadId>
 }) => {
   const calls = input.calls ?? []
   const configLayer = Config.layerFromValues({
@@ -263,14 +282,22 @@ const makeLayer = (input: {
   const inputLayer = Input.memoryLayer(input.input ?? "", true)
   const managerLayer = orbManagerLayer(calls, input.killFails === true).pipe(Layer.provideMerge(storageLayer))
   const mirrorLayer = orbMirrorLayer(calls, input.flushFails === true)
+  const shellLayer = OrbShell.testLayer({
+    shell: (id) =>
+      Effect.sync(() => {
+        input.shellThreads?.push(id)
+        return 0
+      }),
+  })
   const commandLayer = CliOrb.layerWithClientFactory(clientFactory).pipe(
     Layer.provideMerge(storageLayer),
     Layer.provideMerge(outputLayer),
     Layer.provideMerge(inputLayer),
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(mirrorLayer),
+    Layer.provideMerge(shellLayer),
   )
-  return Layer.mergeAll(storageLayer, outputLayer, inputLayer, managerLayer, mirrorLayer, commandLayer)
+  return Layer.mergeAll(storageLayer, outputLayer, inputLayer, managerLayer, mirrorLayer, shellLayer, commandLayer)
 }
 
 const artifactStoreLayer = (calls: Array<string>, putFails: boolean) => {

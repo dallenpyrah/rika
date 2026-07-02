@@ -7,6 +7,7 @@ import { OrbMirror } from "@rika/server"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
 import * as Args from "./args"
 import * as Input from "./input"
+import * as OrbShell from "./orb-shell"
 import * as Output from "./output"
 
 export class OrbError extends Schema.TaggedErrorClass<OrbError>()("CliOrbError", {
@@ -19,6 +20,7 @@ export type RunError =
   | Client.SdkError
   | Input.InputError
   | OrbError
+  | OrbShell.RunError
   | OrbManager.OrbProvisionError
   | OrbMirror.RunError
   | OrbStore.OrbStoreError
@@ -41,6 +43,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
       const artifacts = yield* ArtifactStore.Service
       const orbManager = yield* OrbManager.Service
       const orbMirror = yield* OrbMirror.Service
+      const orbShell = yield* Effect.serviceOption(OrbShell.Service)
       const idGenerator = yield* IdGenerator.Service
       const time = yield* Time.Service
 
@@ -132,6 +135,13 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
               yield* markKilled(orb)
               return 0
             }
+            case "shell": {
+              const threadId = yield* requireThreadId(command)
+              if (Option.isNone(orbShell)) {
+                return yield* new OrbError({ message: "Orb shell service is unavailable", exit_code: 1 })
+              }
+              return yield* orbShell.value.shell(threadId)
+            }
           }
           return yield* new OrbError({ message: "Unsupported orb action", exit_code: 2 })
         }),
@@ -150,6 +160,7 @@ export const executeCommand = Effect.fn("Cli.Orb.executeCommand.call")(function*
 
 export const formatError = (error: RunError) => {
   if (error instanceof OrbError) return error.message
+  if (error instanceof OrbShell.OrbShellError) return error.message
   if (error instanceof Client.SdkError) return error.message
   if (error instanceof Error) return `Rika failed: ${error.message}`
   return `Rika failed: ${String(error)}`

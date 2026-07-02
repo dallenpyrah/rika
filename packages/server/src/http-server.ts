@@ -1,5 +1,5 @@
 import { Diagnostics } from "@rika/core"
-import { OrbChanges } from "@rika/orb"
+import { OrbChanges, OrbPty } from "@rika/orb"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Cause, Context, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
 import * as RemoteControl from "./remote-control"
@@ -40,14 +40,18 @@ const serviceLayer = Layer.effect(
     const remote = yield* RemoteControl.Service
     const diagnostics = yield* Diagnostics.Service
     const orbChanges = yield* OrbChanges.Service
-    return makeService(remote, diagnostics, orbChanges)
+    const orbPty = yield* OrbPty.Service
+    return makeService(remote, diagnostics, orbChanges, orbPty)
   }),
 )
 
 export const layerWithOrbChanges = (orbChangesLayer: Layer.Layer<OrbChanges.Service>) =>
   serviceLayer.pipe(Layer.provide(orbChangesLayer))
 
-export const layer = layerWithOrbChanges(OrbChanges.layer)
+export const layerFromEnv = (env: Record<string, string | undefined>) =>
+  layerWithOrbChanges(OrbChanges.layer).pipe(Layer.provide(OrbPty.layerFromEnv(env)))
+
+export const layer = layerFromEnv({})
 
 export const handle = Effect.fn("HttpServer.handle.call")(function* (request: Request) {
   const service = yield* Service
@@ -64,10 +68,168 @@ interface OrbRouteMode {
   readonly base_commit: string
 }
 
+interface OrbPtySocketData {
+  readonly pty: OrbPty.Interface
+  readonly workspace_root: string
+  readonly cols: number
+  readonly rows: number
+  closed: boolean
+  session?: OrbPty.Session
+}
+
+interface OrbPtyUpgradeServer {
+  readonly upgrade: (request: Request, options: { readonly data: OrbPtySocketData }) => boolean
+}
+
+interface ResizeControl extends Schema.Schema.Type<typeof ResizeControl> {}
+const ResizeControl = Schema.Struct({
+  type: Schema.Literal("resize"),
+  cols: Schema.Int,
+  rows: Schema.Int,
+}).annotate({ identifier: "Rika.Server.HttpServer.OrbPty.ResizeControl" })
+
+const emptyOrbPtySocketData: OrbPtySocketData = {
+  pty: OrbPty.Service.of({
+    open: () =>
+      Effect.fail(
+        new OrbPty.OrbPtyError({
+          message: "PTY socket data was not initialized",
+          operation: "open",
+        }),
+      ),
+  }),
+  workspace_root: "",
+  cols: 80,
+  rows: 24,
+  closed: true,
+}
+
+const orbPtyWebSocketHandler: Bun.WebSocketHandler<OrbPtySocketData> = {
+  data: emptyOrbPtySocketData,
+  open: (ws) => {
+    const data = ws.data
+    Effect.runFork(
+      data.pty
+        .open({
+          workspace_root: data.workspace_root,
+          cols: data.cols,
+          rows: data.rows,
+          onData: (bytes) =>
+            Effect.sync(() => {
+              ws.send(bytes)
+            }),
+        })
+        .pipe(
+          Effect.tap((session) =>
+            Effect.sync(() => {
+              if (data.closed) return false
+              data.session = session
+              return true
+            }).pipe(
+              Effect.flatMap((attached) => {
+                if (attached) return Effect.void
+                return session.close.pipe(Effect.ignore)
+              }),
+            ),
+          ),
+          Effect.catch(() =>
+            Effect.sync(() => {
+              if (!data.closed) ws.close(1011, "pty open failed")
+            }),
+          ),
+        ),
+    )
+  },
+  message: (ws, message) => {
+    const session = ws.data.session
+    if (session === undefined) {
+      ws.close(1011, "pty not ready")
+      return
+    }
+    if (typeof message === "string") {
+      const resize = decodeResizeControl(message)
+      if (resize === undefined) {
+        ws.close(1008, "invalid control frame")
+        return
+      }
+      Effect.runFork(
+        session.resize(resize.cols, resize.rows).pipe(
+          Effect.catch(() =>
+            Effect.sync(() => {
+              ws.close(1011, "pty resize failed")
+            }),
+          ),
+        ),
+      )
+      return
+    }
+    Effect.runFork(
+      session.write(binaryMessage(message)).pipe(
+        Effect.catch(() =>
+          Effect.sync(() => {
+            ws.close(1011, "pty write failed")
+          }),
+        ),
+      ),
+    )
+  },
+  close: (ws) => {
+    ws.data.closed = true
+    const session = ws.data.session
+    if (session !== undefined) Effect.runFork(session.close.pipe(Effect.ignore))
+  },
+}
+
+const upgradeOrbPty = (
+  orbPty: OrbPty.Interface,
+  request: Request,
+  server: OrbPtyUpgradeServer,
+  requiredToken: string | undefined,
+  orbMode: OrbRouteMode | undefined,
+) => {
+  const url = new URL(request.url)
+  if (request.method !== "GET" || url.pathname !== "/v1/orb/pty") return undefined
+  if (orbMode === undefined) return notFound()
+  const required = tokenValue(requiredToken)
+  if (required !== undefined && url.searchParams.get("token") !== required) return unauthorizedJson()
+  const upgraded = server.upgrade(request, {
+    data: {
+      pty: orbPty,
+      workspace_root: orbMode.workspace_root,
+      cols: dimensionOrDefault(intParam(url, "cols"), 80, 1, 500),
+      rows: dimensionOrDefault(intParam(url, "rows"), 24, 1, 300),
+      closed: false,
+    },
+  })
+  return upgraded ? undefined : json({ error: { message: "WebSocket upgrade failed", code: "upgrade_failed" } }, 400)
+}
+
+const decodeResizeControl = (message: string): ResizeControl | undefined => {
+  try {
+    const decoded = Schema.decodeUnknownSync(ResizeControl)(JSON.parse(message))
+    if (!validDimension(decoded.cols, 1, 500) || !validDimension(decoded.rows, 1, 300)) return undefined
+    return decoded
+  } catch {
+    return undefined
+  }
+}
+
+const binaryMessage = (message: ArrayBuffer | Uint8Array) =>
+  message instanceof Uint8Array ? message : new Uint8Array(message)
+
+const dimensionOrDefault = (value: number | undefined, fallback: number, minimum: number, maximum: number) =>
+  value === undefined || !validDimension(value, minimum, maximum) ? fallback : value
+
+const validDimension = (value: number, minimum: number, maximum: number) =>
+  Number.isInteger(value) && value >= minimum && value <= maximum
+
+const unauthorizedJson = () => json({ error: { message: "Unauthorized", code: "unauthorized" } }, 401)
+
 const makeService = (
   remote: RemoteControl.Interface,
   diagnostics: Diagnostics.Interface,
   orbChanges: OrbChanges.Interface,
+  orbPty: OrbPty.Interface,
 ): Interface => {
   const handleRequest = (request: Request, requiredToken?: string, orbMode?: OrbRouteMode) =>
     route(remote, orbChanges, request, tokenValue(requiredToken), orbMode).pipe(
@@ -90,7 +252,12 @@ const makeService = (
           Bun.serve({
             hostname: host,
             port,
-            fetch: (request) => Effect.runPromise(handleRequest(request, input.token, orbMode)),
+            fetch: (request, upgradeServer) => {
+              const upgraded = upgradeOrbPty(orbPty, request, upgradeServer, input.token, orbMode)
+              if (upgraded !== undefined) return upgraded
+              return Effect.runPromise(handleRequest(request, input.token, orbMode))
+            },
+            websocket: orbPtyWebSocketHandler,
           }),
         catch: (cause) =>
           new HttpServerError({
