@@ -92,6 +92,17 @@ describe("CLI args", () => {
     })
   })
 
+  test("parses orb list and kill commands", async () => {
+    const threadId = Ids.ThreadId.make("thread_args_orb_kill")
+    const list = await Effect.runPromise(Args.parse(["orb", "list"]))
+    const kill = await Effect.runPromise(Args.parse(["orb", "kill", threadId]))
+    const forcedKill = await Effect.runPromise(Args.parse(["orb", "kill", threadId, "--force"]))
+
+    expect(list).toEqual({ type: "orb", action: "list" })
+    expect(kill).toEqual({ type: "orb", action: "kill", thread_id: threadId, force: false })
+    expect(forcedKill).toEqual({ type: "orb", action: "kill", thread_id: threadId, force: true })
+  })
+
   test("allows execute without a prompt so piped stdin can supply it", async () => {
     const command = await Effect.runPromise(Args.parse(["-x"]))
 

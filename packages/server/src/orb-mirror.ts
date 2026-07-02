@@ -27,6 +27,7 @@ export type ClientFactory = (endpointUrl: string, token: string) => Client.Inter
 
 export interface Interface {
   readonly mirror: (orbId: Ids.OrbId) => Effect.Effect<void, RunError>
+  readonly flush: (orbId: Ids.OrbId) => Effect.Effect<void, RunError>
   readonly mirrorRunningOrbsOnce: () => Effect.Effect<void, RunError>
   readonly syncRunning: () => Effect.Effect<void, RunError>
 }
@@ -117,6 +118,32 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
         if (orb === undefined || orb.status !== "running") return
         yield* FiberMap.run(fibers, orbId, { onlyIfMissing: true })(mirrorOrbOnce(orb))
       })
+      const flushOrbOnce = Effect.fn("OrbMirror.flushOrbOnce")(function* (orb: Orb.OrbRecord) {
+        const endpoint = yield* orbs.endpointCredentials(orb.orb_id)
+        if (endpoint === undefined) {
+          return yield* new OrbMirrorError({
+            message: `Orb ${orb.orb_id} has no endpoint`,
+            operation: "endpoint",
+            orb_id: orb.orb_id,
+            thread_id: orb.thread_id,
+          })
+        }
+        const client = clientFactory(endpoint.endpoint_url, endpoint.token)
+        yield* latestSequence(orb.thread_id).pipe(
+          Effect.flatMap((afterSequence) =>
+            client
+              .subscribeThreadEvents({ thread_id: orb.thread_id, after_sequence: afterSequence })
+              .pipe(Stream.runForEach((event) => appendOrbEvent(orb, event))),
+          ),
+          Effect.timeoutOption("2 seconds"),
+        )
+        return undefined
+      })
+      const flush = Effect.fn("OrbMirror.flush")(function* (orbId: Ids.OrbId) {
+        const orb = yield* orbs.get(orbId)
+        if (orb === undefined || orb.status === "killed") return
+        yield* flushOrbOnce(orb)
+      })
       const syncRunning = Effect.fn("OrbMirror.syncRunning")(function* () {
         const running = yield* orbs.list({ status: "running" })
         yield* Effect.forEach(running, (orb) => mirror(orb.orb_id), { concurrency: "unbounded", discard: true })
@@ -124,6 +151,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
 
       return Service.of({
         mirror,
+        flush,
         mirrorRunningOrbsOnce: Effect.fn("OrbMirror.mirrorRunningOrbsOnce")(function* () {
           const running = yield* orbs.list({ status: "running" })
           yield* Effect.forEach(running, mirrorOrbOnce, { concurrency: "unbounded", discard: true })
@@ -190,6 +218,11 @@ export const mirrorRunningOrbsOnce = Effect.fn("OrbMirror.mirrorRunningOrbsOnce.
 export const mirror = Effect.fn("OrbMirror.mirror.call")(function* (orbId: Ids.OrbId) {
   const service = yield* Service
   return yield* service.mirror(orbId)
+})
+
+export const flush = Effect.fn("OrbMirror.flush.call")(function* (orbId: Ids.OrbId) {
+  const service = yield* Service
+  return yield* service.flush(orbId)
 })
 
 export const syncRunning = Effect.fn("OrbMirror.syncRunning.call")(function* () {

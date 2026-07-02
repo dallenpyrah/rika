@@ -101,6 +101,19 @@ export const ConfigCommand = Schema.Struct({
   action: ConfigAction,
 }).annotate({ identifier: "Rika.Cli.Args.ConfigCommand" })
 
+export const OrbAction = Schema.Literals(["list", "kill"]).annotate({
+  identifier: "Rika.Cli.Args.OrbAction",
+})
+export type OrbAction = typeof OrbAction.Type
+
+export interface OrbCommand extends Schema.Schema.Type<typeof OrbCommand> {}
+export const OrbCommand = Schema.Struct({
+  type: Schema.Literal("orb"),
+  action: OrbAction,
+  thread_id: Schema.optional(Ids.ThreadId),
+  force: Schema.optional(Schema.Boolean),
+}).annotate({ identifier: "Rika.Cli.Args.OrbCommand" })
+
 export interface VersionCommand extends Schema.Schema.Type<typeof VersionCommand> {}
 export const VersionCommand = Schema.Struct({
   type: Schema.Literal("version"),
@@ -229,6 +242,7 @@ export type Command =
   | SkillCommand
   | McpCommand
   | ConfigCommand
+  | OrbCommand
   | VersionCommand
   | HelpCommand
   | InvalidExecuteAliasCommand
@@ -268,6 +282,8 @@ export const usage = [
   "  rika mcp list",
   "  rika mcp approve <server-name>",
   "  rika config keymap",
+  "  rika orb list",
+  "  rika orb kill <thread-id> [--force]",
   "  rika review [--staged] [--base <ref>] [--workspace <path>] [--ephemeral] [paths...]",
   "  rika extensions create-skill <name> --description <text> [--instructions <text>] [--thread <id>]",
   "  rika extensions create-plugin <name> --description <text> [--thread <id>]",
@@ -470,6 +486,11 @@ const syncConfig = {
   threadId: Argument.string("thread-id").pipe(Argument.withDescription("Thread id to sync from its orb")),
 }
 
+const orbKillConfig = {
+  threadId: Argument.string("thread-id").pipe(Argument.withDescription("Thread id")),
+  force: Flag.boolean("force").pipe(Flag.withDescription("Skip confirmation")),
+}
+
 const ideServerConfig = {
   server: Flag.string("server").pipe(Flag.optional, Flag.withDescription("Remote-control server URL")),
   token: Flag.string("token").pipe(Flag.optional, Flag.withDescription("Bearer token for the remote-control server")),
@@ -614,6 +635,11 @@ interface SyncInput {
   readonly threadId: string
 }
 
+interface OrbKillInput {
+  readonly threadId: string
+  readonly force: boolean
+}
+
 interface IdeServerInput {
   readonly server: Option.Option<string>
   readonly token: Option.Option<string>
@@ -661,6 +687,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   const skills = makeSkillsCommand(parsedRef, rejectedRef)
   const mcp = makeMcpCommand(parsedRef, rejectedRef)
   const config = makeConfigCommand(parsedRef, rejectedRef)
+  const orb = makeOrbCommand(parsedRef, rejectedRef)
   const review = makeReviewCommand(parsedRef)
   const extensions = makeExtensionsCommand(parsedRef, rejectedRef)
   const server = makeServerCommand(parsedRef)
@@ -698,6 +725,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
       skills,
       mcp,
       config,
+      orb,
       review,
       extensions,
       server,
@@ -869,6 +897,25 @@ const makeConfigCommand = (
     CliCommand.withDescription("Inspect Rika configuration"),
     CliCommand.withShortDescription("Inspect config"),
     CliCommand.withSubcommands([keymap]),
+  )
+}
+
+const makeOrbCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Ref.Ref<Option.Option<ArgsError>>) => {
+  const list = CliCommand.make("list", {}, () => Ref.set(parsedRef, Option.some(toOrbListCommand()))).pipe(
+    CliCommand.withDescription("List local orbs"),
+    CliCommand.withShortDescription("List orbs"),
+  )
+
+  const kill = CliCommand.make("kill", orbKillConfig, (input: OrbKillInput) =>
+    Ref.set(parsedRef, Option.some(toOrbKillCommand(input))),
+  ).pipe(CliCommand.withDescription("Kill an orb by thread id"), CliCommand.withShortDescription("Kill orb"))
+
+  return CliCommand.make("orb", {}, () =>
+    Ref.set(rejectedRef, Option.some(new ArgsError({ message: "Expected an orb subcommand", exit_code: 2, usage }))),
+  ).pipe(
+    CliCommand.withDescription("Manage local orbs"),
+    CliCommand.withShortDescription("Manage orbs"),
+    CliCommand.withSubcommands([list, kill]),
   )
 }
 
@@ -1314,6 +1361,18 @@ const toServerCommand = (input: ServerInput): ServerCommand => {
 const toSyncCommand = (input: SyncInput): SyncCommand => ({
   type: "sync",
   thread_id: Ids.ThreadId.make(input.threadId),
+})
+
+const toOrbListCommand = (): OrbCommand => ({
+  type: "orb",
+  action: "list",
+})
+
+const toOrbKillCommand = (input: OrbKillInput): OrbCommand => ({
+  type: "orb",
+  action: "kill",
+  thread_id: Ids.ThreadId.make(input.threadId),
+  force: input.force,
 })
 
 const toDoctorCommand = (): DoctorCommand => ({ type: "doctor" })

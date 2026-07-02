@@ -118,6 +118,19 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(ErrorEnvelope.Envelope)(Codec.encode(ErrorEnvelope.Envelope)(error))).toEqual(error)
   })
 
+  test("round-trips orb final diff artifacts", () => {
+    const artifact: Artifact.Artifact = {
+      id: artifactId,
+      thread_id: threadId,
+      kind: "orb-final-diff",
+      title: "Orb final diff",
+      content: { files: [{ path: "README.md", status: "modified" }] },
+      created_at: now,
+    }
+
+    expect(Codec.decode(Artifact.Artifact)(Codec.encode(Artifact.Artifact)(artifact))).toEqual(artifact)
+  })
+
   test("round-trips thread-created event", () => {
     const event: Event.Event = {
       id: eventId,

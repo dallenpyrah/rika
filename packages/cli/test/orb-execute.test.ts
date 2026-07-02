@@ -444,6 +444,7 @@ const remoteOrbMirrorLayer = () =>
     OrbMirror.Service,
     OrbMirror.Service.of({
       mirror: () => Effect.void,
+      flush: () => Effect.void,
       mirrorRunningOrbsOnce: () => Effect.void,
       syncRunning: () => Effect.void,
     }),

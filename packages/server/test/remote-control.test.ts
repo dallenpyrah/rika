@@ -181,6 +181,7 @@ const fakeOrbMirrorLayer = (onMirror: (mirroredOrbId: Ids.OrbId) => void = () =>
     OrbMirror.Service,
     OrbMirror.Service.of({
       mirror: (mirroredOrbId) => Effect.sync(() => onMirror(mirroredOrbId)),
+      flush: () => Effect.void,
       mirrorRunningOrbsOnce: () => Effect.void,
       syncRunning: () => Effect.void,
     }),
@@ -203,6 +204,33 @@ const orbManagerLayerWithStoredResume = (
             onResume(id)
           }).pipe(Effect.andThen(orbManagerStoreStep("resume", id, orbs.setStatus(id, "running")))),
         kill: (id) => orbManagerStoreStep("kill", id, orbs.setStatus(id, "killed")),
+      }),
+    ),
+  )
+
+const orbManagerLayerWithStoredLifecycle = (
+  onCall: (step: "pause" | "resume" | "kill", orbId: Ids.OrbId) => void,
+): Layer.Layer<OrbManager.Service, never, OrbStore.Service> =>
+  Layer.effect(
+    OrbManager.Service,
+    Effect.map(OrbStore.Service, (orbs) =>
+      OrbManager.Service.of({
+        provisionForThread: (input) =>
+          Effect.sync(() => {
+            return orbRecord(input.thread_id, input.project_id, "running")
+          }),
+        pause: (id) =>
+          Effect.sync(() => onCall("pause", id)).pipe(
+            Effect.andThen(orbManagerStoreStep("pause", id, orbs.setStatus(id, "paused"))),
+          ),
+        resume: (id) =>
+          Effect.sync(() => onCall("resume", id)).pipe(
+            Effect.andThen(orbManagerStoreStep("resume", id, orbs.setStatus(id, "running"))),
+          ),
+        kill: (id) =>
+          Effect.sync(() => onCall("kill", id)).pipe(
+            Effect.andThen(orbManagerStoreStep("kill", id, orbs.setStatus(id, "killed"))),
+          ),
       }),
     ),
   )
@@ -251,7 +279,7 @@ const createRunningOrbRecord = (recordThreadId: Ids.ThreadId) =>
       endpoint_url: "https://orb.remote-contract.test",
       token: "orb-token",
     })
-    yield* OrbStore.setStatus(created.orb_id, "running")
+    return yield* OrbStore.setStatus(created.orb_id, "running")
   })
 
 const createPausedOrbRecord = (recordThreadId: Ids.ThreadId) =>
@@ -421,6 +449,48 @@ describe("remote control API and SDK", () => {
     expect(shared.summary.orb_status).toBe("running")
     expect(archived.orb_status).toBe("running")
     expect(unarchived.orb_status).toBe("running")
+  })
+
+  test("archive pauses a running orb and unarchive leaves it paused", async () => {
+    const calls: Array<string> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer(
+        defaultContextLayer,
+        orbManagerLayerWithStoredLifecycle((step, id) => calls.push(`${step}:${id}`)),
+        fakeOrbMirrorLayer((id) => calls.push(`mirror:${id}`)),
+      ),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    await Effect.runPromise(client.createThread({ thread_id: orbThreadId, project_id: projectId }))
+    const running = await runtime.runPromise(createRunningOrbRecord(orbThreadId))
+    const archived = await Effect.runPromise(client.archiveThread(orbThreadId))
+    const afterArchive = await runtime.runPromise(OrbStore.get(running.orb_id))
+    const unarchived = await Effect.runPromise(client.unarchiveThread(orbThreadId))
+    const afterUnarchive = await runtime.runPromise(OrbStore.get(running.orb_id))
+
+    expect(calls).toEqual([`pause:${running.orb_id}`])
+    expect(archived).toMatchObject({ thread_id: orbThreadId, archived: true, orb_status: "paused" })
+    expect(afterArchive?.status).toBe("paused")
+    expect(unarchived).toMatchObject({ thread_id: orbThreadId, archived: false, orb_status: "paused" })
+    expect(afterUnarchive?.status).toBe("paused")
+
+    const streamedPromise = Effect.runPromise(
+      client.subscribeThreadEvents({ thread_id: orbThreadId }).pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed" || event.type === "turn.failed"),
+        Stream.runCollect,
+      ),
+    )
+    const accepted = await Effect.runPromise(
+      client.startTurn({ thread_id: orbThreadId, project_id: projectId, content: "resume after unarchive" }),
+    )
+    const streamed = await streamedPromise
+    const afterTurn = await runtime.runPromise(OrbStore.get(running.orb_id))
+
+    expect(accepted).toEqual({ thread_id: orbThreadId, accepted: true })
+    expect(calls).toEqual([`pause:${running.orb_id}`, `resume:${running.orb_id}`, `mirror:${running.orb_id}`])
+    expect(streamed.at(-1)).toMatchObject({ type: "turn.completed" })
+    expect(afterTurn?.status).toBe("running")
   })
 
   test("creates projects and provisions orb-backed threads over the remote API", async () => {

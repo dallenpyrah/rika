@@ -44,6 +44,7 @@ import * as Ide from "./ide"
 import * as Input from "./input"
 import * as LocalBackend from "./local-backend"
 import * as Mcp from "./mcp"
+import * as Orb from "./orb"
 import * as OrbExecute from "./orb-execute"
 import * as Output from "./output"
 import * as Project from "./project"
@@ -109,29 +110,33 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                                   )
                                 : command.type === "config"
                                   ? CliConfig.executeCommand(command)
-                                  : command.type === "review"
-                                    ? Review.executeCommand(command).pipe(
-                                        Effect.provide(reviewLiveLayer(command, env, input.cwd)),
+                                  : command.type === "orb"
+                                    ? Orb.executeCommand(command).pipe(
+                                        Effect.provide(orbLiveLayer(command, env, input.cwd)),
                                       )
-                                    : command.type === "extensions"
-                                      ? Extensions.executeCommand(command).pipe(
-                                          Effect.provide(extensionsLiveLayer(command, env, input.cwd)),
+                                    : command.type === "review"
+                                      ? Review.executeCommand(command).pipe(
+                                          Effect.provide(reviewLiveLayer(command, env, input.cwd)),
                                         )
-                                      : command.type === "ide"
-                                        ? Ide.executeCommand(command).pipe(
-                                            Effect.provide(ideLiveLayer(command, env, input.cwd)),
+                                      : command.type === "extensions"
+                                        ? Extensions.executeCommand(command).pipe(
+                                            Effect.provide(extensionsLiveLayer(command, env, input.cwd)),
                                           )
-                                        : command.type === "doctor"
-                                          ? Doctor.executeCommand(command).pipe(
-                                              Effect.provide(doctorLiveLayer(env, input.cwd)),
+                                        : command.type === "ide"
+                                          ? Ide.executeCommand(command).pipe(
+                                              Effect.provide(ideLiveLayer(command, env, input.cwd)),
                                             )
-                                          : command.type === "sync"
-                                            ? Sync.executeCommand(command).pipe(
-                                                Effect.provide(syncLiveLayer(command, env, input.cwd)),
+                                          : command.type === "doctor"
+                                            ? Doctor.executeCommand(command).pipe(
+                                                Effect.provide(doctorLiveLayer(env, input.cwd)),
                                               )
-                                            : Server.executeCommand(command).pipe(
-                                                Effect.provide(serverLiveLayer(command, env, input.cwd)),
-                                              )
+                                            : command.type === "sync"
+                                              ? Sync.executeCommand(command).pipe(
+                                                  Effect.provide(syncLiveLayer(command, env, input.cwd)),
+                                                )
+                                              : Server.executeCommand(command).pipe(
+                                                  Effect.provide(serverLiveLayer(command, env, input.cwd)),
+                                                )
               ).pipe(
                 Effect.matchEffect({
                   onFailure: (error: RuntimeError) =>
@@ -180,13 +185,16 @@ type RuntimeError =
   | Client.SdkError
   | Ide.IdeError
   | IdeBridge.IdeBridgeError
+  | Input.InputError
   | LocalBackend.BackendError
   | Mcp.McpError
   | McpApprovalStore.McpApprovalStoreError
   | McpClient.McpClientError
   | Migration.MigrationError
+  | OrbActivity.OrbActivityError
   | OrbManager.OrbProvisionError
   | OrbMirror.OrbMirrorError
+  | Orb.OrbError
   | OrbExecute.OrbExecuteError
   | OrbStore.OrbStoreError
   | PluginHost.RunError
@@ -197,6 +205,7 @@ type RuntimeError =
   | RemoteControl.RemoteControlError
   | RemoteSession.RemoteSessionError
   | Server.ServerError
+  | SandboxClient.SandboxClientError
   | SandboxClient.OrbConfigError
   | HttpServer.HttpServerError
   | Session.SessionError
@@ -220,11 +229,14 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Client.SdkError) return `Rika failed: ${error.message}`
   if (error instanceof Ide.IdeError) return Ide.formatError(error)
   if (error instanceof IdeBridge.IdeBridgeError) return `Rika failed: ${error.message}`
+  if (error instanceof Input.InputError) return `Rika failed: ${error.message}`
   if (error instanceof LocalBackend.BackendError) return `Rika failed: ${error.message}`
   if (error instanceof Mcp.McpError) return Mcp.formatError(error)
   if (error instanceof McpApprovalStore.McpApprovalStoreError) return `Rika failed: ${error.message}`
   if (error instanceof McpClient.McpClientError) return `Rika failed: ${error.message}`
+  if (error instanceof OrbActivity.OrbActivityError) return `Rika failed: ${error.message}`
   if (error instanceof OrbMirror.OrbMirrorError) return `Rika failed: ${error.message}`
+  if (error instanceof Orb.OrbError) return Orb.formatError(error)
   if (error instanceof OrbExecute.OrbExecuteError) return OrbExecute.formatError(error)
   if (error instanceof OrbManager.OrbProvisionError) return `Rika failed: ${error.message}`
   if (error instanceof OrbStore.OrbStoreError) return `Rika failed: ${error.message}`
@@ -232,6 +244,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof ReviewService.ReviewServiceError) return `Rika failed: ${error.message}`
   if (error instanceof RemoteControl.RemoteControlError) return `Rika failed: ${error.message}`
   if (error instanceof Server.ServerError) return Server.formatError(error)
+  if (error instanceof SandboxClient.SandboxClientError) return `Rika failed: ${error.message}`
   if (error instanceof SandboxClient.OrbConfigError) return `Rika failed: ${error.message}`
   if (error instanceof HttpServer.HttpServerError) return `Rika failed: ${error.message}`
   if (error instanceof ArtifactStore.ArtifactStoreError) return `Rika failed: ${error.message}`
@@ -264,6 +277,7 @@ const formatRuntimeError = (error: RuntimeError) => {
 
 const runtimeExitCode = (error: RuntimeError) => {
   if (error instanceof Execute.ExecuteError) return error.exit_code
+  if (error instanceof Orb.OrbError) return error.exit_code
   if (error instanceof OrbExecute.OrbExecuteError) return error.exit_code
   if (error instanceof Sync.SyncError) return error.exit_code
   return 1
@@ -877,6 +891,79 @@ export const threadsLiveLayer = (
   return commandLayer
 }
 
+export const orbLiveLayer = (
+  _command: Args.OrbCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<OrbLayerOutput, LiveLayerError> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: defaultModeFromEnv(env),
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
+  )
+  const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
+  const orbStoreLayer = OrbStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    Output.layer,
+    Input.layer,
+    databaseLayer,
+    artifactLayer,
+    projectStoreLayer,
+    orbStoreLayer,
+    Migration.layer,
+    ThreadEventLog.layer,
+    ThreadProjection.layer,
+    timeLayer,
+    IdGenerator.layer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
+  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer))
+  const activityLayer = OrbActivity.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(timeLayer),
+  )
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
+  const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const mirrorLayer = OrbMirror.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadLiveLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(activityLayer),
+  )
+
+  return Orb.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(managerLayer),
+    Layer.provideMerge(mirrorLayer),
+  )
+}
+
 export const projectLiveLayer = (
   _command: Args.ProjectCommand,
   env: Record<string, string | undefined>,
@@ -1335,6 +1422,26 @@ export type ThreadsLayerOutput =
   | ThreadProjection.Service
   | ThreadService.Service
   | Threads.Service
+  | Time.Service
+
+export type OrbLayerOutput =
+  | ArtifactStore.Service
+  | Config.Service
+  | Database.Service
+  | IdGenerator.Service
+  | Input.Service
+  | Migration.Service
+  | Orb.Service
+  | OrbActivity.Service
+  | OrbManager.Service
+  | OrbMirror.Service
+  | OrbStore.Service
+  | Output.Service
+  | ProjectStore.Service
+  | SandboxClient.Service
+  | ThreadEventLog.Service
+  | ThreadLive.Service
+  | ThreadProjection.Service
   | Time.Service
 
 export type ProjectLayerOutput =

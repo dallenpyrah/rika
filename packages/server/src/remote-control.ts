@@ -113,6 +113,11 @@ export const layerWithLive = Layer.effect(
       const resumed = yield* orbManager.resume(orb.orb_id)
       yield* orbMirror.mirror(resumed.orb_id)
     })
+    const pauseRunningOrb = Effect.fn("RemoteControl.pauseRunningOrb")(function* (threadId: Ids.ThreadId) {
+      const orb = yield* orbs.getByThread(threadId)
+      if (orb?.status !== "running") return
+      yield* orbManager.pause(orb.orb_id)
+    })
     const reconcileInterruptedTurns = Effect.fn("RemoteControl.reconcileInterruptedTurns")(function* () {
       const events = yield* eventLog.readAll()
       const threadIds = [...new Set(events.map((event) => event.thread_id))]
@@ -236,6 +241,7 @@ export const layerWithLive = Layer.effect(
         }
         const previousSequence = yield* latestLoggedSequence(input.thread_id)
         const summary = yield* threads.archive({ thread_id: input.thread_id })
+        yield* pauseRunningOrb(input.thread_id)
         yield* publishLoggedEvents(input.thread_id, previousSequence)
         return yield* withOrbStatus(orbs, summary)
       }),

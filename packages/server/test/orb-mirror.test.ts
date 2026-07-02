@@ -129,6 +129,50 @@ describe("OrbMirror", () => {
     }
   })
 
+  test("flush mirrors catch-up events once from the latest local sequence", async () => {
+    const remoteEvents = [messageAdded(2, "final flush")]
+    const subscriptions: Array<number | undefined> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer((_endpointUrl, _token) =>
+        Client.make({
+          requestJson: () => Effect.never,
+          streamJson: (input) => {
+            const url = new URL(input.path, "http://orb.test")
+            const afterSequence = url.searchParams.get("after_sequence")
+            subscriptions.push(afterSequence === null ? undefined : Number(afterSequence))
+            return Stream.fromIterable(remoteEvents)
+          },
+        }),
+      ),
+    )
+
+    try {
+      const publishedPromise = runtime.runPromise(
+        ThreadLive.subscribe({ thread_id: threadId, after_sequence: 1 }).pipe(Stream.take(1), Stream.runCollect),
+      )
+
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          yield* Migration.migrate()
+          const orbId = yield* createRunningOrb()
+          const created = yield* ThreadEventLog.append(threadCreated(1))
+          yield* ThreadProjection.apply(created)
+          yield* OrbMirror.flush(orbId)
+        }),
+      )
+      const replay = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: threadId }))
+      const projection = await runtime.runPromise(ThreadProjection.getThread(threadId))
+      const published = await publishedPromise
+
+      expect(subscriptions).toEqual([1])
+      expect(replay.map((event) => event.sequence)).toEqual([1, 2])
+      expect(projection).toMatchObject({ latest_message_text: "final flush" })
+      expect(Array.from(published).map((event) => event.sequence)).toEqual([2])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   test("syncRunning mirrors a newly registered orb through an in-process SDK HTTP backend", async () => {
     const remoteEvents = [threadCreated(1), messageAdded(2, "http mirrored")]
     const orbRuntime = ManagedRuntime.make(makeRemoteBackendLiveLayer())
@@ -559,6 +603,7 @@ const remoteOrbMirrorLayer = () =>
     OrbMirror.Service,
     OrbMirror.Service.of({
       mirror: () => Effect.void,
+      flush: () => Effect.void,
       mirrorRunningOrbsOnce: () => Effect.void,
       syncRunning: () => Effect.void,
     }),
