@@ -328,6 +328,7 @@ describe("Rika protocol schemas", () => {
       pid: 123,
       version: "0.0.0",
     }
+    const publicHealth: Remote.PublicBackendHealth = { status: "ok" }
     const subscription: Remote.SubscribeThreadEventsRequest = {
       thread_id: threadId,
       after_sequence: 1,
@@ -339,6 +340,9 @@ describe("Rika protocol schemas", () => {
       preview,
     )
     expect(Codec.decode(Remote.BackendHealth)(Codec.encode(Remote.BackendHealth)(health))).toEqual(health)
+    expect(Codec.decode(Remote.PublicBackendHealth)(Codec.encode(Remote.PublicBackendHealth)(publicHealth))).toEqual(
+      publicHealth,
+    )
     expect(
       Codec.decode(Remote.SubscribeThreadEventsRequest)(
         Codec.encode(Remote.SubscribeThreadEventsRequest)(subscription),

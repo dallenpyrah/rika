@@ -23,6 +23,11 @@ export const BackendHealth = Schema.Struct({
   version: Schema.String,
 }).annotate({ identifier: "Rika.Remote.BackendHealth" })
 
+export interface PublicBackendHealth extends Schema.Schema.Type<typeof PublicBackendHealth> {}
+export const PublicBackendHealth = Schema.Struct({
+  status: Schema.Literal("ok"),
+}).annotate({ identifier: "Rika.Remote.PublicBackendHealth" })
+
 export const AgentMode = Schema.Literals(["rush", "smart", "deep1", "deep2", "deep3"]).annotate({
   identifier: "Rika.Remote.AgentMode",
 })

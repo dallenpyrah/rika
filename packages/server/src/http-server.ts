@@ -50,19 +50,25 @@ export const serve = Effect.fn("HttpServer.serve.call")(function* (input: ServeI
 })
 
 const makeService = (remote: RemoteControl.Interface, diagnostics: Diagnostics.Interface): Interface => {
-  const handleRequest = (request: Request) =>
-    route(remote, request).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
+  const handleRequest = (request: Request, requiredToken?: string) =>
+    route(remote, request, tokenValue(requiredToken)).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
   return Service.of({
-    handle: handleRequest,
+    handle: (request) => handleRequest(request),
     serve: Effect.fn("HttpServer.serve")(function* (input: ServeInput = {}) {
       const host = input.host ?? defaultHost
       const port = input.port ?? defaultPort
+      if (!isLoopbackHost(host) && (input.token ?? "").length === 0) {
+        return yield* new HttpServerError({
+          message: "refusing to bind non-loopback host without --token",
+          operation: "serve",
+        })
+      }
       const server = yield* Effect.try({
         try: () =>
           Bun.serve({
             hostname: host,
             port,
-            fetch: (request) => Effect.runPromise(handleRequest(withLocalAuth(request, input.token))),
+            fetch: (request) => Effect.runPromise(handleRequest(request, input.token)),
           }),
         catch: (cause) =>
           new HttpServerError({
@@ -81,13 +87,14 @@ const makeService = (remote: RemoteControl.Interface, diagnostics: Diagnostics.I
 const route = (
   remote: RemoteControl.Interface,
   request: Request,
+  requiredToken: string | undefined,
 ): Effect.Effect<Response, never, Diagnostics.Service> => {
   const url = new URL(request.url)
   const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID()
   return Diagnostics.event(
     "http.request",
     (fields) =>
-      dispatch(remote, request, url).pipe(
+      dispatch(remote, request, url, requiredToken).pipe(
         Effect.tap((response) =>
           Effect.sync(() => {
             fields.status_code = response.status
@@ -132,12 +139,16 @@ const dispatch = (
   remote: RemoteControl.Interface,
   request: Request,
   url: URL,
+  requiredToken: string | undefined,
 ): Effect.Effect<Response, RemoteControl.RunError> =>
   Effect.gen(function* () {
-    const unauthorized = unauthorizedResponse(request)
-    if (unauthorized !== undefined) return unauthorized
     if (url.pathname === "/health")
-      return yield* remote.backendHealth(serverUrl(url)).pipe(jsonEffect(Remote.BackendHealth))
+      return isAuthorized(request, requiredToken)
+        ? yield* remote.backendHealth(serverUrl(url)).pipe(jsonEffect(Remote.BackendHealth))
+        : json(Codec.encode(Remote.PublicBackendHealth)({ status: "ok" }))
+
+    const unauthorized = unauthorizedResponse(request, requiredToken)
+    if (unauthorized !== undefined) return unauthorized
 
     const segments = url.pathname.split("/").filter(Boolean)
     if (segments[0] !== "v1") return notFound()
@@ -284,18 +295,20 @@ const dispatch = (
     return notFound()
   })
 
-const withLocalAuth = (request: Request, token: string | undefined) => {
-  if (token === undefined || token.length === 0) return request
-  const headers = new Headers(request.headers)
-  headers.set("x-rika-required-token", token)
-  return new Request(request, { headers })
+const unauthorizedResponse = (request: Request, requiredToken: string | undefined) => {
+  if (requiredToken === undefined) return undefined
+  if (isAuthorized(request, requiredToken)) return undefined
+  return json({ error: { message: "Unauthorized", code: "unauthorized" } }, 401)
 }
 
-const unauthorizedResponse = (request: Request) => {
-  const token = request.headers.get("x-rika-required-token")
-  if (token === null) return undefined
-  if (request.headers.get("authorization") === `Bearer ${token}`) return undefined
-  return json({ error: { message: "Unauthorized", code: "unauthorized" } }, 401)
+const isAuthorized = (request: Request, requiredToken: string | undefined) =>
+  requiredToken !== undefined && request.headers.get("authorization") === `Bearer ${requiredToken}`
+
+const tokenValue = (token: string | undefined) => (token === undefined || token.length === 0 ? undefined : token)
+
+const isLoopbackHost = (host: string) => {
+  const normalized = host.toLowerCase()
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]"
 }
 
 const decodeBody = <const S extends Schema.ConstraintDecoder<unknown>>(request: Request, schema: S) =>

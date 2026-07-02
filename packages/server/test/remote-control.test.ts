@@ -118,10 +118,8 @@ describe("remote control API and SDK", () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
 
-    const health = await Effect.runPromise(client.backendHealth())
     const created = await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
     expect(created).toMatchObject({ thread_id: threadId, workspace_id: workspaceId, archived: false })
-    expect(health).toMatchObject({ status: "healthy", workspace_root: "/workspace/rika-remote" })
 
     const firstSubscriber = Effect.runPromise(
       client.subscribeThreadEvents({ thread_id: threadId, after_sequence: 1 }).pipe(
@@ -187,6 +185,7 @@ describe("remote control API and SDK", () => {
   test("local token auth blocks unauthorized HTTP calls", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const handle = await runtime.runPromise(HttpServer.serve({ port: 0, token: "secret" }))
+    const client = Client.make(Client.fetchTransport({ base_url: handle.url, token: "secret" }))
     try {
       const unauthorized = await fetch(`${handle.url}/v1/threads`)
       const unauthorizedHealth = await fetch(`${handle.url}/health`)
@@ -196,10 +195,12 @@ describe("remote control API and SDK", () => {
       const authorizedHealth = await fetch(`${handle.url}/health`, {
         headers: { authorization: "Bearer secret" },
       })
+      const sdkHealth = await Effect.runPromise(client.backendHealth())
 
       expect(unauthorized.status).toBe(401)
-      expect(unauthorizedHealth.status).toBe(401)
+      expect(unauthorizedHealth.status).toBe(200)
       expect(await unauthorized.json()).toEqual({ error: { message: "Unauthorized", code: "unauthorized" } })
+      expect(await unauthorizedHealth.json()).toEqual({ status: "ok" })
       expect(authorized.status).toBe(200)
       expect(authorizedHealth.status).toBe(200)
       expect(await authorized.json()).toEqual([])
@@ -208,6 +209,83 @@ describe("remote control API and SDK", () => {
         workspace_root: "/workspace/rika-remote",
         data_dir: "/workspace/rika-remote/.rika",
       })
+      expect(sdkHealth).toMatchObject({ status: "healthy", workspace_root: "/workspace/rika-remote" })
+    } finally {
+      await runtime.runPromise(handle.close())
+    }
+  })
+
+  test("local token auth protects every non-health route", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const handle = await runtime.runPromise(HttpServer.serve({ port: 0, token: "secret" }))
+    const routes: ReadonlyArray<{ readonly method: "GET" | "POST"; readonly path: string }> = [
+      { method: "GET", path: "/v1/threads" },
+      { method: "POST", path: "/v1/threads" },
+      { method: "GET", path: "/v1/threads/search" },
+      { method: "GET", path: `/v1/threads/${threadId}` },
+      { method: "GET", path: `/v1/threads/${threadId}/preview` },
+      { method: "POST", path: `/v1/threads/${threadId}/archive` },
+      { method: "POST", path: `/v1/threads/${threadId}/unarchive` },
+      { method: "GET", path: `/v1/threads/${threadId}/share` },
+      { method: "GET", path: `/v1/threads/${threadId}/reference` },
+      { method: "GET", path: `/v1/threads/${threadId}/events` },
+      { method: "POST", path: "/v1/turns" },
+      { method: "POST", path: "/v1/turns/interrupt" },
+      { method: "GET", path: "/v1/artifacts" },
+      { method: "GET", path: `/v1/artifacts/${artifactId}` },
+      { method: "GET", path: "/v1/ide/status" },
+      { method: "POST", path: "/v1/ide/connect" },
+      { method: "POST", path: "/v1/ide/disconnect" },
+      { method: "POST", path: "/v1/ide/context" },
+      { method: "POST", path: "/v1/ide/open-file" },
+      { method: "GET", path: "/v1/ide/navigation-requests" },
+    ]
+
+    try {
+      const responses = await Promise.all(
+        routes.map(async (route) => ({
+          route,
+          response: await fetch(`${handle.url}${route.path}`, { method: route.method }),
+        })),
+      )
+
+      expect(
+        responses.map(({ route, response }) => ({ method: route.method, path: route.path, status: response.status })),
+      ).toEqual(routes.map((route) => ({ ...route, status: 401 })))
+    } finally {
+      await runtime.runPromise(handle.close())
+    }
+  })
+
+  test("client-supplied auth marker cannot unlock health details", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+
+    const response = await runtime.runPromise(
+      HttpServer.handle(
+        new Request("http://rika.test/health", {
+          headers: {
+            "x-rika-required-token": "fake",
+            authorization: "Bearer fake",
+          },
+        }),
+      ),
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ status: "ok" })
+  })
+
+  test("non-loopback server binds require a token", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+
+    const error = await runtime.runPromise(HttpServer.serve({ host: "0.0.0.0", port: 0 }).pipe(Effect.flip))
+    const handle = await runtime.runPromise(HttpServer.serve({ host: "0.0.0.0", port: 0, token: "secret" }))
+
+    try {
+      expect(error).toBeInstanceOf(HttpServer.HttpServerError)
+      if (!(error instanceof HttpServer.HttpServerError)) throw new Error("expected HttpServerError")
+      expect(error.message).toBe("refusing to bind non-loopback host without --token")
+      expect(handle.url).toStartWith("http://0.0.0.0:")
     } finally {
       await runtime.runPromise(handle.close())
     }

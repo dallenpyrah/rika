@@ -35,6 +35,7 @@ describe("CLI local backend", () => {
       data_dir: dataDir,
       pid: 123,
     })
+    expect(system.healthCalls).toEqual([{ url: record.url, token: record.token }])
     expect(system.spawns).toHaveLength(0)
   })
 
@@ -172,6 +173,7 @@ describe("CLI local backend", () => {
 interface FakeSystem extends LocalBackend.System {
   readonly files: Map<string, string>
   readonly healthy: Map<string, Remote.BackendHealth>
+  readonly healthCalls: Array<{ readonly url: string; readonly token: string }>
   readonly spawns: Array<LocalBackend.SpawnInput>
 }
 
@@ -179,10 +181,12 @@ const fakeSystem = (): FakeSystem => {
   const files = new Map<string, string>()
   const locks = new Set<string>()
   const healthy = new Map<string, Remote.BackendHealth>()
+  const healthCalls: Array<{ readonly url: string; readonly token: string }> = []
   const spawns: Array<LocalBackend.SpawnInput> = []
   return {
     files,
     healthy,
+    healthCalls,
     spawns,
     readText: (path) =>
       Effect.suspend(() => {
@@ -216,6 +220,7 @@ const fakeSystem = (): FakeSystem => {
       }),
     health: (url, token) =>
       Effect.suspend(() => {
+        healthCalls.push({ url, token })
         const value = healthy.get(healthKey(url, token))
         if (value === undefined)
           return Effect.fail(new LocalBackend.BackendError({ message: "unhealthy", operation: "health" }))
