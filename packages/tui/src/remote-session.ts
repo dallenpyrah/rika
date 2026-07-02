@@ -102,7 +102,7 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
         ),
       }
     }),
-  streamTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode }) =>
+  streamTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode, tool_access }) =>
     Stream.unwrap(
       client
         .startTurn({
@@ -112,10 +112,11 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
           ...(content_parts === undefined ? {} : { content_parts }),
           mode,
           ...(fast_mode === undefined ? {} : { fast_mode }),
+          ...(tool_access === undefined ? {} : { tool_access }),
         })
         .pipe(Effect.as(Stream.empty)),
     ),
-  submitTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode }) =>
+  submitTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode, tool_access }) =>
     client
       .startTurn({
         thread_id,
@@ -124,6 +125,7 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
         ...(content_parts === undefined ? {} : { content_parts }),
         mode,
         ...(fast_mode === undefined ? {} : { fast_mode }),
+        ...(tool_access === undefined ? {} : { tool_access }),
       })
       .pipe(Effect.asVoid),
   subscribeThreadEvents: ({ thread_id, after_sequence }) =>

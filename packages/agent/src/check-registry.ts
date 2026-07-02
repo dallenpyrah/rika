@@ -2,7 +2,7 @@ import { Config } from "@rika/core"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import { readdir, readFile } from "node:fs/promises"
 import { dirname, join, relative, resolve, sep } from "node:path"
-import * as SubagentRuntime from "./subagent-runtime"
+import * as ToolAccess from "./tool-access"
 
 export const Severity = Schema.Literals(["low", "medium", "high", "critical"]).annotate({
   identifier: "Rika.Agent.CheckRegistry.Severity",
@@ -249,7 +249,7 @@ const severityValue = (frontmatter: Frontmatter, key: string) => {
 }
 
 const defaultTools = ["read", "ffgrep", "semantic_search", "ast_grep_outline"]
-const readOnlyToolSet = new Set<string>(SubagentRuntime.readOnlyToolNames)
+const readOnlyToolSet = new Set<string>(ToolAccess.readOnlyToolNames)
 
 const normalizeToolNames = (tools: ReadonlyArray<string>) => {
   const requested = tools.length === 0 ? defaultTools : tools

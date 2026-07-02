@@ -4,7 +4,7 @@ import { JsonValue, Metadata, ProtocolVersion, TimestampMillis } from "./common"
 import { Envelope } from "./error"
 import { ArtifactId, EventId, MessageId, ThreadId, ToolCallId, TurnId, UserId, WorkspaceId } from "./ids"
 import { Message } from "./message"
-import { Call, Result } from "./tool"
+import { Call, Result, TurnToolAccess } from "./tool"
 
 const fields = {
   id: EventId,
@@ -31,7 +31,9 @@ export const TurnStarted = Schema.Struct({
   ...fields,
   turn_id: TurnId,
   type: Schema.Literal("turn.started"),
-  data: Schema.Struct({}),
+  data: Schema.Struct({
+    tool_access: Schema.optional(TurnToolAccess),
+  }),
 }).annotate({ identifier: "Rika.Event.TurnStarted" })
 
 export interface MessageAdded extends Schema.Schema.Type<typeof MessageAdded> {}

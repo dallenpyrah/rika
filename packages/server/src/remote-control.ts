@@ -391,6 +391,7 @@ export const layerWithLive = Layer.effect(
             ...(input.fast_mode === undefined ? {} : { fast_mode: input.fast_mode }),
             ...(input.cancelled === undefined ? {} : { cancelled: input.cancelled }),
             ...(ideContext === undefined ? {} : { ide_context: ideContext }),
+            ...(input.tool_access === undefined ? {} : { tool_access: input.tool_access }),
           })
           .pipe(
             Stream.runForEach((event) => live.publish(event)),

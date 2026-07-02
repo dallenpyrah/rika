@@ -10,6 +10,11 @@ const call = (name: string, input: Common.JsonValue = {}): Tool.Call => ({
   input,
 })
 
+const readOnlyCall = (name: string, input: Common.JsonValue = {}): Tool.Call => ({
+  ...call(name, input),
+  metadata: { tool_access: "read-only" },
+})
+
 const fakeToolLayer = (
   handlers: Readonly<Record<string, ToolRegistry.FakeHandler>>,
   policy: Layer.Layer<PermissionPolicy.Service> = PermissionPolicy.allowLayer,
@@ -84,6 +89,54 @@ describe("ToolExecutor", () => {
       status: "error",
       error: { kind: "permission", message: "blocked by policy", code: "fake_blocked" },
       metadata: { permission_mode: "configured", permission_action: "reject-and-continue" },
+    })
+  })
+
+  test("read-only turn metadata rejects non-read-only tools before registry execution", async () => {
+    let executed = false
+    const result = await Effect.runPromise(
+      ToolExecutor.execute(readOnlyCall("shell_command", { command: "printf nope" })).pipe(
+        Effect.provide(
+          fakeToolLayer({
+            shell_command: () =>
+              Effect.sync(() => {
+                executed = true
+                return { should_not: "run" }
+              }),
+          }),
+        ),
+      ),
+    )
+
+    expect(executed).toBe(false)
+    expect(result).toMatchObject({
+      name: "shell_command",
+      status: "error",
+      error: {
+        kind: "permission",
+        code: "shell_command",
+        message: "Tool shell_command is not available during read-only turns",
+      },
+      metadata: { permission_action: "reject-and-continue", tool_access: "read-only" },
+    })
+  })
+
+  test("read-only turn metadata allows read-only tools", async () => {
+    const result = await Effect.runPromise(
+      ToolExecutor.execute(readOnlyCall("read", { path: "AGENTS.md" })).pipe(
+        Effect.provide(
+          fakeToolLayer({
+            read: (toolCall) => Effect.succeed({ content: "ok", input: toolCall.input }),
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toMatchObject({
+      name: "read",
+      status: "success",
+      output: { content: "ok", input: { path: "AGENTS.md" } },
+      metadata: { permission_mode: "allow-all", permission_action: "allow", tool_access: "read-only" },
     })
   })
 

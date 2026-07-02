@@ -215,6 +215,30 @@ const blockingAgentLoopLayer = (): Layer.Layer<AgentLoop.Service> =>
     }),
   )
 
+const capturingAgentLoopLayer = (inputs: Array<AgentLoop.RunTurnInput>): Layer.Layer<AgentLoop.Service> =>
+  Layer.succeed(
+    AgentLoop.Service,
+    AgentLoop.Service.of({
+      runTurn: () => Effect.never,
+      streamTurn: (input) =>
+        Stream.sync(() => {
+          inputs.push(input)
+          return {
+            id: Ids.EventId.make("event_remote_captured_completed"),
+            thread_id: input.thread_id,
+            turn_id: Ids.TurnId.make("turn_remote_captured"),
+            sequence: 1,
+            version: 1,
+            created_at: now,
+            type: "turn.completed",
+            data: {},
+          } satisfies Event.TurnCompleted
+        }),
+      cancelTurn: () => Effect.never,
+      queueTurn: () => Effect.never,
+    }),
+  )
+
 const orbManagerLayerWithStoredResume = (
   onResume: (orbId: Ids.OrbId) => void,
 ): Layer.Layer<OrbManager.Service, never, OrbStore.Service> =>
@@ -438,6 +462,33 @@ describe("remote control API and SDK", () => {
     const fetched = await Effect.runPromise(client.getArtifact(artifactId))
     expect(artifacts.map((item) => item.id)).toEqual([artifactId])
     expect(fetched).toEqual(artifact)
+  })
+
+  test("startTurn preserves read-only tool access for the agent loop", async () => {
+    const captured: Array<AgentLoop.RunTurnInput> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), {
+        agentLayer: capturingAgentLoopLayer(captured),
+      }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+    const subscriber = Effect.runPromise(
+      client.subscribeThreadEvents({ thread_id: threadId }).pipe(Stream.take(1), Stream.runCollect),
+    )
+    await Effect.runPromise(
+      client.startTurn({
+        thread_id: threadId,
+        workspace_id: workspaceId,
+        content: "audit only",
+        tool_access: "read-only",
+      }),
+    )
+    await subscriber
+
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toMatchObject({ tool_access: "read-only", content: "audit only" })
   })
 
   test("uses project identity when remote requests omit workspace id", async () => {

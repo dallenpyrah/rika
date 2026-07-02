@@ -1,5 +1,5 @@
 import { Config } from "@rika/core"
-import { Event, Ids, Message, Orb } from "@rika/schema"
+import { Event, Ids, Message, Orb, Tool } from "@rika/schema"
 import { Effect, Stream } from "effect"
 import * as ViewState from "./view-state"
 
@@ -25,6 +25,7 @@ export interface TurnRequest {
   readonly content_parts?: ReadonlyArray<Message.ContentPart>
   readonly mode: Config.Mode
   readonly fast_mode?: boolean
+  readonly tool_access?: Tool.TurnToolAccess
 }
 
 export interface ThreadEventsRequest {

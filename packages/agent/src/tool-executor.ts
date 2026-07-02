@@ -4,6 +4,7 @@ import type { Call, Result } from "@rika/schema/tool"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import type { Tool } from "effect/unstable/ai"
 import * as PermissionPolicy from "./permission-policy"
+import * as ToolAccess from "./tool-access"
 import * as ToolRegistry from "./tool-registry"
 
 export type Descriptor = ToolRegistry.Descriptor
@@ -61,7 +62,28 @@ const runExecute = (
   fields: Diagnostics.Fields,
 ) =>
   Effect.gen(function* () {
+    const toolAccess = ToolAccess.metadataToolAccess(call.metadata)
     const mode = yield* policy.mode
+    if (ToolAccess.isReadOnlyTurn(toolAccess) && !ToolAccess.isReadOnlyToolName(call.name)) {
+      fields.permission_mode = mode
+      fields.permission_action = "reject-and-continue"
+      const result = withMetadata(
+        errorResult(
+          call,
+          new ToolExecutorError({
+            message: `Tool ${call.name} is not available during read-only turns`,
+            kind: "permission",
+            name: call.name,
+            retryable: false,
+          }),
+        ),
+        { ...permissionMetadata(mode, "reject-and-continue"), tool_access: "read-only" },
+      )
+      fields.status = result.status
+      fields.output_size = 0
+      fields.error_kind = "permission"
+      return result
+    }
     const decision = yield* policy.decide(call).pipe(
       Effect.match({
         onFailure: (error) => PermissionPolicy.reject(error.message, error.details),
@@ -70,7 +92,10 @@ const runExecute = (
     )
     fields.permission_mode = mode
     fields.permission_action = decision.action
-    const result = yield* resultForDecision(registry, call, decision, permissionMetadata(mode, decision.action))
+    const resultMetadata = ToolAccess.isReadOnlyTurn(toolAccess)
+      ? { ...permissionMetadata(mode, decision.action), tool_access: "read-only" }
+      : permissionMetadata(mode, decision.action)
+    const result = yield* resultForDecision(registry, call, decision, resultMetadata)
     fields.status = result.status
     fields.output_size = result.output === undefined ? 0 : jsonSize(result.output)
     if (result.status === "error" && result.error !== undefined) {

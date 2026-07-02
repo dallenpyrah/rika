@@ -6,6 +6,9 @@ import { ToolCallId } from "./ids"
 export const ToolResultStatus = Schema.Literals(["success", "error"]).annotate({ identifier: "Rika.ToolResultStatus" })
 export type ToolResultStatus = typeof ToolResultStatus.Type
 
+export const TurnToolAccess = Schema.Literals(["full", "read-only"]).annotate({ identifier: "Rika.TurnToolAccess" })
+export type TurnToolAccess = typeof TurnToolAccess.Type
+
 export interface Call extends Schema.Schema.Type<typeof Call> {}
 export const Call = Schema.Struct({
   id: ToolCallId,

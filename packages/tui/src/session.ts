@@ -103,7 +103,7 @@ const makeBackend = (dependencies: Dependencies): Backend.SessionBackend<RunErro
         last_sequence: events.at(-1)?.sequence ?? 0,
       }
     }),
-  streamTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode }) =>
+  streamTurn: ({ thread_id, workspace_id, content, content_parts, mode, fast_mode, tool_access }) =>
     dependencies.agentLoop.streamTurn({
       thread_id,
       workspace_id,
@@ -111,6 +111,7 @@ const makeBackend = (dependencies: Dependencies): Backend.SessionBackend<RunErro
       ...(content_parts === undefined ? {} : { content_parts }),
       mode,
       ...(fast_mode === undefined ? {} : { fast_mode }),
+      ...(tool_access === undefined ? {} : { tool_access }),
     }),
   cancelTurn: ({ thread_id, turn_id }) => dependencies.agentLoop.cancelTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
   runCommand: (context, command) => handleCommand(dependencies, context, command),

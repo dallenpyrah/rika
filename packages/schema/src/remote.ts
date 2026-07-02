@@ -6,6 +6,7 @@ import { ContextSnapshot as IdeContextSnapshot } from "./ide"
 import { ArtifactId, OrbId, ProjectId, ThreadId, TurnId, UserId, WorkspaceId } from "./ids"
 import { ContentPart } from "./message"
 import { OrbStatus } from "./orb"
+import { TurnToolAccess } from "./tool"
 
 export const BackendStatus = Schema.Literals(["healthy", "starting", "stale", "disconnected", "remote"]).annotate({
   identifier: "Rika.Remote.BackendStatus",
@@ -207,6 +208,7 @@ export const StartTurnRequest = Schema.Struct({
   fast_mode: Schema.optional(Schema.Boolean),
   cancelled: Schema.optional(Schema.Boolean),
   ide_context: Schema.optional(IdeContextSnapshot),
+  tool_access: Schema.optional(TurnToolAccess),
 }).annotate({ identifier: "Rika.Remote.StartTurnRequest" })
 
 export interface StartTurnResponse extends Schema.Schema.Type<typeof StartTurnResponse> {}

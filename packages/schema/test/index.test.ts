@@ -327,6 +327,21 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
 
+  test("round-trips read-only turn started events", () => {
+    const event: Event.Event = {
+      id: eventId,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 5,
+      version: 1,
+      created_at: now,
+      type: "turn.started",
+      data: { tool_access: "read-only" },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
+
   test("round-trips subagent summary events", () => {
     const event: Event.Event = {
       id: eventId,
@@ -368,6 +383,7 @@ describe("Rika protocol schemas", () => {
       content: "Ship remote control",
       content_parts: [Message.text("Ship remote control")],
       mode: "smart",
+      tool_access: "read-only",
     }
     const create: Remote.CreateThreadRequest = {
       thread_id: threadId,

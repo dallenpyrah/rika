@@ -1,4 +1,4 @@
-import { PermissionPolicy, SubagentRuntime, ToolExecutor, ToolRegistry } from "@rika/agent"
+import { PermissionPolicy, SubagentRuntime, ToolAccess, ToolExecutor, ToolRegistry } from "@rika/agent"
 import { Config } from "@rika/core"
 import { McpApprovalStore } from "@rika/persistence"
 import { PluginHost } from "@rika/plugin"
@@ -67,7 +67,7 @@ export const readOnlyRegistryLayerFromServices: Layer.Layer<
       ...FffSearch.toolDefinitions(fffSearch),
       ...AstGrepOutline.toolDefinitions(astGrepOutline),
       ...HashlineFile.toolDefinitions(hashlineFile),
-    ].filter((definition) => SubagentRuntime.readOnlyToolNames.some((name) => name === definition.tool.name))
+    ].filter((definition) => ToolAccess.isReadOnlyToolName(definition.tool.name))
 
     return yield* ToolRegistry.Service.pipe(Effect.provide(ToolRegistry.layerFromDefinitions(definitions)))
   }),

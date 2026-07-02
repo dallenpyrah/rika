@@ -292,6 +292,7 @@ const runRemoteInput = (
       ...(turnInput.fast_mode === undefined ? {} : { fast_mode: turnInput.fast_mode }),
       ...(turnInput.cancelled === undefined ? {} : { cancelled: turnInput.cancelled }),
       ...(turnInput.ide_context === undefined ? {} : { ide_context: turnInput.ide_context }),
+      ...(turnInput.tool_access === undefined ? {} : { tool_access: turnInput.tool_access }),
     })
 
     let terminal = false

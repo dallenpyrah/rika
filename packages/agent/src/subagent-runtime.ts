@@ -4,6 +4,7 @@ import { Common, Ids } from "@rika/schema"
 import type { Call } from "@rika/schema/tool"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import { Tool } from "effect/unstable/ai"
+import * as ToolAccessPolicy from "./tool-access"
 import * as ToolExecutor from "./tool-executor"
 import * as ToolRegistry from "./tool-registry"
 
@@ -76,18 +77,7 @@ interface Dependencies {
   readonly toolExecutor: ToolExecutor.Interface
 }
 
-export const readOnlyToolNames = [
-  "semantic_search",
-  "semantic_search_status",
-  "fffind",
-  "fff_glob",
-  "fff_directory_search",
-  "ffgrep",
-  "fff_multi_grep",
-  "fff_health",
-  "ast_grep_outline",
-  "read",
-] as const
+export const readOnlyToolNames = ToolAccessPolicy.readOnlyToolNames
 
 export const layer = Layer.effect(
   Service,

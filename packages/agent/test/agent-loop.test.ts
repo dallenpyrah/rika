@@ -28,6 +28,11 @@ const defaultToolLayer = ToolExecutor.fakeLayer({
   fake_echo: (call) => Effect.succeed({ echoed: call.input }),
 })
 
+const mixedToolLayer = ToolExecutor.fakeLayer({
+  read: (call) => Effect.succeed({ path: call.input, content: "read output" }),
+  shell_command: (call) => Effect.succeed({ ran: call.input }),
+})
+
 const registryFromProviderLayer = (providerLayer: Layer.Layer<Provider.Service>) =>
   Provider.registryLayerFromService.pipe(Layer.provide(providerLayer))
 
@@ -40,6 +45,13 @@ const providerServiceOf = (
     completeStructured:
       implementation.completeStructured ?? (() => Effect.die(new Error("structured completion not configured"))),
   })
+
+const toolkitToolNames = async (request: Provider.GenerateRequest | undefined): Promise<ReadonlyArray<string>> => {
+  const toolkit = request?.toolkit
+  if (toolkit === undefined) return []
+  const prepared = Effect.isEffect(toolkit) ? await Effect.runPromise(toolkit) : toolkit
+  return Object.keys(prepared.tools).toSorted()
+}
 
 const makeLayer = (
   responses: ReadonlyArray<Provider.FakeResponse>,
@@ -139,6 +151,165 @@ describe("AgentLoop", () => {
       thread_id: threadId,
       latest_message_text: "tool saw hello",
       active_turn_status: "completed",
+    })
+  })
+
+  test("default turns expose the full tool descriptor list", async () => {
+    const captured: Array<Provider.GenerateRequest> = []
+    const providerLayer = Provider.registryLayerFromProviders([
+      providerServiceOf({
+        name: "openai",
+        complete: (request) =>
+          Effect.sync(() => {
+            captured.push(request)
+            return { provider: "openai", model: request.model, content: "done" }
+          }),
+        stream: (request) =>
+          Stream.sync(() => {
+            captured.push(request)
+            return Provider.streamEventsFromResponse(fakeResponse(request, "done"))
+          }).pipe(Stream.flatMap(Stream.fromIterable)),
+      }),
+    ])
+    const layer = makeLayer([], mixedToolLayer, SkillRegistry.emptyLayer, providerLayer)
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        return yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_full_tools"),
+          workspace_id: workspaceId,
+          content: "list full tools",
+        })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const promptText = JSON.stringify(captured[0]?.messages)
+    const toolNames = await toolkitToolNames(captured[0])
+    expect(promptText).toContain("read")
+    expect(promptText).toContain("shell_command")
+    expect(toolNames).toContain("read")
+    expect(toolNames).toContain("shell_command")
+  })
+
+  test("read-only turns hide write tools from the model and record tool access on turn.started", async () => {
+    const captured: Array<Provider.GenerateRequest> = []
+    const providerLayer = Provider.registryLayerFromProviders([
+      providerServiceOf({
+        name: "openai",
+        complete: (request) =>
+          Effect.sync(() => {
+            captured.push(request)
+            return { provider: "openai", model: request.model, content: "done" }
+          }),
+        stream: (request) =>
+          Stream.sync(() => {
+            captured.push(request)
+            return Provider.streamEventsFromResponse(fakeResponse(request, "done"))
+          }).pipe(Stream.flatMap(Stream.fromIterable)),
+      }),
+    ])
+    const layer = makeLayer([], mixedToolLayer, SkillRegistry.emptyLayer, providerLayer)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_read_only_tools"),
+          workspace_id: workspaceId,
+          content: "list read-only tools",
+          tool_access: "read-only",
+        })
+        return yield* ThreadEventLog.readThread({ thread_id: Ids.ThreadId.make("thread_agent_read_only_tools") })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const promptText = JSON.stringify(captured[0]?.messages)
+    const toolNames = await toolkitToolNames(captured[0])
+    expect(promptText).toContain("read")
+    expect(promptText).not.toContain("shell_command")
+    expect(toolNames).toContain("read")
+    expect(toolNames).not.toContain("shell_command")
+    expect(result.find((event) => event.type === "turn.started")).toMatchObject({
+      data: { tool_access: "read-only" },
+    })
+  })
+
+  test("read-only turns reject forced write tool calls from the model stream", async () => {
+    let shellExecuted = false
+    const toolLayer = ToolExecutor.fakeLayer({
+      read: (call) => Effect.succeed({ path: call.input, content: "read output" }),
+      shell_command: (call) =>
+        Effect.sync(() => {
+          shellExecuted = true
+          return { ran: call.input }
+        }),
+    })
+    let streamCount = 0
+    const providerLayer = Provider.registryLayerFromProviders([
+      providerServiceOf({
+        name: "openai",
+        complete: (request) => Effect.succeed(fakeResponse(request, "unexpected complete")),
+        stream: (request) =>
+          Stream.sync(() => {
+            streamCount += 1
+            return streamCount === 1
+              ? [
+                  { type: "response.started" as const, provider: "openai", model: request.model },
+                  {
+                    type: "tool.call" as const,
+                    id: "call_shell_read_only",
+                    name: "shell_command",
+                    input: { command: "printf nope" },
+                  },
+                  {
+                    type: "response.completed" as const,
+                    response: {
+                      provider: "openai",
+                      model: request.model,
+                      content: "",
+                      finish_reason: "tool-call" as const,
+                    },
+                  },
+                ]
+              : Provider.streamEventsFromResponse(fakeResponse(request, "done after blocked shell"))
+          }).pipe(Stream.flatMap(Stream.fromIterable)),
+      }),
+    ])
+    const layer = makeLayer([], toolLayer, SkillRegistry.emptyLayer, providerLayer)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_read_only_forced_shell"),
+          workspace_id: workspaceId,
+          content: "force a write tool",
+          tool_access: "read-only",
+        })
+        const events = yield* ThreadEventLog.readThread({
+          thread_id: Ids.ThreadId.make("thread_agent_read_only_forced_shell"),
+        })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const completed = result.events.find((event) => event.type === "tool.call.completed")
+    expect(shellExecuted).toBe(false)
+    expect(result.turn.status).toBe("completed")
+    expect(completed).toMatchObject({
+      data: {
+        result: {
+          name: "shell_command",
+          status: "error",
+          error: {
+            kind: "permission",
+            code: "shell_command",
+            message: "Tool shell_command is not available during read-only turns",
+          },
+          metadata: { permission_action: "reject-and-continue", tool_access: "read-only" },
+        },
+      },
     })
   })
 

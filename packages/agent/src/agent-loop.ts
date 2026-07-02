@@ -10,6 +10,7 @@ import * as ContextBudget from "./context-budget"
 import * as ModelContext from "./model-context"
 import * as SkillRegistry from "./skill-registry"
 import * as Toolkit from "./toolkit"
+import * as ToolAccess from "./tool-access"
 import * as ToolExecutor from "./tool-executor"
 
 export interface RunTurnInput extends Schema.Schema.Type<typeof RunTurnInput> {}
@@ -23,6 +24,7 @@ export const RunTurnInput = Schema.Struct({
   fast_mode: Schema.optional(Schema.Boolean),
   cancelled: Schema.optional(Schema.Boolean),
   ide_context: Schema.optional(Ide.ContextSnapshot),
+  tool_access: Schema.optional(Tool.TurnToolAccess),
 }).annotate({ identifier: "Rika.Agent.AgentLoop.RunTurnInput" })
 
 export interface CancelTurnInput extends Schema.Schema.Type<typeof CancelTurnInput> {}
@@ -279,7 +281,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
     }
 
     yield* maybeAutoPruneBeforeTurn(dependencies, input, existingEvents.length > 0, emitExternalAppend)
-    yield* append(yield* makeTurnStarted(dependencies, input.thread_id, turnId, sequence + 1))
+    yield* append(yield* makeTurnStarted(dependencies, input, turnId, sequence + 1))
     yield* append(yield* makeUserMessageAdded(dependencies, input, turnId, sequence + 1))
     const resolvedContext = yield* dependencies.contextResolver.resolve({
       thread_id: input.thread_id,
@@ -317,7 +319,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
     )
 
     const history = [...existingEvents, ...appendedEvents]
-    let modelInput: ModelInput = yield* contextModelInput(dependencies, history, skillSelection)
+    let modelInput: ModelInput = yield* contextModelInput(dependencies, input, history, skillSelection)
     if (
       preTurnCompaction.compacted &&
       preTurnCompaction.usable !== undefined &&
@@ -355,7 +357,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
         const events = yield* readThread(dependencies, { thread_id: input.thread_id })
         const filtered =
           excludedToolIds.size === 0 ? events : events.filter((event) => !eventReferencesTool(event, excludedToolIds))
-        const rebuilt = yield* contextModelInput(dependencies, filtered, skillSelection)
+        const rebuilt = yield* contextModelInput(dependencies, input, filtered, skillSelection)
         yield* emitCompactionDiagnostic(dependencies, result.event, Tokens.estimateMessages(rebuilt.messages))
         yield* emit(result.event)
         return rebuilt
@@ -662,7 +664,7 @@ const streamModelResponse = (
             return
           case "tool.call": {
             yield* flushPending()
-            const call = yield* makeToolCall(dependencies, input.thread_id, turnId, streamEvent)
+            const call = yield* makeToolCall(dependencies, input, turnId, streamEvent)
             toolCalls.push(call)
             yield* makeToolCallRequested(dependencies, input.thread_id, turnId, call, nextSequence()).pipe(
               Effect.flatMap(append),
@@ -726,12 +728,15 @@ const streamModelResponse = (
 
 const contextModelInput = (
   dependencies: Dependencies,
+  input: RunTurnInput,
   events: ReadonlyArray<Event.Event>,
   skills: SkillRegistry.Selection,
 ) =>
   Effect.gen(function* () {
-    const tools = yield* dependencies.toolExecutor.describe
-    const prepared = yield* dependencies.toolkit.build
+    const tools = ToolAccess.filterDescriptors(yield* dependencies.toolExecutor.describe, input.tool_access)
+    const prepared = yield* dependencies.toolkit.build(
+      input.tool_access === undefined ? undefined : { tool_access: input.tool_access },
+    )
     const config = yield* dependencies.config.get
     const resolvedContext = latestResolvedContext(events)
     const system = systemMessage(config, tools, resolvedContext, skills)
@@ -1113,19 +1118,19 @@ const makeThreadCreated = (dependencies: Dependencies, input: RunTurnInput, sequ
     return event
   })
 
-const makeTurnStarted = (dependencies: Dependencies, threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number) =>
+const makeTurnStarted = (dependencies: Dependencies, input: RunTurnInput, turnId: Ids.TurnId, sequence: number) =>
   Effect.gen(function* () {
     const createdAt = yield* dependencies.time.nowMillis
     const id = Ids.EventId.make(yield* dependencies.idGenerator.next("event"))
     const event: Event.TurnStarted = {
       id,
-      thread_id: threadId,
+      thread_id: input.thread_id,
       turn_id: turnId,
       sequence,
       version: 1,
       created_at: createdAt,
       type: "turn.started",
-      data: {},
+      data: ToolAccess.metadata(input.tool_access),
     }
     return event
   })
@@ -1284,7 +1289,7 @@ const makeModelReasoningChunk = (
 
 const makeToolCall = (
   dependencies: Dependencies,
-  threadId: Ids.ThreadId,
+  input: RunTurnInput,
   turnId: Ids.TurnId,
   request: Provider.ToolCall,
 ) =>
@@ -1294,7 +1299,7 @@ const makeToolCall = (
       return yield* new AgentLoopError({
         message: `Tool ${request.name} input was not JSON-serializable`,
         operation: "makeToolCall",
-        thread_id: threadId,
+        thread_id: input.thread_id,
         turn_id: turnId,
       })
     }
@@ -1302,7 +1307,7 @@ const makeToolCall = (
       id: Ids.ToolCallId.make(request.id),
       name: request.name,
       input: decodedInput.value,
-      metadata: { thread_id: threadId, turn_id: turnId },
+      metadata: { thread_id: input.thread_id, turn_id: turnId, ...ToolAccess.metadata(input.tool_access) },
     }
     return call
   })
