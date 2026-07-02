@@ -29,6 +29,8 @@ export const ThreadSummary = Schema.Struct({
   diff: ThreadDiffStats,
   active_turn_id: Schema.optional(Ids.TurnId),
   active_turn_status: Schema.optional(TurnStatus),
+  context_tokens: Schema.optional(Schema.Int),
+  last_model: Schema.optional(Schema.String),
   archived: Schema.Boolean,
   created_at: Schema.Int,
   updated_at: Schema.Int,
@@ -165,6 +167,8 @@ interface ThreadProjectionRow {
   readonly diff_deletions: number
   readonly active_turn_id: string | null
   readonly active_turn_status: string | null
+  readonly last_context_tokens: number | null
+  readonly last_model: string | null
   readonly archived: number
   readonly last_sequence: number
   readonly created_at: number
@@ -201,9 +205,12 @@ const applyEventRow = (database: ProjectionDatabase, event: Event.Event) => {
     case "turn.started":
       return applyTurnStatus(database, event, "active")
     case "turn.completed":
-      return applyTurnStatus(database, event, "completed")
+      return applyTurnCompleted(database, event)
     case "turn.failed":
       return applyTurnStatus(database, event, "failed")
+    case "model.stream.chunk":
+    case "model.reasoning.delta":
+      return applyModelSeen(database, event)
     case "thread.archived":
       return applyThreadArchived(database, event)
     case "thread.unarchived":
@@ -281,6 +288,36 @@ const applyTurnStatus = (
     where thread_id = ${event.thread_id}
   `)
 
+const applyTurnCompleted = (database: ProjectionDatabase, event: Event.TurnCompleted) => {
+  const inputTokens = event.data.usage?.input_tokens ?? null
+  const model = event.data.model ?? null
+  return database.run(sql`
+    update thread_projections set
+      active_turn_id = ${event.turn_id},
+      active_turn_status = 'completed',
+      last_context_tokens = case
+        when ${inputTokens} is null then last_context_tokens
+        else ${inputTokens}
+      end,
+      last_model = case
+        when ${model} is null then last_model
+        else ${model}
+      end,
+      last_sequence = ${event.sequence},
+      updated_at = ${event.created_at}
+    where thread_id = ${event.thread_id}
+  `)
+}
+
+const applyModelSeen = (database: ProjectionDatabase, event: Event.ModelStreamChunk | Event.ModelReasoningDelta) =>
+  database.run(sql`
+    update thread_projections set
+      last_model = ${event.data.model},
+      last_sequence = ${event.sequence},
+      updated_at = ${event.created_at}
+    where thread_id = ${event.thread_id}
+  `)
+
 const applyThreadArchived = (database: ProjectionDatabase, event: Event.ThreadArchived) =>
   database.run(sql`
     update thread_projections set
@@ -351,6 +388,8 @@ const rowToSummary = (row: ThreadProjectionRow): ThreadSummary => ({
   },
   active_turn_id: row.active_turn_id === null ? undefined : Ids.TurnId.make(row.active_turn_id),
   active_turn_status: turnStatusOrUndefined(row.active_turn_status),
+  context_tokens: row.last_context_tokens === null ? undefined : row.last_context_tokens,
+  last_model: row.last_model === null ? undefined : row.last_model,
   archived: row.archived === 1,
   created_at: row.created_at,
   updated_at: row.updated_at,

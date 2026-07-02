@@ -5,7 +5,15 @@ import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/per
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Exit, Fiber, Layer, Queue, Scope, Stream } from "effect"
 import { AiError, Prompt } from "effect/unstable/ai"
-import { AgentLoop, ContextResolver, PermissionPolicy, SkillRegistry, ToolExecutor, ToolRegistry } from "../src/index"
+import {
+  AgentLoop,
+  ContextResolver,
+  PermissionPolicy,
+  SkillRegistry,
+  ThreadService,
+  ToolExecutor,
+  ToolRegistry,
+} from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_agent_loop")
 const workspaceId = Ids.WorkspaceId.make("workspace_agent_loop")
@@ -62,7 +70,7 @@ const makeLayer = (
     llmLayer,
   )
 
-  return AgentLoop.layer.pipe(Layer.provideMerge(services))
+  return Layer.mergeAll(AgentLoop.layer, ThreadService.layer).pipe(Layer.provideMerge(services))
 }
 
 describe("AgentLoop", () => {
@@ -128,7 +136,13 @@ describe("AgentLoop", () => {
     const layer = makeLayer([
       { type: "tool-call", id: "call_fake_echo_1", name: "fake_echo", input: { text: "first" } },
       { type: "tool-call", id: "call_fake_echo_2", name: "fake_echo", input: { text: "second" } },
-      "done after two tools",
+      {
+        provider: "openai",
+        model: "gpt-5.5",
+        content: "done after two tools",
+        finish_reason: "stop",
+        usage: { input_tokens: 777, output_tokens: 12, total_tokens: 789 },
+      },
     ])
 
     const result = await Effect.runPromise(
@@ -168,7 +182,10 @@ describe("AgentLoop", () => {
     expect(result.events.filter((event) => event.type === "tool.call.requested")).toHaveLength(2)
     expect(result.events.filter((event) => event.type === "tool.call.completed")).toHaveLength(2)
     expect(result.events.filter((event) => event.type === "message.added")).toHaveLength(2)
-    expect(result.events.at(-1)).toMatchObject({ type: "turn.completed" })
+    expect(result.events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      data: { usage: { input_tokens: 777, output_tokens: 12, total_tokens: 789 } },
+    })
     expect(result.events.findLast((event) => event.type === "message.added")).toMatchObject({
       data: { message: { role: "assistant" } },
     })
@@ -202,6 +219,39 @@ describe("AgentLoop", () => {
       "message.added",
       "turn.completed",
     ])
+  })
+
+  test("projects context window for usage-only final responses", async () => {
+    const usageOnlyThread = Ids.ThreadId.make("thread_agent_usage_only")
+    const layer = makeLayer([
+      { provider: "openai", model: "gpt-5.5", content: "", finish_reason: "stop" },
+      { provider: "openai", model: "gpt-5.5", content: "", finish_reason: "stop" },
+      {
+        provider: "openai",
+        model: "gpt-5.5",
+        content: "",
+        finish_reason: "stop",
+        usage: { input_tokens: 9_000, output_tokens: 0, total_tokens: 9_000 },
+      },
+    ])
+
+    const summary = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* AgentLoop.runTurn({
+          thread_id: usageOnlyThread,
+          workspace_id: workspaceId,
+          content: "answer tersely",
+        })
+        return yield* ThreadService.list({})
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(summary[0]).toMatchObject({
+      thread_id: usageOnlyThread,
+      context_tokens: 9_000,
+      context_window: 400_000,
+    })
   })
 
   test("coalesces bursty model deltas before persistence and replay", async () => {

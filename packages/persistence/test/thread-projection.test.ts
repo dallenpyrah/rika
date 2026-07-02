@@ -82,6 +82,26 @@ describe("ThreadProjection", () => {
     })
   })
 
+  test("projects latest context tokens and model attribution", async () => {
+    const summary = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of contextUsageEvents()) {
+          const appended = yield* ThreadEventLog.append(event)
+          yield* ThreadProjection.apply(appended)
+        }
+        return yield* ThreadProjection.getThread(threadId)
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(summary).toMatchObject({
+      thread_id: threadId,
+      context_tokens: 42_000,
+      last_model: "gpt-5.5",
+      active_turn_status: "completed",
+    })
+  })
+
   test("does not regress projections when an older duplicate event is reapplied", async () => {
     const summary = await Effect.runPromise(
       Effect.gen(function* () {
@@ -195,6 +215,53 @@ const toolCompletedEvent = (): Event.ToolCallCompleted => ({
     },
   },
 })
+
+const contextUsageEvents = (): readonly [
+  Event.ThreadCreated,
+  Event.TurnStarted,
+  Event.ModelStreamChunk,
+  Event.TurnCompleted,
+] => [
+  {
+    id: Ids.EventId.make("projection_context_created"),
+    thread_id: threadId,
+    sequence: 1,
+    version: 1,
+    created_at: 1,
+    type: "thread.created",
+    data: { workspace_id: workspaceId },
+  },
+  {
+    id: Ids.EventId.make("projection_context_turn_started"),
+    thread_id: threadId,
+    turn_id: turnId,
+    sequence: 2,
+    version: 1,
+    created_at: 2,
+    type: "turn.started",
+    data: {},
+  },
+  {
+    id: Ids.EventId.make("projection_context_model"),
+    thread_id: threadId,
+    turn_id: turnId,
+    sequence: 3,
+    version: 1,
+    created_at: 3,
+    type: "model.stream.chunk",
+    data: { provider: "openai", model: "gpt-5.5", text: "answer" },
+  },
+  {
+    id: Ids.EventId.make("projection_context_turn_completed"),
+    thread_id: threadId,
+    turn_id: turnId,
+    sequence: 4,
+    version: 1,
+    created_at: 4,
+    type: "turn.completed",
+    data: { usage: { input_tokens: 42_000, output_tokens: 200, total_tokens: 42_200 } },
+  },
+]
 
 const pierreDiff = (): Common.JsonValue => ({
   kind: "diff",

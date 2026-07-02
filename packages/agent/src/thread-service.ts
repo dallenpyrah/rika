@@ -1,4 +1,5 @@
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { ModelInfo } from "@rika/llm"
 import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema } from "effect"
@@ -50,15 +51,35 @@ export const ReferenceInput = Schema.Struct({
   max_chars: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Agent.ThreadService.ReferenceInput" })
 
+export interface ThreadSummary extends Schema.Schema.Type<typeof ThreadSummary> {}
+export const ThreadSummary = Schema.Struct({
+  thread_id: Ids.ThreadId,
+  workspace_id: Ids.WorkspaceId,
+  user_id: Schema.optional(Ids.UserId),
+  title_text: Schema.optional(Schema.String),
+  latest_message_id: Schema.optional(Ids.MessageId),
+  latest_message_role: Schema.optional(Message.Role),
+  latest_message_text: Schema.optional(Schema.String),
+  latest_message_created_at: Schema.optional(Schema.Int),
+  diff: ThreadProjection.ThreadDiffStats,
+  active_turn_id: Schema.optional(Ids.TurnId),
+  active_turn_status: Schema.optional(ThreadProjection.TurnStatus),
+  context_tokens: Schema.optional(Schema.Int),
+  context_window: Schema.optional(Schema.Int),
+  archived: Schema.Boolean,
+  created_at: Schema.Int,
+  updated_at: Schema.Int,
+}).annotate({ identifier: "Rika.Agent.ThreadService.ThreadSummary" })
+
 export interface ThreadRecord extends Schema.Schema.Type<typeof ThreadRecord> {}
 export const ThreadRecord = Schema.Struct({
-  summary: ThreadProjection.ThreadSummary,
+  summary: ThreadSummary,
   events: Schema.Array(Event.Event),
 }).annotate({ identifier: "Rika.Agent.ThreadService.ThreadRecord" })
 
 export interface SearchResult extends Schema.Schema.Type<typeof SearchResult> {}
 export const SearchResult = Schema.Struct({
-  summary: ThreadProjection.ThreadSummary,
+  summary: ThreadSummary,
   score: Schema.Int,
   matched: Schema.Array(Schema.String),
 }).annotate({ identifier: "Rika.Agent.ThreadService.SearchResult" })
@@ -77,7 +98,7 @@ export const ThreadExport = Schema.Struct({
   schema_version: Schema.Literal(1),
   exported_at: Common.TimestampMillis,
   thread_id: Ids.ThreadId,
-  summary: ThreadProjection.ThreadSummary,
+  summary: ThreadSummary,
   events: Schema.Array(Event.Event),
 }).annotate({ identifier: "Rika.Agent.ThreadService.ThreadExport" })
 
@@ -95,12 +116,12 @@ export type Error =
   | ThreadProjection.ThreadProjectionError
 
 export interface Interface {
-  readonly create: (input: CreateInput) => Effect.Effect<ThreadProjection.ThreadSummary, Error>
-  readonly list: (input?: ListInput) => Effect.Effect<ReadonlyArray<ThreadProjection.ThreadSummary>, Error>
+  readonly create: (input: CreateInput) => Effect.Effect<ThreadSummary, Error>
+  readonly list: (input?: ListInput) => Effect.Effect<ReadonlyArray<ThreadSummary>, Error>
   readonly open: (input: ThreadIdInput) => Effect.Effect<ThreadRecord, Error>
   readonly preview: (input: PreviewInput) => Effect.Effect<ThreadRecord, Error>
-  readonly archive: (input: ThreadIdInput) => Effect.Effect<ThreadProjection.ThreadSummary, Error>
-  readonly unarchive: (input: ThreadIdInput) => Effect.Effect<ThreadProjection.ThreadSummary, Error>
+  readonly archive: (input: ThreadIdInput) => Effect.Effect<ThreadSummary, Error>
+  readonly unarchive: (input: ThreadIdInput) => Effect.Effect<ThreadSummary, Error>
   readonly deleteThread: (input: ThreadIdInput) => Effect.Effect<never, ThreadServiceError>
   readonly search: (input: SearchInput) => Effect.Effect<ReadonlyArray<SearchResult>, Error>
   readonly share: (input: ThreadIdInput) => Effect.Effect<ThreadExport, Error>
@@ -307,6 +328,7 @@ const listThreads = (dependencies: Dependencies, input: ListInput) =>
       .filter((summary) => input.include_archived === true || !summary.archived)
       .filter((summary) => input.workspace_id === undefined || summary.workspace_id === input.workspace_id)
       .slice(0, limit)
+      .map(summaryFromProjection)
   })
 
 const openThread = (dependencies: Dependencies, threadId: Ids.ThreadId) =>
@@ -428,7 +450,7 @@ const referenceEntries = (record: ThreadRecord, terms: ReadonlyArray<string>) =>
 }
 
 const scoreSummary = (
-  summary: ThreadProjection.ThreadSummary,
+  summary: ThreadSummary,
   events: ReadonlyArray<Event.Event>,
   terms: ReadonlyArray<string>,
 ): SearchResult => {
@@ -442,7 +464,7 @@ const scoreSummary = (
   return { summary, score, matched: uniqueStrings(matched).slice(0, 8) }
 }
 
-const searchableFields = (summary: ThreadProjection.ThreadSummary, events: ReadonlyArray<Event.Event>) =>
+const searchableFields = (summary: ThreadSummary, events: ReadonlyArray<Event.Event>) =>
   uniqueStrings([
     summary.thread_id,
     summary.workspace_id,
@@ -519,7 +541,10 @@ const readAll = (dependencies: Dependencies) =>
   dependencies.eventLog.readAll().pipe(Effect.provideService(Database.Service, dependencies.database))
 
 const getSummary = (dependencies: Dependencies, threadId: Ids.ThreadId) =>
-  dependencies.projection.getThread(threadId).pipe(Effect.provideService(Database.Service, dependencies.database))
+  dependencies.projection.getThread(threadId).pipe(
+    Effect.map((summary) => (summary === undefined ? undefined : summaryFromProjection(summary))),
+    Effect.provideService(Database.Service, dependencies.database),
+  )
 
 const requireSummary = (dependencies: Dependencies, threadId: Ids.ThreadId, operation: string) =>
   Effect.gen(function* () {
@@ -531,6 +556,14 @@ const requireSummary = (dependencies: Dependencies, threadId: Ids.ThreadId, oper
       thread_id: threadId,
     })
   })
+
+const summaryFromProjection = (summary: ThreadProjection.ThreadSummary): ThreadSummary => {
+  const { last_model: lastModel, ...base } = summary
+  return {
+    ...base,
+    ...(lastModel === undefined ? {} : { context_window: ModelInfo.modelInfo(lastModel).context_window }),
+  }
+}
 
 const groupEventsByThread = (events: ReadonlyArray<Event.Event>) => {
   const grouped = new Map<Ids.ThreadId, Array<Event.Event>>()

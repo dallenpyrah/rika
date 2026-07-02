@@ -471,6 +471,8 @@ const toRemoteSummary = (summary: ThreadService.ThreadRecord["summary"]): Remote
   diff: summary.diff,
   ...(summary.active_turn_id === undefined ? {} : { active_turn_id: summary.active_turn_id }),
   ...(summary.active_turn_status === undefined ? {} : { active_turn_status: summary.active_turn_status }),
+  ...(summary.context_tokens === undefined ? {} : { context_tokens: summary.context_tokens }),
+  ...(summary.context_window === undefined ? {} : { context_window: summary.context_window }),
   archived: summary.archived,
   created_at: Common.TimestampMillis.make(summary.created_at),
   updated_at: Common.TimestampMillis.make(summary.updated_at),

@@ -50,6 +50,8 @@ export const ThreadSummary = Schema.Struct({
   diff: ThreadDiffStats,
   active_turn_id: Schema.optional(TurnId),
   active_turn_status: Schema.optional(TurnStatus),
+  context_tokens: Schema.optional(Schema.Int),
+  context_window: Schema.optional(Schema.Int),
   orb_status: Schema.optional(OrbStatus),
   archived: Schema.Boolean,
   created_at: TimestampMillis,

@@ -41,6 +41,8 @@ export const thread_projections = sqliteTable(
     diff_deletions: integer().notNull().default(0),
     active_turn_id: text(),
     active_turn_status: text(),
+    last_context_tokens: integer(),
+    last_model: text(),
     archived: integer().notNull().default(0),
     last_sequence: integer().notNull(),
     created_at: integer().notNull(),

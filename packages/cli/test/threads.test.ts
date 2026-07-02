@@ -53,6 +53,27 @@ describe("CLI thread commands", () => {
     expect(results[0]?.matched.join("\n")).toContain("CLI thread command")
   })
 
+  test("prints context usage in thread lists", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedThreadWithContextUsage()
+        return yield* Threads.executeCommand({ type: "threads", action: "list" })
+      }).pipe(Effect.provide(makeLayer(output))),
+    )
+
+    expect(exitCode).toBe(0)
+    const summaries = Schema.decodeUnknownSync(Schema.Array(ThreadService.ThreadSummary))(
+      JSON.parse(output.stdout[0] ?? "[]"),
+    )
+    expect(summaries[0]).toMatchObject({
+      thread_id: threadId,
+      context_tokens: 42_000,
+      context_window: 400_000,
+    })
+  })
+
   test("prints local share exports as JSON", async () => {
     const output: Output.MemoryOutput = { stdout: [], stderr: [] }
     const exitCode = await Effect.runPromise(
@@ -76,6 +97,37 @@ const seedThread = () =>
     const appended = yield* ThreadEventLog.append(messageAdded())
     yield* ThreadProjection.apply(appended)
   })
+
+const seedThreadWithContextUsage = () =>
+  Effect.gen(function* () {
+    yield* ThreadService.create({ thread_id: threadId, workspace_id: workspaceId })
+    for (const event of [modelChunk(), turnCompletedWithUsage()]) {
+      const appended = yield* ThreadEventLog.append(event)
+      yield* ThreadProjection.apply(appended)
+    }
+  })
+
+const modelChunk = (): Event.ModelStreamChunk => ({
+  id: Ids.EventId.make("thread_cli_threads_model_chunk"),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence: 2,
+  version: 1,
+  created_at: now,
+  type: "model.stream.chunk",
+  data: { provider: "openai", model: "gpt-5.5", text: "answer" },
+})
+
+const turnCompletedWithUsage = (): Event.TurnCompleted => ({
+  id: Ids.EventId.make("thread_cli_threads_turn_completed"),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence: 3,
+  version: 1,
+  created_at: now,
+  type: "turn.completed",
+  data: { usage: { input_tokens: 42_000, output_tokens: 100, total_tokens: 42_100 } },
+})
 
 const messageAdded = (): Event.MessageAdded => ({
   id: Ids.EventId.make("thread_cli_threads_message_event"),

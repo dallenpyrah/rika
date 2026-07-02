@@ -79,6 +79,27 @@ describe("ThreadService", () => {
     expect(result.reference.entries).toContain("File: src/auth.ts")
   })
 
+  test("enriches stored context usage with model context window", async () => {
+    const summary = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ThreadService.create({ thread_id: threadId, workspace_id: workspaceId })
+        for (const event of [modelChunk(), turnCompletedWithUsage()]) {
+          const appended = yield* ThreadEventLog.append(event)
+          yield* ThreadProjection.apply(appended)
+        }
+        const summaries = yield* ThreadService.list({})
+        return summaries[0]
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(summary).toMatchObject({
+      thread_id: threadId,
+      context_tokens: 42_000,
+      context_window: 400_000,
+    })
+  })
+
   test("loads preview records from the latest event-log tail", async () => {
     const preview = await Effect.runPromise(
       Effect.gen(function* () {
@@ -96,6 +117,28 @@ describe("ThreadService", () => {
     expect(preview.summary.latest_message_text).toBe("third")
     expect(preview.events.map((event) => event.sequence)).toEqual([3, 4])
   })
+})
+
+const modelChunk = (): Event.ModelStreamChunk => ({
+  id: Ids.EventId.make("thread_service_model_chunk"),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence: 2,
+  version: 1,
+  created_at: now,
+  type: "model.stream.chunk",
+  data: { provider: "openai", model: "gpt-5.5", text: "answer" },
+})
+
+const turnCompletedWithUsage = (): Event.TurnCompleted => ({
+  id: Ids.EventId.make("thread_service_turn_completed"),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence: 3,
+  version: 1,
+  created_at: now,
+  type: "turn.completed",
+  data: { usage: { input_tokens: 42_000, output_tokens: 100, total_tokens: 42_100 } },
 })
 
 const messageAdded = (

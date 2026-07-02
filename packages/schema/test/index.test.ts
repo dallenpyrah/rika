@@ -171,6 +171,31 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
 
+  test("round-trips turn completion usage", () => {
+    const usage: Event.TokenUsage = {
+      input_tokens: 123,
+      output_tokens: 45,
+      total_tokens: 168,
+    }
+    const event: Event.Event = {
+      id: eventId,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 3,
+      version: 1,
+      created_at: now,
+      type: "turn.completed",
+      data: {
+        provider: "openai",
+        model: "gpt-5.5",
+        usage,
+      },
+    }
+
+    expect(Schema.decodeUnknownSync(Event.TokenUsage)(Schema.encodeSync(Event.TokenUsage)(usage))).toEqual(usage)
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
+  })
+
   test("round-trips tool input delta events", () => {
     const event: Event.Event = {
       id: eventId,
@@ -284,6 +309,8 @@ describe("Rika protocol schemas", () => {
       title_text: "Ship remote control",
       latest_message_text: "Ship remote control",
       diff: { additions: 2, modifications: 1, deletions: 1 },
+      context_tokens: 12_000,
+      context_window: 400_000,
       archived: false,
       created_at: now,
       updated_at: now,

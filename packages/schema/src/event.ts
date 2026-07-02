@@ -184,12 +184,23 @@ export const ArtifactCreated = Schema.Struct({
   data: Schema.Struct({ artifact: Artifact }),
 }).annotate({ identifier: "Rika.Event.ArtifactCreated" })
 
+export interface TokenUsage extends Schema.Schema.Type<typeof TokenUsage> {}
+export const TokenUsage = Schema.Struct({
+  input_tokens: Schema.optional(Schema.Int),
+  output_tokens: Schema.optional(Schema.Int),
+  total_tokens: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Event.TokenUsage" })
+
 export interface TurnCompleted extends Schema.Schema.Type<typeof TurnCompleted> {}
 export const TurnCompleted = Schema.Struct({
   ...fields,
   turn_id: TurnId,
   type: Schema.Literal("turn.completed"),
-  data: Schema.Struct({}),
+  data: Schema.Struct({
+    provider: Schema.optional(Schema.String),
+    model: Schema.optional(Schema.String),
+    usage: Schema.optional(TokenUsage),
+  }),
 }).annotate({ identifier: "Rika.Event.TurnCompleted" })
 
 export interface TurnFailed extends Schema.Schema.Type<typeof TurnFailed> {}

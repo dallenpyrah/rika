@@ -5,6 +5,7 @@ import { Common, ErrorEnvelope, Event, Ide, Ids, Message, Tool } from "@rika/sch
 import { Cause, Context, Effect, Layer, Option, Queue, Schema, Stream } from "effect"
 import { AiError, Prompt } from "effect/unstable/ai"
 import * as ContextResolver from "./context-resolver"
+import * as ModelContext from "./model-context"
 import * as SkillRegistry from "./skill-registry"
 import * as Toolkit from "./toolkit"
 import * as ToolExecutor from "./tool-executor"
@@ -108,6 +109,12 @@ interface ModelTurn {
   readonly response: Provider.GenerateResponse
   readonly toolCalls: ReadonlyArray<Tool.Call>
   readonly toolResults: ReadonlyArray<Tool.Result>
+}
+
+interface TurnCompletionData {
+  readonly provider: string
+  readonly model: string
+  readonly usage?: Event.TokenUsage
 }
 
 type NextSequence = () => number
@@ -287,6 +294,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
     let modelInput: ModelInput = yield* contextModelInput(dependencies, history, skillSelection)
     collectAppendedEvents = false
     let emptyRetries = 0
+    let latestCompletion: TurnCompletionData | undefined
 
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
       const modelTurn =
@@ -303,6 +311,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
       if (response.finish_reason !== undefined) fields.stop_reason = response.finish_reason
       if (response.usage?.input_tokens !== undefined) fields.token_in = response.usage.input_tokens
       if (response.usage?.output_tokens !== undefined) fields.token_out = response.usage.output_tokens
+      latestCompletion = turnCompletionData(response)
 
       if (modelTurn.toolCalls.length === 0) {
         if (response.content.trim().length === 0 && emptyRetries < MAX_EMPTY_ANSWER_RETRIES) {
@@ -314,7 +323,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
         yield* append(
           yield* makeAssistantMessageAdded(dependencies, input.thread_id, turnId, response.content, sequence + 1),
         )
-        yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1))
+        yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1, latestCompletion))
         return
       }
 
@@ -341,7 +350,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
         sequence + 1,
       ),
     )
-    yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1))
+    yield* append(yield* makeTurnCompleted(dependencies, input.thread_id, turnId, sequence + 1, latestCompletion))
   }).pipe(
     Effect.onInterrupt(() => {
       fields.status = "cancelled"
@@ -616,7 +625,7 @@ const contextModelInput = (
     const config = yield* dependencies.config.get
     const resolvedContext = latestResolvedContext(events)
     const system = systemMessage(config, tools, resolvedContext, skills)
-    const messages = [system, ...messagesFromEvents(events)]
+    const messages = [system, ...ModelContext.messagesFromEvents(events)]
     const prompt = [providerMessageToPromptMessage(system), ...promptMessagesFromEvents(events)]
     return { messages, prompt, tools: prepared } satisfies ModelInput
   })
@@ -691,36 +700,6 @@ const toolInstructions = (tools: ReadonlyArray<ToolExecutor.Descriptor>) => {
   if (tools.length === 0) return "No tools are currently available."
   const lines = tools.map((tool) => `- ${tool.name}: ${tool.description}`)
   return ["Available tools:", ...lines, "Call tools through the provided tool interface when needed."].join("\n")
-}
-
-const messagesFromEvents = (events: ReadonlyArray<Event.Event>): ReadonlyArray<Provider.Message> =>
-  events.flatMap((event) => {
-    switch (event.type) {
-      case "message.added":
-        return messageToProviderMessages(event.data.message)
-      case "tool.call.completed": {
-        const message: Provider.Message = { role: "tool", content: JSON.stringify(event.data.result) }
-        return [message]
-      }
-      default:
-        return []
-    }
-  })
-
-const messageToProviderMessages = (message: Message.Message): ReadonlyArray<Provider.Message> => {
-  const content = messageText(message)
-  if (content.length === 0) return []
-  switch (message.role) {
-    case "system":
-      return [{ role: "system", content }]
-    case "assistant":
-      return [{ role: "assistant", content }]
-    case "tool":
-      return [{ role: "tool", content }]
-    case "user":
-      return [{ role: "user", content }]
-  }
-  return []
 }
 
 const messageText = (message: Message.Message) => Message.displayText(message)
@@ -1433,7 +1412,13 @@ const makeToolCallCompleted = (
     return event
   })
 
-const makeTurnCompleted = (dependencies: Dependencies, threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number) =>
+const makeTurnCompleted = (
+  dependencies: Dependencies,
+  threadId: Ids.ThreadId,
+  turnId: Ids.TurnId,
+  sequence: number,
+  completion?: TurnCompletionData,
+) =>
   Effect.gen(function* () {
     const createdAt = yield* dependencies.time.nowMillis
     const id = Ids.EventId.make(yield* dependencies.idGenerator.next("event"))
@@ -1445,10 +1430,39 @@ const makeTurnCompleted = (dependencies: Dependencies, threadId: Ids.ThreadId, t
       version: 1,
       created_at: createdAt,
       type: "turn.completed",
-      data: {},
+      data:
+        completion === undefined
+          ? {}
+          : {
+              provider: completion.provider,
+              model: completion.model,
+              ...(completion.usage === undefined ? {} : { usage: completion.usage }),
+            },
     }
     return event
   })
+
+const turnCompletionData = (response: Provider.GenerateResponse): TurnCompletionData => {
+  const usage = tokenUsageFromProvider(response.usage)
+  return {
+    provider: response.provider,
+    model: response.model,
+    ...(usage === undefined ? {} : { usage }),
+  }
+}
+
+const tokenUsageFromProvider = (usage: Provider.Usage | undefined): Event.TokenUsage | undefined => {
+  if (usage === undefined) return undefined
+  const eventUsage: Event.TokenUsage = {
+    ...(usage.input_tokens === undefined ? {} : { input_tokens: usage.input_tokens }),
+    ...(usage.output_tokens === undefined ? {} : { output_tokens: usage.output_tokens }),
+    ...(usage.total_tokens === undefined ? {} : { total_tokens: usage.total_tokens }),
+  }
+  return hasTokenUsage(eventUsage) ? eventUsage : undefined
+}
+
+const hasTokenUsage = (usage: Event.TokenUsage) =>
+  usage.input_tokens !== undefined || usage.output_tokens !== undefined || usage.total_tokens !== undefined
 
 const makeTurnFailed = (
   dependencies: Dependencies,
