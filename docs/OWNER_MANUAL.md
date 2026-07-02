@@ -26,6 +26,20 @@ bun run update:local
 
 For launch builds, `bun run package` writes the compiled artifact and manifest under `dist/release/`.
 
+## Settings
+
+Rika reads optional JSON settings from `~/.config/rika/settings.json` and then `<workspace>/.rika/settings.json`. Workspace settings override user settings. Environment variables override both.
+
+Recognized keys:
+
+| Setting                  | Environment override    | Default    |
+| ------------------------ | ----------------------- | ---------- |
+| `orb.template`           | `RIKA_ORB_TEMPLATE`     | `rika-orb` |
+| `orb.idleTimeoutSeconds` | `RIKA_ORB_IDLE_TIMEOUT` | `300`      |
+| `project.default`        | `RIKA_ORB_PROJECT`      | unset      |
+
+Malformed settings files produce doctor/runtime warnings where surfaced and fall back to the next source instead of crashing startup.
+
 ## Orb template
 
 Build the E2B sandbox template for orb execution with:
@@ -34,7 +48,7 @@ Build the E2B sandbox template for orb execution with:
 E2B_API_KEY=e2b_... bun run orb:template
 ```
 
-The build prepares a Linux x64 Rika release artifact, copies it with the required share assets into `infra/orb-template/.build/`, and invokes the E2B template CLI. The template name resolves from `RIKA_ORB_TEMPLATE`, then the `template_id` on the project named by `RIKA_ORB_PROJECT`, then `rika-orb`. The image installs the runtime tools, puts `rika` on `PATH` at `/opt/rika/bin/rika`, and uses `/home/user/repo` as the canonical workspace root.
+The build prepares a Linux x64 Rika release artifact, copies it with the required share assets into `infra/orb-template/.build/`, and invokes the E2B template CLI. Runtime orb provisioning resolves the template from `RIKA_ORB_TEMPLATE`, then the selected project's `template_id`, then `orb.template`, then `rika-orb`. The image installs the runtime tools, puts `rika` on `PATH` at `/opt/rika/bin/rika`, and uses `/home/user/repo` as the canonical workspace root.
 
 Validate the committed template contract without Docker or E2B:
 
@@ -56,7 +70,7 @@ rika
 rika --execute "summarize this repo" --mode smart
 ```
 
-`rika doctor` prints local diagnostics as JSON and does not upload telemetry.
+`rika doctor` prints local diagnostics as JSON and does not upload telemetry. It reports whether `E2B_API_KEY` is configured, checks the resolved orb template when the key is present, verifies running orb records through authenticated `/health`, and lists Rika sandboxes that are not present in the local orb store with `e2b sandbox kill <sandbox-id>` cleanup commands.
 
 ## Agent modes
 

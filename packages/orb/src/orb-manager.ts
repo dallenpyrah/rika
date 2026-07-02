@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Config, Diagnostics, SecretRedactor } from "@rika/core"
+import { Config, Diagnostics, SecretRedactor, Settings } from "@rika/core"
 import { OrbStore, ProjectStore } from "@rika/persistence"
 import { Ids, Orb } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
@@ -71,6 +71,7 @@ export const layerWithSystem = (system: System) =>
       const sandbox = yield* SandboxClient.Service
       const diagnostics = yield* Diagnostics.Service
       const redactor = Option.getOrUndefined(yield* Effect.serviceOption(SecretRedactor.Service))
+      const settings = Option.getOrUndefined(yield* Effect.serviceOption(Settings.Service))
       const registerSecrets = (entries: ReadonlyArray<SecretRedactor.Entry>) =>
         redactor === undefined ? Effect.void : redactor.register(entries)
       const resumeLocks = new Map<Ids.OrbId, Semaphore.Semaphore>()
@@ -105,8 +106,8 @@ export const layerWithSystem = (system: System) =>
               ),
             ),
         )
-        const templateId = yield* resolveTemplateId(config, project)
-        const timeoutMs = yield* resolveTimeoutMs(config)
+        const templateId = yield* resolveTemplateId(config, project, settings)
+        const timeoutMs = yield* resolveTimeoutMs(config, settings)
         const created = yield* step(
           "create_record",
           orbs.create({ thread_id: input.thread_id, project_id: input.project_id }),
@@ -119,7 +120,7 @@ export const layerWithSystem = (system: System) =>
             sandbox.create({
               templateId,
               envs: {},
-              metadata: { thread_id: input.thread_id, project_id: input.project_id },
+              metadata: { app: "rika", thread_id: input.thread_id, project_id: input.project_id },
               timeoutMs,
               lifecycle: { onTimeout: "pause", autoResume: false },
             }),
@@ -297,16 +298,30 @@ const step = <A, E, R>(
 const resolveTemplateId = Effect.fn("OrbManager.resolveTemplateId")(function* (
   config: Config.Interface,
   project: Orb.ProjectRecord,
+  settings: Settings.Interface | undefined,
 ) {
   const configured = yield* config.requireEnv("RIKA_ORB_TEMPLATE").pipe(Effect.option)
   if (Option.isSome(configured) && configured.value.trim().length > 0) return configured.value.trim()
   if (project.template_id !== null && project.template_id.trim().length > 0) return project.template_id.trim()
+  if (settings !== undefined) {
+    const snapshot = yield* settings.snapshot
+    if (snapshot.values.orb.template.trim().length > 0) return snapshot.values.orb.template.trim()
+  }
   return defaultTemplateId
 })
 
-const resolveTimeoutMs = Effect.fn("OrbManager.resolveTimeoutMs")(function* (config: Config.Interface) {
+const resolveTimeoutMs = Effect.fn("OrbManager.resolveTimeoutMs")(function* (
+  config: Config.Interface,
+  settings: Settings.Interface | undefined,
+) {
   const configured = yield* config.requireEnv("RIKA_ORB_IDLE_TIMEOUT").pipe(Effect.option)
-  if (Option.isNone(configured)) return defaultIdleTimeoutSeconds * 1_000
+  if (Option.isNone(configured)) {
+    if (settings !== undefined) {
+      const snapshot = yield* settings.snapshot
+      return snapshot.values.orb.idleTimeoutSeconds * 1_000
+    }
+    return defaultIdleTimeoutSeconds * 1_000
+  }
   const seconds = Number(configured.value)
   if (!Number.isInteger(seconds) || seconds <= 0) {
     return yield* new OrbProvisionError({

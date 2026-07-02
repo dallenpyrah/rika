@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { Config, IdGenerator, Time } from "@rika/core"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Config, IdGenerator, Settings, Time } from "@rika/core"
 import { Database, Migration, OrbStore } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Deferred, Effect, Fiber, Layer, Stream } from "effect"
@@ -33,6 +36,29 @@ describe("OrbActivity", () => {
       { sandboxId: "sandbox_orb_activity", timeoutMs: 420_000 },
     ])
     expect(record?.last_active_at).toBe(thirdTouchAt)
+  })
+
+  test("uses settings idle timeout when env does not override", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "rika-orb-activity-settings-"))
+    await mkdir(join(workspace, ".rika"), { recursive: true })
+    await writeFile(join(workspace, ".rika", "settings.json"), JSON.stringify({ "orb.idleTimeoutSeconds": 123 }))
+    const sandbox = SandboxClientFake.makeState()
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* Migration.migrate()
+          yield* createRunningOrb()
+          return yield* OrbActivity.touch(orbId)
+        }).pipe(
+          Effect.provide(makeLayer(sandbox, SandboxClientFake.layer(sandbox), { env: {}, workspaceRoot: workspace })),
+        ),
+      )
+
+      expect(sandbox.calls.setTimeout).toEqual([{ sandboxId: "sandbox_orb_activity", timeoutMs: 123_000 }])
+    } finally {
+      await rm(workspace, { force: true, recursive: true })
+    }
   })
 
   test("refreshes sandbox timeout at most once when concurrent touches race", async () => {
@@ -93,15 +119,22 @@ const createPausedOrb = () =>
     yield* OrbStore.setStatus(orbId, "paused")
   })
 
-const makeLayer = (sandbox: SandboxClientFake.State, sandboxLayer = SandboxClientFake.layer(sandbox)) => {
+const makeLayer = (
+  sandbox: SandboxClientFake.State,
+  sandboxLayer = SandboxClientFake.layer(sandbox),
+  options: { readonly env?: Record<string, string | undefined>; readonly workspaceRoot?: string } = {},
+) => {
+  const root = options.workspaceRoot ?? "/workspace/rika-orb-activity"
+  const env = options.env ?? { RIKA_ORB_IDLE_TIMEOUT: "420" }
   const configLayer = Config.layerFromValues(
     {
-      workspace_root: "/workspace/rika-orb-activity",
+      workspace_root: root,
       data_dir: "/workspace/rika-orb-activity/.rika",
       default_mode: "smart",
     },
-    { RIKA_ORB_IDLE_TIMEOUT: "420" },
+    env,
   )
+  const settingsLayer = Settings.layerFromEnv(env, root)
   const databaseLayer = Database.memoryLayer
   const timeLayer = timeSequenceLayer([
     createdAt,
@@ -121,6 +154,7 @@ const makeLayer = (sandbox: SandboxClientFake.State, sandboxLayer = SandboxClien
   )
   const activityLayer = OrbActivity.layer.pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(settingsLayer),
     Layer.provideMerge(orbStoreLayer),
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(timeLayer),
@@ -133,6 +167,7 @@ const makeLayer = (sandbox: SandboxClientFake.State, sandboxLayer = SandboxClien
     idLayer,
     orbStoreLayer,
     sandboxLayer,
+    settingsLayer,
     activityLayer,
   )
 }
@@ -160,6 +195,7 @@ const delayedSetTimeoutLayer = (
           yield* Deferred.await(release)
         }),
       list: () => Effect.never,
+      templateExists: () => Effect.never,
     }),
   )
 

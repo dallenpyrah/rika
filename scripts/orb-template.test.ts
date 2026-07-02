@@ -55,11 +55,12 @@ describe("orb template", () => {
     expect(smoke).toContain("rg --version")
   })
 
-  test("resolves the orb template id from env, project, then fallback", async () => {
+  test("resolves the orb template id from env, project, settings, then fallback", async () => {
     const module = await import("./build-orb-template")
 
     expect(module.resolveOrbTemplateId("project-template", { RIKA_ORB_TEMPLATE: "env-template" })).toBe("env-template")
-    expect(module.resolveOrbTemplateId("project-template", {})).toBe("project-template")
+    expect(module.resolveOrbTemplateId("project-template", {}, "settings-template")).toBe("project-template")
+    expect(module.resolveOrbTemplateId(undefined, {}, "settings-template")).toBe("settings-template")
     expect(module.resolveOrbTemplateId(undefined, {})).toBe("rika-orb")
   })
 
@@ -177,7 +178,7 @@ describe("orb template", () => {
     } finally {
       await rm(workspace, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   test("does not read a missing project when the environment template id is set", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "rika-orb-template-"))

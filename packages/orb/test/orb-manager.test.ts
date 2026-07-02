@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Settings, Time } from "@rika/core"
 import { Database, Migration, OrbStore, ProjectStore } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer } from "effect"
@@ -76,7 +76,7 @@ describe("OrbManager", () => {
       {
         templateId: "project-template",
         envs: {},
-        metadata: { thread_id: threadId, project_id: projectId },
+        metadata: { app: "rika", thread_id: threadId, project_id: projectId },
         timeoutMs: 300_000,
         lifecycle: { onTimeout: "pause", autoResume: false },
       },
@@ -141,6 +141,57 @@ describe("OrbManager", () => {
     expect(JSON.stringify(sandbox.calls.exec.map((call) => call.cmd))).not.toContain("secret-openai")
     expect(diagnostics.some((entry) => entry.message === "orb.setup.stdout")).toBe(true)
     await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("uses settings template and idle timeout when env and project do not override", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "rika-orb-manager-settings-workspace-"))
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-settings-data-"))
+    await mkdir(join(workspace, ".rika"), { recursive: true })
+    await writeFile(
+      join(workspace, ".rika", "settings.json"),
+      JSON.stringify({
+        "orb.template": "settings-template",
+        "orb.idleTimeoutSeconds": 123,
+      }),
+    )
+    const sandbox = SandboxClientFake.makeState({
+      execResults: [
+        [{ type: "exit", exitCode: 0 }],
+        [
+          { type: "stdout", data: "abc123\n" },
+          { type: "exit", exitCode: 0 },
+        ],
+        [{ type: "exit", exitCode: 0 }],
+        [{ type: "started", pid: 4587 }],
+      ],
+    })
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* Migration.migrate()
+          yield* ProjectStore.create({
+            name: "settings-demo",
+            repo_origin: "https://github.com/example/settings-demo.git",
+          })
+          return yield* OrbManager.provisionForThread({
+            thread_id: threadId,
+            project_id: projectId,
+            workspace_root: workspace,
+          })
+        }).pipe(Effect.provide(makeLayer({ sandbox, diagnostics, system, dataDir, workspaceRoot: workspace }))),
+      )
+
+      expect(sandbox.calls.create[0]).toMatchObject({
+        templateId: "settings-template",
+        timeoutMs: 123_000,
+      })
+    } finally {
+      await rm(dataDir, { force: true, recursive: true })
+      await rm(workspace, { force: true, recursive: true })
+    }
   })
 
   test("redacts project secrets from setup diagnostics before the orb server starts", async () => {
@@ -310,7 +361,7 @@ describe("OrbManager", () => {
     expect(sandbox.calls.create[0]).toEqual({
       templateId: "env-template",
       envs: {},
-      metadata: { thread_id: threadId, project_id: projectId },
+      metadata: { app: "rika", thread_id: threadId, project_id: projectId },
       timeoutMs: 42_000,
       lifecycle: { onTimeout: "pause", autoResume: false },
     })
@@ -685,15 +736,18 @@ const makeLayer = (input: {
   readonly system: OrbManager.System
   readonly dataDir: string
   readonly env?: Record<string, string | undefined>
+  readonly workspaceRoot?: string
 }) => {
+  const root = input.workspaceRoot ?? workspaceRoot
   const configLayer = Config.layerFromValues(
     {
-      workspace_root: workspaceRoot,
+      workspace_root: root,
       data_dir: input.dataDir,
       default_mode: "smart",
     },
     input.env ?? {},
   )
+  const settingsLayer = Settings.layerFromEnv(input.env ?? {}, root)
   const databaseLayer = Database.memoryLayer
   const timeLayer = Time.fixedLayer(now)
   const idLayer = IdGenerator.sequenceLayer(1)
@@ -712,6 +766,7 @@ const makeLayer = (input: {
   )
   const managerLayer = OrbManager.layerWithSystem(input.system).pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(settingsLayer),
     Layer.provideMerge(projectStoreLayer),
     Layer.provideMerge(orbStoreLayer),
     Layer.provideMerge(SandboxClientFake.layer(input.sandbox)),
@@ -725,6 +780,7 @@ const makeLayer = (input: {
     timeLayer,
     idLayer,
     redactorLayer,
+    settingsLayer,
     projectStoreLayer,
     orbStoreLayer,
     SandboxClientFake.layer(input.sandbox),

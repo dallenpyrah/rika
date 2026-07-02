@@ -3,6 +3,7 @@ import { Ids } from "@rika/schema"
 import {
   CommandExitError,
   Sandbox,
+  Template,
   type CommandHandle,
   type CommandResult,
   type SandboxInfo,
@@ -97,6 +98,7 @@ export interface Interface {
   readonly kill: (sandboxId: string) => Effect.Effect<void, RunError>
   readonly setTimeout: (sandboxId: string, ms: number) => Effect.Effect<void, RunError>
   readonly list: (filter?: ListFilter) => Effect.Effect<ReadonlyArray<SandboxSummary>, RunError>
+  readonly templateExists: (templateId: string) => Effect.Effect<boolean, RunError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@rika/orb/SandboxClient") {}
@@ -156,6 +158,11 @@ export const setTimeout = Effect.fn("SandboxClient.setTimeout.call")(function* (
 export const list = Effect.fn("SandboxClient.list.call")(function* (filter?: ListFilter) {
   const service = yield* Service
   return yield* service.list(filter)
+})
+
+export const templateExists = Effect.fn("SandboxClient.templateExists.call")(function* (templateId: string) {
+  const service = yield* Service
+  return yield* service.templateExists(templateId)
 })
 
 export const validateCreateInput = (input: CreateInput): Effect.Effect<void, SandboxClientError> => {
@@ -266,6 +273,9 @@ const makeLive = (apiKey: string): Interface =>
         return sandboxes
       })
     }),
+    templateExists: Effect.fn("SandboxClient.templateExists")(function* (templateId: string) {
+      return yield* tryPromise("templateExists", () => Template.exists(templateId, { apiKey }))
+    }),
   })
 
 const makeLiveFromConfig = (config: Config.Interface): Interface =>
@@ -286,6 +296,8 @@ const makeLiveFromConfig = (config: Config.Interface): Interface =>
     setTimeout: (sandboxId, ms) =>
       apiKeyFromConfig(config).pipe(Effect.flatMap((apiKey) => makeLive(apiKey).setTimeout(sandboxId, ms))),
     list: (filter) => apiKeyFromConfig(config).pipe(Effect.flatMap((apiKey) => makeLive(apiKey).list(filter))),
+    templateExists: (templateId) =>
+      apiKeyFromConfig(config).pipe(Effect.flatMap((apiKey) => makeLive(apiKey).templateExists(templateId))),
   })
 
 const apiKeyFromConfig = (config: Config.Interface) =>

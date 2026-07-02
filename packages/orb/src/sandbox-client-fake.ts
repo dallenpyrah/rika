@@ -29,18 +29,21 @@ export interface Calls {
     readonly timeoutMs: number
   }>
   readonly list: Array<SandboxClient.ListFilter | undefined>
+  readonly templateExists: Array<string>
 }
 
 export interface State {
   readonly calls: Calls
   readonly execResults: Array<ReadonlyArray<SandboxClient.ExecChunk>>
   readonly sandboxes: Map<string, SandboxClient.SandboxSummary>
+  readonly templates: Set<string>
   readonly files: Map<string, Uint8Array>
   nextSandbox: number
 }
 
 export interface StateInput {
   readonly execResults?: ReadonlyArray<ReadonlyArray<SandboxClient.ExecChunk>>
+  readonly templates?: ReadonlyArray<string>
 }
 
 export const makeState = (input: StateInput = {}): State => ({
@@ -55,9 +58,11 @@ export const makeState = (input: StateInput = {}): State => ({
     kill: [],
     setTimeout: [],
     list: [],
+    templateExists: [],
   },
   execResults: Array.from(input.execResults ?? []),
   sandboxes: new Map(),
+  templates: new Set(input.templates ?? []),
   files: new Map(),
   nextSandbox: 1,
 })
@@ -126,6 +131,10 @@ const makeService = (state: State): SandboxClient.Interface => ({
   list: Effect.fn("SandboxClientFake.list")(function* (filter?: SandboxClient.ListFilter) {
     state.calls.list.push(filter === undefined ? undefined : { metadata: { ...filter.metadata } })
     return Array.from(state.sandboxes.values()).filter((sandbox) => matchesFilter(sandbox, filter))
+  }),
+  templateExists: Effect.fn("SandboxClientFake.templateExists")(function* (templateId: string) {
+    state.calls.templateExists.push(templateId)
+    return state.templates.has(templateId)
   }),
 })
 

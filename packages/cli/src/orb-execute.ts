@@ -1,4 +1,4 @@
-import { Config, IdGenerator } from "@rika/core"
+import { Config, IdGenerator, Settings } from "@rika/core"
 import { OrbManager } from "@rika/orb"
 import { Database, OrbStore, ProjectStore } from "@rika/persistence"
 import { Client } from "@rika/sdk"
@@ -49,6 +49,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
       const output = yield* Output.Service
       const config = yield* Config.Service
       const configValues = yield* config.get
+      const settings = Option.getOrUndefined(yield* Effect.serviceOption(Settings.Service))
       const idGenerator = yield* IdGenerator.Service
       const projects = yield* ProjectStore.Service
       const orbs = yield* OrbStore.Service
@@ -74,7 +75,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
         }
 
         const workspaceRoot = command.workspace_root ?? configValues.workspace_root
-        const project = yield* resolveProject(projects, command, workspaceRoot)
+        const project = yield* resolveProject(projects, command, workspaceRoot, settings)
         const threadId = command.thread_id ?? Ids.ThreadId.make(yield* idGenerator.next("thread"))
 
         yield* output.stderr("provisioning orb...")
@@ -162,11 +163,22 @@ const resolveProject = Effect.fn("Cli.OrbExecute.resolveProject")(function* (
   projects: ProjectStore.Interface,
   command: Args.ExecuteCommand,
   workspaceRoot: string,
+  settings: Settings.Interface | undefined,
 ) {
   if (command.project_name !== undefined) {
     const project = yield* projects.getByName(command.project_name)
     if (project !== undefined) return project
     return yield* new OrbExecuteError({ message: `Project ${command.project_name} not found`, exit_code: 2 })
+  }
+
+  if (settings !== undefined) {
+    const snapshot = yield* settings.snapshot
+    const configuredDefault = snapshot.values.project.default
+    if (configuredDefault !== undefined) {
+      const project = yield* projects.getByName(configuredDefault)
+      if (project !== undefined) return project
+      return yield* new OrbExecuteError({ message: `Project ${configuredDefault} not found`, exit_code: 2 })
+    }
   }
 
   const origin = yield* Project.currentGitRemoteOrigin(workspaceRoot).pipe(Effect.option)

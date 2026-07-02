@@ -1,6 +1,6 @@
 import { chmod, copyFile, cp, mkdir, readFile, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { Config, IdGenerator, Time } from "@rika/core"
+import { Config, IdGenerator, Settings, Time } from "@rika/core"
 import { Database, Migration, ProjectStore } from "@rika/persistence"
 import { Effect, Layer } from "effect"
 
@@ -28,11 +28,17 @@ export interface BuildResult {
   readonly context: string
 }
 
-export const resolveOrbTemplateId = (projectTemplateId: string | undefined, env: Env = Bun.env): string => {
+export const resolveOrbTemplateId = (
+  projectTemplateId: string | undefined,
+  env: Env = Bun.env,
+  settingsTemplateId?: string,
+): string => {
   const configured = env.RIKA_ORB_TEMPLATE?.trim()
   if (configured !== undefined && configured.length > 0) return configured
   const project = projectTemplateId?.trim()
   if (project !== undefined && project.length > 0) return project
+  const settings = settingsTemplateId?.trim()
+  if (settings !== undefined && settings.length > 0) return settings
   return "rika-orb"
 }
 
@@ -61,10 +67,11 @@ export async function buildOrbTemplate(env: Env = Bun.env): Promise<BuildResult>
     throw new Error(`${requiredEnv} is required to build the E2B orb template`)
   }
 
-  const templateName = resolveOrbTemplateId(
-    templateIdRequiresProjectLookup(env) ? await readProjectTemplateId(env) : undefined,
-    env,
-  )
+  const projectTemplateId = templateIdRequiresProjectLookup(env) ? await readProjectTemplateId(env) : undefined
+  const settingsTemplateId = templateIdRequiresSettingsLookup(env, projectTemplateId)
+    ? await readSettingsTemplateId(env)
+    : undefined
+  const templateName = resolveOrbTemplateId(projectTemplateId, env, settingsTemplateId)
   const templateDir = await prepareOrbTemplateContext(env)
   const e2bExecutable = env.RIKA_E2B_EXECUTABLE ?? "e2b"
 
@@ -133,9 +140,24 @@ export async function readProjectTemplateId(env: Env = Bun.env): Promise<string 
   return project.template_id ?? undefined
 }
 
+export async function readSettingsTemplateId(env: Env = Bun.env): Promise<string | undefined> {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? root
+  const snapshot = await Effect.runPromise(
+    Settings.snapshot.pipe(Effect.provide(Settings.layerFromEnv(env, workspaceRoot))),
+  )
+  return snapshot.sources["orb.template"] === "default" ? undefined : snapshot.values.orb.template
+}
+
 const templateIdRequiresProjectLookup = (env: Env): boolean => {
   const configured = env.RIKA_ORB_TEMPLATE?.trim()
   return configured === undefined || configured.length === 0
+}
+
+const templateIdRequiresSettingsLookup = (env: Env, projectTemplateId: string | undefined): boolean => {
+  const configured = env.RIKA_ORB_TEMPLATE?.trim()
+  if (configured !== undefined && configured.length > 0) return false
+  const project = projectTemplateId?.trim()
+  return project === undefined || project.length === 0
 }
 
 const prepareTemplateContext = async (templateDir: string) => {

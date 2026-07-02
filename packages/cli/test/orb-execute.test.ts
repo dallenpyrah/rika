@@ -11,7 +11,7 @@ import {
   ToolExecutor,
   WorkspaceAccess,
 } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, Settings, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Provider, Router } from "@rika/llm"
 import { OrbManager, SandboxClientFake } from "@rika/orb"
@@ -196,6 +196,90 @@ describe("CLI orb execute", () => {
 
     expect(exitCode).toBe(1)
     expect(output.stdout.map((line) => Schema.decodeUnknownSync(Event.Event)(JSON.parse(line)))).toEqual([terminal])
+  })
+
+  test("uses configured default project when project flag is absent", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const threadId = Ids.ThreadId.make("thread_default_project")
+    const provisioned: Array<OrbManager.ProvisionInput> = []
+    const terminal: Event.TurnCompleted = {
+      id: Ids.EventId.make("event_default_project_completed"),
+      thread_id: threadId,
+      turn_id: Ids.TurnId.make("turn_default_project"),
+      sequence: 1,
+      version: 1,
+      created_at: now,
+      type: "turn.completed",
+      data: {},
+    }
+    const command = await Effect.runPromise(Args.parse(["-ox", "--thread", threadId, "hello"]))
+    if (command.type !== "execute") throw new Error("expected execute command")
+
+    const exitCode = await Effect.runPromise(
+      OrbExecute.executeCommand(command).pipe(
+        Effect.provide(
+          OrbExecute.layerWithClientFactory((clientThreadId) =>
+            Client.make({
+              requestJson: (input) =>
+                input.path === "/v1/turns"
+                  ? Effect.succeed({ thread_id: clientThreadId, accepted: true })
+                  : Effect.succeed({
+                      thread_id: clientThreadId,
+                      workspace_id: Ids.WorkspaceId.make("project:project_1"),
+                      diff: { additions: 0, modifications: 0, deletions: 0 },
+                      archived: false,
+                      created_at: now,
+                      updated_at: now,
+                    }),
+              streamJson: () => Stream.make(Codec.encode(Event.Event)(terminal)),
+            }),
+          ).pipe(
+            Layer.provideMerge(Output.memoryLayer(output)),
+            Layer.provideMerge(
+              Config.layerFromValues({ workspace_root: workspaceRoot, data_dir: dataRoot, default_mode: "smart" }),
+            ),
+            Layer.provideMerge(Settings.layerFromEnv({ RIKA_ORB_PROJECT: "demo" }, workspaceRoot)),
+            Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+            Layer.provideMerge(projectStoreFakeLayer()),
+            Layer.provideMerge(orbStoreFakeLayer()),
+            Layer.provideMerge(
+              Layer.succeed(
+                OrbManager.Service,
+                OrbManager.Service.of({
+                  provisionForThread: (input) =>
+                    Effect.sync(() => {
+                      provisioned.push(input)
+                      return {
+                        orb_id: Ids.OrbId.make("orb_default_project"),
+                        thread_id: input.thread_id,
+                        project_id: input.project_id,
+                        sandbox_id: "sandbox_default_project",
+                        status: "running" as const,
+                        base_commit: "abc123",
+                        endpoint_url: "https://sandbox_default_project-4587.fake.rika.local",
+                        created_at: now,
+                        last_active_at: now,
+                      }
+                    }),
+                  pause: () => Effect.never,
+                  resume: () => Effect.never,
+                  kill: () => Effect.never,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(provisioned).toEqual([
+      {
+        thread_id: threadId,
+        project_id: projectId,
+        workspace_root: workspaceRoot,
+      },
+    ])
   })
 
   test("fails when the remote event stream ends before a terminal turn event", async () => {

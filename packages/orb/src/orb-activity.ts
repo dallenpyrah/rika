@@ -1,4 +1,4 @@
-import { Config, Time } from "@rika/core"
+import { Config, Settings, Time } from "@rika/core"
 import { Database, OrbStore } from "@rika/persistence"
 import { Ids } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect"
@@ -34,10 +34,11 @@ export const layer: Layer.Layer<
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
+    const settings = Option.getOrUndefined(yield* Effect.serviceOption(Settings.Service))
     const orbs = yield* OrbStore.Service
     const sandbox = yield* SandboxClient.Service
     const time = yield* Time.Service
-    const timeoutMs = yield* resolveTimeoutMs(config)
+    const timeoutMs = yield* resolveTimeoutMs(config, settings)
     const lastRefreshByOrb = new Map<Ids.OrbId, number>()
     const refreshLocks = new Map<Ids.OrbId, Semaphore.Semaphore>()
     const refreshLocksMutex = yield* Semaphore.make(1)
@@ -100,9 +101,18 @@ export const touch = Effect.fn("OrbActivity.touch.call")(function* (orbId: Ids.O
   return yield* service.touch(orbId)
 })
 
-const resolveTimeoutMs = Effect.fn("OrbActivity.resolveTimeoutMs")(function* (config: Config.Interface) {
+const resolveTimeoutMs = Effect.fn("OrbActivity.resolveTimeoutMs")(function* (
+  config: Config.Interface,
+  settings: Settings.Interface | undefined,
+) {
   const configured = yield* config.requireEnv("RIKA_ORB_IDLE_TIMEOUT").pipe(Effect.option)
-  if (Option.isNone(configured)) return defaultIdleTimeoutSeconds * 1_000
+  if (Option.isNone(configured)) {
+    if (settings !== undefined) {
+      const snapshot = yield* settings.snapshot
+      return snapshot.values.orb.idleTimeoutSeconds * 1_000
+    }
+    return defaultIdleTimeoutSeconds * 1_000
+  }
   const seconds = Number(configured.value)
   if (!Number.isInteger(seconds) || seconds <= 0) {
     return yield* new Config.ConfigError({

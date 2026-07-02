@@ -17,11 +17,13 @@ const metadata: SandboxClient.SandboxMetadata = {
 }
 
 describe("SandboxClient", () => {
-  test("fake layer creates, lists, pauses, resumes, times out, and kills sandboxes through the service contract", async () => {
-    const state = SandboxClientFake.makeState()
+  test("fake layer creates, lists, checks templates, pauses, resumes, times out, and kills sandboxes through the service contract", async () => {
+    const state = SandboxClientFake.makeState({ templates: ["rika-orb"] })
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
+        const templateFound = yield* SandboxClient.templateExists("rika-orb")
+        const templateMissing = yield* SandboxClient.templateExists("missing-template")
         const created = yield* SandboxClient.create({
           templateId: "rika-orb",
           envs: { RIKA_MODE: "deep3" },
@@ -33,10 +35,12 @@ describe("SandboxClient", () => {
         yield* SandboxClient.setTimeout(created.sandboxId, 30_000)
         const listed = yield* SandboxClient.list({ metadata: { thread_id: metadata.thread_id } })
         yield* SandboxClient.kill(created.sandboxId)
-        return { created, listed }
+        return { created, listed, templateFound, templateMissing }
       }).pipe(Effect.provide(SandboxClientFake.layer(state))),
     )
 
+    expect(result.templateFound).toBe(true)
+    expect(result.templateMissing).toBe(false)
     expect(result.created).toEqual({ sandboxId: "sandbox_1" })
     expect(result.listed).toEqual([
       {
@@ -58,6 +62,7 @@ describe("SandboxClient", () => {
     expect(state.calls.resume).toEqual(["sandbox_1"])
     expect(state.calls.setTimeout).toEqual([{ sandboxId: "sandbox_1", timeoutMs: 30_000 }])
     expect(state.calls.kill).toEqual(["sandbox_1"])
+    expect(state.calls.templateExists).toEqual(["rika-orb", "missing-template"])
   })
 
   test("fake layer streams scripted stdout, stderr, and exit chunks while recording exec calls", async () => {

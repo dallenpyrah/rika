@@ -4,6 +4,7 @@ import { Config } from "./index"
 import { Diagnostics } from "./index"
 import { IdGenerator } from "./index"
 import { SecretRedactor } from "./index"
+import { Settings } from "./index"
 import { Time } from "./index"
 
 export interface TestServicesInput {
@@ -23,6 +24,7 @@ export const testLayer = (input: TestServicesInput = {}) => {
 
   return Layer.mergeAll(
     Config.layerFromValues(config, input.env),
+    Settings.layerFromEnv(input.env ?? {}, config.workspace_root),
     SecretRedactor.layer,
     Diagnostics.memoryLayer(input.diagnostics ?? []),
     Time.fixedLayer(input.now ?? 0),
