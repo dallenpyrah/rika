@@ -12,10 +12,10 @@ export const OrbRecord = Schema.Struct({
   orb_id: OrbId,
   thread_id: ThreadId,
   project_id: ProjectId,
-  sandbox_id: Schema.String,
+  sandbox_id: Schema.NullOr(Schema.String),
   status: OrbStatus,
-  base_commit: Schema.String,
-  endpoint_url: Schema.String,
+  base_commit: Schema.NullOr(Schema.String),
+  endpoint_url: Schema.NullOr(Schema.String),
   created_at: TimestampMillis,
   last_active_at: TimestampMillis,
 }).annotate({ identifier: "Rika.OrbRecord" })

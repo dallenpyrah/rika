@@ -12,6 +12,53 @@ const threadId = Ids.ThreadId.make("thread_orb_store")
 const projectId = Ids.ProjectId.make("project_orb_store")
 
 describe("OrbStore", () => {
+  test("creates a staged provisioning record and allows cleanup before running", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({ thread_id: threadId, project_id: projectId })
+        const killed = yield* OrbStore.setStatus(orbId, "killed")
+        return { created, killed }
+      }).pipe(Effect.provide(makeLayer({ times: [createdAt, touchedAt] }))),
+    )
+
+    expect(result.created).toEqual(
+      orbRecord({
+        sandbox_id: null,
+        base_commit: null,
+        endpoint_url: null,
+        status: "provisioning",
+        last_active_at: createdAt,
+      }),
+    )
+    expect(result.killed.status).toBe("killed")
+    expect(result.killed.last_active_at).toBe(touchedAt)
+  })
+
+  test("records sandbox identity and base commit during provisioning", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* OrbStore.create({ thread_id: threadId, project_id: projectId })
+        const sandbox = yield* OrbStore.setSandbox(orbId, "sandbox_orb_store")
+        const baseCommit = yield* OrbStore.setBaseCommit(orbId, "abc123")
+        const stored = yield* OrbStore.get(orbId)
+        return { sandbox, baseCommit, stored }
+      }).pipe(Effect.provide(makeLayer())),
+    )
+
+    expect(result.sandbox.sandbox_id).toBe("sandbox_orb_store")
+    expect(result.baseCommit.base_commit).toBe("abc123")
+    expect(result.stored).toEqual(
+      orbRecord({
+        sandbox_id: "sandbox_orb_store",
+        base_commit: "abc123",
+        endpoint_url: null,
+        status: "provisioning",
+      }),
+    )
+  })
+
   test("creates, fetches, and lists token-free orb records", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

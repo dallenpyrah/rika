@@ -9,10 +9,10 @@ export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 export const CreateInput = Schema.Struct({
   thread_id: Ids.ThreadId,
   project_id: Ids.ProjectId,
-  sandbox_id: Schema.String,
-  base_commit: Schema.String,
-  endpoint_url: Schema.String,
-  token: Schema.String,
+  sandbox_id: Schema.optional(Schema.NullOr(Schema.String)),
+  base_commit: Schema.optional(Schema.NullOr(Schema.String)),
+  endpoint_url: Schema.optional(Schema.NullOr(Schema.String)),
+  token: Schema.optional(Schema.NullOr(Schema.String)),
 }).annotate({ identifier: "Rika.Persistence.OrbStore.CreateInput" })
 
 export interface EndpointInput extends Schema.Schema.Type<typeof EndpointInput> {}
@@ -53,6 +53,14 @@ export interface Interface {
     orbId: Ids.OrbId,
     status: Orb.OrbStatus,
   ) => Effect.Effect<Orb.OrbRecord, Database.DatabaseError | OrbStoreError>
+  readonly setSandbox: (
+    orbId: Ids.OrbId,
+    sandboxId: string,
+  ) => Effect.Effect<Orb.OrbRecord, Database.DatabaseError | OrbStoreError>
+  readonly setBaseCommit: (
+    orbId: Ids.OrbId,
+    baseCommit: string,
+  ) => Effect.Effect<Orb.OrbRecord, Database.DatabaseError | OrbStoreError>
   readonly setEndpoint: (
     orbId: Ids.OrbId,
     input: EndpointInput,
@@ -79,17 +87,20 @@ export const layer = Layer.effect(
           orb_id: orbId,
           thread_id: input.thread_id,
           project_id: input.project_id,
-          sandbox_id: input.sandbox_id,
+          sandbox_id: input.sandbox_id ?? null,
           status: "provisioning",
-          base_commit: input.base_commit,
-          endpoint_url: input.endpoint_url,
+          base_commit: input.base_commit ?? null,
+          endpoint_url: input.endpoint_url ?? null,
           created_at: now,
           last_active_at: now,
         }
         return yield* databaseService.withDatabaseEffect((database) =>
           Effect.try({
             try: () => {
-              database.insert(orbs).values(recordToRow(record, input.token)).run()
+              database
+                .insert(orbs)
+                .values(recordToRow(record, input.token ?? null))
+                .run()
               return record
             },
             catch: (cause) => toError(cause, "create", { orbId, threadId: input.thread_id }),
@@ -142,6 +153,32 @@ export const layer = Layer.effect(
                 return { ...existing, status, last_active_at: now }
               }),
             catch: (cause) => toError(cause, "setStatus", { orbId, status }),
+          }),
+        )
+      }),
+      setSandbox: Effect.fn("OrbStore.setSandbox")(function* (orbId: Ids.OrbId, sandboxId: string) {
+        return yield* databaseService.withDatabaseEffect((database) =>
+          Effect.try({
+            try: () =>
+              database.transaction((transaction) => {
+                const existing = requireOrb(transaction, orbId, "setSandbox")
+                transaction.run(sql`update orbs set sandbox_id = ${sandboxId} where orb_id = ${orbId}`)
+                return { ...existing, sandbox_id: sandboxId }
+              }),
+            catch: (cause) => toError(cause, "setSandbox", { orbId }),
+          }),
+        )
+      }),
+      setBaseCommit: Effect.fn("OrbStore.setBaseCommit")(function* (orbId: Ids.OrbId, baseCommit: string) {
+        return yield* databaseService.withDatabaseEffect((database) =>
+          Effect.try({
+            try: () =>
+              database.transaction((transaction) => {
+                const existing = requireOrb(transaction, orbId, "setBaseCommit")
+                transaction.run(sql`update orbs set base_commit = ${baseCommit} where orb_id = ${orbId}`)
+                return { ...existing, base_commit: baseCommit }
+              }),
+            catch: (cause) => toError(cause, "setBaseCommit", { orbId }),
           }),
         )
       }),
@@ -214,6 +251,16 @@ export const setStatus = Effect.fn("OrbStore.setStatus.call")(function* (orbId: 
   return yield* store.setStatus(orbId, status)
 })
 
+export const setSandbox = Effect.fn("OrbStore.setSandbox.call")(function* (orbId: Ids.OrbId, sandboxId: string) {
+  const store = yield* Service
+  return yield* store.setSandbox(orbId, sandboxId)
+})
+
+export const setBaseCommit = Effect.fn("OrbStore.setBaseCommit.call")(function* (orbId: Ids.OrbId, baseCommit: string) {
+  const store = yield* Service
+  return yield* store.setBaseCommit(orbId, baseCommit)
+})
+
 export const setEndpoint = Effect.fn("OrbStore.setEndpoint.call")(function* (orbId: Ids.OrbId, input: EndpointInput) {
   const store = yield* Service
   return yield* store.setEndpoint(orbId, input)
@@ -233,17 +280,17 @@ interface OrbRecordRow {
   readonly orb_id: string
   readonly thread_id: string
   readonly project_id: string
-  readonly sandbox_id: string
+  readonly sandbox_id: string | null
   readonly status: string
-  readonly base_commit: string
-  readonly endpoint_url: string
+  readonly base_commit: string | null
+  readonly endpoint_url: string | null
   readonly created_at: number
   readonly last_active_at: number
 }
 
 interface EndpointRow {
-  readonly endpoint_url: string
-  readonly token: string
+  readonly endpoint_url: string | null
+  readonly token: string | null
 }
 
 const listRows = (database: Pick<Database.DrizzleDatabase, "all">, filter: ListFilter) => {
@@ -268,7 +315,7 @@ const requireOrb = (database: Pick<Database.DrizzleDatabase, "get">, orbId: Ids.
   return record
 }
 
-const recordToRow = (record: Orb.OrbRecord, token: string) => ({
+const recordToRow = (record: Orb.OrbRecord, token: string | null) => ({
   orb_id: record.orb_id,
   thread_id: record.thread_id,
   project_id: record.project_id,
@@ -276,7 +323,7 @@ const recordToRow = (record: Orb.OrbRecord, token: string) => ({
   status: record.status,
   base_commit: record.base_commit,
   endpoint_url: record.endpoint_url,
-  token,
+  token: token ?? null,
   created_at: record.created_at,
   last_active_at: record.last_active_at,
 })
@@ -297,7 +344,9 @@ const rowToExistingRecord = (row: OrbRecordRow): Orb.OrbRecord => ({
 })
 
 const rowToEndpoint = (row: EndpointRow | undefined): EndpointInput | undefined =>
-  row === undefined ? undefined : { endpoint_url: row.endpoint_url, token: row.token }
+  row === undefined || row.endpoint_url === null || row.token === null
+    ? undefined
+    : { endpoint_url: row.endpoint_url, token: row.token }
 
 const recordColumns = sql`select orb_id, thread_id, project_id, sandbox_id, status, base_commit, endpoint_url, created_at, last_active_at`
 
@@ -311,7 +360,7 @@ const canTransition = (from: Orb.OrbStatus, to: Orb.OrbStatus) => {
   if (to === "archived") return true
   switch (from) {
     case "provisioning":
-      return to === "running"
+      return to === "running" || to === "killed"
     case "running":
       return to === "paused" || to === "killed"
     case "paused":

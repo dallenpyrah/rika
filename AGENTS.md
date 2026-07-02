@@ -33,6 +33,7 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 | `docs/runtime-and-layers.md`        | Runtime/layer assembly conventions and base service list.                                                           |
 | `docs/observability.md`             | Telemetry export to the local inspector, `RIKA_TELEMETRY*` config, no-stdout constraint, and wide-events logging.   |
 | `docs/persistence.md`               | Drizzle, SQLite, migration, and persistence service boundary rules.                                                 |
+| `docs/orbs.md`                      | Orb provisioning, repository transfer, origin-clone credentials, endpoint token handling.                           |
 | `docs/remote-rivet-hosting.md`      | Local/remote Rivet hosting topology, multi-user boundaries, and recovery guidance.                                  |
 | `docs/ide-integration.md`           | Editor adapter boundaries for IDE clients, IDE context, and navigation requests.                                    |
 | `docs/local-web-sync.md`            | Local TUI/web shared-backend sync contract and Foldkit web app development flow.                                    |
