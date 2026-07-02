@@ -114,7 +114,7 @@ const ChatDetailModal = ({
 
 	return (
 		<box position="absolute" zIndex={3500} left={0} top={0} width={paneWidth} height={paneHeight} backgroundColor={RGBA.fromInts(0, 0, 0, 110)} onMouseUp={onClose}>
-			<box position="absolute" left={left} top={top} width={modalWidth} height={modalHeight} flexDirection="column" backgroundColor={RGBA.fromHex(colors.screenBg)} onMouseScroll={handleWheel}>
+			<box position="absolute" left={left} top={top} width={modalWidth} height={modalHeight} flexDirection="column" backgroundColor={RGBA.fromHex(colors.panelBg)} onMouseScroll={handleWheel}>
 				<box paddingLeft={1} paddingRight={1}>
 					<AlignedHeaderLine left={chunkDetailTitle(chunk)} right={`${meta} ${SEPARATOR} esc close`} width={modalWidth - 2} rightFg={colors.count} />
 				</box>

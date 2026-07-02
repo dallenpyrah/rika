@@ -1,5 +1,8 @@
+import { RGBA } from "@opentui/core"
+
 export interface ThemeColors {
-	readonly screenBg: string
+	readonly screenBg: string | undefined
+	readonly panelBg: string
 	readonly text: string
 	readonly muted: string
 	readonly separator: string
@@ -42,6 +45,7 @@ const motelDefaultTheme: ThemeDefinition = {
 	label: "Classic",
 	colors: {
 		screenBg: "#111120",       // oklch(0.185 0.030 282)
+		panelBg: "#111120",
 		text: "#eee5d6",           // oklch(0.925 0.022 82)  — warm cream
 		muted: "#9a9181",          // oklch(0.660 0.025 82)
 		separator: "#686155",      // oklch(0.495 0.020 81)
@@ -72,6 +76,7 @@ const tokyoNightTheme: ThemeDefinition = {
 	label: "Tokyo Night",
 	colors: {
 		screenBg: "#1a1b26",
+		panelBg: "#1a1b26",
 		text: "#c0caf5",
 		muted: "#7a88b6",
 		separator: "#565f89",
@@ -102,6 +107,7 @@ const catppuccinTheme: ThemeDefinition = {
 	label: "Catppuccin Mocha",
 	colors: {
 		screenBg: "#11111b",
+		panelBg: "#11111b",
 		text: "#cdd6f4",
 		muted: "#a6adc8",
 		separator: "#6c7086",
@@ -131,7 +137,8 @@ const rikaTheme: ThemeDefinition = {
 	name: "rika",
 	label: "Rika",
 	colors: {
-		screenBg: "#0a0a0a",
+		screenBg: undefined,
+		panelBg: "#0a0a0a",
 		text: "#c9d1d9",
 		muted: "#7d8590",
 		separator: "#30363d",
@@ -179,6 +186,9 @@ export const applyTheme = (name: ThemeName) => {
 	Object.assign(waterfallColors, theme.waterfall)
 	return theme
 }
+
+export const bgColor = (value: string | undefined): RGBA | undefined =>
+	value === undefined ? undefined : RGBA.fromHex(value)
 
 export const cycleThemeName = (current: ThemeName) => {
 	const nextIndex = (themeOrder.indexOf(current) + 1) % themeOrder.length

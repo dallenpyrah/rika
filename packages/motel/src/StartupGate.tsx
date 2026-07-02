@@ -1,12 +1,12 @@
 import { Effect } from "effect"
-import { RGBA, TextAttributes } from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useState } from "react"
 import { App } from "./App.js"
 import { createDaemonManager, ensureManagedDaemon, getManagedDaemonStatus, type DaemonStatus } from "./daemon.js"
 import { MOTEL_SERVICE_ID } from "./registry.js"
 import { Divider, PlainLine, TextLine } from "./ui/primitives.tsx"
-import { colors } from "./ui/theme.ts"
+import { bgColor, colors } from "./ui/theme.ts"
 
 type ConflictStatus = DaemonStatus & {
 	readonly service: typeof MOTEL_SERVICE_ID
@@ -78,7 +78,7 @@ const LoadingScreen = ({ width, height, message }: { width: number; height: numb
 	const top = Math.max(0, Math.floor((height - 5) / 2))
 
 	return (
-		<box width={width} height={height} backgroundColor={RGBA.fromHex(colors.screenBg)}>
+		<box width={width} height={height} backgroundColor={bgColor(colors.screenBg)}>
 			<box position="absolute" left={left} top={top} width={panelWidth} flexDirection="column">
 				<TextLine>
 					<span fg={colors.accent} attributes={TextAttributes.BOLD}>RIKA INSPECT</span>
@@ -121,7 +121,7 @@ const RecoveryScreen = ({
 	const top = Math.max(0, Math.floor((height - bodyHeight) / 2))
 
 	return (
-		<box width={width} height={height} backgroundColor={RGBA.fromHex(colors.screenBg)}>
+		<box width={width} height={height} backgroundColor={bgColor(colors.screenBg)}>
 			<box position="absolute" left={left} top={top} width={panelWidth} flexDirection="column">
 				<TextLine>
 					<span fg={colors.accent} attributes={TextAttributes.BOLD}>RIKA INSPECT</span>

@@ -82,7 +82,7 @@ export const AttrFilterModal = ({
 
 	return (
 		<box position="absolute" zIndex={3000} left={0} top={0} width={width} height={height} backgroundColor={RGBA.fromInts(0, 0, 0, 110)} onMouseUp={onClose}>
-			<box position="absolute" left={left} top={top} width={panelWidth} flexDirection="column" backgroundColor={RGBA.fromInts(20, 20, 28, 255)}>
+			<box position="absolute" left={left} top={top} width={panelWidth} flexDirection="column" backgroundColor={RGBA.fromHex(colors.panelBg)}>
 				<box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexDirection="column">
 					<TextLine>
 						<span fg={colors.count} attributes={TextAttributes.BOLD}>{truncateText(title, innerWidth)}</span>

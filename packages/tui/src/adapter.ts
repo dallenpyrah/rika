@@ -1567,7 +1567,7 @@ const inspectRows = (inspect: ViewState.InspectState, width: number): ReadonlyAr
   if (inspect.status === "failed")
     return [inspectSection(`Could not load telemetry: ${inspect.message ?? "unknown error"}`, width)]
   if (inspect.traces.length === 0 && inspect.logs.length === 0 && inspect.spans.length === 0) {
-    return [inspectSection("No Rika telemetry found yet. Run a turn, then press r to refresh.", width)]
+    return [inspectSection("No Rika telemetry in the last 24h. Run a turn, then press r to refresh.", width)]
   }
   return inspect.view === "traces" ? inspectTraceRows(inspect, width) : inspectLogRows(inspect, width)
 }

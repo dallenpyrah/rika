@@ -18,7 +18,7 @@ const ULTRA_SHORT_MARKERS = ["\u258f", "\u258e", "\u258d", "\u258c"] as const
 
 type WaterfallBarSegment = {
 	readonly text: string
-	readonly fg: string
+	readonly fg?: string
 	readonly bg?: string
 }
 
@@ -28,7 +28,7 @@ const renderWaterfallBar = (
 	barWidth: number,
 	barColor: string,
 	laneColor: string,
-	rowBg: string,
+	rowBg: string | undefined,
 ): { readonly segments: readonly WaterfallBarSegment[] } => {
 	// Timeline semantics: the leading gap (before the bar starts) is the
 	// "runway" showing how long after trace start this span kicked in — render

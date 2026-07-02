@@ -123,6 +123,7 @@ const queryPath = (path: string, target: ViewState.InspectTarget, limit: number)
   const url = new URL(path, "http://unused.local")
   url.searchParams.set("service", Telemetry.serviceName)
   url.searchParams.set("limit", String(limit))
+  url.searchParams.set("lookback", "24h")
   if (target.scope === "thread") url.searchParams.set("attr.rika.thread_id", target.thread_id)
   return `${url.pathname}${url.search}`
 }

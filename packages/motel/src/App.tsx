@@ -23,7 +23,7 @@ import {
 import { chatDetailChunkIdAtom, chatDetailScrollOffsetAtom, selectedChatChunkIdAtom } from "./ui/aiState.ts"
 import { persistSelectedTheme } from "./ui/persistence.ts"
 import type { ThemeName } from "./ui/theme.ts"
-import { applyTheme, colors, SEPARATOR, themeLabel } from "./ui/theme.ts"
+import { applyTheme, bgColor, colors, SEPARATOR, themeLabel } from "./ui/theme.ts"
 import { useKeyboardNav } from "./ui/useKeyboardNav.ts"
 import { AttrFilterModal } from "./ui/AttrFilterModal.tsx"
 import { useAttrFilterPicker } from "./ui/useAttrFilterPicker.ts"
@@ -346,7 +346,7 @@ export const App = () => {
 	startupBenchMark("app_render_ready")
 
 	return (
-		<box width={width ?? 100} height={height ?? 24} flexGrow={1} flexDirection="column" backgroundColor={RGBA.fromHex(colors.screenBg)}>
+		<box width={width ?? 100} height={height ?? 24} flexGrow={1} flexDirection="column" backgroundColor={bgColor(colors.screenBg)}>
 			<AppHeader {...headerModel} />
 			{showSplit
 				? <SplitDivider leftWidth={leftPaneWidth} junction={"┬"} rightWidth={rightPaneWidth} />

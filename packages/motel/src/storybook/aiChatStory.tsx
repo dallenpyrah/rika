@@ -19,7 +19,7 @@ import { buildChunks, type Chunk } from "../ui/aiChatModel.ts"
 import { AiChatView } from "../ui/AiChatView.tsx"
 import { Divider, TextLine } from "../ui/primitives.tsx"
 import type { AiCallDetailState } from "../ui/aiState.ts"
-import { applyTheme, colors, SEPARATOR } from "../ui/theme.ts"
+import { applyTheme, bgColor, colors, SEPARATOR } from "../ui/theme.ts"
 import type { ChatFixture } from "./fixtures/index.ts"
 import { errorFixture } from "./fixtures/errorState.ts"
 import { imagePasteFixture } from "./fixtures/imagePaste.ts"
@@ -181,7 +181,7 @@ const StoryApp = () => {
 	const contentWidth = Math.max(8, w - 2)
 
 	return (
-		<box width={w} height={h} flexDirection="column" backgroundColor={RGBA.fromHex(colors.screenBg)}>
+		<box width={w} height={h} flexDirection="column" backgroundColor={bgColor(colors.screenBg)}>
 			<box paddingLeft={1} paddingRight={1} height={HEADER_ROWS} flexDirection="column">
 				<TextLine>
 					<span fg={colors.muted} attributes={TextAttributes.BOLD}>AI CHAT</span>
