@@ -2,11 +2,12 @@ import { AgentLoop, ThreadService, WorkspaceAccess, WorkspaceIdentity } from "@r
 import { Config, IdGenerator } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbManager } from "@rika/orb"
-import { ArtifactStore, Database, OrbStore, ProjectStore, ThreadEventLog } from "@rika/persistence"
+import { ArtifactStore, Database, OrbStore, ProjectStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import * as OrbMirror from "./orb-mirror"
 import * as ThreadLive from "./thread-live"
+import * as TurnInterruption from "./turn-interruption"
 
 export class RemoteControlError extends Schema.TaggedErrorClass<RemoteControlError>()("RemoteControlError", {
   message: Schema.String,
@@ -24,6 +25,7 @@ export type RunError =
   | OrbManager.OrbProvisionError
   | ProjectStore.ProjectStoreError
   | ThreadEventLog.ThreadEventLogError
+  | ThreadProjection.ThreadProjectionError
   | IdeBridge.IdeBridgeError
   | OrbMirror.RunError
   | WorkspaceAccess.RunError
@@ -73,6 +75,7 @@ export const layerWithLive = Layer.effect(
     const idGenerator = yield* IdGenerator.Service
     const database = yield* Database.Service
     const eventLog = yield* ThreadEventLog.Service
+    const projection = yield* ThreadProjection.Service
     const ideBridge = yield* IdeBridge.Service
     const workspaceAccess = yield* WorkspaceAccess.Service
     const live = yield* ThreadLive.Service
@@ -110,6 +113,24 @@ export const layerWithLive = Layer.effect(
       const resumed = yield* orbManager.resume(orb.orb_id)
       yield* orbMirror.mirror(resumed.orb_id)
     })
+    const reconcileInterruptedTurns = Effect.fn("RemoteControl.reconcileInterruptedTurns")(function* () {
+      const events = yield* eventLog.readAll()
+      const threadIds = [...new Set(events.map((event) => event.thread_id))]
+      yield* Effect.forEach(
+        threadIds,
+        (threadId) =>
+          TurnInterruption.appendIfLatestTurnOpen({
+            thread_id: threadId,
+            message: TurnInterruption.BackendRestartMessage,
+            eventLog,
+            projection,
+            live,
+          }),
+        { discard: true },
+      )
+    })
+
+    yield* reconcileInterruptedTurns().pipe(Effect.provideService(Database.Service, database))
 
     return Service.of({
       backendHealth: Effect.fn("RemoteControl.backendHealth")(function* (url: string) {

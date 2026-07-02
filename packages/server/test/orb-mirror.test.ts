@@ -21,6 +21,7 @@ import { HttpServer, OrbMirror, RemoteControl, ThreadLive } from "../src/index"
 const threadId = Ids.ThreadId.make("thread_orb_mirror")
 const projectId = Ids.ProjectId.make("project_orb_mirror")
 const workspaceId = Ids.WorkspaceId.make("project:project_orb_mirror")
+const turnId = Ids.TurnId.make("turn_orb_mirror")
 const now = Common.TimestampMillis.make(2_010_000_000_000)
 
 describe("OrbMirror", () => {
@@ -300,14 +301,28 @@ describe("OrbMirror", () => {
         Effect.gen(function* () {
           yield* Migration.migrate()
           const orbId = yield* createRunningOrb()
+          yield* seedActiveTurn()
           yield* OrbMirror.mirrorRunningOrbsOnce()
           yield* OrbMirror.syncRunning()
-          return yield* OrbStore.get(orbId)
+          const stored = yield* OrbStore.get(orbId)
+          const replay = yield* ThreadEventLog.readThread({ thread_id: threadId })
+          const projection = yield* ThreadProjection.getThread(threadId)
+          return { stored, replay, projection }
         }),
       )
 
-      expect(record?.status).toBe("paused")
-      expect(subscriptions).toEqual([0])
+      const failed = record.replay.filter((event): event is Event.TurnFailed => event.type === "turn.failed")
+      expect(record.stored?.status).toBe("paused")
+      expect(failed).toHaveLength(1)
+      expect(failed[0]).toMatchObject({
+        thread_id: threadId,
+        turn_id: turnId,
+        sequence: 3,
+        data: { error: { kind: "unknown", message: "turn interrupted by orb pause" } },
+      })
+      expect(record.projection).toMatchObject({ active_turn_id: turnId, active_turn_status: "failed" })
+      expect(record.replay.map((event) => event.sequence)).toEqual([1, 2, 3])
+      expect(subscriptions).toEqual([2])
       expect(sandboxState.calls.list).toEqual([{ metadata: { thread_id: threadId, project_id: projectId } }])
     } finally {
       await runtime.dispose()
@@ -338,12 +353,27 @@ describe("OrbMirror", () => {
         Effect.gen(function* () {
           yield* Migration.migrate()
           const orbId = yield* createRunningOrb()
+          yield* seedActiveTurn()
           yield* OrbMirror.mirrorRunningOrbsOnce()
-          return yield* OrbStore.get(orbId)
+          yield* OrbMirror.syncRunning()
+          const stored = yield* OrbStore.get(orbId)
+          const replay = yield* ThreadEventLog.readThread({ thread_id: threadId })
+          const projection = yield* ThreadProjection.getThread(threadId)
+          return { stored, replay, projection }
         }),
       )
 
-      expect(record?.status).toBe("killed")
+      const failed = record.replay.filter((event): event is Event.TurnFailed => event.type === "turn.failed")
+      expect(record.stored?.status).toBe("killed")
+      expect(failed).toHaveLength(1)
+      expect(failed[0]).toMatchObject({
+        thread_id: threadId,
+        turn_id: turnId,
+        sequence: 3,
+        data: { error: { kind: "unknown", message: "turn interrupted by orb pause" } },
+      })
+      expect(record.projection).toMatchObject({ active_turn_id: turnId, active_turn_status: "failed" })
+      expect(record.replay.map((event) => event.sequence)).toEqual([1, 2, 3])
       expect(sandboxState.calls.list).toEqual([{ metadata: { thread_id: threadId, project_id: projectId } }])
     } finally {
       await runtime.dispose()
@@ -558,6 +588,14 @@ const createRunningOrb = () =>
     return created.orb_id
   })
 
+const seedActiveTurn = () =>
+  Effect.gen(function* () {
+    for (const event of [threadCreated(1), turnStarted(2)]) {
+      const appended = yield* ThreadEventLog.append(event)
+      yield* ThreadProjection.apply(appended)
+    }
+  })
+
 const threadCreated = (sequence: number): Event.ThreadCreated => ({
   id: Ids.EventId.make(`event_orb_mirror_created_${sequence}`),
   thread_id: threadId,
@@ -568,10 +606,21 @@ const threadCreated = (sequence: number): Event.ThreadCreated => ({
   data: { workspace_id: workspaceId },
 })
 
+const turnStarted = (sequence: number): Event.TurnStarted => ({
+  id: Ids.EventId.make(`event_orb_mirror_turn_started_${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: now,
+  type: "turn.started",
+  data: {},
+})
+
 const messageAdded = (sequence: number, content: string): Event.MessageAdded => ({
   id: Ids.EventId.make(`event_orb_mirror_message_${sequence}`),
   thread_id: threadId,
-  turn_id: Ids.TurnId.make("turn_orb_mirror"),
+  turn_id: turnId,
   sequence,
   version: 1,
   created_at: now,
@@ -580,7 +629,7 @@ const messageAdded = (sequence: number, content: string): Event.MessageAdded => 
     message: Message.user({
       id: Ids.MessageId.make(`message_orb_mirror_${sequence}`),
       thread_id: threadId,
-      turn_id: Ids.TurnId.make("turn_orb_mirror"),
+      turn_id: turnId,
       content,
       created_at: now,
     }),

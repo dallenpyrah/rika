@@ -18,7 +18,7 @@ import {
   WorkspaceStore,
 } from "@rika/persistence"
 import { Client } from "@rika/sdk"
-import { Artifact, Common, Ide, Ids, Orb, Remote } from "@rika/schema"
+import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
 import { HttpServer, OrbMirror, RemoteControl } from "../src/index"
 
@@ -30,6 +30,8 @@ const projectWorkspaceId = Ids.WorkspaceId.make("project:project_remote_contract
 const artifactId = Ids.ArtifactId.make("artifact_remote_contract")
 const orbId = Ids.OrbId.make("orb_remote_contract")
 const orbThreadId = Ids.ThreadId.make("thread_remote_orb_contract")
+const orphanedThreadId = Ids.ThreadId.make("thread_remote_orphaned_turn")
+const orphanedTurnId = Ids.TurnId.make("turn_remote_orphaned")
 const ideClientId = Ids.IdeClientId.make("ide_remote_contract")
 const ownerId = Ids.UserId.make("user_remote_owner")
 const outsiderId = Ids.UserId.make("user_remote_outsider")
@@ -58,6 +60,13 @@ const configLayer = Config.layerFromValues({
   default_mode: "smart",
 })
 
+const configLayerForDataDir = (dataDir: string) =>
+  Config.layerFromValues({
+    workspace_root: "/workspace/rika-remote",
+    data_dir: dataDir,
+    default_mode: "smart",
+  })
+
 const defaultContextLayer = ContextResolver.fakeLayer({ entries: [], rendered: "", total_chars: 0 })
 
 const ideAwareContextLayer = Layer.succeed(
@@ -80,12 +89,15 @@ const makeLayer = (
   contextLayer = defaultContextLayer,
   orbManagerLayer: Layer.Layer<OrbManager.Service, never, OrbStore.Service> = fakeOrbManagerLayer(),
   orbMirrorLayer: Layer.Layer<OrbMirror.Service> = fakeOrbMirrorLayer(),
+  options: { readonly dataDir?: string } = {},
 ) => {
-  const databaseLayer = Database.memoryLayer
+  const runtimeConfigLayer = options.dataDir === undefined ? configLayer : configLayerForDataDir(options.dataDir)
+  const databaseLayer =
+    options.dataDir === undefined ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(runtimeConfigLayer))
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const storageLayer = Layer.mergeAll(
-    configLayer,
+    runtimeConfigLayer,
     databaseLayer,
     artifactLayer,
     workspaceStoreLayer,
@@ -106,7 +118,7 @@ const makeLayer = (
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const providedOrbManagerLayer = orbManagerLayer.pipe(Layer.provideMerge(migratedStorageLayer))
   const llmLayer = Router.layer.pipe(
-    Layer.provideMerge(configLayer),
+    Layer.provideMerge(runtimeConfigLayer),
     Layer.provideMerge(
       Provider.fakeRegistryLayer([
         { name: "anthropic", responses: ["remote hello"] },
@@ -133,6 +145,18 @@ const makeLayer = (
   const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
 
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
+}
+
+const makeThreadStorageLayer = (dataDir: string) => {
+  const runtimeConfigLayer = configLayerForDataDir(dataDir)
+  const databaseLayer = Database.layer.pipe(Layer.provideMerge(runtimeConfigLayer))
+  return Layer.mergeAll(
+    runtimeConfigLayer,
+    databaseLayer,
+    Migration.layer,
+    ThreadEventLog.layer,
+    ThreadProjection.layer,
+  )
 }
 
 const fakeOrbManagerLayer = (
@@ -244,6 +268,33 @@ const createPausedOrbRecord = (recordThreadId: Ids.ThreadId) =>
     yield* OrbStore.setStatus(created.orb_id, "running")
     return yield* OrbStore.setStatus(created.orb_id, "paused")
   })
+
+const appendProjected = (event: Event.Event) =>
+  Effect.gen(function* () {
+    const appended = yield* ThreadEventLog.append(event)
+    yield* ThreadProjection.apply(appended)
+  })
+
+const orphanedThreadCreated = (): Event.ThreadCreated => ({
+  id: Ids.EventId.make("event_remote_orphaned_thread_created"),
+  thread_id: orphanedThreadId,
+  sequence: 1,
+  version: 1,
+  created_at: now,
+  type: "thread.created",
+  data: { workspace_id: workspaceId },
+})
+
+const orphanedTurnStarted = (): Event.TurnStarted => ({
+  id: Ids.EventId.make("event_remote_orphaned_turn_started"),
+  thread_id: orphanedThreadId,
+  turn_id: orphanedTurnId,
+  sequence: 2,
+  version: 1,
+  created_at: now,
+  type: "turn.started",
+  data: {},
+})
 
 const makeClient = (handle: (request: Request) => Promise<Response>) =>
   Client.make(
@@ -440,6 +491,64 @@ describe("remote control API and SDK", () => {
     expect(calls).toEqual([`resume:${paused.orb_id}`, `mirror:${paused.orb_id}`])
     expect(streamed.at(-1)).toMatchObject({ type: "turn.completed" })
     expect(stored?.status).toBe("running")
+  })
+
+  test("startup reconciliation fails orphaned active turns and allows a new turn", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-remote-orphaned-turn-"))
+    const storageRuntime = ManagedRuntime.make(makeThreadStorageLayer(dataDir))
+
+    try {
+      await storageRuntime.runPromise(
+        Effect.gen(function* () {
+          yield* Migration.migrate()
+          yield* appendProjected(orphanedThreadCreated())
+          yield* appendProjected(orphanedTurnStarted())
+        }),
+      )
+    } finally {
+      await storageRuntime.dispose()
+    }
+
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), { dataDir }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await runtime.runPromise(RemoteControl.backendHealth("http://rika.test"))
+      const replay = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: orphanedThreadId }))
+      const projection = await runtime.runPromise(ThreadProjection.getThread(orphanedThreadId))
+      const streamedPromise = Effect.runPromise(
+        client.subscribeThreadEvents({ thread_id: orphanedThreadId, after_sequence: replay.at(-1)?.sequence }).pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed" || event.type === "turn.failed"),
+          Stream.runCollect,
+        ),
+      )
+      const accepted = await Effect.runPromise(
+        client.startTurn({ thread_id: orphanedThreadId, workspace_id: workspaceId, content: "after restart" }),
+      )
+      const streamed = await streamedPromise
+      const failed = replay.filter((event): event is Event.TurnFailed => event.type === "turn.failed")
+
+      expect(replay.map((event) => event.type)).toEqual(["thread.created", "turn.started", "turn.failed"])
+      expect(failed).toHaveLength(1)
+      expect(failed[0]).toMatchObject({
+        thread_id: orphanedThreadId,
+        turn_id: orphanedTurnId,
+        sequence: 3,
+        data: { error: { kind: "unknown", message: "turn interrupted by backend restart" } },
+      })
+      expect(projection).toMatchObject({
+        thread_id: orphanedThreadId,
+        active_turn_id: orphanedTurnId,
+        active_turn_status: "failed",
+      })
+      expect(accepted).toEqual({ thread_id: orphanedThreadId, accepted: true })
+      expect(streamed.at(-1)).toMatchObject({ type: "turn.completed" })
+    } finally {
+      await runtime.dispose()
+      await rm(dataDir, { force: true, recursive: true })
+    }
   })
 
   test("project remote API returns redacted summaries", async () => {

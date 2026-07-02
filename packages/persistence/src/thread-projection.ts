@@ -203,11 +203,11 @@ const applyEventRow = (database: ProjectionDatabase, event: Event.Event) => {
     case "tool.call.completed":
       return applyToolCallCompleted(database, event)
     case "turn.started":
-      return applyTurnStatus(database, event, "active")
+      return applyTurnStarted(database, event)
     case "turn.completed":
       return applyTurnCompleted(database, event)
     case "turn.failed":
-      return applyTurnStatus(database, event, "failed")
+      return applyTurnFailed(database, event)
     case "model.stream.chunk":
     case "model.reasoning.delta":
       return applyModelSeen(database, event)
@@ -274,15 +274,28 @@ const applyToolCallCompleted = (database: ProjectionDatabase, event: Event.ToolC
   `)
 }
 
-const applyTurnStatus = (
-  database: ProjectionDatabase,
-  event: Event.TurnStarted | Event.TurnCompleted | Event.TurnFailed,
-  status: TurnStatus,
-) =>
+const applyTurnStarted = (database: ProjectionDatabase, event: Event.TurnStarted) =>
   database.run(sql`
     update thread_projections set
       active_turn_id = ${event.turn_id},
-      active_turn_status = ${status},
+      active_turn_status = 'active',
+      last_sequence = ${event.sequence},
+      updated_at = ${event.created_at}
+    where thread_id = ${event.thread_id}
+  `)
+
+const applyTurnFailed = (database: ProjectionDatabase, event: Event.TurnFailed) =>
+  database.run(sql`
+    update thread_projections set
+      active_turn_id = case
+        when active_turn_id is null then ${event.turn_id}
+        else active_turn_id
+      end,
+      active_turn_status = case
+        when active_turn_id is null then 'failed'
+        when active_turn_id = ${event.turn_id} and active_turn_status not in ('completed', 'failed') then 'failed'
+        else active_turn_status
+      end,
       last_sequence = ${event.sequence},
       updated_at = ${event.created_at}
     where thread_id = ${event.thread_id}
@@ -293,15 +306,24 @@ const applyTurnCompleted = (database: ProjectionDatabase, event: Event.TurnCompl
   const model = event.data.model ?? null
   return database.run(sql`
     update thread_projections set
-      active_turn_id = ${event.turn_id},
-      active_turn_status = 'completed',
+      active_turn_id = case
+        when active_turn_id is null then ${event.turn_id}
+        else active_turn_id
+      end,
+      active_turn_status = case
+        when active_turn_id is null then 'completed'
+        when active_turn_id = ${event.turn_id} and active_turn_status not in ('completed', 'failed') then 'completed'
+        else active_turn_status
+      end,
       last_context_tokens = case
-        when ${inputTokens} is null then last_context_tokens
-        else ${inputTokens}
+        when active_turn_id is null and ${inputTokens} is not null then ${inputTokens}
+        when active_turn_id = ${event.turn_id} and active_turn_status not in ('completed', 'failed') and ${inputTokens} is not null then ${inputTokens}
+        else last_context_tokens
       end,
       last_model = case
-        when ${model} is null then last_model
-        else ${model}
+        when active_turn_id is null and ${model} is not null then ${model}
+        when active_turn_id = ${event.turn_id} and active_turn_status not in ('completed', 'failed') and ${model} is not null then ${model}
+        else last_model
       end,
       last_sequence = ${event.sequence},
       updated_at = ${event.created_at}

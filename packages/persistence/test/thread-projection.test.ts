@@ -6,6 +6,7 @@ import { Database, Migration, ThreadEventLog, ThreadProjection } from "../src/in
 const threadId = Ids.ThreadId.make("thread_projection_thread")
 const workspaceId = Ids.WorkspaceId.make("workspace_projection")
 const turnId = Ids.TurnId.make("turn_projection")
+const secondTurnId = Ids.TurnId.make("turn_projection_second")
 const layer = Layer.mergeAll(Database.memoryLayer, Migration.layer, ThreadEventLog.layer, ThreadProjection.layer)
 
 describe("ThreadProjection", () => {
@@ -121,6 +122,68 @@ describe("ThreadProjection", () => {
 
     expect(summary).toMatchObject({ active_turn_status: "completed" })
   })
+
+  test("keeps the first terminal turn status when a later terminal event arrives", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of [projectionEvents()[0], projectionEvents()[1], turnFailedEvent(), projectionEvents()[3]]) {
+          const appended = yield* ThreadEventLog.append(event)
+          yield* ThreadProjection.apply(appended)
+        }
+        const applied = yield* ThreadProjection.getThread(threadId)
+        yield* ThreadProjection.clear()
+        yield* ThreadProjection.rebuild()
+        const rebuilt = yield* ThreadProjection.getThread(threadId)
+        return { applied, rebuilt }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.applied).toMatchObject({
+      active_turn_id: turnId,
+      active_turn_status: "failed",
+    })
+    expect(result.rebuilt).toMatchObject({
+      active_turn_id: turnId,
+      active_turn_status: "failed",
+    })
+  })
+
+  test("ignores a late terminal event for an older turn after a newer turn starts", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of [
+          projectionEvents()[0],
+          projectionEvents()[1],
+          turnFailedEvent(),
+          secondTurnStartedEvent(),
+          lateFirstTurnCompletedEvent(),
+        ]) {
+          const appended = yield* ThreadEventLog.append(event)
+          yield* ThreadProjection.apply(appended)
+        }
+        const applied = yield* ThreadProjection.getThread(threadId)
+        yield* ThreadProjection.clear()
+        yield* ThreadProjection.rebuild()
+        const rebuilt = yield* ThreadProjection.getThread(threadId)
+        return { applied, rebuilt }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.applied).toMatchObject({
+      active_turn_id: secondTurnId,
+      active_turn_status: "active",
+    })
+    expect(result.applied?.context_tokens).toBeUndefined()
+    expect(result.applied?.last_model).toBeUndefined()
+    expect(result.rebuilt).toMatchObject({
+      active_turn_id: secondTurnId,
+      active_turn_status: "active",
+    })
+    expect(result.rebuilt?.context_tokens).toBeUndefined()
+    expect(result.rebuilt?.last_model).toBeUndefined()
+  })
 })
 
 const projectionEvents = (): readonly [
@@ -196,6 +259,39 @@ const unarchivedEvent = (): Event.ThreadUnarchived => ({
   created_at: 6,
   type: "thread.unarchived",
   data: {},
+})
+
+const turnFailedEvent = (): Event.TurnFailed => ({
+  id: Ids.EventId.make("projection_turn_failed"),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence: 3,
+  version: 1,
+  created_at: 3,
+  type: "turn.failed",
+  data: { error: { kind: "unknown", message: "turn interrupted by backend restart" } },
+})
+
+const secondTurnStartedEvent = (): Event.TurnStarted => ({
+  id: Ids.EventId.make("projection_second_turn_started"),
+  thread_id: threadId,
+  turn_id: secondTurnId,
+  sequence: 4,
+  version: 1,
+  created_at: 4,
+  type: "turn.started",
+  data: {},
+})
+
+const lateFirstTurnCompletedEvent = (): Event.TurnCompleted => ({
+  id: Ids.EventId.make("projection_late_first_turn_completed"),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence: 5,
+  version: 1,
+  created_at: 5,
+  type: "turn.completed",
+  data: { model: "gpt-late", usage: { input_tokens: 99, output_tokens: 1, total_tokens: 100 } },
 })
 
 const toolCompletedEvent = (): Event.ToolCallCompleted => ({

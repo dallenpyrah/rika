@@ -1451,6 +1451,8 @@ export type LiveLayerError =
   | ProjectStore.ProjectStoreError
   | ReviewService.RunError
   | SandboxClient.OrbConfigError
+  | ThreadEventLog.ThreadEventLogError
+  | ThreadProjection.ThreadProjectionError
 
 const defaultModeFromEnv = (env: Record<string, string | undefined>): Config.Mode => {
   const value = env.RIKA_MODE

@@ -4,6 +4,7 @@ import { Client } from "@rika/sdk"
 import { Ids, Orb } from "@rika/schema"
 import { Context, Duration, Effect, FiberMap, Layer, Schedule, Schema, Stream } from "effect"
 import * as ThreadLive from "./thread-live"
+import * as TurnInterruption from "./turn-interruption"
 
 export class OrbMirrorError extends Schema.TaggedErrorClass<OrbMirrorError>()("OrbMirrorError", {
   message: Schema.String,
@@ -78,6 +79,16 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
         if (inserted) yield* activity.touch(orb.orb_id)
         return yield* Effect.void
       })
+      const interruptActiveTurn = (threadId: Ids.ThreadId) =>
+        withDatabase(
+          TurnInterruption.appendIfLatestTurnOpen({
+            thread_id: threadId,
+            message: TurnInterruption.OrbPauseMessage,
+            eventLog,
+            projection,
+            live,
+          }),
+        ).pipe(Effect.asVoid)
       const mirrorOrbOnce = Effect.fn("OrbMirror.mirrorOrbOnce")(function* (orb: Orb.OrbRecord) {
         const endpoint = yield* orbs.endpointCredentials(orb.orb_id)
         if (endpoint === undefined) {
@@ -97,7 +108,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
           ),
         )
         return yield* runAttempt.pipe(
-          Effect.catchTag("SdkError", (error) => handleStreamFailure(orbs, sandbox, orb, error)),
+          Effect.catchTag("SdkError", (error) => handleStreamFailure(orbs, sandbox, orb, error, interruptActiveTurn)),
           Effect.retry(reconnectSchedule),
         )
       })
@@ -127,9 +138,11 @@ const handleStreamFailure = Effect.fn("OrbMirror.handleStreamFailure")(function*
   sandbox: SandboxClient.Interface,
   orb: Orb.OrbRecord,
   error: Client.SdkError,
+  interruptActiveTurn: (threadId: Ids.ThreadId) => Effect.Effect<void, RunError>,
 ) {
   const lifecycle = yield* inspectSandbox(sandbox, orb)
   if (lifecycle === "running") return yield* Effect.fail(error)
+  yield* interruptActiveTurn(orb.thread_id)
   return yield* setLifecycleStatus(orbs, orb, lifecycle)
 })
 

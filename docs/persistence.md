@@ -27,4 +27,5 @@ Tests should use `Database.memoryLayer` unless the behavior being tested require
 - Core, CLI, TUI, actor, LLM, and tool orchestration code must not import Drizzle directly.
 - The append-only event log is canonical durable truth. Projections remain rebuildable.
 - `ThreadEventLog` owns event append/read invariants. `ThreadProjection` owns rebuildable thread list, latest message, and active turn read models.
+- Backend and orb lifecycle recovery writes synthetic `turn.failed` events to the same append-only log. Projection replay treats the first terminal event for a turn as authoritative while keeping sequence advancement monotonic for later terminal events on that same turn.
 - `WorkspaceStore` owns durable workspace memberships for hosted access. Authorization decisions stay in `WorkspaceAccess`, not in the Drizzle adapter.
