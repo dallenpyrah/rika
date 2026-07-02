@@ -169,6 +169,28 @@ describe("SDK client", () => {
     ])
   })
 
+  test("uses shared schema for orb changes requests", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const changes: Remote.OrbChangesResponse = {
+      base_commit: "abc123",
+      head_commit: "def456",
+      diff: "diff --git a/README.md b/README.md\n",
+      dirty: true,
+    }
+    const client = Client.make({
+      requestJson: (input) => {
+        calls.push(input)
+        return Effect.succeed(Codec.encode(Remote.OrbChangesResponse)(changes))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    const result = await Effect.runPromise(client.orbChanges())
+
+    expect(result).toEqual(changes)
+    expect(calls).toEqual([{ method: "GET", path: "/v1/orb/changes" }])
+  })
+
   test("fetch transport sends bearer auth and decodes API errors", async () => {
     let authorization: string | undefined
     const client = Client.make(

@@ -1,3 +1,4 @@
+export * as OrbChanges from "./orb-changes"
 export * as OrbActivity from "./orb-activity"
 export * as OrbManager from "./orb-manager"
 export * as SandboxClient from "./sandbox-client"

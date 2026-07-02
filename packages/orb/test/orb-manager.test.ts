@@ -125,6 +125,9 @@ describe("OrbManager", () => {
         "server-token",
         "--workspace",
         "/home/user/repo",
+        "--orb",
+        "--base-commit",
+        "abc123",
       ],
       opts: {
         background: true,

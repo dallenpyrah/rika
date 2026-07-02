@@ -51,6 +51,7 @@ import * as Review from "./review"
 import * as RuntimeEnv from "./runtime-env"
 import * as Server from "./server"
 import * as Skills from "./skills"
+import * as Sync from "./sync"
 import * as Threads from "./threads"
 import * as Version from "./version"
 
@@ -124,9 +125,13 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                                           ? Doctor.executeCommand(command).pipe(
                                               Effect.provide(doctorLiveLayer(env, input.cwd)),
                                             )
-                                          : Server.executeCommand(command).pipe(
-                                              Effect.provide(serverLiveLayer(command, env, input.cwd)),
-                                            )
+                                          : command.type === "sync"
+                                            ? Sync.executeCommand(command).pipe(
+                                                Effect.provide(syncLiveLayer(command, env, input.cwd)),
+                                              )
+                                            : Server.executeCommand(command).pipe(
+                                                Effect.provide(serverLiveLayer(command, env, input.cwd)),
+                                              )
               ).pipe(
                 Effect.matchEffect({
                   onFailure: (error: RuntimeError) =>
@@ -199,6 +204,7 @@ type RuntimeError =
   | SkillRegistry.SkillRegistryError
   | SubagentRuntime.RunError
   | Skills.SkillsError
+  | Sync.SyncError
   | ThreadService.ThreadServiceError
   | ThreadEventLog.ThreadEventLogError
   | ThreadProjection.ThreadProjectionError
@@ -244,6 +250,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
   if (error instanceof Skills.SkillsError) return Skills.formatError(error)
+  if (error instanceof Sync.SyncError) return Sync.formatError(error)
   if (error instanceof ThreadService.ThreadServiceError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadEventLog.ThreadEventLogError) return `Rika failed: ${error.message}`
   if (error instanceof ThreadProjection.ThreadProjectionError) return `Rika failed: ${error.message}`
@@ -258,6 +265,7 @@ const formatRuntimeError = (error: RuntimeError) => {
 const runtimeExitCode = (error: RuntimeError) => {
   if (error instanceof Execute.ExecuteError) return error.exit_code
   if (error instanceof OrbExecute.OrbExecuteError) return error.exit_code
+  if (error instanceof Sync.SyncError) return error.exit_code
   return 1
 }
 
@@ -753,6 +761,7 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
     backendHealth: () => request({}, (remote) => remote.backendHealth()),
     createThread: (thread) => request(endpointInputFor(thread?.thread_id), (remote) => remote.createThread(thread)),
     createOrbThread: (thread) => request({}, (remote) => remote.createOrbThread(thread)),
+    orbChanges: () => request({}, (remote) => remote.orbChanges()),
     listProjects: () => request({}, (remote) => remote.listProjects()),
     createProject: (project) => request({}, (remote) => remote.createProject(project)),
     listThreads: (thread) => request({}, (remote) => remote.listThreads(thread)),
@@ -1150,6 +1159,47 @@ export const serverLiveLayer = (
   return commandLayer
 }
 
+export const syncLiveLayer = (
+  _command: Args.SyncCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<SyncLayerOutput, LiveLayerError, Output.Service> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
+  const configLayer = Config.layerFromValues(
+    {
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      default_mode: defaultModeFromEnv(env),
+      ...(env.RIKA_DATABASE_URL === undefined ? {} : { database_url: env.RIKA_DATABASE_URL }),
+    },
+    env,
+  )
+  const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const timeLayer = Time.layer
+  const orbStoreLayer = OrbStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    databaseLayer,
+    Migration.layer,
+    timeLayer,
+    IdGenerator.layer,
+    orbStoreLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const resolverLayer = BackendEndpoint.resolverLayerFromEnv(env).pipe(
+    Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd })),
+    Layer.provideMerge(BackendEndpoint.healthLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
+
+  return Sync.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(resolverLayer))
+}
+
 export type LiveLayerOutput =
   | AgentLoop.Service
   | ArtifactStore.Service
@@ -1256,6 +1306,8 @@ export type ProjectLayerOutput =
   | Time.Service
 
 export type SkillsLayerOutput = Config.Service | Output.Service | SkillRegistry.Service | Skills.Service
+
+export type SyncLayerOutput = Config.Service | BackendEndpoint.Resolver | Sync.Service
 
 export type McpLayerOutput =
   | Config.Service

@@ -214,6 +214,16 @@ rika --execute --workspace /repo --thread thread_123 "continue the task"
 
 Stdout is newline-delimited protocol events. Diagnostics go to stderr.
 
+## Orb sync
+
+Mirror changes from a running orb thread into a local worktree:
+
+```bash
+rika sync thread_123
+```
+
+The command writes to `<workspace>/.rika/worktrees/<thread-id>` on branch `rika/orb/<thread-id>`, verifies the orb base commit exists locally, resets the worktree to that base, cleans stale untracked files, and applies the orb's binary diff. Empty orb diffs print `no changes yet`.
+
 ## Remote control, IDEs, and SDK
 
 Start the local remote-control server:

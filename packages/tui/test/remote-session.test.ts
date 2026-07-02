@@ -213,6 +213,8 @@ const fakeBackend = (): FakeBackend => {
         })
         return threadSummary
       }),
+    orbChanges: () =>
+      Effect.fail(new Client.SdkError({ message: "orb changes unavailable", operation: "orbChanges", status: 404 })),
     listProjects: () => Effect.succeed([projectRecord("demo", "https://github.com/example/rika.git")]),
     createProject: (input) => Effect.succeed(projectRecord(input.name, input.repo_origin)),
     listThreads: (input) =>

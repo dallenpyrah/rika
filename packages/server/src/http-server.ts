@@ -1,4 +1,5 @@
 import { Diagnostics } from "@rika/core"
+import { OrbChanges } from "@rika/orb"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Cause, Context, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
 import * as RemoteControl from "./remote-control"
@@ -11,6 +12,9 @@ export const ServeInput = Schema.Struct({
   host: Schema.optional(Schema.String),
   port: Schema.optional(Schema.Int),
   token: Schema.optional(Schema.String),
+  workspace_root: Schema.optional(Schema.String),
+  orb: Schema.optional(Schema.Boolean),
+  base_commit: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Server.HttpServer.ServeInput" })
 
 export interface ServerHandle {
@@ -30,14 +34,20 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/server/HttpServer") {}
 
-export const layer = Layer.effect(
+const serviceLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const remote = yield* RemoteControl.Service
     const diagnostics = yield* Diagnostics.Service
-    return makeService(remote, diagnostics)
+    const orbChanges = yield* OrbChanges.Service
+    return makeService(remote, diagnostics, orbChanges)
   }),
 )
+
+export const layerWithOrbChanges = (orbChangesLayer: Layer.Layer<OrbChanges.Service>) =>
+  serviceLayer.pipe(Layer.provide(orbChangesLayer))
+
+export const layer = layerWithOrbChanges(OrbChanges.layer)
 
 export const handle = Effect.fn("HttpServer.handle.call")(function* (request: Request) {
   const service = yield* Service
@@ -49,14 +59,26 @@ export const serve = Effect.fn("HttpServer.serve.call")(function* (input: ServeI
   return yield* service.serve(input)
 })
 
-const makeService = (remote: RemoteControl.Interface, diagnostics: Diagnostics.Interface): Interface => {
-  const handleRequest = (request: Request, requiredToken?: string) =>
-    route(remote, request, tokenValue(requiredToken)).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
+interface OrbRouteMode {
+  readonly workspace_root: string
+  readonly base_commit: string
+}
+
+const makeService = (
+  remote: RemoteControl.Interface,
+  diagnostics: Diagnostics.Interface,
+  orbChanges: OrbChanges.Interface,
+): Interface => {
+  const handleRequest = (request: Request, requiredToken?: string, orbMode?: OrbRouteMode) =>
+    route(remote, orbChanges, request, tokenValue(requiredToken), orbMode).pipe(
+      Effect.provideService(Diagnostics.Service, diagnostics),
+    )
   return Service.of({
     handle: (request) => handleRequest(request),
     serve: Effect.fn("HttpServer.serve")(function* (input: ServeInput = {}) {
       const host = input.host ?? defaultHost
       const port = input.port ?? defaultPort
+      const orbMode = yield* orbRouteMode(input)
       if (!isLoopbackHost(host) && (input.token ?? "").length === 0) {
         return yield* new HttpServerError({
           message: "refusing to bind non-loopback host without --token",
@@ -68,7 +90,7 @@ const makeService = (remote: RemoteControl.Interface, diagnostics: Diagnostics.I
           Bun.serve({
             hostname: host,
             port,
-            fetch: (request) => Effect.runPromise(handleRequest(request, input.token)),
+            fetch: (request) => Effect.runPromise(handleRequest(request, input.token, orbMode)),
           }),
         catch: (cause) =>
           new HttpServerError({
@@ -84,17 +106,32 @@ const makeService = (remote: RemoteControl.Interface, diagnostics: Diagnostics.I
   })
 }
 
+const orbRouteMode = (input: ServeInput): Effect.Effect<OrbRouteMode | undefined, HttpServerError> => {
+  if (input.orb !== true) return Effect.succeed(undefined)
+  if (input.workspace_root === undefined || input.base_commit === undefined) {
+    return Effect.fail(
+      new HttpServerError({
+        message: "orb server mode requires --workspace and --base-commit",
+        operation: "serve",
+      }),
+    )
+  }
+  return Effect.succeed({ workspace_root: input.workspace_root, base_commit: input.base_commit })
+}
+
 const route = (
   remote: RemoteControl.Interface,
+  orbChanges: OrbChanges.Interface,
   request: Request,
   requiredToken: string | undefined,
+  orbMode: OrbRouteMode | undefined,
 ): Effect.Effect<Response, never, Diagnostics.Service> => {
   const url = new URL(request.url)
   const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID()
   return Diagnostics.event(
     "http.request",
     (fields) =>
-      dispatch(remote, request, url, requiredToken).pipe(
+      dispatch(remote, orbChanges, request, url, requiredToken, orbMode).pipe(
         Effect.tap((response) =>
           Effect.sync(() => {
             fields.status_code = response.status
@@ -137,9 +174,11 @@ const requestFields = (request: Request, url: URL, requestId: string): Diagnosti
 
 const dispatch = (
   remote: RemoteControl.Interface,
+  orbChanges: OrbChanges.Interface,
   request: Request,
   url: URL,
   requiredToken: string | undefined,
+  orbMode: OrbRouteMode | undefined,
 ): Effect.Effect<Response, RemoteControl.RunError> =>
   Effect.gen(function* () {
     if (url.pathname === "/health")
@@ -152,6 +191,23 @@ const dispatch = (
 
     const segments = url.pathname.split("/").filter(Boolean)
     if (segments[0] !== "v1") return notFound()
+
+    if (request.method === "GET" && segments[1] === "orb" && segments[2] === "changes" && segments.length === 3) {
+      if (orbMode === undefined) return notFound()
+      return yield* orbChanges
+        .changes({ workspace_root: orbMode.workspace_root, base_commit: orbMode.base_commit })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new RemoteControl.RemoteControlError({
+                message: error.message,
+                operation: error.operation,
+                status: 500,
+              }),
+          ),
+          jsonEffect(Remote.OrbChangesResponse),
+        )
+    }
 
     if (request.method === "GET" && segments[1] === "threads" && segments.length === 2) {
       const input = listThreadsRequest(url)

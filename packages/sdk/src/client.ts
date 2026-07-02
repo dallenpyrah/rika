@@ -28,6 +28,7 @@ export interface Interface {
   readonly backendHealth: () => Effect.Effect<Remote.BackendHealth, SdkError>
   readonly createThread: (input?: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
   readonly createOrbThread: (input: Remote.CreateOrbThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly orbChanges: () => Effect.Effect<Remote.OrbChangesResponse, SdkError>
   readonly listProjects: () => Effect.Effect<ReadonlyArray<Remote.ProjectSummary>, SdkError>
   readonly createProject: (input: Remote.CreateProjectRequest) => Effect.Effect<Remote.ProjectSummary, SdkError>
   readonly listThreads: (
@@ -78,6 +79,10 @@ export const make = (transport: Transport): Interface => ({
     transport
       .requestJson({ method: "POST", path: "/v1/orbs", body: Codec.encode(Remote.CreateOrbThreadRequest)(input) })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "createOrbThread"))),
+  orbChanges: () =>
+    transport
+      .requestJson({ method: "GET", path: "/v1/orb/changes" })
+      .pipe(Effect.flatMap(decodeEffect(Remote.OrbChangesResponse, "orbChanges"))),
   listProjects: () =>
     transport
       .requestJson({ method: "GET", path: "/v1/projects" })

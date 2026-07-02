@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor, WorkspaceAccess } from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
@@ -15,8 +18,8 @@ import {
   WorkspaceStore,
 } from "@rika/persistence"
 import { Client } from "@rika/sdk"
-import { Artifact, Common, Ide, Ids, Orb } from "@rika/schema"
-import { Effect, Layer, ManagedRuntime, Stream } from "effect"
+import { Artifact, Common, Ide, Ids, Orb, Remote } from "@rika/schema"
+import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
 import { HttpServer, RemoteControl } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_remote_contract")
@@ -458,6 +461,55 @@ describe("remote control API and SDK", () => {
     }
   })
 
+  test("serves orb changes only when the HTTP server is in orb mode", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "rika-orb-changes-http-"))
+    await runGit(workspace, ["init", "-b", "main"])
+    await runGit(workspace, ["config", "user.email", "rika@example.test"])
+    await runGit(workspace, ["config", "user.name", "Rika Test"])
+    await writeFile(join(workspace, "README.md"), "before\n")
+    await runGit(workspace, ["add", "README.md"])
+    await runGit(workspace, ["commit", "-m", "init"])
+    const baseCommit = (await runGit(workspace, ["rev-parse", "HEAD"])).trim()
+    await writeFile(join(workspace, "README.md"), "after\n")
+
+    const runtime = ManagedRuntime.make(makeLayer())
+
+    try {
+      const disabled = await runtime.runPromise(HttpServer.handle(new Request("http://rika.test/v1/orb/changes")))
+      const handle = await runtime.runPromise(
+        HttpServer.serve({
+          port: 0,
+          token: "secret",
+          orb: true,
+          base_commit: baseCommit,
+          workspace_root: workspace,
+        }),
+      )
+      try {
+        const unauthorized = await fetch(`${handle.url}/v1/orb/changes`)
+        const enabled = await fetch(`${handle.url}/v1/orb/changes`, {
+          headers: { authorization: "Bearer secret" },
+        })
+        const body = Schema.decodeUnknownSync(Remote.OrbChangesResponse)(await enabled.json())
+
+        expect(disabled.status).toBe(404)
+        expect(unauthorized.status).toBe(401)
+        expect(enabled.status).toBe(200)
+        expect(body).toMatchObject({
+          base_commit: baseCommit,
+          head_commit: baseCommit,
+          dirty: true,
+        })
+        expect(body.diff).toContain("diff --git a/README.md b/README.md")
+        expect(body.diff).toContain("+after")
+      } finally {
+        await runtime.runPromise(handle.close())
+      }
+    } finally {
+      await rm(workspace, { force: true, recursive: true })
+    }
+  })
+
   test("client-supplied auth marker cannot unlock health details", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
 
@@ -571,3 +623,14 @@ describe("remote control API and SDK", () => {
     expect(requests).toEqual([navigationRequest])
   })
 })
+
+const runGit = async (cwd: string, args: ReadonlyArray<string>) => {
+  const process = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ])
+  if (exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${stderr}`)
+  return stdout
+}

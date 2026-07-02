@@ -17,6 +17,7 @@ export * as Runtime from "./runtime"
 export * as RuntimeEnv from "./runtime-env"
 export * as Server from "./server"
 export * as Skills from "./skills"
+export * as Sync from "./sync"
 export * as Threads from "./threads"
 export * as Version from "./version"
 

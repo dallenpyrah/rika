@@ -128,7 +128,7 @@ export const layerWithSystem = (system: System) =>
           yield* step("base_commit", orbs.setBaseCommit(orbId, baseCommit), { orbId, sandboxId })
           yield* runSetup(sandbox, diagnostics, sandboxId, processEnv, orbId)
           const token = yield* step("token", system.randomToken, { orbId, sandboxId })
-          yield* startServer(sandbox, sandboxId, processEnv, token, orbId)
+          yield* startServer(sandbox, sandboxId, processEnv, token, baseCommit, orbId)
           const endpointUrl = yield* step("host_url", sandbox.hostUrl(sandboxId, serverPort), { orbId, sandboxId })
           yield* waitForHealth(system, endpointUrl, token, 0, orbId, sandboxId)
           yield* step("endpoint", orbs.setEndpoint(orbId, { endpoint_url: endpointUrl, token }), { orbId, sandboxId })
@@ -359,18 +359,34 @@ const startServer: (
   sandboxId: string,
   envs: Record<string, string>,
   token: string,
+  baseCommit: string,
   orbId: Ids.OrbId,
 ) => Effect.Effect<void, OrbProvisionError> = Effect.fn("OrbManager.startServer")(function* (
   sandbox: SandboxClient.Interface,
   sandboxId: string,
   envs: Record<string, string>,
   token: string,
+  baseCommit: string,
   orbId: Ids.OrbId,
 ) {
   const chunks = yield* collectExec(
     sandbox,
     sandboxId,
-    ["rika", "server", "--host", "0.0.0.0", "--port", String(serverPort), "--token", token, "--workspace", repoRoot],
+    [
+      "rika",
+      "server",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      String(serverPort),
+      "--token",
+      token,
+      "--workspace",
+      repoRoot,
+      "--orb",
+      "--base-commit",
+      baseCommit,
+    ],
     { cwd: repoRoot, envs, background: true },
     "start_server",
     orbId,

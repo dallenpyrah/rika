@@ -186,8 +186,16 @@ export const ServerCommand = Schema.Struct({
   port: Schema.optional(Schema.Int),
   token: Schema.optional(Schema.String),
   workspace_root: Schema.optional(Schema.String),
+  orb: Schema.Boolean,
+  base_commit: Schema.optional(Schema.String),
   ephemeral: Schema.Boolean,
 }).annotate({ identifier: "Rika.Cli.Args.ServerCommand" })
+
+export interface SyncCommand extends Schema.Schema.Type<typeof SyncCommand> {}
+export const SyncCommand = Schema.Struct({
+  type: Schema.Literal("sync"),
+  thread_id: Ids.ThreadId,
+}).annotate({ identifier: "Rika.Cli.Args.SyncCommand" })
 
 export const IdeAction = Schema.Literals(["status", "connect", "disconnect", "open-file"]).annotate({
   identifier: "Rika.Cli.Args.IdeAction",
@@ -227,6 +235,7 @@ export type Command =
   | ReviewCommand
   | ExtensionCommand
   | ServerCommand
+  | SyncCommand
   | IdeCommand
   | DoctorCommand
 
@@ -265,7 +274,8 @@ export const usage = [
   "  rika extensions enable-plugin <name> --verification <command> [--thread <id>]",
   "  rika extensions disable-plugin <name> [--reason <text>] [--thread <id>]",
   "  rika extensions rollback-plugin <name> [--reason <text>] [--thread <id>]",
-  "  rika server [--host <host>] [--port <n>] [--token <token>] [--workspace <path>] [--ephemeral]",
+  "  rika server [--host <host>] [--port <n>] [--token <token>] [--workspace <path>] [--orb --base-commit <sha>] [--ephemeral]",
+  "  rika sync <thread-id>",
   "  rika doctor",
   "  rika ide status [--server <url>] [--token <token>]",
   "  rika ide connect --client <id> [--server <url>] [--token <token>] [--workspace <path>] [--capabilities <csv>]",
@@ -451,7 +461,13 @@ const serverConfig = {
   port: Flag.integer("port").pipe(Flag.optional, Flag.withDescription("Port for the local server")),
   token: Flag.string("token").pipe(Flag.optional, Flag.withDescription("Bearer token required for API calls")),
   workspace: Flag.string("workspace").pipe(Flag.optional, Flag.withDescription("Workspace root for remote turns")),
+  orb: Flag.boolean("orb").pipe(Flag.withDescription("Serve orb-only endpoints")),
+  baseCommit: Flag.string("base-commit").pipe(Flag.optional, Flag.withDescription("Orb repository base commit")),
   ephemeral: Flag.boolean("ephemeral").pipe(Flag.withDescription("Use in-memory persistence for this server")),
+}
+
+const syncConfig = {
+  threadId: Argument.string("thread-id").pipe(Argument.withDescription("Thread id to sync from its orb")),
 }
 
 const ideServerConfig = {
@@ -589,7 +605,13 @@ interface ServerInput {
   readonly port: Option.Option<number>
   readonly token: Option.Option<string>
   readonly workspace: Option.Option<string>
+  readonly orb: boolean
+  readonly baseCommit: Option.Option<string>
   readonly ephemeral: boolean
+}
+
+interface SyncInput {
+  readonly threadId: string
 }
 
 interface IdeServerInput {
@@ -642,6 +664,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   const review = makeReviewCommand(parsedRef)
   const extensions = makeExtensionsCommand(parsedRef, rejectedRef)
   const server = makeServerCommand(parsedRef)
+  const sync = makeSyncCommand(parsedRef)
   const ide = makeIdeCommand(parsedRef)
   const doctor = makeDoctorCommand(parsedRef)
 
@@ -678,6 +701,7 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
       review,
       extensions,
       server,
+      sync,
       doctor,
       ide,
     ]),
@@ -907,6 +931,12 @@ const makeServerCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
   ).pipe(
     CliCommand.withDescription("Start the local Rika remote-control server"),
     CliCommand.withShortDescription("Start remote-control server"),
+  )
+
+const makeSyncCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
+  CliCommand.make("sync", syncConfig, (input: SyncInput) => Ref.set(parsedRef, Option.some(toSyncCommand(input)))).pipe(
+    CliCommand.withDescription("Mirror orb changes into a local worktree"),
+    CliCommand.withShortDescription("Sync orb"),
   )
 
 const makeDoctorCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
@@ -1268,15 +1298,23 @@ const toServerCommand = (input: ServerInput): ServerCommand => {
   const port = Option.getOrUndefined(input.port)
   const token = Option.getOrUndefined(input.token)
   const workspaceRoot = Option.getOrUndefined(input.workspace)
+  const baseCommit = Option.getOrUndefined(input.baseCommit)
   return {
     type: "server",
+    orb: input.orb,
     ephemeral: input.ephemeral,
     ...(host === undefined ? {} : { host }),
     ...(port === undefined ? {} : { port }),
     ...(token === undefined ? {} : { token }),
     ...(workspaceRoot === undefined ? {} : { workspace_root: workspaceRoot }),
+    ...(baseCommit === undefined ? {} : { base_commit: baseCommit }),
   }
 }
+
+const toSyncCommand = (input: SyncInput): SyncCommand => ({
+  type: "sync",
+  thread_id: Ids.ThreadId.make(input.threadId),
+})
 
 const toDoctorCommand = (): DoctorCommand => ({ type: "doctor" })
 

@@ -76,6 +76,22 @@ describe("CLI args", () => {
     expect(rootInteractive).toMatchObject({ type: "interactive", orb: true, ephemeral: false })
   })
 
+  test("parses sync and orb server flags", async () => {
+    const threadId = Ids.ThreadId.make("thread_args_sync")
+    const sync = await Effect.runPromise(Args.parse(["sync", threadId]))
+    const server = await Effect.runPromise(
+      Args.parse(["server", "--orb", "--base-commit", "abc123", "--workspace", "/home/user/repo"]),
+    )
+
+    expect(sync).toEqual({ type: "sync", thread_id: threadId })
+    expect(server).toMatchObject({
+      type: "server",
+      orb: true,
+      base_commit: "abc123",
+      workspace_root: "/home/user/repo",
+    })
+  })
+
   test("allows execute without a prompt so piped stdin can supply it", async () => {
     const command = await Effect.runPromise(Args.parse(["-x"]))
 
@@ -550,6 +566,7 @@ describe("CLI args", () => {
       port: 4587,
       token: "secret",
       workspace_root: "/workspace/rika",
+      orb: false,
       ephemeral: true,
     })
   })

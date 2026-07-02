@@ -36,6 +36,13 @@ export const layer = Layer.effect(
                 ...(command.host === undefined ? {} : { host: command.host }),
                 ...(command.port === undefined ? {} : { port: command.port }),
                 ...(command.token === undefined ? {} : { token: command.token }),
+                ...(command.orb
+                  ? {
+                      orb: true,
+                      workspace_root: command.workspace_root ?? configValues.workspace_root,
+                      ...(command.base_commit === undefined ? {} : { base_commit: command.base_commit }),
+                    }
+                  : {}),
               })
               fields.url = handle.url
               yield* output.stdout(JSON.stringify({ url: handle.url }))
