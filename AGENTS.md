@@ -70,6 +70,9 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 
 ## For AI Agents
 
+- For every code, config, docs, or behavior change, explicitly consult the Codex `oracle` custom subagent before final handoff. The oracle is configured in `.codex/agents/oracle.toml` as a read-only `gpt-5.5` reviewer with `xhigh` reasoning.
+- Use the oracle for plans, architecture changes, difficult debugging, subtle code review, and final diff review. The oracle may spawn nested read-only subagents for ticket fit, duplication, project standards, Effect/library fit, and verification lanes. Tell the user why the oracle is being invoked. If subagents are unavailable or the change is an emergency containment/no-op inspection, state that the oracle review was skipped and why.
+- Use the Codex `librarian` custom subagent for deep source research across this repo, `node_modules`, upstream repositories, and official docs. Use the Codex `herald` custom subagent for deep web search and current public-source discovery. Both are configured with live web search and may spawn nested read-only subagents for independent research tracks.
 - Read `CONTEXT.md` before naming new domain concepts.
 - Read `docs/RESEARCH.md` before changing the architecture or issue stack.
 - Read `docs/effect-module-conventions.md` before adding or changing an Effect service.
