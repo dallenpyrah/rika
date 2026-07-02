@@ -26,6 +26,16 @@ describe("palette.filter", () => {
     ])
   })
 
+  test("shows orb lifecycle commands only for an active orb-backed thread", () => {
+    expect(Palette.filter("orb pause", "smart", false, false)).toEqual([])
+    expect(Palette.filter("orb pause", "smart", false, true).map((command) => command.id)).toEqual(["orb-pause"])
+    expect(
+      Palette.commandsFor("smart", false, true)
+        .filter((command) => command.category === "orb" && command.id !== "orb-toggle")
+        .map((command) => command.command),
+    ).toEqual(["/orb pause", "/orb resume", "/orb kill"])
+  })
+
   test("does not advertise IDE connection commands", () => {
     expect(Palette.commands.some((command) => command.command.startsWith("/ide"))).toBe(false)
     expect(Palette.filter("connect IDE", "smart", false)).toEqual([])

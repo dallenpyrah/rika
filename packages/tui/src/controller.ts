@@ -292,6 +292,7 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
             thread_id: created.thread_id,
             events: [],
             notice: `Orb-backed thread ready: ${project.name}`,
+            ...(created.active_orb === undefined ? {} : { active_orb: created.active_orb }),
           })
           next = ViewState.withRemoteArm(next, { enabled: false, project_name: project.name })
           if (previousBranch !== undefined) next = ViewState.withGitBranch(next, previousBranch)
@@ -315,7 +316,8 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
               toggleRemoteArm()
               return true
             }
-            state = ViewState.withNotice(state, "Usage: /orb toggle")
+            if (argument === "pause" || argument === "resume" || argument === "kill") return false
+            state = ViewState.withNotice(state, "Usage: /orb toggle|pause|resume|kill")
             return true
           }
           if (name === "/project") {
@@ -553,14 +555,14 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
               state = ViewState.paletteMove(
                 state,
                 -1,
-                Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActivity(state)).length,
+                Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActiveOrb(state)).length,
               )
               break
             case "PaletteDown":
               state = ViewState.paletteMove(
                 state,
                 1,
-                Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActivity(state)).length,
+                Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActiveOrb(state)).length,
               )
               break
             case "PaletteInsert":
@@ -575,7 +577,7 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
                 state.palette.selected,
                 state.mode,
                 state.fast_mode,
-                ViewState.hasActivity(state),
+                ViewState.hasActiveOrb(state),
               )
               state = ViewState.closePalette(state)
               if (command !== undefined) {

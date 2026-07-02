@@ -587,7 +587,7 @@ export class Surface {
 
     this.paletteBox.visible = state.palette.open
     if (state.palette.open) {
-      const filtered = Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActivity(state))
+      const filtered = Palette.filter(state.palette.query, state.mode, state.fast_mode, ViewState.hasActiveOrb(state))
       const selected = Math.min(state.palette.selected, Math.max(0, filtered.length - 1))
       const width = 80
       const height = Math.min(Math.max(6, filtered.length + 5), Math.max(6, this.renderer.height - 4))

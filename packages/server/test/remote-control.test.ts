@@ -268,6 +268,16 @@ const orbRecord = (
   last_active_at: now,
 })
 
+const remoteOrbSummary = (record: Orb.OrbRecord): Remote.OrbSummary => ({
+  orb_id: record.orb_id,
+  thread_id: record.thread_id,
+  project_id: record.project_id,
+  status: record.status,
+  base_commit: record.base_commit,
+  created_at: record.created_at,
+  last_active_at: record.last_active_at,
+})
+
 const createRunningOrbRecord = (recordThreadId: Ids.ThreadId) =>
   Effect.gen(function* () {
     const created = yield* OrbStore.create({
@@ -532,6 +542,60 @@ describe("remote control API and SDK", () => {
     })
   })
 
+  test("orb lifecycle API lists token-free summaries and drives manager transitions", async () => {
+    const calls: Array<string> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer(
+        defaultContextLayer,
+        orbManagerLayerWithStoredLifecycle((step, id) => calls.push(`${step}:${id}`)),
+      ),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      const seeded = await runtime.runPromise(createRunningOrbRecord(orbThreadId))
+      const expectedRunning = remoteOrbSummary(seeded)
+      const listed = await Effect.runPromise(client.listOrbs())
+      const byThread = await Effect.runPromise(client.getOrbByThread(orbThreadId))
+      const paused = await Effect.runPromise(client.pauseOrb(seeded.orb_id))
+      const resumed = await Effect.runPromise(client.resumeOrb(seeded.orb_id))
+      const killed = await Effect.runPromise(client.killOrb(seeded.orb_id))
+
+      expect(listed).toEqual([expectedRunning])
+      expect(byThread).toEqual(expectedRunning)
+      expect(paused).toEqual({ ...expectedRunning, status: "paused" })
+      expect(resumed).toEqual(expectedRunning)
+      expect(killed).toEqual({ ...expectedRunning, status: "killed" })
+      expect(calls).toEqual([`pause:${seeded.orb_id}`, `resume:${seeded.orb_id}`, `kill:${seeded.orb_id}`])
+      expect(JSON.stringify(listed)).not.toContain("orb-token")
+      expect(JSON.stringify(listed)).not.toContain("orb.remote-contract.test")
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  test("orb lifecycle API maps invalid transitions to conflict responses", async () => {
+    const runtime = ManagedRuntime.make(
+      makeLayer(
+        defaultContextLayer,
+        orbManagerLayerWithStoredLifecycle(() => {}),
+      ),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      const running = await runtime.runPromise(createRunningOrbRecord(orbThreadId))
+      await Effect.runPromise(client.killOrb(running.orb_id))
+      const error = await Effect.runPromise(client.pauseOrb(running.orb_id).pipe(Effect.flip))
+
+      expect(error).toBeInstanceOf(Client.SdkError)
+      expect(error.status).toBe(409)
+      expect(error.message).toContain("Invalid orb status transition")
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   test("startTurn resumes a paused orb and restarts mirroring before the turn runs", async () => {
     const calls: Array<string> = []
     const runtime = ManagedRuntime.make(
@@ -698,6 +762,11 @@ describe("remote control API and SDK", () => {
       { method: "GET", path: "/v1/threads" },
       { method: "POST", path: "/v1/threads" },
       { method: "POST", path: "/v1/orbs" },
+      { method: "GET", path: "/v1/orbs" },
+      { method: "GET", path: `/v1/orbs/by-thread/${orbThreadId}` },
+      { method: "POST", path: `/v1/orbs/${orbId}/pause` },
+      { method: "POST", path: `/v1/orbs/${orbId}/resume` },
+      { method: "POST", path: `/v1/orbs/${orbId}/kill` },
       { method: "GET", path: "/v1/projects" },
       { method: "POST", path: "/v1/projects" },
       { method: "GET", path: "/v1/threads/search" },

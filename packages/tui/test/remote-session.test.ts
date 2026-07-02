@@ -6,6 +6,8 @@ import { Adapter, Keys, RemoteSession, Ticker, ViewState } from "../src/index"
 
 const workspaceRoot = "/workspace/rika-remote-tui-test"
 const workspaceId = Ids.WorkspaceId.make(workspaceRoot)
+const initialThreadId = Ids.ThreadId.make("thread_remote_initial")
+const initialOrbId = Ids.OrbId.make("orb_remote_initial")
 
 const line = (text: string): ReadonlyArray<Keys.Key> => [...Keys.fromString(text), Keys.enter]
 
@@ -166,22 +168,51 @@ describe("TUI remote session", () => {
     expect(rendered.some((state) => state.remoteArm.enabled)).toBe(true)
     expect(rendered.at(-1)?.remoteArm.enabled).toBe(false)
   })
+
+  test("runs orb lifecycle commands against the active orb-backed thread", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart", thread_id: initialThreadId }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(
+          Adapter.memoryLayer({
+            rendered,
+            keys: ["/orb pause", "/orb resume", "/orb kill", "/exit"].flatMap(line),
+          }),
+        ),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(backend.orbActions).toEqual([`pause:${initialOrbId}`, `resume:${initialOrbId}`, `kill:${initialOrbId}`])
+    expect(frames).toContain("Orb paused.")
+    expect(frames).toContain("Orb resumed.")
+    expect(frames).toContain("Orb killed.")
+    expect(rendered.at(-1)?.active_orb?.status).toBe("killed")
+  })
 })
 
 interface FakeBackend {
   readonly client: Client.Interface
   readonly turns: Array<string>
   readonly workspaceIds: Array<Ids.WorkspaceId | undefined>
+  readonly orbActions: Array<string>
 }
 
 const fakeBackend = (): FakeBackend => {
   const turns: Array<string> = []
   const workspaceIds: Array<Ids.WorkspaceId | undefined> = []
+  const orbActions: Array<string> = []
   const threads = new Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>()
   const subscribers = new Set<(event: Event.Event) => void>()
-  const initialThread = Ids.ThreadId.make("thread_remote_initial")
-  const initialEvents = [threadCreated(initialThread, 1), messageAdded(initialThread, 2, "old remote message")]
-  threads.set(initialThread, { summary: summary(initialThread, "old remote message"), events: [...initialEvents] })
+  const orbs = new Map<Ids.ThreadId, Remote.OrbSummary>()
+  const initialEvents = [threadCreated(initialThreadId, 1), messageAdded(initialThreadId, 2, "old remote message")]
+  threads.set(initialThreadId, { summary: summary(initialThreadId, "old remote message"), events: [...initialEvents] })
+  orbs.set(initialThreadId, orbSummary(initialThreadId, initialOrbId, "running"))
   let nextThread = 1
 
   const client: Client.Interface = {
@@ -207,14 +238,27 @@ const fakeBackend = (): FakeBackend => {
       Effect.sync(() => {
         const threadId = input.thread_id ?? Ids.ThreadId.make(`thread_remote_orb_${nextThread++}`)
         const threadSummary = summary(threadId, undefined, Ids.WorkspaceId.make(`project:${input.project_id}`))
+        const orbId = Ids.OrbId.make(`orb_${threadId}`)
         threads.set(threadId, {
-          summary: threadSummary,
+          summary: { ...threadSummary, orb_status: "running" },
           events: [threadCreated(threadId, 1, threadSummary.workspace_id)],
         })
-        return threadSummary
+        orbs.set(threadId, orbSummary(threadId, orbId, "running"))
+        return { ...threadSummary, orb_status: "running" }
       }),
     orbChanges: () =>
       Effect.fail(new Client.SdkError({ message: "orb changes unavailable", operation: "orbChanges", status: 404 })),
+    listOrbs: () => Effect.succeed([...orbs.values()]),
+    getOrbByThread: (threadId) =>
+      Effect.suspend(() => {
+        const orb = orbs.get(threadId)
+        if (orb === undefined)
+          return Effect.fail(new Client.SdkError({ message: "missing", operation: "getOrbByThread", status: 404 }))
+        return Effect.succeed(orb)
+      }),
+    pauseOrb: (orbId) => lifecycleOrb(orbs, threads, orbActions, orbId, "paused", "pause"),
+    resumeOrb: (orbId) => lifecycleOrb(orbs, threads, orbActions, orbId, "running", "resume"),
+    killOrb: (orbId) => lifecycleOrb(orbs, threads, orbActions, orbId, "killed", "kill"),
     listProjects: () => Effect.succeed([projectRecord("demo", "https://github.com/example/rika.git")]),
     createProject: (input) => Effect.succeed(projectRecord(input.name, input.repo_origin)),
     listThreads: (input) =>
@@ -308,7 +352,7 @@ const fakeBackend = (): FakeBackend => {
     ideNavigationRequests: () => Effect.succeed([]),
   }
 
-  return { client, turns, workspaceIds }
+  return { client, turns, workspaceIds, orbActions }
 }
 
 const emptyIdeStatus = { connected: false, capabilities: [], workspace_roots: [] } as const
@@ -351,6 +395,41 @@ const summary = (
   created_at: Common.TimestampMillis.make(1),
   updated_at: Common.TimestampMillis.make(2),
 })
+
+const orbSummary = (
+  threadId: Ids.ThreadId,
+  orbId: Ids.OrbId,
+  status: Remote.OrbSummary["status"],
+): Remote.OrbSummary => ({
+  orb_id: orbId,
+  thread_id: threadId,
+  project_id: Ids.ProjectId.make("project_demo"),
+  status,
+  base_commit: "abc123",
+  created_at: Common.TimestampMillis.make(1),
+  last_active_at: Common.TimestampMillis.make(2),
+})
+
+const lifecycleOrb = (
+  orbs: Map<Ids.ThreadId, Remote.OrbSummary>,
+  threads: Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>,
+  orbActions: Array<string>,
+  orbId: Ids.OrbId,
+  status: Remote.OrbSummary["status"],
+  action: string,
+) =>
+  Effect.suspend(() => {
+    const entry = [...orbs.entries()].find(([, orb]) => orb.orb_id === orbId)
+    if (entry === undefined)
+      return Effect.fail(new Client.SdkError({ message: "missing", operation: action, status: 404 }))
+    const [threadId, orb] = entry
+    const next = { ...orb, status }
+    const record = threads.get(threadId)
+    if (record !== undefined) record.summary = { ...record.summary, orb_status: status }
+    orbs.set(threadId, next)
+    orbActions.push(`${action}:${orbId}`)
+    return Effect.succeed(next)
+  })
 
 const turnEvents = (threadId: Ids.ThreadId, content: string, response: string): ReadonlyArray<Event.Event> => {
   const turnId = Ids.TurnId.make("turn_remote_session")

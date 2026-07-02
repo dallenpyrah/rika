@@ -34,6 +34,11 @@ export interface Interface {
   readonly backendHealth: (url: string) => Effect.Effect<Remote.BackendHealth, RunError>
   readonly createThread: (input: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
   readonly createOrbThread: (input: Remote.CreateOrbThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
+  readonly listOrbs: () => Effect.Effect<ReadonlyArray<Remote.OrbSummary>, RunError>
+  readonly getOrbByThread: (threadId: Ids.ThreadId) => Effect.Effect<Remote.OrbSummary, RunError>
+  readonly pauseOrb: (orbId: Ids.OrbId) => Effect.Effect<Remote.OrbSummary, RunError>
+  readonly resumeOrb: (orbId: Ids.OrbId) => Effect.Effect<Remote.OrbSummary, RunError>
+  readonly killOrb: (orbId: Ids.OrbId) => Effect.Effect<Remote.OrbSummary, RunError>
   readonly listProjects: () => Effect.Effect<ReadonlyArray<Remote.ProjectSummary>, RunError>
   readonly createProject: (input: Remote.CreateProjectRequest) => Effect.Effect<Remote.ProjectSummary, RunError>
   readonly listThreads: (
@@ -192,6 +197,27 @@ export const layerWithLive = Layer.effect(
           created_at: orb.created_at,
           updated_at: orb.last_active_at,
         }
+      }),
+      listOrbs: Effect.fn("RemoteControl.listOrbs")(function* () {
+        const records = yield* orbs.list()
+        return records.map(toOrbSummary)
+      }),
+      getOrbByThread: Effect.fn("RemoteControl.getOrbByThread")(function* (threadId: Ids.ThreadId) {
+        const record = yield* orbs.getByThread(threadId)
+        if (record === undefined) return yield* orbNotFound({ thread_id: threadId }, "getOrbByThread")
+        return toOrbSummary(record)
+      }),
+      pauseOrb: Effect.fn("RemoteControl.pauseOrb")(function* (orbId: Ids.OrbId) {
+        const record = yield* orbManager.pause(orbId)
+        return toOrbSummary(record)
+      }),
+      resumeOrb: Effect.fn("RemoteControl.resumeOrb")(function* (orbId: Ids.OrbId) {
+        const record = yield* orbManager.resume(orbId)
+        return toOrbSummary(record)
+      }),
+      killOrb: Effect.fn("RemoteControl.killOrb")(function* (orbId: Ids.OrbId) {
+        const record = yield* orbManager.kill(orbId)
+        return toOrbSummary(record)
       }),
       listProjects: Effect.fn("RemoteControl.listProjects")(function* () {
         const records = yield* projects.list()
@@ -420,6 +446,31 @@ export const createOrbThread = Effect.fn("RemoteControl.createOrbThread.call")(f
   return yield* service.createOrbThread(input)
 })
 
+export const listOrbs = Effect.fn("RemoteControl.listOrbs.call")(function* () {
+  const service = yield* Service
+  return yield* service.listOrbs()
+})
+
+export const getOrbByThread = Effect.fn("RemoteControl.getOrbByThread.call")(function* (threadId: Ids.ThreadId) {
+  const service = yield* Service
+  return yield* service.getOrbByThread(threadId)
+})
+
+export const pauseOrb = Effect.fn("RemoteControl.pauseOrb.call")(function* (orbId: Ids.OrbId) {
+  const service = yield* Service
+  return yield* service.pauseOrb(orbId)
+})
+
+export const resumeOrb = Effect.fn("RemoteControl.resumeOrb.call")(function* (orbId: Ids.OrbId) {
+  const service = yield* Service
+  return yield* service.resumeOrb(orbId)
+})
+
+export const killOrb = Effect.fn("RemoteControl.killOrb.call")(function* (orbId: Ids.OrbId) {
+  const service = yield* Service
+  return yield* service.killOrb(orbId)
+})
+
 export const listProjects = Effect.fn("RemoteControl.listProjects.call")(function* () {
   const service = yield* Service
   return yield* service.listProjects()
@@ -568,14 +619,14 @@ export const errorToApi = (error: RunError): Remote.ApiError => ({
   },
 })
 
-export const statusFromError = (error: RunError) =>
-  error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError
-    ? error.status
-    : error instanceof WorkspaceAccess.WorkspaceAccessDenied
-      ? 403
-      : error instanceof WorkspaceAccess.WorkspaceAccessError
-        ? 404
-        : 500
+export const statusFromError = (error: RunError) => {
+  if (error instanceof RemoteControlError || error instanceof IdeBridge.IdeBridgeError) return error.status
+  if (error instanceof OrbStore.OrbStoreError) return statusFromOrbStoreError(error)
+  if (error instanceof OrbManager.OrbProvisionError) return statusFromOrbProvisionError(error)
+  if (error instanceof WorkspaceAccess.WorkspaceAccessDenied) return 403
+  if (error instanceof WorkspaceAccess.WorkspaceAccessError) return 404
+  return 500
+}
 
 const toRemoteSummary = (summary: ThreadService.ThreadRecord["summary"]): Remote.ThreadSummary => ({
   thread_id: summary.thread_id,
@@ -602,6 +653,16 @@ const withOrbStatus = Effect.fn("RemoteControl.withOrbStatus")(function* (
   return orb === undefined ? remote : { ...remote, orb_status: orb.status }
 })
 
+const toOrbSummary = (orb: Orb.OrbRecord): Remote.OrbSummary => ({
+  orb_id: orb.orb_id,
+  thread_id: orb.thread_id,
+  project_id: orb.project_id,
+  status: orb.status,
+  base_commit: orb.base_commit,
+  created_at: orb.created_at,
+  last_active_at: orb.last_active_at,
+})
+
 const toProjectSummary = (project: Orb.ProjectRecord): Remote.ProjectSummary => ({
   project_id: project.project_id,
   name: project.name,
@@ -626,3 +687,23 @@ const publicRepoOrigin = (repoOrigin: string): string => {
     return repoOrigin
   }
 }
+
+const statusFromOrbStoreError = (error: OrbStore.OrbStoreError) =>
+  error.reason === "not_found" ? 404 : error.reason === "invalid_transition" ? 409 : 500
+
+const statusFromOrbProvisionError = (error: OrbManager.OrbProvisionError) => {
+  const message = error.message.toLowerCase()
+  if (message.includes("not found")) return 404
+  if (message.includes("cannot resume from") || message.includes("invalid orb status transition")) return 409
+  return 500
+}
+
+const orbNotFound = (input: { readonly orb_id?: Ids.OrbId; readonly thread_id?: Ids.ThreadId }, operation: string) =>
+  new RemoteControlError({
+    message:
+      input.orb_id === undefined
+        ? `Orb for thread ${input.thread_id} was not found`
+        : `Orb ${input.orb_id} was not found`,
+    operation,
+    status: 404,
+  })

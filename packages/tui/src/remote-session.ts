@@ -72,11 +72,22 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
                 .pipe(Effect.map((summary): Remote.ThreadRecord => ({ summary, events: [] }))),
             ),
           )
+        const activeOrb =
+          record.summary.orb_status === undefined
+            ? undefined
+            : yield* activeOrbByThread(client, record.summary.thread_id)
         return {
           thread_id,
           last_sequence: record.events.at(-1)?.sequence ?? 0,
+          ...(activeOrb === undefined ? {} : { active_orb: activeOrb }),
           state: ViewState.beginConnecting(
-            ViewState.initial({ thread_id, workspace_path, mode, events: record.events }),
+            ViewState.initial({
+              thread_id,
+              workspace_path,
+              mode,
+              events: record.events,
+              ...(activeOrb === undefined ? {} : { active_orb: activeOrb }),
+            }),
           ),
         }
       }
@@ -120,9 +131,16 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
   listProjects: () => client.listProjects().pipe(Effect.map((projects) => projects.map(projectOptionFromRecord))),
   createProject: (input) => client.createProject(input).pipe(Effect.map(projectOptionFromRecord)),
   createOrbThread: ({ project_id, mode }) =>
-    client
-      .createOrbThread({ project_id, mode })
-      .pipe(Effect.map((summary) => ({ thread_id: summary.thread_id, workspace_id: summary.workspace_id }))),
+    Effect.gen(function* () {
+      const summary = yield* client.createOrbThread({ project_id, mode })
+      const activeOrb =
+        summary.orb_status === undefined ? undefined : yield* activeOrbByThread(client, summary.thread_id)
+      return {
+        thread_id: summary.thread_id,
+        workspace_id: summary.workspace_id,
+        ...(activeOrb === undefined ? {} : { active_orb: activeOrb }),
+      }
+    }),
   listThreads: ({ workspace_id }) =>
     client.listThreads({ workspace_id }).pipe(Effect.map((summaries) => summaries.map(threadOptionFromSummary))),
   loadThreadPreview: ({ thread_id, workspace_path, mode }) =>
@@ -160,6 +178,14 @@ const projectOptionFromRecord = (project: Remote.ProjectSummary): Backend.Projec
   repo_origin: project.repo_origin,
 })
 
+const activeOrbByThread = (client: Client.Interface, threadId: Ids.ThreadId) =>
+  client.getOrbByThread(threadId).pipe(Effect.map(activeOrbFromSummary))
+
+const activeOrbFromSummary = (summary: Remote.OrbSummary): ViewState.ActiveOrb => ({
+  orb_id: summary.orb_id,
+  status: summary.status,
+})
+
 const handleCommand = (
   client: Client.Interface,
   context: Backend.CommandContext,
@@ -195,6 +221,7 @@ const handleCommand = (
           argument === "authenticate" ? "MCP authentication requested." : "No MCP servers connected.",
         ),
       })
+    if (name === "/orb") return yield* orbCommand(client, context, argument)
     if (name === "/skills" || name === "/skill")
       return Backend.commandResult(context, {
         state: ViewState.withNotice(state, "Skills are loaded by the shared backend during agent turns."),
@@ -230,10 +257,13 @@ const handleCommand = (
         return Backend.commandResult(context, { state: ViewState.withNotice(state, "Usage: /thread <thread-id>") })
       const nextThreadId = Ids.ThreadId.make(argument)
       const record = yield* client.openThread(nextThreadId)
+      const activeOrb =
+        record.summary.orb_status === undefined ? undefined : yield* activeOrbByThread(client, nextThreadId)
       const next = ViewState.beginConnecting(
         ViewState.withThread(state, {
           thread_id: nextThreadId,
           events: record.events,
+          ...(activeOrb === undefined ? {} : { active_orb: activeOrb }),
         }),
       )
       return Backend.commandResult(context, {
@@ -283,6 +313,31 @@ const handleCommand = (
     })
   })
 
+const orbCommand = (
+  client: Client.Interface,
+  context: Backend.CommandContext,
+  argument: string | undefined,
+): Effect.Effect<Backend.CommandResult, RunError> =>
+  Effect.gen(function* () {
+    const activeOrb = context.state.active_orb
+    if (activeOrb === undefined)
+      return Backend.commandResult(context, {
+        state: ViewState.withNotice(context.state, "No orb is attached to the active thread."),
+      })
+    if (argument !== "pause" && argument !== "resume" && argument !== "kill")
+      return Backend.commandResult(context, {
+        state: ViewState.withNotice(context.state, "Usage: /orb pause|resume|kill"),
+      })
+    const summary =
+      argument === "pause"
+        ? yield* client.pauseOrb(activeOrb.orb_id)
+        : argument === "resume"
+          ? yield* client.resumeOrb(activeOrb.orb_id)
+          : yield* client.killOrb(activeOrb.orb_id)
+    const next = ViewState.withActiveOrb(context.state, activeOrbFromSummary(summary))
+    return Backend.commandResult(context, { state: ViewState.withNotice(next, `Orb ${pastTense(argument)}.`) })
+  })
+
 const fastCommand = (context: Backend.CommandContext): Backend.CommandResult => {
   if (!ViewState.isFastEligible(context.mode))
     return Backend.commandResult(context, {
@@ -317,6 +372,12 @@ const nextModeAfter = (mode: Config.Mode): Config.Mode => {
   if (mode === "deep1") return "deep2"
   if (mode === "deep2") return "deep3"
   return "rush"
+}
+
+const pastTense = (action: "pause" | "resume" | "kill") => {
+  if (action === "pause") return "paused"
+  if (action === "resume") return "resumed"
+  return "killed"
 }
 
 const formatSummaries = (summaries: ReadonlyArray<Remote.ThreadSummary>) => {

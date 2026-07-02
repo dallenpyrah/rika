@@ -52,6 +52,52 @@ describe("adapter Surface (headless)", () => {
     }
   })
 
+  test("renders orb lifecycle palette commands only for an active orb-backed thread", async () => {
+    const setup = await createTestRenderer({ width: 120, height: 36 })
+    try {
+      const surface = new Adapter.Surface(setup.renderer)
+      const activeNonOrb = ViewState.paletteInsert(
+        ViewState.openPalette(
+          ViewState.initial({
+            thread_id: threadId,
+            workspace_path: "/workspace/rika",
+            mode: "smart",
+            events: [messageAdded(1, "user", "existing transcript")],
+          }),
+        ),
+        "orb",
+      )
+
+      surface.update(activeNonOrb)
+      await setup.renderOnce()
+      let frame = setup.captureCharFrame()
+      expect(frame).toContain("toggle")
+      expect(frame).not.toContain("pause")
+      expect(frame).not.toContain("resume")
+      expect(frame).not.toContain("kill")
+
+      const activeOrb = ViewState.paletteInsert(
+        ViewState.openPalette(
+          ViewState.withActiveOrb(
+            ViewState.initial({ thread_id: threadId, workspace_path: "/workspace/rika", mode: "smart" }),
+            { orb_id: Ids.OrbId.make("orb_adapter_smoke"), status: "running" },
+          ),
+        ),
+        "orb",
+      )
+
+      surface.update(activeOrb)
+      await setup.renderOnce()
+      frame = setup.captureCharFrame()
+      expect(frame).toContain("toggle")
+      expect(frame).toContain("pause")
+      expect(frame).toContain("resume")
+      expect(frame).toContain("kill")
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
   test("linkifies bare URLs and markdown links in assistant messages", async () => {
     const setup = await createTestRenderer({ width: 160, height: 24 })
     try {

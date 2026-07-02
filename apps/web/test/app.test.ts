@@ -2,11 +2,16 @@ import { Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
 import { describe, expect, test } from "bun:test"
 import {
   ChangedDraft,
+  CancelledKillOrb,
   ClickedThread,
+  ClickedKillOrb,
+  ClickedPauseOrb,
+  ConfirmedKillOrb,
   LoadedThreads,
   OpenedThread,
   ReceivedThreadEvent,
   SubmittedDraft,
+  UpdatedSelectedOrb,
   eventRows,
   init,
   initialModel,
@@ -16,6 +21,8 @@ import {
 const threadId = Ids.ThreadId.make("thread-web")
 const workspaceId = Ids.WorkspaceId.make("workspace-web")
 const messageId = Ids.MessageId.make("message-web")
+const orbId = Ids.OrbId.make("orb-web")
+const projectId = Ids.ProjectId.make("project-web")
 
 describe("web app state", () => {
   test("initializes by loading backend state and the requested thread", () => {
@@ -110,9 +117,58 @@ describe("web app state", () => {
     expect(model.events).toEqual([])
     expect(model.last_sequence).toBe(0)
   })
+
+  test("opens an orb-backed thread by loading its selected orb summary", () => {
+    const [model, commands] = update(
+      initialModel({ api_base_url: "/api/rika" }),
+      OpenedThread({ record: { summary: summary(threadId, { orb_status: "running" }), events: [] } }),
+    )
+
+    expect(model.selected_thread_id).toBe(threadId)
+    expect(model.selected_orb).toBeUndefined()
+    expect(commands.map((command) => command.name)).toEqual(["LoadSelectedOrb"])
+  })
+
+  test("orb lifecycle actions update selected orb state and thread badges", () => {
+    const running = orbSummary("running")
+    const paused = { ...running, status: "paused" as const }
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      selected_orb: running,
+      threads: [summary(threadId, { orb_status: "running" })],
+    }
+
+    const [requested, commands] = update(model, ClickedPauseOrb())
+    const [updated] = update(requested, UpdatedSelectedOrb({ orb: paused }))
+
+    expect(commands.map((command) => command.name)).toEqual(["PauseSelectedOrb"])
+    expect(updated.selected_orb).toEqual(paused)
+    expect(updated.threads[0]?.orb_status).toBe("paused")
+  })
+
+  test("kill requires a confirmation before sending the lifecycle command", () => {
+    const running = orbSummary("running")
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      selected_orb: running,
+      threads: [summary(threadId, { orb_status: "running" })],
+    }
+
+    const [confirming, firstCommands] = update(model, ClickedKillOrb())
+    const [cancelled] = update(confirming, CancelledKillOrb())
+    const [confirmed, secondCommands] = update(confirming, ConfirmedKillOrb())
+
+    expect(firstCommands).toEqual([])
+    expect(confirming.confirm_kill_orb_id).toBe(orbId)
+    expect(cancelled.confirm_kill_orb_id).toBeUndefined()
+    expect(secondCommands.map((command) => command.name)).toEqual(["KillSelectedOrb"])
+    expect(confirmed.confirm_kill_orb_id).toBeUndefined()
+  })
 })
 
-const summary = (id: Ids.ThreadId): Remote.ThreadSummary => ({
+const summary = (id: Ids.ThreadId, input: Partial<Remote.ThreadSummary> = {}): Remote.ThreadSummary => ({
   thread_id: id,
   workspace_id: workspaceId,
   title_text: "Web thread",
@@ -121,6 +177,17 @@ const summary = (id: Ids.ThreadId): Remote.ThreadSummary => ({
   archived: false,
   created_at: 1,
   updated_at: 2,
+  ...input,
+})
+
+const orbSummary = (status: Remote.OrbSummary["status"]): Remote.OrbSummary => ({
+  orb_id: orbId,
+  thread_id: threadId,
+  project_id: projectId,
+  status,
+  base_commit: "abc123",
+  created_at: 1,
+  last_active_at: 121_001,
 })
 
 const messageAdded = (sequence: number, role: RikaMessage.Role, text: string): Event.MessageAdded => ({

@@ -425,10 +425,12 @@ describe("Rika protocol schemas", () => {
       updated_at: now,
     }
     const orbSummary: Remote.OrbSummary = {
+      orb_id: orbId,
       thread_id: threadId,
       project_id: projectId,
       status: "running",
-      endpoint_url: "https://orb.example.test",
+      base_commit: "abc123",
+      created_at: now,
       last_active_at: now,
     }
 

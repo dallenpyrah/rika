@@ -3,7 +3,7 @@ import { Kind as ArtifactKind } from "./artifact"
 import { JsonValue, TimestampMillis } from "./common"
 import { Event } from "./event"
 import { ContextSnapshot as IdeContextSnapshot } from "./ide"
-import { ArtifactId, ProjectId, ThreadId, TurnId, UserId, WorkspaceId } from "./ids"
+import { ArtifactId, OrbId, ProjectId, ThreadId, TurnId, UserId, WorkspaceId } from "./ids"
 import { ContentPart } from "./message"
 import { OrbStatus } from "./orb"
 
@@ -227,10 +227,12 @@ export const OrbChangesResponse = Schema.Struct({
 
 export interface OrbSummary extends Schema.Schema.Type<typeof OrbSummary> {}
 export const OrbSummary = Schema.Struct({
+  orb_id: OrbId,
   thread_id: ThreadId,
   project_id: ProjectId,
   status: OrbStatus,
-  endpoint_url: Schema.String,
+  base_commit: Schema.NullOr(Schema.String),
+  created_at: TimestampMillis,
   last_active_at: TimestampMillis,
 }).annotate({ identifier: "Rika.Remote.OrbSummary" })
 

@@ -74,6 +74,30 @@ const trailingCommands: ReadonlyArray<Command> = [
 
 export const commands: ReadonlyArray<Command> = [...leadingCommands, ...trailingCommands]
 
+const orbLifecycleCommands: ReadonlyArray<Command> = [
+  {
+    id: "orb-pause",
+    category: "orb",
+    action: "pause",
+    hint: "pause the active orb-backed thread",
+    command: "/orb pause",
+  },
+  {
+    id: "orb-resume",
+    category: "orb",
+    action: "resume",
+    hint: "resume the active orb-backed thread",
+    command: "/orb resume",
+  },
+  {
+    id: "orb-kill",
+    category: "orb",
+    action: "kill",
+    hint: "kill the active orb-backed thread",
+    command: "/orb kill",
+  },
+]
+
 const speedCommand = (fastMode: boolean): Command => ({
   id: "speed-fast",
   category: "speed",
@@ -83,8 +107,8 @@ const speedCommand = (fastMode: boolean): Command => ({
   key: "Opt+R",
 })
 
-export const commandsFor = (mode: Config.Mode, fastMode: boolean, _threadActive = false): ReadonlyArray<Command> => {
-  const available = [...leadingCommands, ...trailingCommands]
+export const commandsFor = (mode: Config.Mode, fastMode: boolean, orbBackedThread = false): ReadonlyArray<Command> => {
+  const available = [...leadingCommands, ...(orbBackedThread ? orbLifecycleCommands : []), ...trailingCommands]
   return isFastEligible(mode) ? [...available, speedCommand(fastMode)] : available
 }
 

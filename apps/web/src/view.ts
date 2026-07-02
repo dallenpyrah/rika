@@ -1,8 +1,13 @@
 import { html, type Document, type Html } from "foldkit/html"
 import {
+  CancelledKillOrb,
   ChangedDraft,
+  ClickedKillOrb,
   ClickedNewThread,
+  ClickedPauseOrb,
+  ClickedResumeOrb,
   ClickedThread,
+  ConfirmedKillOrb,
   SubmittedDraft,
   eventRows,
   type AppMessage,
@@ -57,6 +62,9 @@ const threadButton = (model: Model, thread: Model["threads"][number]): Html =>
     [
       H.span([H.Class("thread-title")], [thread.title_text ?? shortId(thread.thread_id)]),
       H.span([H.Class("thread-preview")], [thread.latest_message_text ?? "No messages yet"]),
+      thread.orb_status === undefined
+        ? Ui.empty
+        : Ui.badge([`orb ${thread.orb_status}`], orbBadgeTone(thread.orb_status)),
     ],
   )
 
@@ -71,11 +79,57 @@ const workspace = (model: Model): Html =>
           H.div([H.Class("sequence")], [`seq ${model.last_sequence}`]),
         ],
       ),
+      orbHeader(model),
       model.notice === undefined ? Ui.empty : H.div([H.Class("notice")], [model.notice]),
       transcript(model),
       composer(model),
     ],
   )
+
+const orbHeader = (model: Model): Html => {
+  const orb = model.selected_orb
+  if (orb === undefined) return Ui.empty
+  const confirmingKill = model.confirm_kill_orb_id === orb.orb_id
+  return H.section(
+    [H.Class("orb-header")],
+    [
+      H.div(
+        [H.Class("orb-status")],
+        [
+          Ui.badge([orb.status], orbBadgeTone(orb.status)),
+          H.span([], [`last active ${relativeTime(orb.last_active_at)}`]),
+          H.span([], [`runtime ${runningMinutes(orb)}m`]),
+          H.span([], [orb.base_commit === null ? "base pending" : `base ${shortId(orb.base_commit)}`]),
+        ],
+      ),
+      H.div(
+        [H.Class("orb-actions")],
+        [
+          Ui.button(
+            [H.Type("button"), H.Disabled(orb.status !== "running"), H.OnClick(ClickedPauseOrb())],
+            ["Pause"],
+            "ghost",
+          ),
+          Ui.button(
+            [H.Type("button"), H.Disabled(orb.status !== "paused"), H.OnClick(ClickedResumeOrb())],
+            ["Resume"],
+            "ghost",
+          ),
+          confirmingKill ? Ui.button([H.Type("button"), H.OnClick(CancelledKillOrb())], ["Cancel"], "ghost") : Ui.empty,
+          Ui.button(
+            [
+              H.Type("button"),
+              H.Disabled(orb.status === "killed"),
+              H.OnClick(confirmingKill ? ConfirmedKillOrb() : ClickedKillOrb()),
+            ],
+            [confirmingKill ? "Confirm kill" : "Kill"],
+            "danger",
+          ),
+        ],
+      ),
+    ],
+  )
+}
 
 const transcript = (model: Model): Html => {
   const rows = eventRows(model.events)
@@ -141,5 +195,25 @@ const activeTitle = (model: Model) => {
     (model.selected_thread_id === undefined ? "No thread selected" : shortId(model.selected_thread_id))
   )
 }
+
+const orbBadgeTone = (status: Model["threads"][number]["orb_status"]) => {
+  if (status === "running") return "success"
+  if (status === "paused") return "warning"
+  if (status === "killed") return "danger"
+  return "default"
+}
+
+const relativeTime = (timestamp: number) => {
+  const delta = Date.now() - timestamp
+  if (delta < 60_000) return "just now"
+  const minutes = Math.max(1, Math.floor(delta / 60_000))
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+const runningMinutes = (orb: NonNullable<Model["selected_orb"]>) =>
+  Math.max(0, Math.round((orb.last_active_at - orb.created_at) / 60_000))
 
 const shortId = (value: string) => (value.length <= 16 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`)

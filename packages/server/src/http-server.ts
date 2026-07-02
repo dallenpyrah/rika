@@ -391,6 +391,54 @@ const dispatch = (
       return yield* remote.createOrbThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
+    if (request.method === "GET" && segments[1] === "orbs" && segments.length === 2) {
+      return yield* remote.listOrbs().pipe(jsonEffect(Schema.Array(Remote.OrbSummary)))
+    }
+
+    if (
+      request.method === "GET" &&
+      segments[1] === "orbs" &&
+      segments[2] === "by-thread" &&
+      segments[3] !== undefined &&
+      segments.length === 4
+    ) {
+      return yield* remote
+        .getOrbByThread(Ids.ThreadId.make(decodeURIComponent(segments[3])))
+        .pipe(jsonEffect(Remote.OrbSummary))
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "orbs" &&
+      segments[2] !== undefined &&
+      segments[3] === "pause" &&
+      segments.length === 4
+    ) {
+      return yield* remote.pauseOrb(Ids.OrbId.make(decodeURIComponent(segments[2]))).pipe(jsonEffect(Remote.OrbSummary))
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "orbs" &&
+      segments[2] !== undefined &&
+      segments[3] === "resume" &&
+      segments.length === 4
+    ) {
+      return yield* remote
+        .resumeOrb(Ids.OrbId.make(decodeURIComponent(segments[2])))
+        .pipe(jsonEffect(Remote.OrbSummary))
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "orbs" &&
+      segments[2] !== undefined &&
+      segments[3] === "kill" &&
+      segments.length === 4
+    ) {
+      return yield* remote.killOrb(Ids.OrbId.make(decodeURIComponent(segments[2]))).pipe(jsonEffect(Remote.OrbSummary))
+    }
+
     if (request.method === "GET" && segments[1] === "projects" && segments.length === 2) {
       return yield* remote.listProjects().pipe(jsonEffect(Schema.Array(Remote.ProjectSummary)))
     }

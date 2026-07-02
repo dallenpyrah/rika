@@ -19,6 +19,8 @@ export const Model = S.Struct({
   pending_turn: S.Boolean,
   selected_thread_id: S.optional(Ids.ThreadId),
   subscribed_thread_id: S.optional(Ids.ThreadId),
+  selected_orb: S.optional(Remote.OrbSummary),
+  confirm_kill_orb_id: S.optional(Ids.OrbId),
   backend: S.optional(Remote.BackendHealth),
   notice: S.optional(S.String),
   pending_submit: S.optional(S.String),
@@ -48,6 +50,15 @@ export const CreatedThread = m("CreatedThread", { summary: Remote.ThreadSummary 
 export const FailedCreateThread = m("FailedCreateThread", { message: S.String })
 export const OpenedThread = m("OpenedThread", { record: Remote.ThreadRecord })
 export const FailedOpenThread = m("FailedOpenThread", { message: S.String })
+export const LoadedSelectedOrb = m("LoadedSelectedOrb", { orb: Remote.OrbSummary })
+export const FailedLoadSelectedOrb = m("FailedLoadSelectedOrb", { message: S.String })
+export const ClickedPauseOrb = m("ClickedPauseOrb")
+export const ClickedResumeOrb = m("ClickedResumeOrb")
+export const ClickedKillOrb = m("ClickedKillOrb")
+export const CancelledKillOrb = m("CancelledKillOrb")
+export const ConfirmedKillOrb = m("ConfirmedKillOrb")
+export const UpdatedSelectedOrb = m("UpdatedSelectedOrb", { orb: Remote.OrbSummary })
+export const FailedOrbAction = m("FailedOrbAction", { message: S.String })
 export const ChangedDraft = m("ChangedDraft", { value: S.String })
 export const SubmittedDraft = m("SubmittedDraft")
 export const AcceptedTurn = m("AcceptedTurn", { response: Remote.StartTurnResponse })
@@ -66,6 +77,15 @@ export const AppMessage = S.Union([
   FailedCreateThread,
   OpenedThread,
   FailedOpenThread,
+  LoadedSelectedOrb,
+  FailedLoadSelectedOrb,
+  ClickedPauseOrb,
+  ClickedResumeOrb,
+  ClickedKillOrb,
+  CancelledKillOrb,
+  ConfirmedKillOrb,
+  UpdatedSelectedOrb,
+  FailedOrbAction,
   ChangedDraft,
   SubmittedDraft,
   AcceptedTurn,
@@ -133,6 +153,62 @@ export const OpenThread = Command.define(
     ),
 )
 
+export const LoadSelectedOrb = Command.define(
+  "LoadSelectedOrb",
+  { api_base_url: S.String, thread_id: Ids.ThreadId },
+  LoadedSelectedOrb,
+  FailedLoadSelectedOrb,
+)(({ api_base_url, thread_id }) =>
+  sdk(api_base_url)
+    .getOrbByThread(thread_id)
+    .pipe(
+      Effect.map((orb) => LoadedSelectedOrb({ orb })),
+      Effect.catch((error) => Effect.succeed(FailedLoadSelectedOrb({ message: error.message }))),
+    ),
+)
+
+export const PauseSelectedOrb = Command.define(
+  "PauseSelectedOrb",
+  { api_base_url: S.String, orb_id: Ids.OrbId },
+  UpdatedSelectedOrb,
+  FailedOrbAction,
+)(({ api_base_url, orb_id }) =>
+  sdk(api_base_url)
+    .pauseOrb(orb_id)
+    .pipe(
+      Effect.map((orb) => UpdatedSelectedOrb({ orb })),
+      Effect.catch((error) => Effect.succeed(FailedOrbAction({ message: error.message }))),
+    ),
+)
+
+export const ResumeSelectedOrb = Command.define(
+  "ResumeSelectedOrb",
+  { api_base_url: S.String, orb_id: Ids.OrbId },
+  UpdatedSelectedOrb,
+  FailedOrbAction,
+)(({ api_base_url, orb_id }) =>
+  sdk(api_base_url)
+    .resumeOrb(orb_id)
+    .pipe(
+      Effect.map((orb) => UpdatedSelectedOrb({ orb })),
+      Effect.catch((error) => Effect.succeed(FailedOrbAction({ message: error.message }))),
+    ),
+)
+
+export const KillSelectedOrb = Command.define(
+  "KillSelectedOrb",
+  { api_base_url: S.String, orb_id: Ids.OrbId },
+  UpdatedSelectedOrb,
+  FailedOrbAction,
+)(({ api_base_url, orb_id }) =>
+  sdk(api_base_url)
+    .killOrb(orb_id)
+    .pipe(
+      Effect.map((orb) => UpdatedSelectedOrb({ orb })),
+      Effect.catch((error) => Effect.succeed(FailedOrbAction({ message: error.message }))),
+    ),
+)
+
 export const StartTurn = Command.define(
   "StartTurn",
   { api_base_url: S.String, thread_id: Ids.ThreadId, content: S.String },
@@ -195,6 +271,8 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
           ...model,
           selected_thread_id: undefined,
           subscribed_thread_id: undefined,
+          selected_orb: undefined,
+          confirm_kill_orb_id: undefined,
           events: [],
           last_sequence: 0,
           subscription_after_sequence: 0,
@@ -214,6 +292,26 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return openedThreadModel(model, message.record)
     case "FailedOpenThread":
       return [{ ...model, connection: "failed", notice: message.message }, []]
+    case "LoadedSelectedOrb":
+      return selectedOrbLoadedModel(model, message.orb)
+    case "FailedLoadSelectedOrb":
+      return [{ ...model, notice: message.message }, []]
+    case "ClickedPauseOrb":
+      return selectedOrbActionModel(model, "pause")
+    case "ClickedResumeOrb":
+      return selectedOrbActionModel(model, "resume")
+    case "ClickedKillOrb":
+      return model.selected_orb === undefined
+        ? [model, []]
+        : [{ ...model, confirm_kill_orb_id: model.selected_orb.orb_id, notice: undefined }, []]
+    case "CancelledKillOrb":
+      return [{ ...model, confirm_kill_orb_id: undefined }, []]
+    case "ConfirmedKillOrb":
+      return confirmedKillOrbModel(model)
+    case "UpdatedSelectedOrb":
+      return selectedOrbLoadedModel(model, message.orb)
+    case "FailedOrbAction":
+      return [{ ...model, confirm_kill_orb_id: undefined, notice: message.message }, []]
     case "ChangedDraft":
       return [{ ...model, draft: message.value }, []]
     case "SubmittedDraft":
@@ -366,6 +464,8 @@ const openThreadModel = (model: Model, threadId: Ids.ThreadId): readonly [Model,
     ...model,
     selected_thread_id: threadId,
     subscribed_thread_id: undefined,
+    selected_orb: undefined,
+    confirm_kill_orb_id: undefined,
     events: [],
     last_sequence: 0,
     subscription_after_sequence: 0,
@@ -384,6 +484,8 @@ const createdThreadModel = (
     threads: newestFirst([summary, ...model.threads.filter((thread) => thread.thread_id !== summary.thread_id)]),
     selected_thread_id: summary.thread_id,
     subscribed_thread_id: summary.thread_id,
+    selected_orb: undefined,
+    confirm_kill_orb_id: undefined,
     events: [],
     last_sequence: 0,
     subscription_after_sequence: 0,
@@ -400,22 +502,27 @@ const createdThreadModel = (
 
 const openedThreadModel = (model: Model, record: Remote.ThreadRecord): readonly [Model, ReadonlyArray<AppCommand>] => {
   const lastSequence = lastEventSequence(record.events)
+  const next = {
+    ...model,
+    selected_thread_id: record.summary.thread_id,
+    subscribed_thread_id: record.summary.thread_id,
+    selected_orb: undefined,
+    confirm_kill_orb_id: undefined,
+    threads: newestFirst([
+      record.summary,
+      ...model.threads.filter((thread) => thread.thread_id !== record.summary.thread_id),
+    ]),
+    events: record.events,
+    last_sequence: lastSequence,
+    subscription_after_sequence: lastSequence,
+    connection: "connected" as const,
+    notice: undefined,
+  }
   return [
-    {
-      ...model,
-      selected_thread_id: record.summary.thread_id,
-      subscribed_thread_id: record.summary.thread_id,
-      threads: newestFirst([
-        record.summary,
-        ...model.threads.filter((thread) => thread.thread_id !== record.summary.thread_id),
-      ]),
-      events: record.events,
-      last_sequence: lastSequence,
-      subscription_after_sequence: lastSequence,
-      connection: "connected",
-      notice: undefined,
-    },
-    [],
+    next,
+    record.summary.orb_status === undefined
+      ? []
+      : [LoadSelectedOrb({ api_base_url: model.api_base_url, thread_id: record.summary.thread_id })],
   ]
 }
 
@@ -448,6 +555,46 @@ const receivedEventModel = (model: Model, event: Event.Event): readonly [Model, 
     [],
   ]
 }
+
+const selectedOrbLoadedModel = (model: Model, orb: Remote.OrbSummary): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_thread_id !== orb.thread_id) return [model, []]
+  return [
+    {
+      ...model,
+      selected_orb: orb,
+      confirm_kill_orb_id: undefined,
+      threads: updateThreadOrbStatus(model.threads, orb),
+      notice: undefined,
+    },
+    [],
+  ]
+}
+
+const selectedOrbActionModel = (
+  model: Model,
+  action: "pause" | "resume",
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_orb === undefined) return [model, []]
+  const input = { api_base_url: model.api_base_url, orb_id: model.selected_orb.orb_id }
+  return [
+    { ...model, confirm_kill_orb_id: undefined, notice: undefined },
+    [action === "pause" ? PauseSelectedOrb(input) : ResumeSelectedOrb(input)],
+  ]
+}
+
+const confirmedKillOrbModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_orb === undefined || model.confirm_kill_orb_id !== model.selected_orb.orb_id) return [model, []]
+  return [
+    { ...model, confirm_kill_orb_id: undefined, notice: undefined },
+    [KillSelectedOrb({ api_base_url: model.api_base_url, orb_id: model.selected_orb.orb_id })],
+  ]
+}
+
+const updateThreadOrbStatus = (
+  threads: ReadonlyArray<Remote.ThreadSummary>,
+  orb: Remote.OrbSummary,
+): ReadonlyArray<Remote.ThreadSummary> =>
+  threads.map((thread) => (thread.thread_id === orb.thread_id ? { ...thread, orb_status: orb.status } : thread))
 
 const newestFirst = (threads: ReadonlyArray<Remote.ThreadSummary>): ReadonlyArray<Remote.ThreadSummary> =>
   threads.toSorted((left, right) => right.updated_at - left.updated_at)

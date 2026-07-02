@@ -6,6 +6,7 @@ import { Client } from "../src/index"
 const threadId = Ids.ThreadId.make("thread_sdk_client")
 const workspaceId = Ids.WorkspaceId.make("workspace_sdk_client")
 const projectId = Ids.ProjectId.make("project_sdk_client")
+const orbId = Ids.OrbId.make("orb_sdk_client")
 const turnId = Ids.TurnId.make("turn_sdk_client")
 const eventId = Ids.EventId.make("event_sdk_client")
 const ideClientId = Ids.IdeClientId.make("ide_sdk_client")
@@ -189,6 +190,64 @@ describe("SDK client", () => {
 
     expect(result).toEqual(changes)
     expect(calls).toEqual([{ method: "GET", path: "/v1/orb/changes" }])
+  })
+
+  test("uses shared schemas for orb lifecycle endpoints without endpoint credentials", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const summary: Remote.OrbSummary = {
+      orb_id: orbId,
+      thread_id: threadId,
+      project_id: projectId,
+      status: "running",
+      base_commit: "abc123",
+      created_at: now,
+      last_active_at: now,
+    }
+    const paused: Remote.OrbSummary = { ...summary, status: "paused" }
+    const killed: Remote.OrbSummary = { ...summary, status: "killed" }
+    const client = Client.make({
+      requestJson: (input) => {
+        calls.push(input)
+        if (input.method === "GET" && input.path === "/v1/orbs") {
+          return Effect.succeed(Codec.encode(Schema.Array(Remote.OrbSummary))([summary]))
+        }
+        if (input.method === "GET" && input.path === "/v1/orbs/by-thread/thread_sdk_client") {
+          return Effect.succeed(Codec.encode(Remote.OrbSummary)(summary))
+        }
+        if (input.method === "POST" && input.path === "/v1/orbs/orb_sdk_client/pause") {
+          return Effect.succeed(Codec.encode(Remote.OrbSummary)(paused))
+        }
+        if (input.method === "POST" && input.path === "/v1/orbs/orb_sdk_client/resume") {
+          return Effect.succeed(Codec.encode(Remote.OrbSummary)(summary))
+        }
+        if (input.method === "POST" && input.path === "/v1/orbs/orb_sdk_client/kill") {
+          return Effect.succeed(Codec.encode(Remote.OrbSummary)(killed))
+        }
+        return Effect.fail(new Client.SdkError({ message: `unexpected ${input.path}`, operation: "requestJson" }))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    const listed = await Effect.runPromise(client.listOrbs())
+    const byThread = await Effect.runPromise(client.getOrbByThread(threadId))
+    const pause = await Effect.runPromise(client.pauseOrb(orbId))
+    const resume = await Effect.runPromise(client.resumeOrb(orbId))
+    const kill = await Effect.runPromise(client.killOrb(orbId))
+
+    expect(listed).toEqual([summary])
+    expect(byThread).toEqual(summary)
+    expect(pause).toEqual(paused)
+    expect(resume).toEqual(summary)
+    expect(kill).toEqual(killed)
+    expect(JSON.stringify(listed)).not.toContain("orb-token")
+    expect(JSON.stringify(listed)).not.toContain("orb.remote")
+    expect(calls).toEqual([
+      { method: "GET", path: "/v1/orbs" },
+      { method: "GET", path: "/v1/orbs/by-thread/thread_sdk_client" },
+      { method: "POST", path: "/v1/orbs/orb_sdk_client/pause" },
+      { method: "POST", path: "/v1/orbs/orb_sdk_client/resume" },
+      { method: "POST", path: "/v1/orbs/orb_sdk_client/kill" },
+    ])
   })
 
   test("fetch transport sends bearer auth and decodes API errors", async () => {

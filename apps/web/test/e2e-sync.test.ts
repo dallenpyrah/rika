@@ -18,10 +18,22 @@ import { Client } from "@rika/sdk"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
 import { HttpServer, OrbMirror, RemoteControl } from "@rika/server"
-import { ChangedDraft, SubmittedDraft, eventRows, init, subscriptions, update } from "../src/app"
+import {
+  ChangedDraft,
+  ClickedKillOrb,
+  ClickedPauseOrb,
+  ClickedResumeOrb,
+  ConfirmedKillOrb,
+  SubmittedDraft,
+  eventRows,
+  init,
+  subscriptions,
+  update,
+} from "../src/app"
 import type { AppCommand, AppMessage, Model } from "../src/app"
 
 const threadId = Ids.ThreadId.make("thread_web_e2e_sync")
+const orbThreadId = Ids.ThreadId.make("thread_web_orb_controls")
 const workspaceId = Ids.WorkspaceId.make("workspace_web_e2e_sync")
 const now = Common.TimestampMillis.make(2_000_000_000_000)
 
@@ -79,6 +91,61 @@ describe("web local sync e2e", () => {
       expect(submittedModel.events.map((event) => event.sequence)).toEqual(beforeSubmitSequences)
       expect(submittedModel.pending_turn).toBe(true)
       expect(commands.map((command) => command.name)).toEqual(["StartTurn"])
+    } finally {
+      await Effect.runPromise(handle.close())
+      await runtime.dispose()
+    }
+  })
+
+  test("orb controls load badge state and drive OrbStore lifecycle through the HTTP server", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const handle = await runtime.runPromise(HttpServer.serve({ host: "127.0.0.1", port: 0 }))
+    try {
+      const api = client(handle.url)
+      const project = await Effect.runPromise(
+        api.createProject({ name: "web-orb", repo_origin: "https://github.com/example/rika.git" }),
+      )
+      await Effect.runPromise(api.createThread({ thread_id: orbThreadId, project_id: project.project_id }))
+      const created = await Effect.runPromise(
+        api.createOrbThread({ thread_id: orbThreadId, project_id: project.project_id, mode: "smart" }),
+      )
+
+      let webModel = await openWebModel(handle.url, orbThreadId)
+      expect(created.orb_status).toBe("running")
+      expect(webModel.selected_orb?.status).toBe("running")
+      expect(webModel.threads.find((thread) => thread.thread_id === orbThreadId)?.orb_status).toBe("running")
+
+      const [pausing, pauseCommands] = update(webModel, ClickedPauseOrb())
+      webModel = await runCommands(pausing, pauseCommands)
+      const paused = requireSelectedOrb(webModel)
+      const pausedStored = await runtime.runPromise(OrbStore.get(paused.orb_id))
+      expect(pauseCommands.map((command) => command.name)).toEqual(["PauseSelectedOrb"])
+      expect(paused.status).toBe("paused")
+      expect(pausedStored?.status).toBe("paused")
+      expect(webModel.threads.find((thread) => thread.thread_id === orbThreadId)?.orb_status).toBe("paused")
+
+      const [resuming, resumeCommands] = update(webModel, ClickedResumeOrb())
+      webModel = await runCommands(resuming, resumeCommands)
+      const resumed = requireSelectedOrb(webModel)
+      const resumedStored = await runtime.runPromise(OrbStore.get(resumed.orb_id))
+      expect(resumeCommands.map((command) => command.name)).toEqual(["ResumeSelectedOrb"])
+      expect(resumed.status).toBe("running")
+      expect(resumedStored?.status).toBe("running")
+
+      const [confirmingKill, firstKillCommands] = update(webModel, ClickedKillOrb())
+      const preKill = await runtime.runPromise(OrbStore.get(resumed.orb_id))
+      expect(firstKillCommands).toEqual([])
+      expect(confirmingKill.confirm_kill_orb_id).toBe(resumed.orb_id)
+      expect(preKill?.status).toBe("running")
+
+      const [killing, killCommands] = update(confirmingKill, ConfirmedKillOrb())
+      webModel = await runCommands(killing, killCommands)
+      const killed = requireSelectedOrb(webModel)
+      const killedStored = await runtime.runPromise(OrbStore.get(killed.orb_id))
+      expect(killCommands.map((command) => command.name)).toEqual(["KillSelectedOrb"])
+      expect(killed.status).toBe("killed")
+      expect(killedStored?.status).toBe("killed")
+      expect(webModel.threads.find((thread) => thread.thread_id === orbThreadId)?.orb_status).toBe("killed")
     } finally {
       await Effect.runPromise(handle.close())
       await runtime.dispose()
@@ -143,7 +210,7 @@ const makeLayer = () => {
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
-    fakeOrbManagerLayer(),
+    fakeOrbManagerLayer().pipe(Layer.provideMerge(migratedStorageLayer)),
     fakeOrbMirrorLayer(),
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
@@ -153,25 +220,25 @@ const makeLayer = () => {
 }
 
 const fakeOrbManagerLayer = () =>
-  Layer.succeed(
+  Layer.effect(
     OrbManager.Service,
-    OrbManager.Service.of({
-      provisionForThread: (input) =>
-        Effect.succeed({
-          orb_id: Ids.OrbId.make("orb_web_e2e_sync"),
-          thread_id: input.thread_id,
-          project_id: input.project_id,
-          sandbox_id: null,
-          status: "running",
-          base_commit: null,
-          endpoint_url: null,
-          created_at: now,
-          last_active_at: now,
-        }),
-      pause: () => Effect.never,
-      resume: () => Effect.never,
-      kill: () => Effect.never,
-    }),
+    Effect.map(OrbStore.Service, (orbs) =>
+      OrbManager.Service.of({
+        provisionForThread: (input) =>
+          orbs.create({ thread_id: input.thread_id, project_id: input.project_id, base_commit: "abc123" }).pipe(
+            Effect.flatMap((record) => orbs.setStatus(record.orb_id, "running")),
+            Effect.mapError((error) => toOrbProvisionError("provision", undefined, error)),
+          ),
+        pause: (orbId) =>
+          orbs.setStatus(orbId, "paused").pipe(Effect.mapError((error) => toOrbProvisionError("pause", orbId, error))),
+        resume: (orbId) =>
+          orbs
+            .setStatus(orbId, "running")
+            .pipe(Effect.mapError((error) => toOrbProvisionError("resume", orbId, error))),
+        kill: (orbId) =>
+          orbs.setStatus(orbId, "killed").pipe(Effect.mapError((error) => toOrbProvisionError("kill", orbId, error))),
+      }),
+    ),
   )
 
 const fakeOrbMirrorLayer = () =>
@@ -187,19 +254,36 @@ const fakeOrbMirrorLayer = () =>
 
 const client = (baseUrl: string) => Client.make(Client.fetchTransport({ base_url: baseUrl }))
 
-const openWebModel = async (apiBaseUrl: string): Promise<Model> => {
-  let [model, commands] = init({ api_base_url: apiBaseUrl, thread_id: threadId })
-  for (const command of commands) {
-    model = await runCommand(model, command)
+const openWebModel = async (apiBaseUrl: string, selectedThreadId: Ids.ThreadId = threadId): Promise<Model> => {
+  const [model, commands] = init({ api_base_url: apiBaseUrl, thread_id: selectedThreadId })
+  return runCommands(model, commands)
+}
+
+const runCommands = async (initial: Model, initialCommands: ReadonlyArray<AppCommand>): Promise<Model> => {
+  let model = initial
+  const queue = [...initialCommands]
+  while (queue.length > 0) {
+    const command = queue.shift()
+    if (command === undefined) continue
+    const message = await Effect.runPromise(command.effect)
+    const [next, commands] = update(model, message)
+    model = next
+    queue.push(...commands)
   }
   return model
 }
 
-const runCommand = async (model: Model, command: AppCommand): Promise<Model> => {
-  const message = await Effect.runPromise(command.effect)
-  const [next] = update(model, message)
-  return next
+const requireSelectedOrb = (model: Model) => {
+  if (model.selected_orb === undefined) throw new Error("expected selected orb")
+  return model.selected_orb
 }
+
+const toOrbProvisionError = (step: string, orbId: Ids.OrbId | undefined, error: unknown) =>
+  new OrbManager.OrbProvisionError({
+    message: error instanceof Error ? error.message : String(error),
+    step,
+    ...(orbId === undefined ? {} : { orb_id: orbId }),
+  })
 
 const collectTurn = (sdk: Client.Interface, afterSequence: number) =>
   Effect.runPromise(

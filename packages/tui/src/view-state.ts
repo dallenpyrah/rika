@@ -38,6 +38,12 @@ export interface Input {
   readonly workspace_path: string
   readonly mode: Config.Mode
   readonly events?: ReadonlyArray<Event.Event>
+  readonly active_orb?: ActiveOrb
+}
+
+export interface ActiveOrb {
+  readonly orb_id: Ids.OrbId
+  readonly status: Orb.OrbStatus
 }
 
 export interface InputBuffer {
@@ -123,6 +129,7 @@ export interface RemoteArmState {
 
 export interface ViewState {
   readonly thread_id: Ids.ThreadId
+  readonly active_orb?: ActiveOrb
   readonly workspace_path: string
   readonly git_branch?: string
   readonly mode: Config.Mode
@@ -209,6 +216,7 @@ const modeDefaultEffort = deepModeTier
 
 const initialSeed = (input: Input): ViewState => ({
   thread_id: input.thread_id,
+  ...(input.active_orb === undefined ? {} : { active_orb: input.active_orb }),
   workspace_path: input.workspace_path,
   mode: input.mode,
   cost_usd: 0,
@@ -328,13 +336,36 @@ export const withGitBranch = (state: ViewState, branch: string | undefined): Vie
 
 export const hasActivity = (state: ViewState): boolean => state.entries.length > 0
 
+export const hasActiveOrb = (state: ViewState): boolean => state.active_orb !== undefined
+
+export const withActiveOrb = (state: ViewState, activeOrb: ActiveOrb): ViewState => ({
+  ...state,
+  active_orb: activeOrb,
+})
+
 export const withThread = (
   state: ViewState,
-  input: { readonly thread_id: Ids.ThreadId; readonly events: ReadonlyArray<Event.Event>; readonly notice?: string },
+  input: {
+    readonly thread_id: Ids.ThreadId
+    readonly events: ReadonlyArray<Event.Event>
+    readonly notice?: string
+    readonly active_orb?: ActiveOrb
+  },
 ): ViewState => {
-  const base = initialSeed({ thread_id: input.thread_id, workspace_path: state.workspace_path, mode: state.mode })
+  const base = initialSeed({
+    thread_id: input.thread_id,
+    workspace_path: state.workspace_path,
+    mode: state.mode,
+    ...(input.active_orb === undefined ? {} : { active_orb: input.active_orb }),
+  })
   const next = fromEvents(
-    { thread_id: input.thread_id, workspace_path: state.workspace_path, mode: state.mode, events: input.events },
+    {
+      thread_id: input.thread_id,
+      workspace_path: state.workspace_path,
+      mode: state.mode,
+      events: input.events,
+      ...(input.active_orb === undefined ? {} : { active_orb: input.active_orb }),
+    },
     base,
   )
   return input.notice === undefined ? next : withNotice(next, input.notice)

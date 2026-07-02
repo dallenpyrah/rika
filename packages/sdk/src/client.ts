@@ -29,6 +29,11 @@ export interface Interface {
   readonly createThread: (input?: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
   readonly createOrbThread: (input: Remote.CreateOrbThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
   readonly orbChanges: () => Effect.Effect<Remote.OrbChangesResponse, SdkError>
+  readonly listOrbs: () => Effect.Effect<ReadonlyArray<Remote.OrbSummary>, SdkError>
+  readonly getOrbByThread: (threadId: Ids.ThreadId) => Effect.Effect<Remote.OrbSummary, SdkError>
+  readonly pauseOrb: (orbId: Ids.OrbId) => Effect.Effect<Remote.OrbSummary, SdkError>
+  readonly resumeOrb: (orbId: Ids.OrbId) => Effect.Effect<Remote.OrbSummary, SdkError>
+  readonly killOrb: (orbId: Ids.OrbId) => Effect.Effect<Remote.OrbSummary, SdkError>
   readonly listProjects: () => Effect.Effect<ReadonlyArray<Remote.ProjectSummary>, SdkError>
   readonly createProject: (input: Remote.CreateProjectRequest) => Effect.Effect<Remote.ProjectSummary, SdkError>
   readonly listThreads: (
@@ -83,6 +88,26 @@ export const make = (transport: Transport): Interface => ({
     transport
       .requestJson({ method: "GET", path: "/v1/orb/changes" })
       .pipe(Effect.flatMap(decodeEffect(Remote.OrbChangesResponse, "orbChanges"))),
+  listOrbs: () =>
+    transport
+      .requestJson({ method: "GET", path: "/v1/orbs" })
+      .pipe(Effect.flatMap(decodeEffect(Schema.Array(Remote.OrbSummary), "listOrbs"))),
+  getOrbByThread: (threadId: Ids.ThreadId) =>
+    transport
+      .requestJson({ method: "GET", path: `/v1/orbs/by-thread/${encodeURIComponent(threadId)}` })
+      .pipe(Effect.flatMap(decodeEffect(Remote.OrbSummary, "getOrbByThread"))),
+  pauseOrb: (orbId: Ids.OrbId) =>
+    transport
+      .requestJson({ method: "POST", path: `/v1/orbs/${encodeURIComponent(orbId)}/pause` })
+      .pipe(Effect.flatMap(decodeEffect(Remote.OrbSummary, "pauseOrb"))),
+  resumeOrb: (orbId: Ids.OrbId) =>
+    transport
+      .requestJson({ method: "POST", path: `/v1/orbs/${encodeURIComponent(orbId)}/resume` })
+      .pipe(Effect.flatMap(decodeEffect(Remote.OrbSummary, "resumeOrb"))),
+  killOrb: (orbId: Ids.OrbId) =>
+    transport
+      .requestJson({ method: "POST", path: `/v1/orbs/${encodeURIComponent(orbId)}/kill` })
+      .pipe(Effect.flatMap(decodeEffect(Remote.OrbSummary, "killOrb"))),
   listProjects: () =>
     transport
       .requestJson({ method: "GET", path: "/v1/projects" })

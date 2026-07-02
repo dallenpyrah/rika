@@ -14,6 +14,7 @@ export interface LoadedThread {
   readonly thread_id: Ids.ThreadId
   readonly state: ViewState.ViewState
   readonly last_sequence?: number
+  readonly active_orb?: ViewState.ActiveOrb
 }
 
 export interface TurnRequest {
@@ -95,6 +96,7 @@ export interface CreateOrbThreadInput {
 export interface CreatedOrbThread {
   readonly thread_id: Ids.ThreadId
   readonly workspace_id: Ids.WorkspaceId
+  readonly active_orb?: ViewState.ActiveOrb
 }
 
 export interface ThreadOptionInput {
