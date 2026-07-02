@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { Config, Diagnostics } from "@rika/core"
 import { OrbStore, ProjectStore } from "@rika/persistence"
 import { Ids, Orb } from "@rika/schema"
-import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
+import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import * as SandboxClient from "./sandbox-client"
 
 const repoRoot = "/home/user/repo"
@@ -12,9 +12,12 @@ const serverPort = 4587
 const defaultTemplateId = "rika-orb"
 const defaultIdleTimeoutSeconds = 300
 const healthAttempts = 60
+const resumeHealthAttempts = 15
 const healthDelayMillis = 1_000
 const setupCommand =
   "if [ -e .agents/setup ] && [ ! -x .agents/setup ]; then echo 'Lifecycle hook file must be executable' >&2; exit 126; fi; if [ -x .agents/setup ]; then .agents/setup; fi"
+const resumeCommand =
+  'if [ -e .agents/resume ] && [ ! -x .agents/resume ]; then echo \'Lifecycle hook file must be executable\' >&2; exit 126; fi; if [ ! -x .agents/resume ]; then echo \'Lifecycle hook skipped\' >&2; exit 0; fi; status_dir=$(mktemp -d); status_file="$status_dir/status"; (.agents/resume; code=$?; if [ -d "$status_dir" ]; then printf \'%s\' "$code" > "$status_file"; fi) & pid=$!; for _ in $(seq 1 100); do if [ -f "$status_file" ]; then code=$(cat "$status_file"); rm -rf "$status_dir"; wait "$pid" 2>/dev/null || true; exit "$code"; fi; sleep 0.1; done; echo \'Lifecycle hook detached after 10 seconds\' >&2; rm -rf "$status_dir"; disown "$pid" 2>/dev/null || true; exit 0'
 
 export interface ProvisionInput extends Schema.Schema.Type<typeof ProvisionInput> {}
 export const ProvisionInput = Schema.Struct({
@@ -56,6 +59,8 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/orb/OrbManager") {}
 
+type SandboxOrbRecord = Orb.OrbRecord & { readonly sandbox_id: string }
+
 export const layerWithSystem = (system: System) =>
   Layer.effect(
     Service,
@@ -65,6 +70,18 @@ export const layerWithSystem = (system: System) =>
       const orbs = yield* OrbStore.Service
       const sandbox = yield* SandboxClient.Service
       const diagnostics = yield* Diagnostics.Service
+      const resumeLocks = new Map<Ids.OrbId, Semaphore.Semaphore>()
+      const resumeLocksMutex = yield* Semaphore.make(1)
+      const resumeLockFor = (orbId: Ids.OrbId) =>
+        resumeLocksMutex.withPermit(
+          Effect.gen(function* () {
+            const existing = resumeLocks.get(orbId)
+            if (existing !== undefined) return existing
+            const lock = yield* Semaphore.make(1)
+            resumeLocks.set(orbId, lock)
+            return lock
+          }),
+        )
 
       const provisionForThread: Interface["provisionForThread"] = Effect.fn("OrbManager.provisionForThread")(function* (
         input: ProvisionInput,
@@ -130,7 +147,7 @@ export const layerWithSystem = (system: System) =>
           const token = yield* step("token", system.randomToken, { orbId, sandboxId })
           yield* startServer(sandbox, sandboxId, processEnv, token, baseCommit, orbId)
           const endpointUrl = yield* step("host_url", sandbox.hostUrl(sandboxId, serverPort), { orbId, sandboxId })
-          yield* waitForHealth(system, endpointUrl, token, 0, orbId, sandboxId)
+          yield* waitForHealth(system, endpointUrl, token, 0, orbId, sandboxId, healthAttempts)
           yield* step("endpoint", orbs.setEndpoint(orbId, { endpoint_url: endpointUrl, token }), { orbId, sandboxId })
           return yield* step("running", orbs.setStatus(orbId, "running"), { orbId, sandboxId })
         }).pipe(
@@ -152,6 +169,17 @@ export const layerWithSystem = (system: System) =>
         }
         return record.sandbox_id
       })
+      const requireOrbRecord = Effect.fn("OrbManager.requireOrbRecord")(function* (orbId: Ids.OrbId, stepName: string) {
+        const record = yield* step(stepName, orbs.get(orbId), { orbId })
+        if (record === undefined) {
+          return yield* new OrbProvisionError({ message: `Orb ${orbId} not found`, step: stepName, orb_id: orbId })
+        }
+        const sandboxId = record.sandbox_id
+        if (sandboxId === null) {
+          return yield* new OrbProvisionError({ message: `Orb ${orbId} has no sandbox`, step: stepName, orb_id: orbId })
+        }
+        return { ...record, sandbox_id: sandboxId }
+      })
 
       return Service.of({
         provisionForThread,
@@ -161,9 +189,51 @@ export const layerWithSystem = (system: System) =>
           return yield* step("pause_status", orbs.setStatus(orbId, "paused"), { orbId, sandboxId })
         }),
         resume: Effect.fn("OrbManager.resume")(function* (orbId: Ids.OrbId) {
-          const sandboxId = yield* requireSandboxId(orbId, "resume")
-          yield* step("resume", sandbox.resume(sandboxId), { orbId, sandboxId })
-          return yield* step("resume_status", orbs.setStatus(orbId, "running"), { orbId, sandboxId })
+          const resumeLock = yield* resumeLockFor(orbId)
+          return yield* resumeLock.withPermit(
+            Diagnostics.event(
+              "orb.resume",
+              (fields) =>
+                Effect.gen(function* () {
+                  const record = yield* requireOrbRecord(orbId, "resume")
+                  const sandboxId = record.sandbox_id
+                  fields.sandbox_id = sandboxId
+                  if (record.status === "running") {
+                    fields.status = "already_running"
+                    return record
+                  }
+                  if (record.status !== "paused") {
+                    return yield* new OrbProvisionError({
+                      message: `Orb ${orbId} cannot resume from ${record.status}`,
+                      step: "resume",
+                      orb_id: orbId,
+                      sandbox_id: sandboxId,
+                    })
+                  }
+                  const endpoint = yield* resumeEndpoint(orbs, record)
+                  yield* step("resume", sandbox.resume(sandboxId), { orbId, sandboxId })
+                  const endpointUrl = yield* step("host_url", sandbox.hostUrl(sandboxId, serverPort), {
+                    orbId,
+                    sandboxId,
+                  })
+                  yield* ensureResumeHealth(system, sandbox, projects, record, endpoint.token, endpointUrl)
+                  const updatedEndpoint = yield* step(
+                    "endpoint",
+                    orbs.setEndpoint(orbId, { endpoint_url: endpointUrl, token: endpoint.token }),
+                    { orbId, sandboxId },
+                  )
+                  const hook = yield* runResumeHook(sandbox, sandboxId)
+                  fields.hook_status = hook.status
+                  if ("error" in hook && hook.error !== undefined) fields.hook_error = hook.error
+                  if ("exitCode" in hook && hook.exitCode !== undefined) fields.hook_exit_code = hook.exitCode
+                  return yield* step("resume_status", orbs.setStatus(updatedEndpoint.orb_id, "running"), {
+                    orbId,
+                    sandboxId,
+                  })
+                }),
+              { orb_id: orbId },
+            ).pipe(Effect.provideService(Diagnostics.Service, diagnostics)),
+          )
         }),
         kill: Effect.fn("OrbManager.kill")(function* (orbId: Ids.OrbId) {
           const sandboxId = yield* requireSandboxId(orbId, "kill")
@@ -508,6 +578,7 @@ const waitForHealth: (
   attempt: number,
   orbId: Ids.OrbId,
   sandboxId: string,
+  maxAttempts: number,
 ) => Effect.Effect<void, OrbProvisionError> = Effect.fn("OrbManager.waitForHealth")(function* (
   system: System,
   url: string,
@@ -515,17 +586,118 @@ const waitForHealth: (
   attempt: number,
   orbId: Ids.OrbId,
   sandboxId: string,
+  maxAttempts: number,
 ) {
   return yield* step("health", system.health(url, token), { orbId, sandboxId }).pipe(
     Effect.catch((error) =>
-      attempt >= healthAttempts - 1
+      attempt >= maxAttempts - 1
         ? Effect.fail(error)
         : system
             .sleep(healthDelayMillis)
-            .pipe(Effect.flatMap(() => waitForHealth(system, url, token, attempt + 1, orbId, sandboxId))),
+            .pipe(Effect.flatMap(() => waitForHealth(system, url, token, attempt + 1, orbId, sandboxId, maxAttempts))),
     ),
   )
 })
+
+const resumeEndpoint = Effect.fn("OrbManager.resumeEndpoint")(function* (
+  orbs: OrbStore.Interface,
+  record: SandboxOrbRecord,
+) {
+  if (record.base_commit === null) {
+    return yield* new OrbProvisionError({
+      message: `Orb ${record.orb_id} has no base commit`,
+      step: "resume_endpoint",
+      orb_id: record.orb_id,
+      sandbox_id: record.sandbox_id,
+    })
+  }
+  const endpoint = yield* step("resume_endpoint", orbs.endpointCredentials(record.orb_id), {
+    orbId: record.orb_id,
+    sandboxId: record.sandbox_id,
+  })
+  if (endpoint === undefined) {
+    return yield* new OrbProvisionError({
+      message: `Orb ${record.orb_id} has no endpoint`,
+      step: "resume_endpoint",
+      orb_id: record.orb_id,
+      sandbox_id: record.sandbox_id,
+    })
+  }
+  return endpoint
+})
+
+const ensureResumeHealth = Effect.fn("OrbManager.ensureResumeHealth")(function* (
+  system: System,
+  sandbox: SandboxClient.Interface,
+  projects: ProjectStore.Interface,
+  record: SandboxOrbRecord,
+  token: string,
+  endpointUrl: string,
+) {
+  const firstCheck = yield* Effect.result(
+    waitForHealth(system, endpointUrl, token, 0, record.orb_id, record.sandbox_id, resumeHealthAttempts),
+  )
+  if (firstCheck._tag === "Success") return
+  const envs = yield* step("resume_process_env", resumeProcessEnv(projects, record), {
+    orbId: record.orb_id,
+    sandboxId: record.sandbox_id,
+  })
+  const baseCommit = record.base_commit
+  if (baseCommit === null) {
+    yield* new OrbProvisionError({
+      message: `Orb ${record.orb_id} has no base commit`,
+      step: "resume_start_server",
+      orb_id: record.orb_id,
+      sandbox_id: record.sandbox_id,
+    })
+  } else {
+    yield* startServer(sandbox, record.sandbox_id, envs, token, baseCommit, record.orb_id)
+    yield* waitForHealth(system, endpointUrl, token, 0, record.orb_id, record.sandbox_id, resumeHealthAttempts)
+  }
+})
+
+const resumeProcessEnv = Effect.fn("OrbManager.resumeProcessEnv")(function* (
+  projects: ProjectStore.Interface,
+  record: SandboxOrbRecord,
+) {
+  const project = yield* projects.get(record.project_id)
+  if (project === undefined) return {}
+  const secrets = yield* projects.secretsForProvision(record.project_id)
+  return { ...project.env, ...secrets }
+})
+
+type ResumeHookResult =
+  | {
+      readonly status: "skipped" | "ok" | "detached"
+    }
+  | {
+      readonly status: "failed"
+      readonly exitCode?: number
+      readonly error?: string
+    }
+
+const runResumeHook: (sandbox: SandboxClient.Interface, sandboxId: string) => Effect.Effect<ResumeHookResult> =
+  Effect.fn("OrbManager.runResumeHook")(function* (sandbox: SandboxClient.Interface, sandboxId: string) {
+    const result = yield* Effect.result(
+      sandbox.exec(sandboxId, ["bash", "-lc", resumeCommand], { cwd: repoRoot }).pipe(Stream.runCollect),
+    )
+    if (result._tag === "Failure") {
+      return { status: "failed", error: messageFromUnknown(result.failure) } as const
+    }
+    const chunks = Array.from(result.success)
+    const lines = execOutputLines(chunks)
+    if (lines.some((line) => line.includes("Lifecycle hook skipped"))) {
+      return { status: "skipped" } as const
+    }
+    if (lines.some((line) => line.includes("Lifecycle hook detached after 10 seconds"))) {
+      return { status: "detached" } as const
+    }
+    const exit = chunks.find((chunk) => chunk.type === "exit")
+    if (exit?.type === "exit" && exit.exitCode !== 0) {
+      return { status: "failed", exitCode: exit.exitCode } as const
+    }
+    return { status: "ok" } as const
+  })
 
 const cleanupAfterProvisionFailure = (
   orbs: OrbStore.Interface,

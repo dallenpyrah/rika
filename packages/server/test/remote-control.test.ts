@@ -20,7 +20,7 @@ import {
 import { Client } from "@rika/sdk"
 import { Artifact, Common, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
-import { HttpServer, RemoteControl } from "../src/index"
+import { HttpServer, OrbMirror, RemoteControl } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_remote_contract")
 const ideThreadId = Ids.ThreadId.make("thread_remote_ide")
@@ -78,7 +78,8 @@ const ideAwareContextLayer = Layer.succeed(
 
 const makeLayer = (
   contextLayer = defaultContextLayer,
-  orbManagerLayer: Layer.Layer<OrbManager.Service> = fakeOrbManagerLayer(),
+  orbManagerLayer: Layer.Layer<OrbManager.Service, never, OrbStore.Service> = fakeOrbManagerLayer(),
+  orbMirrorLayer: Layer.Layer<OrbMirror.Service> = fakeOrbMirrorLayer(),
 ) => {
   const databaseLayer = Database.memoryLayer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -103,6 +104,7 @@ const makeLayer = (
   const projectStoreLayer = ProjectStore.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const providedOrbManagerLayer = orbManagerLayer.pipe(Layer.provideMerge(migratedStorageLayer))
   const llmLayer = Router.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(
@@ -123,7 +125,8 @@ const makeLayer = (
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
-    orbManagerLayer,
+    providedOrbManagerLayer,
+    orbMirrorLayer,
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
   const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
@@ -147,6 +150,53 @@ const fakeOrbManagerLayer = (
       resume: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "running", id)),
       kill: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "killed", id)),
     }),
+  )
+
+const fakeOrbMirrorLayer = (onMirror: (mirroredOrbId: Ids.OrbId) => void = () => {}): Layer.Layer<OrbMirror.Service> =>
+  Layer.succeed(
+    OrbMirror.Service,
+    OrbMirror.Service.of({
+      mirror: (mirroredOrbId) => Effect.sync(() => onMirror(mirroredOrbId)),
+      mirrorRunningOrbsOnce: () => Effect.void,
+      syncRunning: () => Effect.void,
+    }),
+  )
+
+const orbManagerLayerWithStoredResume = (
+  onResume: (orbId: Ids.OrbId) => void,
+): Layer.Layer<OrbManager.Service, never, OrbStore.Service> =>
+  Layer.effect(
+    OrbManager.Service,
+    Effect.map(OrbStore.Service, (orbs) =>
+      OrbManager.Service.of({
+        provisionForThread: (input) =>
+          Effect.sync(() => {
+            return orbRecord(input.thread_id, input.project_id, "running")
+          }),
+        pause: (id) => orbManagerStoreStep("pause", id, orbs.setStatus(id, "paused")),
+        resume: (id) =>
+          Effect.sync(() => {
+            onResume(id)
+          }).pipe(Effect.andThen(orbManagerStoreStep("resume", id, orbs.setStatus(id, "running")))),
+        kill: (id) => orbManagerStoreStep("kill", id, orbs.setStatus(id, "killed")),
+      }),
+    ),
+  )
+
+const orbManagerStoreStep = (
+  step: string,
+  recordOrbId: Ids.OrbId,
+  effect: Effect.Effect<Orb.OrbRecord, unknown>,
+): Effect.Effect<Orb.OrbRecord, OrbManager.OrbProvisionError> =>
+  effect.pipe(
+    Effect.mapError(
+      (error) =>
+        new OrbManager.OrbProvisionError({
+          message: error instanceof Error ? error.message : String(error),
+          step,
+          orb_id: recordOrbId,
+        }),
+    ),
   )
 
 const orbRecord = (
@@ -178,6 +228,21 @@ const createRunningOrbRecord = (recordThreadId: Ids.ThreadId) =>
       token: "orb-token",
     })
     yield* OrbStore.setStatus(created.orb_id, "running")
+  })
+
+const createPausedOrbRecord = (recordThreadId: Ids.ThreadId) =>
+  Effect.gen(function* () {
+    const created = yield* OrbStore.create({
+      thread_id: recordThreadId,
+      project_id: projectId,
+    })
+    yield* OrbStore.setSandbox(created.orb_id, "sandbox_remote_contract")
+    yield* OrbStore.setEndpoint(created.orb_id, {
+      endpoint_url: "https://orb.remote-contract.test",
+      token: "orb-token",
+    })
+    yield* OrbStore.setStatus(created.orb_id, "running")
+    return yield* OrbStore.setStatus(created.orb_id, "paused")
   })
 
 const makeClient = (handle: (request: Request) => Promise<Response>) =>
@@ -344,6 +409,37 @@ describe("remote control API and SDK", () => {
       orb_status: "running",
       archived: false,
     })
+  })
+
+  test("startTurn resumes a paused orb and restarts mirroring before the turn runs", async () => {
+    const calls: Array<string> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer(
+        defaultContextLayer,
+        orbManagerLayerWithStoredResume((id) => calls.push(`resume:${id}`)),
+        fakeOrbMirrorLayer((id) => calls.push(`mirror:${id}`)),
+      ),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    await Effect.runPromise(client.createThread({ thread_id: orbThreadId, project_id: projectId }))
+    const paused = await runtime.runPromise(createPausedOrbRecord(orbThreadId))
+    const streamedPromise = Effect.runPromise(
+      client.subscribeThreadEvents({ thread_id: orbThreadId }).pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed" || event.type === "turn.failed"),
+        Stream.runCollect,
+      ),
+    )
+    const accepted = await Effect.runPromise(
+      client.startTurn({ thread_id: orbThreadId, project_id: projectId, content: "resume before turn" }),
+    )
+    const streamed = await streamedPromise
+    const stored = await runtime.runPromise(OrbStore.get(paused.orb_id))
+
+    expect(accepted).toEqual({ thread_id: orbThreadId, accepted: true })
+    expect(calls).toEqual([`resume:${paused.orb_id}`, `mirror:${paused.orb_id}`])
+    expect(streamed.at(-1)).toMatchObject({ type: "turn.completed" })
+    expect(stored?.status).toBe("running")
   })
 
   test("project remote API returns redacted summaries", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Config, IdGenerator, Time } from "@rika/core"
-import { OrbActivity } from "@rika/orb"
+import { OrbActivity, OrbManager } from "@rika/orb"
 import { Database, Migration, OrbStore } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer } from "effect"
@@ -40,9 +40,47 @@ describe("CLI backend endpoint resolver", () => {
     expect(health.calls).toEqual([{ url: "https://orb-endpoint.rika.test", token: "orb-token" }])
   })
 
-  test("errors for a paused orb instead of falling back to env or local", async () => {
+  test("resumes a paused orb and resolves the refreshed endpoint instead of falling back", async () => {
     const local = fakeLocalBackend()
     const health = fakeHealth()
+    const resumer = fakeOrbResumer({
+      endpoint_url: "https://fresh-orb-endpoint.rika.test/",
+      token: "fresh-orb-token",
+    })
+    const endpoint = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const paused = yield* createPausedOrb()
+        const resolved = yield* BackendEndpoint.resolveEndpoint({
+          thread_id: threadId,
+          workspace_root: workspaceRoot,
+          data_dir: dataDir,
+          mode: "smart",
+          env: {
+            RIKA_BACKEND_URL: "https://env.rika.test",
+            RIKA_BACKEND_TOKEN: "env-token",
+          },
+        })
+        return { paused, resolved }
+      }).pipe(Effect.provide(makeLayer(local.service, health.service, resumer.layer))),
+    )
+
+    expect(endpoint.resolved).toMatchObject({
+      kind: "orb",
+      url: "https://fresh-orb-endpoint.rika.test",
+      token: "fresh-orb-token",
+      orb_id: endpoint.paused.orb_id,
+      thread_id: threadId,
+    })
+    expect(resumer.calls).toEqual([endpoint.paused.orb_id])
+    expect(local.connects).toBe(0)
+    expect(health.calls).toEqual([{ url: "https://fresh-orb-endpoint.rika.test/", token: "fresh-orb-token" }])
+  })
+
+  test("does not fall back when paused orb resume fails", async () => {
+    const local = fakeLocalBackend()
+    const health = fakeHealth()
+    const resumer = failingOrbResumer()
     const error = await Effect.runPromise(
       Effect.gen(function* () {
         yield* Migration.migrate()
@@ -57,11 +95,12 @@ describe("CLI backend endpoint resolver", () => {
             RIKA_BACKEND_TOKEN: "env-token",
           },
         }).pipe(Effect.flip)
-      }).pipe(Effect.provide(makeLayer(local.service, health.service))),
+      }).pipe(Effect.provide(makeLayer(local.service, health.service, resumer.layer))),
     )
 
-    expect(error).toBeInstanceOf(BackendEndpoint.BackendEndpointError)
-    expect(error.message).toContain("paused")
+    expect(error).toBeInstanceOf(OrbManager.OrbProvisionError)
+    expect(error.message).toContain("resume failed")
+    expect(resumer.calls).toEqual([Ids.OrbId.make("orb_1")])
     expect(local.connects).toBe(0)
     expect(health.calls).toEqual([])
   })
@@ -229,17 +268,22 @@ describe("CLI backend endpoint resolver", () => {
     expect(touched).toEqual([Ids.OrbId.make("orb_backend_endpoint")])
   })
 
-  test("reconnecting client rejects stale cached orb endpoints before fetch", async () => {
+  test("reconnecting client refreshes stale cached orb endpoints when touch reports a pause", async () => {
     const urls: Array<string> = []
     const resolved: Array<Ids.ThreadId | undefined> = []
     let running = true
+    let resolveCount = 0
     const client = Runtime.reconnectingClient({
       resolveEndpoint: (input) =>
         Effect.sync(() => {
           resolved.push(input.thread_id)
+          resolveCount += 1
+          const endpoint =
+            resolveCount === 1 ? "https://orb-endpoint.rika.test" : "https://resumed-orb-endpoint.rika.test"
+          if (resolveCount > 1) running = true
           return {
             kind: "orb" as const,
-            url: "https://orb-endpoint.rika.test",
+            url: endpoint,
             token: "orb-token",
             orb_id: Ids.OrbId.make("orb_backend_endpoint"),
             thread_id: threadId,
@@ -270,18 +314,24 @@ describe("CLI backend endpoint resolver", () => {
 
     await Effect.runPromise(client.openThread(threadId))
     running = false
-    const secondError = await Effect.runPromise(client.openThread(threadId).pipe(Effect.flip))
+    const second = await Effect.runPromise(client.openThread(threadId))
     const resolvedAfterSecond = Array.from(resolved)
     const urlsAfterSecond = Array.from(urls)
-    const thirdError = await Effect.runPromise(client.openThread(threadId).pipe(Effect.flip))
+    const third = await Effect.runPromise(client.openThread(threadId))
 
-    expect(secondError.operation).toBe("backend.touchOrb")
-    expect(secondError.message).toContain("paused")
-    expect(resolvedAfterSecond).toEqual([threadId])
-    expect(urlsAfterSecond).toHaveLength(1)
-    expect(thirdError.operation).toBe("backend.touchOrb")
+    expect(second.summary.thread_id).toBe(threadId)
+    expect(third.summary.thread_id).toBe(threadId)
+    expect(resolvedAfterSecond).toEqual([threadId, threadId])
+    expect(urlsAfterSecond.map((url) => new URL(url).origin)).toEqual([
+      "https://orb-endpoint.rika.test",
+      "https://resumed-orb-endpoint.rika.test",
+    ])
     expect(resolved).toEqual([threadId, threadId])
-    expect(urls).toHaveLength(1)
+    expect(urls.map((url) => new URL(url).origin)).toEqual([
+      "https://orb-endpoint.rika.test",
+      "https://resumed-orb-endpoint.rika.test",
+      "https://resumed-orb-endpoint.rika.test",
+    ])
   })
 })
 
@@ -305,7 +355,7 @@ const createPausedOrb = () =>
       token: "orb-token",
     })
     yield* OrbStore.setStatus(created.orb_id, "running")
-    yield* OrbStore.setStatus(created.orb_id, "paused")
+    return yield* OrbStore.setStatus(created.orb_id, "paused")
   })
 
 const createRunningOrbWithoutEndpoint = () =>
@@ -315,7 +365,11 @@ const createRunningOrbWithoutEndpoint = () =>
     yield* OrbStore.setStatus(created.orb_id, "running")
   })
 
-const makeLayer = (localBackend: LocalBackend.Interface, health: BackendEndpoint.HealthInterface) => {
+const makeLayer = (
+  localBackend: LocalBackend.Interface,
+  health: BackendEndpoint.HealthInterface,
+  resumerLayer: Layer.Layer<BackendEndpoint.OrbResumer, never, OrbStore.Service> = fakeOrbResumer().layer,
+) => {
   const configLayer = Config.layerFromValues({
     workspace_root: workspaceRoot,
     data_dir: dataDir,
@@ -336,9 +390,73 @@ const makeLayer = (localBackend: LocalBackend.Interface, health: BackendEndpoint
   )
   return Layer.mergeAll(
     storageLayer,
+    resumerLayer.pipe(Layer.provideMerge(storageLayer)),
     Layer.succeed(LocalBackend.Service, localBackend),
     Layer.succeed(BackendEndpoint.Health, BackendEndpoint.Health.of(health)),
   )
+}
+
+const fakeOrbResumer = (
+  endpoint: { readonly endpoint_url: string; readonly token: string } = {
+    endpoint_url: "https://resumed-orb-endpoint.rika.test",
+    token: "resumed-orb-token",
+  },
+) => {
+  const calls: Array<Ids.OrbId> = []
+  const layer = Layer.effect(
+    BackendEndpoint.OrbResumer,
+    Effect.map(OrbStore.Service, (orbs) =>
+      BackendEndpoint.OrbResumer.of({
+        resume: (orbId) =>
+          Effect.gen(function* () {
+            calls.push(orbId)
+            yield* backendEndpointStoreStep("resume_endpoint", orbId, orbs.setEndpoint(orbId, endpoint))
+            return yield* backendEndpointStoreStep("resume", orbId, orbs.setStatus(orbId, "running"))
+          }),
+      }),
+    ),
+  )
+  return { calls, layer }
+}
+
+const backendEndpointStoreStep = <A>(
+  step: string,
+  orbId: Ids.OrbId,
+  effect: Effect.Effect<A, unknown>,
+): Effect.Effect<A, OrbManager.OrbProvisionError> =>
+  effect.pipe(
+    Effect.mapError(
+      (error) =>
+        new OrbManager.OrbProvisionError({
+          message: error instanceof Error ? error.message : String(error),
+          step,
+          orb_id: orbId,
+        }),
+    ),
+  )
+
+const failingOrbResumer = () => {
+  const calls: Array<Ids.OrbId> = []
+  const layer = Layer.succeed(
+    BackendEndpoint.OrbResumer,
+    BackendEndpoint.OrbResumer.of({
+      resume: (orbId) =>
+        Effect.sync(() => {
+          calls.push(orbId)
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new OrbManager.OrbProvisionError({
+                message: "resume failed",
+                step: "resume",
+                orb_id: orbId,
+              }),
+            ),
+          ),
+        ),
+    }),
+  )
+  return { calls, layer }
 }
 
 const fakeLocalBackend = () => {

@@ -17,7 +17,7 @@ import {
 import { Client } from "@rika/sdk"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
-import { HttpServer, RemoteControl } from "@rika/server"
+import { HttpServer, OrbMirror, RemoteControl } from "@rika/server"
 import { ChangedDraft, SubmittedDraft, eventRows, init, subscriptions, update } from "../src/app"
 import type { AppCommand, AppMessage, Model } from "../src/app"
 
@@ -144,6 +144,7 @@ const makeLayer = () => {
     llmLayer,
     IdeBridge.layer,
     fakeOrbManagerLayer(),
+    fakeOrbMirrorLayer(),
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
   const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
@@ -170,6 +171,16 @@ const fakeOrbManagerLayer = () =>
       pause: () => Effect.never,
       resume: () => Effect.never,
       kill: () => Effect.never,
+    }),
+  )
+
+const fakeOrbMirrorLayer = () =>
+  Layer.succeed(
+    OrbMirror.Service,
+    OrbMirror.Service.of({
+      mirror: () => Effect.void,
+      mirrorRunningOrbsOnce: () => Effect.void,
+      syncRunning: () => Effect.void,
     }),
   )
 

@@ -1,6 +1,7 @@
 import { Config } from "@rika/core"
+import { OrbManager } from "@rika/orb"
 import { Database, OrbStore } from "@rika/persistence"
-import { Ids, Remote } from "@rika/schema"
+import { Ids, Orb, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Schema } from "effect"
 import * as LocalBackend from "./local-backend"
 
@@ -25,6 +26,7 @@ export type ResolveError =
   | BackendEndpointError
   | Database.DatabaseError
   | LocalBackend.BackendError
+  | OrbManager.OrbProvisionError
   | OrbStore.OrbStoreError
 
 export interface HealthInterface {
@@ -32,6 +34,14 @@ export interface HealthInterface {
 }
 
 export class Health extends Context.Service<Health, HealthInterface>()("@rika/cli/BackendEndpoint/Health") {}
+
+export interface OrbResumerInterface {
+  readonly resume: (orbId: Ids.OrbId) => Effect.Effect<Orb.OrbRecord, OrbManager.OrbProvisionError>
+}
+
+export class OrbResumer extends Context.Service<OrbResumer, OrbResumerInterface>()(
+  "@rika/cli/BackendEndpoint/OrbResumer",
+) {}
 
 export interface ResolverInterface {
   readonly resolveEndpoint: (input: ResolveInput) => Effect.Effect<BackendEndpoint, ResolveError>
@@ -61,6 +71,11 @@ export const healthLayer = Layer.succeed(
   }),
 )
 
+export const orbManagerResumerLayer = Layer.effect(
+  OrbResumer,
+  Effect.map(OrbManager.Service, (manager) => OrbResumer.of({ resume: manager.resume })),
+)
+
 export const resolverLayerFromEnv = (env?: Record<string, string | undefined>) =>
   Layer.effect(
     Resolver,
@@ -68,12 +83,14 @@ export const resolverLayerFromEnv = (env?: Record<string, string | undefined>) =
       const localBackend = yield* LocalBackend.Service
       const orbs = yield* OrbStore.Service
       const health = yield* Health
+      const resumer = yield* OrbResumer
       return Resolver.of({
         resolveEndpoint: (input) =>
           resolveEndpoint({ ...input, env: env ?? input.env }).pipe(
             Effect.provideService(LocalBackend.Service, localBackend),
             Effect.provideService(OrbStore.Service, orbs),
             Effect.provideService(Health, health),
+            Effect.provideService(OrbResumer, resumer),
           ),
       })
     }),
@@ -92,33 +109,16 @@ export const resolveEndpoint = Effect.fn("Cli.BackendEndpoint.resolveEndpoint")(
   const localBackend = yield* LocalBackend.Service
   const orbs = yield* OrbStore.Service
   const health = yield* Health
+  const resumer = yield* OrbResumer
 
   if (input.thread_id !== undefined) {
     const orb = yield* orbs.getByThread(input.thread_id)
     if (orb?.status === "paused") {
-      return yield* new BackendEndpointError({
-        message: `Orb for thread ${input.thread_id} is paused`,
-        operation: "resolveEndpoint",
-        thread_id: input.thread_id,
-      })
+      const resumed = yield* resumer.resume(orb.orb_id)
+      return yield* orbEndpoint(orbs, health, resumed, input.thread_id)
     }
     if (orb?.status === "running") {
-      const endpoint = yield* orbs.endpointCredentials(orb.orb_id)
-      if (endpoint === undefined) {
-        return yield* new BackendEndpointError({
-          message: `Orb for thread ${input.thread_id} has no endpoint`,
-          operation: "resolveEndpoint",
-          thread_id: input.thread_id,
-        })
-      }
-      yield* health.health(endpoint.endpoint_url, endpoint.token)
-      return {
-        kind: "orb" as const,
-        url: endpoint.endpoint_url.replace(/\/$/, ""),
-        token: endpoint.token,
-        orb_id: orb.orb_id,
-        thread_id: orb.thread_id,
-      }
+      return yield* orbEndpoint(orbs, health, orb, input.thread_id)
     }
   }
 
@@ -133,6 +133,30 @@ export const resolveEndpoint = Effect.fn("Cli.BackendEndpoint.resolveEndpoint")(
     data_dir: dataDir,
     mode,
   })
+})
+
+const orbEndpoint = Effect.fn("Cli.BackendEndpoint.orbEndpoint")(function* (
+  orbs: OrbStore.Interface,
+  health: HealthInterface,
+  orb: Orb.OrbRecord,
+  threadId: Ids.ThreadId,
+) {
+  const endpoint = yield* orbs.endpointCredentials(orb.orb_id)
+  if (endpoint === undefined) {
+    return yield* new BackendEndpointError({
+      message: `Orb for thread ${threadId} has no endpoint`,
+      operation: "resolveEndpoint",
+      thread_id: threadId,
+    })
+  }
+  yield* health.health(endpoint.endpoint_url, endpoint.token)
+  return {
+    kind: "orb" as const,
+    url: endpoint.endpoint_url.replace(/\/$/, ""),
+    token: endpoint.token,
+    orb_id: orb.orb_id,
+    thread_id: orb.thread_id,
+  }
 })
 
 const endpointFromEnv = (env: Record<string, string | undefined>): BackendEndpoint | undefined => {

@@ -5,6 +5,7 @@ import { OrbManager } from "@rika/orb"
 import { ArtifactStore, Database, OrbStore, ProjectStore, ThreadEventLog } from "@rika/persistence"
 import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
+import * as OrbMirror from "./orb-mirror"
 import * as ThreadLive from "./thread-live"
 
 export class RemoteControlError extends Schema.TaggedErrorClass<RemoteControlError>()("RemoteControlError", {
@@ -24,6 +25,7 @@ export type RunError =
   | ProjectStore.ProjectStoreError
   | ThreadEventLog.ThreadEventLogError
   | IdeBridge.IdeBridgeError
+  | OrbMirror.RunError
   | WorkspaceAccess.RunError
 
 export interface Interface {
@@ -77,6 +79,7 @@ export const layerWithLive = Layer.effect(
     const projects = yield* ProjectStore.Service
     const orbs = yield* OrbStore.Service
     const orbManager = yield* OrbManager.Service
+    const orbMirror = yield* OrbMirror.Service
     const activeThreads = new Set<Ids.ThreadId>()
     const activeThreadsMutex = yield* Semaphore.make(1)
     const reserveThread = (threadId: Ids.ThreadId) =>
@@ -101,6 +104,12 @@ export const layerWithLive = Layer.effect(
       readLoggedEvents(threadId, 0).pipe(Effect.map((events) => events.at(-1)?.sequence ?? 0))
     const publishLoggedEvents = (threadId: Ids.ThreadId, afterSequence: number) =>
       readLoggedEvents(threadId, afterSequence).pipe(Effect.flatMap((events) => live.publishAll(events)))
+    const resumePausedOrb = Effect.fn("RemoteControl.resumePausedOrb")(function* (threadId: Ids.ThreadId) {
+      const orb = yield* orbs.getByThread(threadId)
+      if (orb?.status !== "paused") return
+      const resumed = yield* orbManager.resume(orb.orb_id)
+      yield* orbMirror.mirror(resumed.orb_id)
+    })
 
     return Service.of({
       backendHealth: Effect.fn("RemoteControl.backendHealth")(function* (url: string) {
@@ -286,6 +295,7 @@ export const layerWithLive = Layer.effect(
               ),
             )
         }
+        yield* resumePausedOrb(input.thread_id)
         const reserved = yield* reserveThread(input.thread_id)
         if (!reserved) {
           return yield* new RemoteControlError({

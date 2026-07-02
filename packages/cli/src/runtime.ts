@@ -185,9 +185,9 @@ type RuntimeError =
   | McpApprovalStore.McpApprovalStoreError
   | McpClient.McpClientError
   | Migration.MigrationError
+  | OrbManager.OrbProvisionError
   | OrbMirror.OrbMirrorError
   | OrbExecute.OrbExecuteError
-  | OrbManager.OrbProvisionError
   | OrbStore.OrbStoreError
   | PluginHost.RunError
   | Project.ProjectError
@@ -330,6 +330,7 @@ export const liveLayer = (
     Layer.provideMerge(timeLayer),
     Layer.provideMerge(IdGenerator.layer),
   )
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const permissionConfig = PermissionPolicy.configFromEnv(env)
@@ -383,10 +384,17 @@ export const liveLayer = (
     diagnosticsLayer,
     telemetryLayer,
   )
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const backendEndpointResolverLayer = BackendEndpoint.resolverLayerFromEnv(env).pipe(
     Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd })),
     Layer.provideMerge(BackendEndpoint.healthLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(BackendEndpoint.orbManagerResumerLayer),
+    Layer.provideMerge(managerLayer),
   )
   const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
 
@@ -603,6 +611,11 @@ const interactiveRemoteLiveLayerFromTui = (
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(timeLayer),
   )
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(Diagnostics.layer.pipe(Layer.provideMerge(configLayer))),
+  )
   const backendLayer = LocalBackend.layerFromInput({ env, cwd })
   const remoteSessionLayer = Layer.effect(
     RemoteSession.Service,
@@ -611,6 +624,7 @@ const interactiveRemoteLiveLayerFromTui = (
       const orbs = yield* OrbStore.Service
       const activity = yield* OrbActivity.Service
       const health = yield* BackendEndpoint.Health
+      const resumer = yield* BackendEndpoint.OrbResumer
       const renderer = yield* Adapter.Service
       const ticker = yield* Ticker.Service
       const workspaceId = yield* workspaceIdForRoot(workspaceRoot)
@@ -625,6 +639,7 @@ const interactiveRemoteLiveLayerFromTui = (
           Effect.provideService(LocalBackend.Service, backend),
           Effect.provideService(OrbStore.Service, orbs),
           Effect.provideService(BackendEndpoint.Health, health),
+          Effect.provideService(BackendEndpoint.OrbResumer, resumer),
         )
       const client = reconnectingClient({ resolveEndpoint, touchOrb: (orbId) => activity.touch(orbId) })
       return RemoteSession.make(client, renderer, ticker.ticks, workspaceId)
@@ -637,6 +652,8 @@ const interactiveRemoteLiveLayerFromTui = (
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(activityLayer),
+    Layer.provideMerge(BackendEndpoint.orbManagerResumerLayer),
+    Layer.provideMerge(managerLayer),
   )
 
   return remoteSessionLayer
@@ -684,7 +701,7 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
             (error) =>
               new Client.SdkError({
                 message: error.message,
-                operation: `backend.${error.operation}`,
+                operation: resolveErrorOperation(error),
               }),
           ),
         )
@@ -793,8 +810,10 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
   }
 }
 
-const retryableSdkError = (error: Client.SdkError): boolean =>
-  error.status === undefined && error.operation !== "backend.touchOrb"
+const resolveErrorOperation = (error: BackendEndpoint.ResolveError) =>
+  "operation" in error ? `backend.${error.operation}` : `backend.${error.step}`
+
+const retryableSdkError = (error: Client.SdkError): boolean => error.status === undefined
 
 export const skillsLiveLayer = (
   _command: Args.SkillCommand,
@@ -1132,17 +1151,18 @@ export const serverLiveLayer = (
   )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
-  const remoteLayer = RemoteControl.layerWithLive.pipe(
-    Layer.provideMerge(agentLayer),
-    Layer.provideMerge(baseLayer),
-    Layer.provideMerge(managerLayer),
-    Layer.provideMerge(threadLiveLayer),
-  )
   const orbMirrorLayer = OrbMirror.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(threadLiveLayer),
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(activityLayer),
+  )
+  const remoteLayer = RemoteControl.layerWithLive.pipe(
+    Layer.provideMerge(agentLayer),
+    Layer.provideMerge(baseLayer),
+    Layer.provideMerge(managerLayer),
+    Layer.provideMerge(threadLiveLayer),
+    Layer.provideMerge(orbMirrorLayer),
   )
   const orbMirrorStartupLayer = Layer.effectDiscard(
     Effect.repeat(
@@ -1176,25 +1196,41 @@ export const syncLiveLayer = (
     env,
   )
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const { diagnosticsLayer } = telemetryLayers(env, configLayer)
   const timeLayer = Time.layer
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
   const orbStoreLayer = OrbStore.layer.pipe(
     Layer.provideMerge(databaseLayer),
     Layer.provideMerge(timeLayer),
     Layer.provideMerge(IdGenerator.layer),
   )
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
     Migration.layer,
     timeLayer,
     IdGenerator.layer,
+    projectStoreLayer,
     orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const resolverLayer = BackendEndpoint.resolverLayerFromEnv(env).pipe(
     Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd })),
     Layer.provideMerge(BackendEndpoint.healthLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(BackendEndpoint.orbManagerResumerLayer),
+    Layer.provideMerge(managerLayer),
   )
 
   return Sync.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(resolverLayer))
@@ -1207,17 +1243,20 @@ export type LiveLayerOutput =
   | ContextResolver.Service
   | Database.Service
   | BackendEndpoint.Health
+  | BackendEndpoint.OrbResumer
   | BackendEndpoint.Resolver
   | Execute.Service
   | IdGenerator.Service
   | LocalBackend.Service
   | Migration.Service
+  | OrbManager.Service
   | McpApprovalStore.Service
   | OrbStore.Service
   | Output.Service
   | PluginHost.Service
   | ProjectStore.Service
   | Router.Service
+  | SandboxClient.Service
   | SkillRegistry.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
@@ -1269,12 +1308,16 @@ export type InteractiveLayerOutput =
 
 export type InteractiveRemoteLayerOutput =
   | Adapter.Service
+  | BackendEndpoint.Health
+  | BackendEndpoint.OrbResumer
   | Config.Service
   | Database.Service
   | IdGenerator.Service
   | LocalBackend.Service
   | Migration.Service
   | OrbActivity.Service
+  | OrbManager.Service
+  | OrbStore.Service
   | ProjectStore.Service
   | RemoteSession.Service
   | SandboxClient.Service
@@ -1307,7 +1350,15 @@ export type ProjectLayerOutput =
 
 export type SkillsLayerOutput = Config.Service | Output.Service | SkillRegistry.Service | Skills.Service
 
-export type SyncLayerOutput = Config.Service | BackendEndpoint.Resolver | Sync.Service
+export type SyncLayerOutput =
+  | BackendEndpoint.OrbResumer
+  | BackendEndpoint.Resolver
+  | Config.Service
+  | OrbManager.Service
+  | OrbStore.Service
+  | ProjectStore.Service
+  | SandboxClient.Service
+  | Sync.Service
 
 export type McpLayerOutput =
   | Config.Service

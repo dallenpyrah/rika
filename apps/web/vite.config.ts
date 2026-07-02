@@ -56,13 +56,14 @@ function localBackendProxy(): Plugin {
 }
 
 async function makeProxyResolver(): Promise<ProxyResolver> {
-  const [Core, Persistence, SchemaModule, EffectRuntime, BackendEndpointModule, LocalBackend] = await Promise.all([
+  const [Core, Persistence, SchemaModule, EffectRuntime, BackendEndpointModule, LocalBackend, Orb] = await Promise.all([
     import("@rika/core"),
     import("@rika/persistence"),
     import("@rika/schema"),
     import("effect"),
     import("@rika/cli/backend-endpoint"),
     import("@rika/cli/local-backend"),
+    import("@rika/orb"),
   ])
   const env = process.env
   const configLayer = Core.Config.layerFromValues(
@@ -76,26 +77,41 @@ async function makeProxyResolver(): Promise<ProxyResolver> {
   )
   const databaseLayer = Persistence.Database.layer.pipe(EffectRuntime.Layer.provideMerge(configLayer))
   const timeLayer = Core.Time.layer
+  const projectStoreLayer = Persistence.ProjectStore.layer.pipe(
+    EffectRuntime.Layer.provideMerge(configLayer),
+    EffectRuntime.Layer.provideMerge(databaseLayer),
+    EffectRuntime.Layer.provideMerge(timeLayer),
+    EffectRuntime.Layer.provideMerge(Core.IdGenerator.layer),
+  )
   const orbStoreLayer = Persistence.OrbStore.layer.pipe(
     EffectRuntime.Layer.provideMerge(databaseLayer),
     EffectRuntime.Layer.provideMerge(timeLayer),
     EffectRuntime.Layer.provideMerge(Core.IdGenerator.layer),
   )
+  const sandboxLayer = Orb.SandboxClient.layer.pipe(EffectRuntime.Layer.provideMerge(configLayer))
   const storageLayer = EffectRuntime.Layer.mergeAll(
     configLayer,
     databaseLayer,
     Persistence.Migration.layer,
     timeLayer,
     Core.IdGenerator.layer,
+    projectStoreLayer,
     orbStoreLayer,
   )
   const migratedStorageLayer = EffectRuntime.Layer.effectDiscard(Persistence.Migration.migrate()).pipe(
     EffectRuntime.Layer.provideMerge(storageLayer),
   )
+  const managerLayer = Orb.OrbManager.layer.pipe(
+    EffectRuntime.Layer.provideMerge(migratedStorageLayer),
+    EffectRuntime.Layer.provideMerge(sandboxLayer),
+    EffectRuntime.Layer.provideMerge(Core.Diagnostics.layer.pipe(EffectRuntime.Layer.provideMerge(configLayer))),
+  )
   const layer = BackendEndpointModule.resolverLayerFromEnv(env).pipe(
     EffectRuntime.Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd: workspaceRoot })),
     EffectRuntime.Layer.provideMerge(BackendEndpointModule.healthLayer),
     EffectRuntime.Layer.provideMerge(migratedStorageLayer),
+    EffectRuntime.Layer.provideMerge(BackendEndpointModule.orbManagerResumerLayer),
+    EffectRuntime.Layer.provideMerge(managerLayer),
   )
   const runtime = EffectRuntime.ManagedRuntime.make(layer)
   return {

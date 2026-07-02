@@ -86,6 +86,48 @@ describe("OrbMirror", () => {
     }
   })
 
+  test("mirror starts a resumed orb stream from the latest local sequence", async () => {
+    const remoteEvents = [messageAdded(3, "after resume")]
+    const subscriptions: Array<number | undefined> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer((_endpointUrl, _token) =>
+        Client.make({
+          requestJson: () => Effect.never,
+          streamJson: (input) => {
+            const url = new URL(input.path, "http://orb.test")
+            const afterSequence = url.searchParams.get("after_sequence")
+            subscriptions.push(afterSequence === null ? undefined : Number(afterSequence))
+            return Stream.fromIterable(remoteEvents)
+          },
+        }),
+      ),
+    )
+
+    try {
+      const publishedPromise = runtime.runPromise(
+        ThreadLive.subscribe({ thread_id: threadId, after_sequence: 2 }).pipe(Stream.take(1), Stream.runCollect),
+      )
+
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          yield* Migration.migrate()
+          const orbId = yield* createRunningOrb()
+          yield* ThreadEventLog.append(threadCreated(1))
+          yield* ThreadEventLog.append(messageAdded(2, "before resume"))
+          yield* OrbMirror.mirror(orbId)
+        }),
+      )
+      const replay = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: threadId }))
+      const published = await publishedPromise
+
+      expect(subscriptions).toEqual([2])
+      expect(replay.map((event) => event.sequence)).toEqual([1, 2, 3])
+      expect(Array.from(published).map((event) => event.sequence)).toEqual([3])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   test("syncRunning mirrors a newly registered orb through an in-process SDK HTTP backend", async () => {
     const remoteEvents = [threadCreated(1), messageAdded(2, "http mirrored")]
     const orbRuntime = ManagedRuntime.make(makeRemoteBackendLiveLayer())
@@ -455,6 +497,7 @@ const makeRemoteControlLiveLayer = () => {
     Layer.provideMerge(IdeBridge.layer),
     Layer.provideMerge(liveLayer),
     Layer.provideMerge(remoteOrbManagerLayer()),
+    Layer.provideMerge(remoteOrbMirrorLayer()),
   )
   return Layer.mergeAll(migratedStorageLayer, liveLayer, remoteLayer)
 }
@@ -478,6 +521,16 @@ const remoteOrbManagerLayer = () =>
       pause: () => Effect.never,
       resume: () => Effect.never,
       kill: () => Effect.never,
+    }),
+  )
+
+const remoteOrbMirrorLayer = () =>
+  Layer.succeed(
+    OrbMirror.Service,
+    OrbMirror.Service.of({
+      mirror: () => Effect.void,
+      mirrorRunningOrbsOnce: () => Effect.void,
+      syncRunning: () => Effect.void,
     }),
   )
 

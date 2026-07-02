@@ -13,6 +13,8 @@ const workspaceRoot = "/workspace/rika-orb-manager-test"
 const threadId = Ids.ThreadId.make("thread_orb_manager")
 const projectId = Ids.ProjectId.make("project_1")
 const orbId = Ids.OrbId.make("orb_2")
+const resumeHookCommand =
+  'if [ -e .agents/resume ] && [ ! -x .agents/resume ]; then echo \'Lifecycle hook file must be executable\' >&2; exit 126; fi; if [ ! -x .agents/resume ]; then echo \'Lifecycle hook skipped\' >&2; exit 0; fi; status_dir=$(mktemp -d); status_file="$status_dir/status"; (.agents/resume; code=$?; if [ -d "$status_dir" ]; then printf \'%s\' "$code" > "$status_file"; fi) & pid=$!; for _ in $(seq 1 100); do if [ -f "$status_file" ]; then code=$(cat "$status_file"); rm -rf "$status_dir"; wait "$pid" 2>/dev/null || true; exit "$code"; fi; sleep 0.1; done; echo \'Lifecycle hook detached after 10 seconds\' >&2; rm -rf "$status_dir"; disown "$pid" 2>/dev/null || true; exit 0'
 
 describe("OrbManager", () => {
   test("provisions a sandboxed thread through bundle clone, setup, server start, health, and running status", async () => {
@@ -323,6 +325,218 @@ describe("OrbManager", () => {
     await rm(dataDir, { force: true, recursive: true })
   })
 
+  test("resume refreshes endpoint, validates health, runs resume hook, and marks running", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const sandbox = SandboxClientFake.makeState()
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://old-orb-endpoint.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        yield* OrbStore.setStatus(created.orb_id, "paused")
+        const resumed = yield* OrbManager.resume(created.orb_id)
+        const credentials = yield* OrbStore.endpointCredentials(created.orb_id)
+        return { resumed, credentials }
+      }).pipe(Effect.provide(makeLayer({ sandbox, diagnostics, system, dataDir }))),
+    )
+
+    expect(result.resumed.status).toBe("running")
+    expect(result.resumed.endpoint_url).toBe("https://sandbox_1-4587.fake.rika.local")
+    expect(result.credentials).toEqual({
+      endpoint_url: "https://sandbox_1-4587.fake.rika.local",
+      token: "server-token",
+    })
+    expect(sandbox.calls.resume).toEqual(["sandbox_1"])
+    expect(sandbox.calls.hostUrl).toEqual([{ sandboxId: "sandbox_1", port: 4587 }])
+    expect(system.calls.health).toEqual([{ url: "https://sandbox_1-4587.fake.rika.local", token: "server-token" }])
+    expect(sandbox.calls.exec).toEqual([
+      {
+        sandboxId: "sandbox_1",
+        cmd: ["bash", "-lc", resumeHookCommand],
+        opts: { cwd: "/home/user/repo" },
+      },
+    ])
+    expect(diagnostics.find((entry) => entry.message === "orb.resume success")?.data).toMatchObject({
+      orb_id: result.resumed.orb_id,
+      sandbox_id: "sandbox_1",
+      hook_status: "ok",
+    })
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("resume relaunches the orb server with the stored token and base commit when health stays down", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const sandbox = SandboxClientFake.makeState({
+      execResults: [[{ type: "started", pid: 4587 }], [{ type: "exit", exitCode: 0 }]],
+    })
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem({ failingHealthChecks: 15 })
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://old-orb-endpoint.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        yield* OrbStore.setStatus(created.orb_id, "paused")
+        yield* OrbManager.resume(created.orb_id)
+      }).pipe(Effect.provide(makeLayer({ sandbox, diagnostics, system, dataDir }))),
+    )
+
+    expect(system.calls.health).toHaveLength(16)
+    expect(system.calls.sleep).toHaveLength(14)
+    expect(sandbox.calls.exec[0]).toEqual({
+      sandboxId: "sandbox_1",
+      cmd: [
+        "rika",
+        "server",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "4587",
+        "--token",
+        "server-token",
+        "--workspace",
+        "/home/user/repo",
+        "--orb",
+        "--base-commit",
+        "abc123",
+      ],
+      opts: {
+        background: true,
+        cwd: "/home/user/repo",
+        envs: {},
+      },
+    })
+    expect(sandbox.calls.exec[1]).toEqual({
+      sandboxId: "sandbox_1",
+      cmd: ["bash", "-lc", resumeHookCommand],
+      opts: { cwd: "/home/user/repo" },
+    })
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("resume records failed hook diagnostics without blocking running status", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const sandbox = SandboxClientFake.makeState({
+      execResults: [
+        [
+          { type: "stderr", data: "resume failed\n" },
+          { type: "exit", exitCode: 9 },
+        ],
+      ],
+    })
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://old-orb-endpoint.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        yield* OrbStore.setStatus(created.orb_id, "paused")
+        return yield* OrbManager.resume(created.orb_id)
+      }).pipe(Effect.provide(makeLayer({ sandbox, diagnostics, system, dataDir }))),
+    )
+
+    expect(result.status).toBe("running")
+    expect(diagnostics.find((entry) => entry.message === "orb.resume success")?.data).toMatchObject({
+      hook_status: "failed",
+      hook_exit_code: 9,
+    })
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("resume records detached hook diagnostics without killing the resume operation", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const sandbox = SandboxClientFake.makeState({
+      execResults: [
+        [
+          { type: "stderr", data: "Lifecycle hook detached after 10 seconds\n" },
+          { type: "exit", exitCode: 0 },
+        ],
+      ],
+    })
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://old-orb-endpoint.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        yield* OrbStore.setStatus(created.orb_id, "paused")
+        return yield* OrbManager.resume(created.orb_id)
+      }).pipe(Effect.provide(makeLayer({ sandbox, diagnostics, system, dataDir }))),
+    )
+
+    expect(result.status).toBe("running")
+    expect(diagnostics.find((entry) => entry.message === "orb.resume success")?.data).toMatchObject({
+      hook_status: "detached",
+    })
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("concurrent resume calls perform one sandbox resume and return the running record", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const sandbox = SandboxClientFake.makeState()
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://old-orb-endpoint.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        yield* OrbStore.setStatus(created.orb_id, "paused")
+        return yield* Effect.all([OrbManager.resume(created.orb_id), OrbManager.resume(created.orb_id)], {
+          concurrency: "unbounded",
+        })
+      }).pipe(Effect.provide(makeLayer({ sandbox, diagnostics, system, dataDir }))),
+    )
+
+    expect(result.map((record) => record.status)).toEqual(["running", "running"])
+    expect(sandbox.calls.resume).toEqual(["sandbox_1"])
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
   const integration = Bun.env.E2B_API_KEY === undefined || Bun.env.E2B_API_KEY.length === 0 ? test.skip : test
 
   integration("provisions a tiny fixture repo and protects health with the orb token", async () => {
@@ -474,7 +688,9 @@ const makeLayer = (input: {
   )
 }
 
-const makeSystem = (): OrbManager.System & {
+const makeSystem = (
+  options: { readonly failingHealthChecks?: number } = {},
+): OrbManager.System & {
   readonly calls: {
     readonly bundle: Array<{ readonly workspaceRoot: string; readonly path: string }>
     readonly currentBranch: Array<string>
@@ -496,9 +712,9 @@ const makeSystem = (): OrbManager.System & {
   return {
     calls,
     makeTempPath: Effect.succeed("/tmp/rika-orb-manager-test.bundle"),
-    createGitBundle: (input) =>
+    createGitBundle: (request) =>
       Effect.sync(() => {
-        calls.bundle.push(input)
+        calls.bundle.push(request)
         return new TextEncoder().encode("bundle-bytes")
       }),
     currentBranch: (root) =>
@@ -508,8 +724,12 @@ const makeSystem = (): OrbManager.System & {
       }),
     randomToken: Effect.succeed("server-token"),
     health: (url, token) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         calls.health.push({ url, token })
+        if (calls.health.length <= (options.failingHealthChecks ?? 0)) {
+          return yield* new OrbManager.SystemError({ message: "health down", operation: "health" })
+        }
+        return yield* Effect.void
       }),
     sleep: (millis) =>
       Effect.sync(() => {
