@@ -54,6 +54,15 @@ describe("keymap.resolve", () => {
     expect(expectAction(Keymap.resolve(inputCtx(), undefined, Keys.ctrl("s")))._tag).toBe("OpenModePicker")
   })
 
+  test("leader r toggles orb-backed thread arming", () => {
+    const leader = Keymap.resolve(inputCtx(), undefined, Keys.ctrl("x"))
+
+    expect(leader).toEqual({ _tag: "Pending", chord: "leader" })
+    expect(expectAction(Keymap.resolve(inputCtx(), "leader", Keys.make({ name: "r", sequence: "r" })))._tag).toBe(
+      "ToggleRemoteArm",
+    )
+  })
+
   test("Ctrl+S cycles the mode picker once it is open", () => {
     const ctx = inputCtx({ surface: "modepicker" })
     expect(expectAction(Keymap.resolve(ctx, undefined, Keys.ctrl("s")))._tag).toBe("ModePickerNext")

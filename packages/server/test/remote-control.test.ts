@@ -2,10 +2,19 @@ import { describe, expect, test } from "bun:test"
 import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor, WorkspaceAccess } from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
+import { OrbManager } from "@rika/orb"
 import { Provider, Router } from "@rika/llm"
-import { ArtifactStore, Database, Migration, ThreadEventLog, ThreadProjection, WorkspaceStore } from "@rika/persistence"
+import {
+  ArtifactStore,
+  Database,
+  Migration,
+  ProjectStore,
+  ThreadEventLog,
+  ThreadProjection,
+  WorkspaceStore,
+} from "@rika/persistence"
 import { Client } from "@rika/sdk"
-import { Artifact, Common, Ide, Ids } from "@rika/schema"
+import { Artifact, Common, Ide, Ids, Orb } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
 import { HttpServer, RemoteControl } from "../src/index"
 
@@ -15,6 +24,8 @@ const workspaceId = Ids.WorkspaceId.make("workspace_remote_contract")
 const projectId = Ids.ProjectId.make("project_remote_contract")
 const projectWorkspaceId = Ids.WorkspaceId.make("project:project_remote_contract")
 const artifactId = Ids.ArtifactId.make("artifact_remote_contract")
+const orbId = Ids.OrbId.make("orb_remote_contract")
+const orbThreadId = Ids.ThreadId.make("thread_remote_orb_contract")
 const ideClientId = Ids.IdeClientId.make("ide_remote_contract")
 const ownerId = Ids.UserId.make("user_remote_owner")
 const outsiderId = Ids.UserId.make("user_remote_outsider")
@@ -61,7 +72,10 @@ const ideAwareContextLayer = Layer.succeed(
   }),
 )
 
-const makeLayer = (contextLayer = defaultContextLayer) => {
+const makeLayer = (
+  contextLayer = defaultContextLayer,
+  orbManagerLayer: Layer.Layer<OrbManager.Service> = fakeOrbManagerLayer(),
+) => {
   const databaseLayer = Database.memoryLayer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -77,6 +91,7 @@ const makeLayer = (contextLayer = defaultContextLayer) => {
     IdGenerator.sequenceLayer(1),
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const projectStoreLayer = ProjectStore.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const llmLayer = Router.layer.pipe(
@@ -90,6 +105,7 @@ const makeLayer = (contextLayer = defaultContextLayer) => {
   )
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
+    projectStoreLayer,
     threadLayer,
     workspaceAccessLayer,
     contextLayer,
@@ -98,6 +114,7 @@ const makeLayer = (contextLayer = defaultContextLayer) => {
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
+    orbManagerLayer,
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
   const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
@@ -105,6 +122,40 @@ const makeLayer = (contextLayer = defaultContextLayer) => {
 
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
+
+const fakeOrbManagerLayer = (
+  onProvision: (input: OrbManager.ProvisionInput) => void = () => {},
+): Layer.Layer<OrbManager.Service> =>
+  Layer.succeed(
+    OrbManager.Service,
+    OrbManager.Service.of({
+      provisionForThread: (input) =>
+        Effect.sync(() => {
+          onProvision(input)
+          return orbRecord(input.thread_id, input.project_id, "running")
+        }),
+      pause: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "paused", id)),
+      resume: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "running", id)),
+      kill: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "killed", id)),
+    }),
+  )
+
+const orbRecord = (
+  recordThreadId: Ids.ThreadId,
+  recordProjectId: Ids.ProjectId,
+  status: Orb.OrbStatus,
+  recordOrbId = orbId,
+): Orb.OrbRecord => ({
+  orb_id: recordOrbId,
+  thread_id: recordThreadId,
+  project_id: recordProjectId,
+  sandbox_id: "sandbox_remote_contract",
+  status,
+  base_commit: "abc123",
+  endpoint_url: "https://orb.remote-contract.test",
+  created_at: now,
+  last_active_at: now,
+})
 
 const makeClient = (handle: (request: Request) => Promise<Response>) =>
   Client.make(
@@ -209,6 +260,82 @@ describe("remote control API and SDK", () => {
     })
   })
 
+  test("creates projects and provisions orb-backed threads over the remote API", async () => {
+    const provisioned: Array<OrbManager.ProvisionInput> = []
+    const runtime = ManagedRuntime.make(
+      makeLayer(
+        defaultContextLayer,
+        fakeOrbManagerLayer((input) => provisioned.push(input)),
+      ),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    const project = await Effect.runPromise(
+      client.createProject({ name: "demo", repo_origin: "https://github.com/example/rika.git" }),
+    )
+    const projects = await Effect.runPromise(client.listProjects())
+    const summary = await Effect.runPromise(
+      client.createOrbThread({ project_id: project.project_id, thread_id: orbThreadId, mode: "smart" }),
+    )
+
+    expect(project).toMatchObject({
+      name: "demo",
+      repo_origin: "https://github.com/example/rika.git",
+      default_branch: "main",
+    })
+    expect(projects.map((item) => item.project_id)).toEqual([project.project_id])
+    expect(provisioned).toEqual([
+      {
+        thread_id: orbThreadId,
+        project_id: project.project_id,
+        workspace_root: "/workspace/rika-remote",
+      },
+    ])
+    expect(summary).toMatchObject({
+      thread_id: orbThreadId,
+      workspace_id: Ids.WorkspaceId.make(`project:${project.project_id}`),
+      orb_status: "running",
+      archived: false,
+    })
+  })
+
+  test("project remote API returns redacted summaries", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    const created = await Effect.runPromise(
+      client.createProject({
+        name: "credentialed",
+        repo_origin:
+          "https://x-access-token:leaky-token-123@github.com/example/private.git?token=query-leak-123#fragment-leak-123",
+      }),
+    )
+    await runtime.runPromise(ProjectStore.setEnv(created.project_id, "TOKEN", "env-secret-123"))
+    const stored = await runtime.runPromise(ProjectStore.get(created.project_id))
+    const projects = await Effect.runPromise(client.listProjects())
+    const payload = JSON.stringify({ created, projects })
+
+    expect(created).toMatchObject({
+      name: "credentialed",
+      repo_origin: "https://github.com/example/private.git",
+      env_keys: [],
+      secret_names: [],
+    })
+    expect(stored?.repo_origin).toBe("https://github.com/example/private.git")
+    expect(projects).toEqual([
+      {
+        ...created,
+        env_keys: ["TOKEN"],
+        updated_at: now,
+      },
+    ])
+    expect(payload).not.toContain("leaky-token-123")
+    expect(payload).not.toContain("query-leak-123")
+    expect(payload).not.toContain("fragment-leak-123")
+    expect(payload).not.toContain("env-secret-123")
+    expect(payload).not.toContain('"env"')
+  })
+
   test("local token auth blocks unauthorized HTTP calls", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const handle = await runtime.runPromise(HttpServer.serve({ port: 0, token: "secret" }))
@@ -248,6 +375,9 @@ describe("remote control API and SDK", () => {
     const routes: ReadonlyArray<{ readonly method: "GET" | "POST"; readonly path: string }> = [
       { method: "GET", path: "/v1/threads" },
       { method: "POST", path: "/v1/threads" },
+      { method: "POST", path: "/v1/orbs" },
+      { method: "GET", path: "/v1/projects" },
+      { method: "POST", path: "/v1/projects" },
       { method: "GET", path: "/v1/threads/search" },
       { method: "GET", path: `/v1/threads/${threadId}` },
       { method: "GET", path: `/v1/threads/${threadId}/preview` },

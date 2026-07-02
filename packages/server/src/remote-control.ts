@@ -1,8 +1,9 @@
 import { AgentLoop, ThreadService, WorkspaceAccess, WorkspaceIdentity } from "@rika/agent"
-import { Config } from "@rika/core"
+import { Config, IdGenerator } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
-import { ArtifactStore, Database, ThreadEventLog } from "@rika/persistence"
-import { Artifact, Common, Event, Ide, Ids, Remote } from "@rika/schema"
+import { OrbManager } from "@rika/orb"
+import { ArtifactStore, Database, ProjectStore, ThreadEventLog } from "@rika/persistence"
+import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import * as ThreadLive from "./thread-live"
 
@@ -18,6 +19,8 @@ export type RunError =
   | ThreadService.Error
   | ArtifactStore.ArtifactStoreError
   | Database.DatabaseError
+  | OrbManager.OrbProvisionError
+  | ProjectStore.ProjectStoreError
   | ThreadEventLog.ThreadEventLogError
   | IdeBridge.IdeBridgeError
   | WorkspaceAccess.RunError
@@ -25,6 +28,9 @@ export type RunError =
 export interface Interface {
   readonly backendHealth: (url: string) => Effect.Effect<Remote.BackendHealth, RunError>
   readonly createThread: (input: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
+  readonly createOrbThread: (input: Remote.CreateOrbThreadRequest) => Effect.Effect<Remote.ThreadSummary, RunError>
+  readonly listProjects: () => Effect.Effect<ReadonlyArray<Remote.ProjectSummary>, RunError>
+  readonly createProject: (input: Remote.CreateProjectRequest) => Effect.Effect<Remote.ProjectSummary, RunError>
   readonly listThreads: (
     input?: Remote.ListThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSummary>, RunError>
@@ -61,11 +67,14 @@ export const layerWithLive = Layer.effect(
     const threads = yield* ThreadService.Service
     const artifacts = yield* ArtifactStore.Service
     const config = yield* Config.Service
+    const idGenerator = yield* IdGenerator.Service
     const database = yield* Database.Service
     const eventLog = yield* ThreadEventLog.Service
     const ideBridge = yield* IdeBridge.Service
     const workspaceAccess = yield* WorkspaceAccess.Service
     const live = yield* ThreadLive.Service
+    const projects = yield* ProjectStore.Service
+    const orbManager = yield* OrbManager.Service
     const activeThreads = new Set<Ids.ThreadId>()
     const activeThreadsMutex = yield* Semaphore.make(1)
     const reserveThread = (threadId: Ids.ThreadId) =>
@@ -125,6 +134,40 @@ export const layerWithLive = Layer.effect(
         })
         yield* publishLoggedEvents(summary.thread_id, previousSequence)
         return toRemoteSummary(summary)
+      }),
+      createOrbThread: Effect.fn("RemoteControl.createOrbThread")(function* (input: Remote.CreateOrbThreadRequest) {
+        const values = yield* config.get
+        const threadId = input.thread_id ?? Ids.ThreadId.make(yield* idGenerator.next("thread"))
+        const orb = yield* orbManager.provisionForThread({
+          thread_id: threadId,
+          project_id: input.project_id,
+          workspace_root: values.workspace_root,
+        })
+        return {
+          thread_id: threadId,
+          workspace_id: WorkspaceIdentity.resolveWorkspaceId({
+            workspace_root: values.workspace_root,
+            project_id: input.project_id,
+          }),
+          diff: { additions: 0, modifications: 0, deletions: 0 },
+          orb_status: orb.status,
+          archived: false,
+          created_at: orb.created_at,
+          updated_at: orb.last_active_at,
+        }
+      }),
+      listProjects: Effect.fn("RemoteControl.listProjects")(function* () {
+        const records = yield* projects.list()
+        return records.map(toProjectSummary)
+      }),
+      createProject: Effect.fn("RemoteControl.createProject")(function* (input: Remote.CreateProjectRequest) {
+        const project = yield* projects.create({
+          name: input.name,
+          repo_origin: publicRepoOrigin(input.repo_origin),
+          ...(input.default_branch === undefined ? {} : { default_branch: input.default_branch }),
+          ...(input.template_id === undefined ? {} : { template_id: input.template_id }),
+        })
+        return toProjectSummary(project)
       }),
       listThreads: Effect.fn("RemoteControl.listThreads")(function* (input: Remote.ListThreadsRequest = {}) {
         if (input.workspace_id !== undefined && input.user_id !== undefined) {
@@ -330,6 +373,25 @@ export const createThread = Effect.fn("RemoteControl.createThread.call")(functio
   return yield* service.createThread(input)
 })
 
+export const createOrbThread = Effect.fn("RemoteControl.createOrbThread.call")(function* (
+  input: Remote.CreateOrbThreadRequest,
+) {
+  const service = yield* Service
+  return yield* service.createOrbThread(input)
+})
+
+export const listProjects = Effect.fn("RemoteControl.listProjects.call")(function* () {
+  const service = yield* Service
+  return yield* service.listProjects()
+})
+
+export const createProject = Effect.fn("RemoteControl.createProject.call")(function* (
+  input: Remote.CreateProjectRequest,
+) {
+  const service = yield* Service
+  return yield* service.createProject(input)
+})
+
 export const backendHealth = Effect.fn("RemoteControl.backendHealth.call")(function* (url: string) {
   const service = yield* Service
   return yield* service.backendHealth(url)
@@ -490,3 +552,28 @@ const toRemoteSummary = (summary: ThreadService.ThreadRecord["summary"]): Remote
   created_at: Common.TimestampMillis.make(summary.created_at),
   updated_at: Common.TimestampMillis.make(summary.updated_at),
 })
+
+const toProjectSummary = (project: Orb.ProjectRecord): Remote.ProjectSummary => ({
+  project_id: project.project_id,
+  name: project.name,
+  repo_origin: publicRepoOrigin(project.repo_origin),
+  default_branch: project.default_branch,
+  template_id: project.template_id,
+  env_keys: Object.keys(project.env).toSorted(),
+  secret_names: project.secret_names,
+  created_at: project.created_at,
+  updated_at: project.updated_at,
+})
+
+const publicRepoOrigin = (repoOrigin: string): string => {
+  try {
+    const url = new URL(repoOrigin)
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.hash = ""
+    return url.toString()
+  } catch {
+    return repoOrigin
+  }
+}

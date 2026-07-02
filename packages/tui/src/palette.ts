@@ -13,6 +13,28 @@ export interface Command {
 const leadingCommands: ReadonlyArray<Command> = [
   { id: "thread-switch", category: "thread", action: "switch", hint: "switch threads", command: "/switch-thread" },
   {
+    id: "orb-toggle",
+    category: "orb",
+    action: "toggle",
+    hint: "toggle orb-backed thread creation",
+    command: "/orb toggle",
+    key: "Ctrl+X R",
+  },
+  {
+    id: "project-select",
+    category: "project",
+    action: "select",
+    hint: "choose the project for the next orb-backed thread",
+    command: "/project select",
+  },
+  {
+    id: "project-create",
+    category: "project",
+    action: "create",
+    hint: "create a project for orb-backed threads",
+    command: "/project create",
+  },
+  {
     id: "amp-relaunch",
     category: "amp",
     action: "relaunch (quit & reopen)",

@@ -140,6 +140,31 @@ describe("TUI remote session", () => {
       projectWorkspaceId,
     ])
   })
+
+  test("uses the orb-created project workspace identity for later turns", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+    const projectWorkspaceId = Ids.WorkspaceId.make("project:project_demo")
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart" }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(
+          Adapter.memoryLayer({
+            rendered,
+            keys: ["/project select demo", "/orb toggle", "/new", "after orb", "/exit"].flatMap(line),
+          }),
+        ),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(backend.turns).toEqual(["after orb"])
+    expect(backend.workspaceIds.at(-1)).toBe(projectWorkspaceId)
+    expect(rendered.some((state) => state.remoteArm.enabled)).toBe(true)
+    expect(rendered.at(-1)?.remoteArm.enabled).toBe(false)
+  })
 })
 
 interface FakeBackend {
@@ -177,6 +202,18 @@ const fakeBackend = (): FakeBackend => {
         threads.set(threadId, { summary: threadSummary, events: [threadCreated(threadId, 1)] })
         return threadSummary
       }),
+    createOrbThread: (input) =>
+      Effect.sync(() => {
+        const threadId = input.thread_id ?? Ids.ThreadId.make(`thread_remote_orb_${nextThread++}`)
+        const threadSummary = summary(threadId, undefined, Ids.WorkspaceId.make(`project:${input.project_id}`))
+        threads.set(threadId, {
+          summary: threadSummary,
+          events: [threadCreated(threadId, 1, threadSummary.workspace_id)],
+        })
+        return threadSummary
+      }),
+    listProjects: () => Effect.succeed([projectRecord("demo", "https://github.com/example/rika.git")]),
+    createProject: (input) => Effect.succeed(projectRecord(input.name, input.repo_origin)),
     listThreads: (input) =>
       Effect.sync(() => {
         workspaceIds.push(input?.workspace_id)
@@ -248,7 +285,7 @@ const fakeBackend = (): FakeBackend => {
         const record = threads.get(input.thread_id)
         if (record !== undefined) {
           record.events.push(...events)
-          record.summary = summary(input.thread_id, "remote response")
+          record.summary = summary(input.thread_id, "remote response", input.workspace_id ?? workspaceId)
         }
         for (const event of events) {
           for (const subscriber of subscribers) subscriber(event)
@@ -272,6 +309,18 @@ const fakeBackend = (): FakeBackend => {
 }
 
 const emptyIdeStatus = { connected: false, capabilities: [], workspace_roots: [] } as const
+
+const projectRecord = (name: string, repoOrigin: string): Remote.ProjectSummary => ({
+  project_id: Ids.ProjectId.make(`project_${name}`),
+  name,
+  repo_origin: repoOrigin,
+  default_branch: "main",
+  template_id: null,
+  env_keys: [],
+  secret_names: [],
+  created_at: Common.TimestampMillis.make(1),
+  updated_at: Common.TimestampMillis.make(2),
+})
 
 const setArchived = (
   threads: Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>,
@@ -319,10 +368,14 @@ const base = (threadId: Ids.ThreadId, sequence: number, turnId?: Ids.TurnId): Om
   created_at: Common.TimestampMillis.make(sequence),
 })
 
-const threadCreated = (threadId: Ids.ThreadId, sequence: number): Event.ThreadCreated => ({
+const threadCreated = (
+  threadId: Ids.ThreadId,
+  sequence: number,
+  inputWorkspaceId: Ids.WorkspaceId = workspaceId,
+): Event.ThreadCreated => ({
   ...base(threadId, sequence),
   type: "thread.created",
-  data: { workspace_id: workspaceId },
+  data: { workspace_id: inputWorkspaceId },
 })
 
 const turnStarted = (threadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnStarted => ({

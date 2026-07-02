@@ -115,6 +115,11 @@ export interface ThreadSwitcherState {
   readonly items: ReadonlyArray<ThreadSwitcherItem>
 }
 
+export interface RemoteArmState {
+  readonly enabled: boolean
+  readonly project_name?: string
+}
+
 export interface ViewState {
   readonly thread_id: Ids.ThreadId
   readonly workspace_path: string
@@ -152,6 +157,7 @@ export interface ViewState {
   readonly modepicker: ModePickerState
   readonly filepicker: FilePickerState
   readonly threadswitcher: ThreadSwitcherState
+  readonly remoteArm: RemoteArmState
   readonly shortcuts_open: boolean
 }
 
@@ -169,6 +175,7 @@ const closedPalette: PaletteState = { open: false, query: "", selected: 0 }
 const closedModePicker: ModePickerState = { open: false, selected: 0 }
 const closedFilePicker: FilePickerState = { open: false, query: "", selected: 0, kind: "file", items: [] }
 const closedThreadSwitcher: ThreadSwitcherState = { open: false, query: "", selected: 0, items: [] }
+const remoteArmDefault: RemoteArmState = { enabled: false }
 const hiddenThinking: ThinkingState = { text: "", visible: false }
 
 const interactionDefaults = {
@@ -186,6 +193,7 @@ const interactionDefaults = {
   modepicker: closedModePicker,
   filepicker: closedFilePicker,
   threadswitcher: closedThreadSwitcher,
+  remoteArm: remoteArmDefault,
   palette_open: false,
   shortcuts_open: false,
 }
@@ -350,6 +358,21 @@ export const withPalette = (state: ViewState): ViewState => ({
   palette: { open: true, query: "", selected: 0 },
   shortcuts_open: false,
   notice: `Command palette: /threads, /relaunch, /help, /welcome, /credits, /version, /exit, /ast-grep, /mcp, /mode rush, /mode smart, /mode deep1, /mode deep2, /mode deep3`,
+})
+
+export const toggleRemoteArm = (state: ViewState): ViewState => ({
+  ...state,
+  remoteArm: { ...state.remoteArm, enabled: !state.remoteArm.enabled },
+})
+
+export const withRemoteProject = (state: ViewState, projectName: string): ViewState => ({
+  ...state,
+  remoteArm: { ...state.remoteArm, project_name: projectName },
+})
+
+export const withRemoteArm = (state: ViewState, remoteArm: RemoteArmState): ViewState => ({
+  ...state,
+  remoteArm,
 })
 
 const nextReasoningMode = (mode: Config.Mode): Config.Mode =>
@@ -1129,6 +1152,11 @@ const updateCard = (state: ViewState, card: Card): ViewState => ({
   cards: upsertCard(state.cards, card),
   entries: upsertCardEntry(state.entries, card),
 })
+
+export const withSystemCard = (
+  state: ViewState,
+  input: { readonly id: string; readonly title: string; readonly subtitle?: string },
+): ViewState => updateCard(state, systemCard(input.title, input.subtitle ?? "", input.id))
 
 const messageText = (message: Message.Message) => Message.displayText(message)
 

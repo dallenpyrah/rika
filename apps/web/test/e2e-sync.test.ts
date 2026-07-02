@@ -3,7 +3,16 @@ import { AgentLoop, ContextResolver, SkillRegistry, ThreadService, ToolExecutor,
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Provider, Router } from "@rika/llm"
-import { ArtifactStore, Database, Migration, ThreadEventLog, ThreadProjection, WorkspaceStore } from "@rika/persistence"
+import { OrbManager } from "@rika/orb"
+import {
+  ArtifactStore,
+  Database,
+  Migration,
+  ProjectStore,
+  ThreadEventLog,
+  ThreadProjection,
+  WorkspaceStore,
+} from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Common, Ids } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
@@ -85,11 +94,18 @@ const makeLayer = () => {
   const databaseLayer = Database.memoryLayer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(Time.fixedLayer(now)),
+    Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+  )
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
     artifactLayer,
     workspaceStoreLayer,
+    projectStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -118,12 +134,35 @@ const makeLayer = () => {
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
+    fakeOrbManagerLayer(),
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
   const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
   const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
+
+const fakeOrbManagerLayer = () =>
+  Layer.succeed(
+    OrbManager.Service,
+    OrbManager.Service.of({
+      provisionForThread: (input) =>
+        Effect.succeed({
+          orb_id: Ids.OrbId.make("orb_web_e2e_sync"),
+          thread_id: input.thread_id,
+          project_id: input.project_id,
+          sandbox_id: null,
+          status: "running",
+          base_commit: null,
+          endpoint_url: null,
+          created_at: now,
+          last_active_at: now,
+        }),
+      pause: () => Effect.never,
+      resume: () => Effect.never,
+      kill: () => Effect.never,
+    }),
+  )
 
 const client = (baseUrl: string) => Client.make(Client.fetchTransport({ base_url: baseUrl }))
 

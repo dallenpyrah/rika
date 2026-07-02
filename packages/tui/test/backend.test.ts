@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Common, Event, Ids, Message } from "@rika/schema"
+import { Ids } from "@rika/schema"
 import { Backend } from "../src/index"
-import { ViewState } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_backend_switcher")
 
@@ -23,26 +22,3 @@ describe("Backend thread options", () => {
     expect(option.diff).toEqual({ additions: 3, modifications: 1, deletions: 1 })
   })
 })
-
-const messageAdded = (sequence: number, content: string): Event.MessageAdded => {
-  const turnId = Ids.TurnId.make("turn_backend_inspect")
-  return {
-    id: Ids.EventId.make(`event_backend_inspect_${sequence}`),
-    sequence,
-    thread_id: threadId,
-    turn_id: turnId,
-    version: 1,
-    type: "message.added",
-    created_at: Common.TimestampMillis.make(sequence),
-    data: {
-      message: {
-        id: Ids.MessageId.make(`message_backend_inspect_${sequence}`),
-        thread_id: threadId,
-        turn_id: turnId,
-        role: "user",
-        content: [Message.text(content)],
-        created_at: Common.TimestampMillis.make(sequence),
-      },
-    },
-  }
-}

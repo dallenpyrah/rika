@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test"
 import { AgentLoop, ThreadService, WorkspaceAccess } from "@rika/agent"
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
-import { SandboxClientFake } from "@rika/orb"
+import { OrbManager, SandboxClientFake } from "@rika/orb"
 import {
   ArtifactStore,
   OrbStore,
   Database,
   Migration,
+  ProjectStore,
   ThreadEventLog,
   ThreadProjection,
   WorkspaceStore,
@@ -363,11 +364,18 @@ const makeRemoteControlLiveLayer = () => {
   const databaseLayer = Database.memoryLayer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(Time.fixedLayer(now)),
+    Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+  )
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
     artifactLayer,
     workspaceStoreLayer,
+    projectStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -395,9 +403,32 @@ const makeRemoteControlLiveLayer = () => {
     Layer.provideMerge(agentLayer),
     Layer.provideMerge(IdeBridge.layer),
     Layer.provideMerge(liveLayer),
+    Layer.provideMerge(remoteOrbManagerLayer()),
   )
   return Layer.mergeAll(migratedStorageLayer, liveLayer, remoteLayer)
 }
+
+const remoteOrbManagerLayer = () =>
+  Layer.succeed(
+    OrbManager.Service,
+    OrbManager.Service.of({
+      provisionForThread: (input) =>
+        Effect.succeed({
+          orb_id: Ids.OrbId.make("orb_orb_mirror_remote"),
+          thread_id: input.thread_id,
+          project_id: input.project_id,
+          sandbox_id: null,
+          status: "running",
+          base_commit: null,
+          endpoint_url: null,
+          created_at: now,
+          last_active_at: now,
+        }),
+      pause: () => Effect.never,
+      resume: () => Effect.never,
+      kill: () => Effect.never,
+    }),
+  )
 
 const makeRemoteBackendLiveLayer = () => {
   const remoteLayer = makeRemoteControlLiveLayer()

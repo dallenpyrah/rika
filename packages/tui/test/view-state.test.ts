@@ -9,6 +9,19 @@ const base = (): ViewState.ViewState =>
   ViewState.initial({ thread_id: threadId, workspace_path: "/workspace/rika", mode: "smart" })
 
 describe("ViewState input editing", () => {
+  test("remote arm is session scoped and toggles on demand", () => {
+    const idle = base()
+    expect(idle.remoteArm).toEqual({ enabled: false })
+
+    const armed = ViewState.toggleRemoteArm(idle)
+    const selected = ViewState.withRemoteProject(armed, "demo")
+    const disarmed = ViewState.toggleRemoteArm(selected)
+
+    expect(armed.remoteArm).toEqual({ enabled: true })
+    expect(selected.remoteArm).toEqual({ enabled: true, project_name: "demo" })
+    expect(disarmed.remoteArm).toEqual({ enabled: false, project_name: "demo" })
+  })
+
   test("insertText, cursor movement, and backspace are pure", () => {
     let state = base()
     state = ViewState.insertText(state, "hello")

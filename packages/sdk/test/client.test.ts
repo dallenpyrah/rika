@@ -5,6 +5,7 @@ import { Client } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_sdk_client")
 const workspaceId = Ids.WorkspaceId.make("workspace_sdk_client")
+const projectId = Ids.ProjectId.make("project_sdk_client")
 const turnId = Ids.TurnId.make("turn_sdk_client")
 const eventId = Ids.EventId.make("event_sdk_client")
 const ideClientId = Ids.IdeClientId.make("ide_sdk_client")
@@ -101,6 +102,71 @@ describe("SDK client", () => {
 
     expect(preview).toEqual(record)
     expect(calls).toEqual([{ method: "GET", path: "/v1/threads/thread_sdk_client/preview?limit=80" }])
+  })
+
+  test("uses shared schemas for project and orb-thread requests", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const project: Remote.ProjectSummary = {
+      project_id: projectId,
+      name: "demo",
+      repo_origin: "https://github.com/example/rika.git",
+      default_branch: "main",
+      template_id: null,
+      env_keys: [],
+      secret_names: [],
+      created_at: now,
+      updated_at: now,
+    }
+    const summary: Remote.ThreadSummary = {
+      thread_id: threadId,
+      workspace_id: Ids.WorkspaceId.make("project:project_sdk_client"),
+      diff: { additions: 0, modifications: 0, deletions: 0 },
+      orb_status: "running",
+      archived: false,
+      created_at: now,
+      updated_at: now,
+    }
+    const client = Client.make({
+      requestJson: (input) => {
+        calls.push(input)
+        if (input.method === "GET" && input.path === "/v1/projects") {
+          return Effect.succeed(Codec.encode(Schema.Array(Remote.ProjectSummary))([project]))
+        }
+        if (input.method === "POST" && input.path === "/v1/projects") {
+          return Effect.succeed(Codec.encode(Remote.ProjectSummary)(project))
+        }
+        if (input.method === "POST" && input.path === "/v1/orbs") {
+          return Effect.succeed(Codec.encode(Remote.ThreadSummary)(summary))
+        }
+        return Effect.fail(new Client.SdkError({ message: `unexpected ${input.path}`, operation: "requestJson" }))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    const projects = await Effect.runPromise(client.listProjects())
+    const createdProject = await Effect.runPromise(
+      client.createProject({ name: "demo", repo_origin: "https://github.com/example/rika.git" }),
+    )
+    const createdOrb = await Effect.runPromise(
+      client.createOrbThread({ project_id: projectId, thread_id: threadId, mode: "smart" }),
+    )
+
+    expect(projects).toEqual([project])
+    expect(createdProject).toEqual(project)
+    expect(createdOrb).toEqual(summary)
+    expect(calls).toEqual([
+      { method: "GET", path: "/v1/projects" },
+      {
+        method: "POST",
+        path: "/v1/projects",
+        body: { name: "demo", repo_origin: "https://github.com/example/rika.git" },
+      },
+      {
+        method: "POST",
+        path: "/v1/orbs",
+        body: { project_id: projectId, thread_id: threadId, mode: "smart" },
+      },
+    ])
   })
 
   test("fetch transport sends bearer auth and decodes API errors", async () => {

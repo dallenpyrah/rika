@@ -74,6 +74,28 @@ export interface ThreadOption {
   readonly diff?: ViewState.ThreadDiffStats
 }
 
+export interface ProjectOption {
+  readonly project_id: Ids.ProjectId
+  readonly name: string
+  readonly repo_origin: string
+}
+
+export interface CreateProjectInput {
+  readonly name: string
+  readonly repo_origin: string
+}
+
+export interface CreateOrbThreadInput {
+  readonly project_id: Ids.ProjectId
+  readonly workspace_path: string
+  readonly mode: Config.Mode
+}
+
+export interface CreatedOrbThread {
+  readonly thread_id: Ids.ThreadId
+  readonly workspace_id: Ids.WorkspaceId
+}
+
 export interface ThreadOptionInput {
   readonly thread_id: Ids.ThreadId
   readonly title_text?: string
@@ -105,6 +127,9 @@ export interface SessionBackend<E> {
   readonly subscribeThreadEvents?: (input: ThreadEventsRequest) => Stream.Stream<Event.Event, E>
   readonly cancelTurn: (input: CancelRequest) => Effect.Effect<void, E>
   readonly runCommand: (context: CommandContext, command: string) => Effect.Effect<CommandResult, E>
+  readonly listProjects?: (input: { readonly workspace_path: string }) => Effect.Effect<ReadonlyArray<ProjectOption>, E>
+  readonly createProject?: (input: CreateProjectInput) => Effect.Effect<ProjectOption, E>
+  readonly createOrbThread?: (input: CreateOrbThreadInput) => Effect.Effect<CreatedOrbThread, E>
   readonly listThreads: (input: {
     readonly workspace_path: string
     readonly workspace_id: Ids.WorkspaceId

@@ -84,6 +84,27 @@ export const CreateOrbThreadRequest = Schema.Struct({
   mode: Schema.optional(AgentMode),
 }).annotate({ identifier: "Rika.Remote.CreateOrbThreadRequest" })
 
+export interface CreateProjectRequest extends Schema.Schema.Type<typeof CreateProjectRequest> {}
+export const CreateProjectRequest = Schema.Struct({
+  name: Schema.String,
+  repo_origin: Schema.String,
+  default_branch: Schema.optional(Schema.String),
+  template_id: Schema.optional(Schema.NullOr(Schema.String)),
+}).annotate({ identifier: "Rika.Remote.CreateProjectRequest" })
+
+export interface ProjectSummary extends Schema.Schema.Type<typeof ProjectSummary> {}
+export const ProjectSummary = Schema.Struct({
+  project_id: ProjectId,
+  name: Schema.String,
+  repo_origin: Schema.String,
+  default_branch: Schema.String,
+  template_id: Schema.NullOr(Schema.String),
+  env_keys: Schema.Array(Schema.String),
+  secret_names: Schema.Array(Schema.String),
+  created_at: TimestampMillis,
+  updated_at: TimestampMillis,
+}).annotate({ identifier: "Rika.Remote.ProjectSummary" })
+
 export interface ListThreadsRequest extends Schema.Schema.Type<typeof ListThreadsRequest> {}
 export const ListThreadsRequest = Schema.Struct({
   include_archived: Schema.optional(Schema.Boolean),

@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Stream } from "effect"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type * as Backend from "../src/backend"
 import type * as Adapter from "../src/adapter"
 import { Controller, Keys, ViewState } from "../src/index"
 
 const workspacePath = "/workspace/rika-controller-test"
 const threadId = Ids.ThreadId.make("thread_controller")
+const projectId = Ids.ProjectId.make("project_controller")
+const orbThreadId = Ids.ThreadId.make("thread_controller_orb")
 
 type Recorded = Array<ViewState.ViewState>
 
@@ -18,6 +22,8 @@ interface Harness {
   readonly commands: Array<string>
   readonly opened: Array<Adapter.OpenFileInput>
   readonly previewLoads: Array<Ids.ThreadId>
+  readonly createdProjects: Array<Backend.CreateProjectInput>
+  readonly orbThreads: Array<Backend.CreateOrbThreadInput>
 }
 
 const run = (
@@ -29,6 +35,7 @@ const run = (
     workspacePath?: string
     turnEvents?: (content: string) => ReadonlyArray<Event.Event>
     threads?: ReadonlyArray<Backend.ThreadOption>
+    projects?: ReadonlyArray<Backend.ProjectOption>
   } = {},
 ) => {
   const runWorkspacePath = options.workspacePath ?? workspacePath
@@ -38,6 +45,8 @@ const run = (
   const commands: Array<string> = []
   const opened: Array<Adapter.OpenFileInput> = []
   const previewLoads: Array<Ids.ThreadId> = []
+  const createdProjects: Array<Backend.CreateProjectInput> = []
+  const orbThreads: Array<Backend.CreateOrbThreadInput> = []
   let turnCount = 0
 
   const adapter: Adapter.Adapter = {
@@ -76,6 +85,21 @@ const run = (
           return { ...context, state: ViewState.withNotice(context.state, "Goodbye."), exit: true }
         return { ...context, state: ViewState.withNotice(context.state, `Ran ${command}`), exit: false }
       }),
+    listProjects: () => Effect.succeed(options.projects ?? []),
+    createProject: (input) =>
+      Effect.sync(() => {
+        createdProjects.push(input)
+        return {
+          project_id: Ids.ProjectId.make(`project_${input.name}`),
+          name: input.name,
+          repo_origin: input.repo_origin,
+        }
+      }),
+    createOrbThread: (input) =>
+      Effect.sync(() => {
+        orbThreads.push(input)
+        return { thread_id: orbThreadId, workspace_id: Ids.WorkspaceId.make(`project:${input.project_id}`) }
+      }),
     listThreads: () => Effect.succeed(options.threads ?? []),
     loadThreadPreview: ({ thread_id, workspace_path, mode }) =>
       Effect.sync(() => {
@@ -105,6 +129,8 @@ const run = (
     commands,
     opened,
     previewLoads,
+    createdProjects,
+    orbThreads,
   }))
 }
 
@@ -126,6 +152,12 @@ describe("Controller", () => {
   test("Ctrl+O opens the command palette", async () => {
     const { rendered } = await run([Keys.ctrl("o"), ...quit])
     expect(rendered.some((state) => state.palette.open)).toBe(true)
+  })
+
+  test("leader r toggles orb-backed thread arming", async () => {
+    const { rendered } = await run([Keys.ctrl("x"), Keys.make({ name: "r", sequence: "r" }), ...quit])
+
+    expect(rendered.some((state) => state.remoteArm.enabled)).toBe(true)
   })
 
   test("Alt+T expands the focused tool card", async () => {
@@ -291,6 +323,55 @@ describe("Controller", () => {
     expect(commands).toContain("/mode rush")
   })
 
+  test("project commands select and create the project for the next orb-backed thread", async () => {
+    const workspace = await tempGitWorkspace("https://github.com/example/rika.git")
+    const project: Backend.ProjectOption = {
+      project_id: projectId,
+      name: "demo",
+      repo_origin: "https://github.com/example/rika.git",
+    }
+    const { rendered, createdProjects } = await run(
+      [
+        ...Keys.fromString("/project select demo"),
+        Keys.enter,
+        ...Keys.fromString("/project create fresh"),
+        Keys.enter,
+        ...quit,
+      ],
+      { projects: [project], workspacePath: workspace },
+    )
+
+    expect(rendered.some((state) => state.remoteArm.project_name === "demo")).toBe(true)
+    expect(createdProjects).toEqual([{ name: "fresh", repo_origin: "https://github.com/example/rika.git" }])
+    expect(rendered.some((state) => state.remoteArm.project_name === "fresh")).toBe(true)
+  })
+
+  test("armed new thread provisions an orb-backed thread through the backend", async () => {
+    const project: Backend.ProjectOption = {
+      project_id: projectId,
+      name: "demo",
+      repo_origin: "https://github.com/example/rika.git",
+    }
+    const { rendered, commands, orbThreads } = await run(
+      [
+        ...Keys.fromString("/project select demo"),
+        Keys.enter,
+        ...Keys.fromString("/orb toggle"),
+        Keys.enter,
+        ...Keys.fromString("/new"),
+        Keys.enter,
+        ...quit,
+      ],
+      { projects: [project] },
+    )
+
+    expect(commands).not.toContain("/new")
+    expect(orbThreads).toEqual([{ project_id: projectId, workspace_path: workspacePath, mode: "smart" }])
+    expect(rendered.some((state) => state.thread_id === orbThreadId)).toBe(true)
+    expect(rendered.at(-1)?.remoteArm.enabled).toBe(false)
+    expect(rendered.some((state) => state.cards.some((card) => card.title.includes("Orb")))).toBe(true)
+  })
+
   test("submit while busy queues the next prompt and Enter Enter steers it quietly", async () => {
     const keys = [
       ...Keys.fromString("first"),
@@ -411,6 +492,19 @@ const turnEvents = (content: string, response: string): ReadonlyArray<Event.Even
     messageAdded(5, response, turnId, "assistant"),
     turnCompleted(turnId, 6),
   ]
+}
+
+const tempGitWorkspace = async (origin: string): Promise<string> => {
+  const workspace = mkdtempSync(join(tmpdir(), "rika-controller-git-"))
+  await runGit(workspace, ["init"])
+  await runGit(workspace, ["remote", "add", "origin", origin])
+  return workspace
+}
+
+const runGit = async (cwd: string, args: ReadonlyArray<string>) => {
+  const subprocess = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  const [exitCode, stderr] = await Promise.all([subprocess.exited, new Response(subprocess.stderr).text()])
+  if (exitCode !== 0) throw new Error(stderr)
 }
 
 const eventBase = (sequence: number, turnId?: Ids.TurnId): Omit<Event.Event, "type" | "data"> => ({

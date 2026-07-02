@@ -24,6 +24,7 @@
     "@rika/core": "workspace:*",
     "@rika/ide": "workspace:*",
     "@rika/llm": "workspace:*",
+    "@rika/orb": "workspace:*",
     "@rika/persistence": "workspace:*",
     "@rika/server": "workspace:*",
     "@types/bun": "catalog:",

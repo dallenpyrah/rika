@@ -19,6 +19,11 @@ describe("palette.filter", () => {
       "ast-grep-outline-status",
     ])
     expect(Palette.filter("switch threads", "smart", false).map((command) => command.id)).toEqual(["thread-switch"])
+    expect(Palette.filter("orb toggle", "smart", false).map((command) => command.id)).toEqual(["orb-toggle"])
+    expect(Palette.filter("project", "smart", false).map((command) => command.id)).toEqual([
+      "project-select",
+      "project-create",
+    ])
   })
 
   test("does not advertise IDE connection commands", () => {

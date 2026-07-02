@@ -706,6 +706,9 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
   return {
     backendHealth: () => request({}, (remote) => remote.backendHealth()),
     createThread: (thread) => request(endpointInputFor(thread?.thread_id), (remote) => remote.createThread(thread)),
+    createOrbThread: (thread) => request({}, (remote) => remote.createOrbThread(thread)),
+    listProjects: () => request({}, (remote) => remote.listProjects()),
+    createProject: (project) => request({}, (remote) => remote.createProject(project)),
     listThreads: (thread) => request({}, (remote) => remote.listThreads(thread)),
     openThread: (threadId, userId) => request({ thread_id: threadId }, (remote) => remote.openThread(threadId, userId)),
     previewThread: (threadId, preview) =>
@@ -992,6 +995,12 @@ export const serverLiveLayer = (
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
   const orbStoreLayer = OrbStore.layer.pipe(
     Layer.provideMerge(databaseLayer),
     Layer.provideMerge(timeLayer),
@@ -1007,6 +1016,7 @@ export const serverLiveLayer = (
     artifactLayer,
     mcpApprovalLayer,
     workspaceStoreLayer,
+    projectStoreLayer,
     orbStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
@@ -1051,11 +1061,17 @@ export const serverLiveLayer = (
     diagnosticsLayer,
     telemetryLayer,
   )
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
   const remoteLayer = RemoteControl.layerWithLive.pipe(
     Layer.provideMerge(agentLayer),
     Layer.provideMerge(baseLayer),
+    Layer.provideMerge(managerLayer),
     Layer.provideMerge(threadLiveLayer),
   )
   const orbMirrorLayer = OrbMirror.layer.pipe(
@@ -1236,8 +1252,10 @@ export type ServerLayerOutput =
   | PluginHost.Service
   | RemoteControl.Service
   | Router.Service
+  | OrbManager.Service
   | OrbMirror.Service
   | OrbStore.Service
+  | ProjectStore.Service
   | SandboxClient.Service
   | Server.Service
   | SkillRegistry.Service

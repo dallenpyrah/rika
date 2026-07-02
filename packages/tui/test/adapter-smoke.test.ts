@@ -135,6 +135,23 @@ describe("adapter Surface (headless)", () => {
     }
   })
 
+  test("armed orb-backed thread creation renders an orb status indicator", async () => {
+    const setup = await createTestRenderer({ width: 120, height: 24 })
+    try {
+      const surface = new Adapter.Surface(setup.renderer)
+      const state = ViewState.toggleRemoteArm(
+        ViewState.initial({ thread_id: threadId, workspace_path: "/workspace/rika", mode: "smart" }),
+      )
+
+      surface.update(state)
+      await setup.renderOnce()
+
+      expect(setup.captureCharFrame()).toContain("[orb]")
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
   test("unselected queued prompts show only the steer hint", async () => {
     const setup = await createTestRenderer({ width: 120, height: 24 })
     try {

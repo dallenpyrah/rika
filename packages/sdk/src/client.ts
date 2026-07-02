@@ -27,6 +27,9 @@ export class SdkError extends Schema.TaggedErrorClass<SdkError>()("SdkError", {
 export interface Interface {
   readonly backendHealth: () => Effect.Effect<Remote.BackendHealth, SdkError>
   readonly createThread: (input?: Remote.CreateThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly createOrbThread: (input: Remote.CreateOrbThreadRequest) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly listProjects: () => Effect.Effect<ReadonlyArray<Remote.ProjectSummary>, SdkError>
+  readonly createProject: (input: Remote.CreateProjectRequest) => Effect.Effect<Remote.ProjectSummary, SdkError>
   readonly listThreads: (
     input?: Remote.ListThreadsRequest,
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSummary>, SdkError>
@@ -71,6 +74,18 @@ export const make = (transport: Transport): Interface => ({
     transport
       .requestJson({ method: "POST", path: "/v1/threads", body: Codec.encode(Remote.CreateThreadRequest)(input) })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "createThread"))),
+  createOrbThread: (input: Remote.CreateOrbThreadRequest) =>
+    transport
+      .requestJson({ method: "POST", path: "/v1/orbs", body: Codec.encode(Remote.CreateOrbThreadRequest)(input) })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "createOrbThread"))),
+  listProjects: () =>
+    transport
+      .requestJson({ method: "GET", path: "/v1/projects" })
+      .pipe(Effect.flatMap(decodeEffect(Schema.Array(Remote.ProjectSummary), "listProjects"))),
+  createProject: (input: Remote.CreateProjectRequest) =>
+    transport
+      .requestJson({ method: "POST", path: "/v1/projects", body: Codec.encode(Remote.CreateProjectRequest)(input) })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ProjectSummary, "createProject"))),
   listThreads: (input: Remote.ListThreadsRequest = {}) =>
     transport
       .requestJson({ method: "GET", path: `/v1/threads${query(input)}` })

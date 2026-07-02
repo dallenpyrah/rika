@@ -46,6 +46,7 @@ export type Action =
   | { readonly _tag: "ToggleDetails" }
   | { readonly _tag: "CycleReasoning" }
   | { readonly _tag: "ToggleFastMode" }
+  | { readonly _tag: "ToggleRemoteArm" }
   | { readonly _tag: "OpenEditor" }
   | { readonly _tag: "PasteImage" }
   | { readonly _tag: "ForceInterrupt" }
@@ -60,7 +61,7 @@ export type Action =
   | { readonly _tag: "NavNextMessage" }
   | { readonly _tag: "EditMessage" }
 
-export type Pending = "ctrl-c" | "esc" | "enter"
+export type Pending = "ctrl-c" | "esc" | "enter" | "leader"
 
 export type Resolution =
   | { readonly _tag: "Action"; readonly action: Action }
@@ -103,6 +104,10 @@ const resolveChord = (current: Pending, key: Keys.Key): Resolution | undefined =
     if (isEscape(key)) return action({ _tag: "ForceInterrupt" })
     return undefined
   }
+  if (current === "leader") {
+    if (key.name === "r" || key.sequence.toLowerCase() === "r") return action({ _tag: "ToggleRemoteArm" })
+    return undefined
+  }
   if (isEnter(key) && !key.shift) return action({ _tag: "Steer" })
   return undefined
 }
@@ -132,6 +137,7 @@ const resolveInput = (context: Context, key: Keys.Key): Resolution => {
   if (key.name === "paste" && key.sequence.length > 0) return action({ _tag: "Paste", text: key.sequence })
 
   if (key.ctrl && key.name === "c") return pending("ctrl-c")
+  if (key.ctrl && key.name === "x") return pending("leader")
   if (key.ctrl && key.name === "o") return action({ _tag: "OpenPalette" })
   if (key.ctrl && key.name === "s") return action({ _tag: "OpenModePicker" })
   if (key.ctrl && key.name === "g") return action({ _tag: "OpenEditor" })

@@ -163,6 +163,20 @@ const dispatch = (
       return yield* remote.createThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
+    if (request.method === "POST" && segments[1] === "orbs" && segments.length === 2) {
+      const input = yield* decodeBody(request, Remote.CreateOrbThreadRequest)
+      return yield* remote.createOrbThread(input).pipe(jsonEffect(Remote.ThreadSummary))
+    }
+
+    if (request.method === "GET" && segments[1] === "projects" && segments.length === 2) {
+      return yield* remote.listProjects().pipe(jsonEffect(Schema.Array(Remote.ProjectSummary)))
+    }
+
+    if (request.method === "POST" && segments[1] === "projects" && segments.length === 2) {
+      const input = yield* decodeBody(request, Remote.CreateProjectRequest)
+      return yield* remote.createProject(input).pipe(jsonEffect(Remote.ProjectSummary))
+    }
+
     if (request.method === "GET" && segments[1] === "threads" && segments[2] === "search" && segments.length === 3) {
       const input = searchThreadsRequest(url)
       return yield* remote.searchThreads(input).pipe(jsonEffect(Schema.Array(Remote.ThreadSearchResult)))

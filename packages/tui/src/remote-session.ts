@@ -117,6 +117,12 @@ const makeBackend = (client: Client.Interface): Backend.SessionBackend<RunError>
     client.subscribeThreadEvents({ thread_id, ...(after_sequence === undefined ? {} : { after_sequence }) }),
   cancelTurn: ({ thread_id, turn_id }) => client.interruptTurn({ thread_id, turn_id }).pipe(Effect.asVoid),
   runCommand: (context, command) => handleCommand(client, context, command),
+  listProjects: () => client.listProjects().pipe(Effect.map((projects) => projects.map(projectOptionFromRecord))),
+  createProject: (input) => client.createProject(input).pipe(Effect.map(projectOptionFromRecord)),
+  createOrbThread: ({ project_id, mode }) =>
+    client
+      .createOrbThread({ project_id, mode })
+      .pipe(Effect.map((summary) => ({ thread_id: summary.thread_id, workspace_id: summary.workspace_id }))),
   listThreads: ({ workspace_id }) =>
     client.listThreads({ workspace_id }).pipe(Effect.map((summaries) => summaries.map(threadOptionFromSummary))),
   loadThreadPreview: ({ thread_id, workspace_path, mode }) =>
@@ -146,6 +152,12 @@ const threadOptionFromSummary = (summary: Remote.ThreadSummary): Backend.ThreadO
     archived: summary.archived,
     diff: summary.diff,
   })
+
+const projectOptionFromRecord = (project: Remote.ProjectSummary): Backend.ProjectOption => ({
+  project_id: project.project_id,
+  name: project.name,
+  repo_origin: project.repo_origin,
+})
 
 const handleCommand = (
   client: Client.Interface,

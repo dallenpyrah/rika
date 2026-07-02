@@ -1019,6 +1019,7 @@ const modeLabelChunks = (state: ViewState.ViewState): TextChunk[] => {
 const modeIndicatorContent = (state: ViewState.ViewState): StyledText => {
   const chunks: TextChunk[] = [fg(color.text)(" ")]
   if (state.cost_usd > 0) chunks.push(fg(color.dim)(`${costLabel(state.cost_usd)} `), fg(color.faint)("— "))
+  if (state.remoteArm.enabled) chunks.push(fg(color.green)("[orb] "), fg(color.faint)("— "))
   if (state.fast_mode) chunks.push(fg(color.yellow)("↯"))
   for (const chunk of modeLabelChunks(state)) chunks.push(chunk)
   chunks.push(fg(color.text)(" "))
@@ -1468,14 +1469,6 @@ const threadDiffChunks = (diff: ViewState.ThreadDiffStats): Array<TextChunk> => 
   }
   return chunks
 }
-
-const formatDuration = (ms: number): string =>
-  ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10_000 ? 1 : 2)}s` : `${Math.max(0, ms).toFixed(ms < 10 ? 2 : 1)}ms`
-
-const formatClock = (value: number): string =>
-  new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-
-const shortId = (value: string): string => (value.length <= 8 ? value : value.slice(0, 8))
 
 const truncate = (value: string, width: number): string => {
   if (value.length <= width) return value

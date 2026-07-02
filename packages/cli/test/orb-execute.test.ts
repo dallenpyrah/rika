@@ -18,7 +18,7 @@ import {
   WorkspaceStore,
 } from "@rika/persistence"
 import { Client } from "@rika/sdk"
-import { Codec, Common, Event, Ids } from "@rika/schema"
+import { Codec, Common, Event, Ids, Orb } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
 import { HttpServer, RemoteControl } from "@rika/server"
 import { Args, OrbExecute, Output } from "../src/index"
@@ -278,22 +278,24 @@ const makeOrbLayer = (input: {
     Layer.provideMerge(timeLayer),
     Layer.provideMerge(idLayer),
   )
+  const storageLayer = Layer.mergeAll(
+    configLayer,
+    databaseLayer,
+    Migration.layer,
+    timeLayer,
+    idLayer,
+    projectStoreLayer,
+    orbStoreLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const managerLayer = OrbManager.layerWithSystem(makeSystem()).pipe(
-    Layer.provideMerge(configLayer),
-    Layer.provideMerge(projectStoreLayer),
-    Layer.provideMerge(orbStoreLayer),
+    Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(SandboxClientFake.layer(input.sandbox)),
     Layer.provideMerge(Diagnostics.memoryLayer([])),
   )
   return OrbExecute.layerWithFetch(input.fetch).pipe(
-    Layer.provideMerge(configLayer),
     Layer.provideMerge(Output.memoryLayer(input.output)),
-    Layer.provideMerge(databaseLayer),
-    Layer.provideMerge(Migration.layer),
-    Layer.provideMerge(timeLayer),
-    Layer.provideMerge(idLayer),
-    Layer.provideMerge(projectStoreLayer),
-    Layer.provideMerge(orbStoreLayer),
+    Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(managerLayer),
   )
 }
@@ -358,11 +360,18 @@ const makeRemoteLayer = () => {
   const databaseLayer = Database.memoryLayer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(Time.fixedLayer(now)),
+    Layer.provideMerge(IdGenerator.sequenceLayer(1)),
+  )
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
     artifactLayer,
     workspaceStoreLayer,
+    projectStoreLayer,
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
@@ -391,12 +400,35 @@ const makeRemoteLayer = () => {
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
+    remoteOrbManagerLayer(),
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
-  const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(AgentLoop.layer.pipe(Layer.provideMerge(agentBase))))
+  const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
   const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
+
+const remoteOrbManagerLayer = () =>
+  Layer.succeed(
+    OrbManager.Service,
+    OrbManager.Service.of({
+      provisionForThread: (input) =>
+        Effect.succeed({
+          orb_id: Ids.OrbId.make("orb_remote_execute"),
+          thread_id: input.thread_id,
+          project_id: input.project_id,
+          sandbox_id: null,
+          status: "running" as Orb.OrbStatus,
+          base_commit: null,
+          endpoint_url: null,
+          created_at: now,
+          last_active_at: now,
+        }),
+      pause: () => Effect.never,
+      resume: () => Effect.never,
+      kill: () => Effect.never,
+    }),
+  )
 
 const makeSystem = (): OrbManager.System => ({
   makeTempPath: Effect.succeed("/tmp/rika-orb-execute-test.bundle"),
