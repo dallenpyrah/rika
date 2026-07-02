@@ -7,6 +7,7 @@ export const Kind = Schema.Literals([
   "image",
   "research",
   "review",
+  "verdict",
   "file",
   "orb-final-diff",
   "other",

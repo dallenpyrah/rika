@@ -131,6 +131,20 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Artifact.Artifact)(Codec.encode(Artifact.Artifact)(artifact))).toEqual(artifact)
   })
 
+  test("round-trips verdict artifacts", () => {
+    const artifact: Artifact.Artifact = {
+      id: artifactId,
+      thread_id: threadId,
+      kind: "verdict",
+      title: "Judge verdict",
+      content: { winner_id: "candidate_a", ranking: [{ candidate_id: "candidate_a", median_score: 9 }] },
+      created_at: now,
+      metadata: { winner_id: "candidate_a", candidate_count: 2, judge_count: 3 },
+    }
+
+    expect(Codec.decode(Artifact.Artifact)(Codec.encode(Artifact.Artifact)(artifact))).toEqual(artifact)
+  })
+
   test("round-trips thread-created event", () => {
     const event: Event.Event = {
       id: eventId,
