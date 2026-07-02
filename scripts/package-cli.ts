@@ -11,12 +11,8 @@ const artifactName = `rika-${artifactPlatform}-${artifactArch}${artifactPlatform
 const outDir = new URL("dist/release/", root)
 const shareRoot = new URL("dist/share/rika/", root)
 const drizzleShareDir = new URL("drizzle/", shareRoot)
-const inspectShareDir = new URL("inspect/", shareRoot)
-const inspectWebShareDir = new URL("web/dist/", shareRoot)
 const migrationsDir = new URL("packages/persistence/drizzle/", root)
-const inspectWebDistDir = new URL("packages/motel/web/dist/", root)
 const artifact = new URL(artifactName, outDir)
-const inspectEntry = new URL("packages/motel/src/motel.ts", root).pathname
 
 const nativeTargets = [
   "@opentui/core-darwin-arm64",
@@ -43,8 +39,6 @@ const manifest = {
   artifact: `dist/release/${artifactName}`,
   share: {
     drizzle: "dist/share/rika/drizzle",
-    inspect: "dist/share/rika/inspect/inspect.js",
-    inspect_web: "dist/share/rika/web/dist",
   },
   native: {
     bundled: bundledNative,
@@ -61,12 +55,8 @@ if (bundledNative.length === 0) {
 
 await $`mkdir -p ${outDir.pathname}`
 await $`rm -rf ${shareRoot.pathname}`
-await $`mkdir -p ${drizzleShareDir.pathname} ${inspectShareDir.pathname} ${inspectWebShareDir.pathname}`
+await $`mkdir -p ${drizzleShareDir.pathname}`
 await $`cp -R ${migrationsDir.pathname}. ${drizzleShareDir.pathname}`
-await $`cp -R ${inspectWebDistDir.pathname}. ${inspectWebShareDir.pathname}`
-await $`bun build ${inspectEntry} --target bun --format esm ${externalFlags} --outdir ${inspectShareDir.pathname}`
-await $`mv ${new URL("motel.js", inspectShareDir).pathname} ${new URL("inspect.js", inspectShareDir).pathname}`
-await sanitizeSourcemapDirectives(new URL("inspect.js", inspectShareDir))
 await $`bun build --compile packages/cli/src/main.ts ${compileTargetFlags(artifactTarget)} ${externalFlags} --outfile ${artifact.pathname}`
 await Bun.write(new URL(`${artifactName}.json`, outDir), `${JSON.stringify(manifest, null, 2)}\n`)
 
@@ -95,11 +85,6 @@ function readPackageJson(value: unknown) {
   if (typeof value !== "object" || value === null || !("version" in value)) return {}
   const version = value.version
   return typeof version === "string" ? { version } : {}
-}
-
-async function sanitizeSourcemapDirectives(file: URL) {
-  const text = await Bun.file(file).text()
-  await Bun.write(file, text.replaceAll("//# sourceMappingURL=", "// sourceMappingURL="))
 }
 
 function compileTargetFlags(target: string | undefined) {

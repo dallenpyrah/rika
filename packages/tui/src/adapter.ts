@@ -29,7 +29,6 @@ import { stdin, stdout } from "node:process"
 import { pathToFileURL } from "node:url"
 import { Context, Effect, Layer, Queue, Stream } from "effect"
 import { DiffRenderCache, type RenderedDiff } from "./diff-renderer"
-import * as Inspect from "./inspect"
 import * as Keys from "./keys"
 import * as Palette from "./palette"
 import * as ViewState from "./view-state"
@@ -55,7 +54,6 @@ export interface Adapter {
   readonly openFile: (input: OpenFileInput) => Effect.Effect<void, Error>
   readonly editExternally: (text: string) => Effect.Effect<string>
   readonly pasteImage: (workspacePath: string) => Effect.Effect<string | undefined>
-  readonly runInspect: (target: ViewState.InspectTarget) => Effect.Effect<void, Error>
 }
 
 export type Action =
@@ -84,7 +82,6 @@ export const memoryLayer = (memory: MemoryRenderer) =>
       openFile: (input) => Effect.sync(() => memory.opened?.push(input)),
       editExternally: (text: string) => Effect.succeed(text),
       pasteImage: () => Effect.succeed(undefined),
-      runInspect: () => Effect.void,
     }),
   )
 
@@ -207,26 +204,6 @@ export const layer = Layer.effect(
             } catch {}
           }
         }).pipe(Effect.orElseSucceed(() => text)),
-      runInspect: (target: ViewState.InspectTarget) =>
-        Effect.tryPromise({
-          try: async () => {
-            const launch = Inspect.command()
-            renderer.suspend()
-            try {
-              const exitCode = await Bun.spawn([...launch, "tui"], {
-                stdin: "inherit",
-                stdout: "inherit",
-                stderr: "inherit",
-                cwd: Inspect.workingDirectory(launch),
-                env: Inspect.environment(target),
-              }).exited
-              if (exitCode !== 0) throw new Error(`Rika Inspect exited ${exitCode}`)
-            } finally {
-              renderer.resume()
-            }
-          },
-          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-        }),
       pasteImage: (workspacePath: string) =>
         Effect.tryPromise(async () => {
           const rel = `.rika/pasted/paste-${Date.now()}.png`

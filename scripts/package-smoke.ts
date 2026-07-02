@@ -1,7 +1,7 @@
 import { $ } from "bun"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 
 const artifactName = `rika-${process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`
 const artifactPath = `dist/release/${artifactName}`
@@ -25,10 +25,9 @@ if (parseDoctorReport(doctorOff.stdout).telemetry !== "disabled") {
   fail("compiled CLI doctor report did not honor RIKA_TELEMETRY=off", doctorOff)
 }
 
-await smokeInspectCommand()
 await smokeServerHealth()
 
-console.log(JSON.stringify({ artifact: artifactPath, checks: ["help", "doctor", "inspect", "server-health"] }))
+console.log(JSON.stringify({ artifact: artifactPath, checks: ["help", "doctor", "server-health"] }))
 
 interface RunResult {
   readonly exitCode: number
@@ -103,59 +102,6 @@ async function smokeServerHealth() {
   } finally {
     child.kill()
     await child.exited.catch(() => 0)
-    await rm(workspace, { force: true, recursive: true })
-  }
-}
-
-async function smokeInspectCommand() {
-  const workspace = await mkdtemp(join(tmpdir(), "rika-package-inspect-"))
-  const fakeBun = join(workspace, "fake-bun")
-  const output = join(workspace, "inspect.json")
-  const expectedInspectSuffix = join("dist", "share", "rika", "inspect", "inspect.js")
-  await Bun.write(
-    fakeBun,
-    `#!/usr/bin/env bun
-const output = process.env.RIKA_FAKE_INSPECT_OUTPUT
-if (output === undefined) process.exit(2)
-await Bun.write(output, JSON.stringify({
-  argv: process.argv.slice(2),
-  cwd: process.cwd(),
-  service: process.env.MOTEL_TUI_SERVICE_NAME,
-  theme: process.env.MOTEL_TUI_THEME,
-}))
-`,
-  )
-  await $`chmod +x ${fakeBun}`
-
-  try {
-    const result = await runArtifact(["inspect", "--all"], {
-      RIKA_BUN_EXECUTABLE: fakeBun,
-      RIKA_FAKE_INSPECT_OUTPUT: output,
-    })
-    if (result.exitCode !== 0) fail("compiled CLI inspect command failed", result)
-    const invocation = JSON.parse(await Bun.file(output).text())
-    const inspectScript = Array.isArray(invocation.argv) ? invocation.argv[0] : undefined
-    const inspectWebIndex =
-      typeof inspectScript === "string" ? join(dirname(dirname(inspectScript)), "web", "dist", "index.html") : ""
-    if (
-      invocation.service !== "rika" ||
-      invocation.theme !== "rika" ||
-      !Array.isArray(invocation.argv) ||
-      invocation.argv.length !== 2 ||
-      invocation.argv[1] !== "tui" ||
-      typeof inspectScript !== "string" ||
-      invocation.cwd !== dirname(inspectScript) ||
-      !inspectScript.endsWith(expectedInspectSuffix) ||
-      !(await Bun.file(inspectScript).exists()) ||
-      !(await Bun.file(inspectWebIndex).exists())
-    ) {
-      fail("compiled CLI inspect command did not launch bundled inspector with Rika filters", {
-        exitCode: 1,
-        stdout: JSON.stringify(invocation),
-        stderr: "",
-      })
-    }
-  } finally {
     await rm(workspace, { force: true, recursive: true })
   }
 }

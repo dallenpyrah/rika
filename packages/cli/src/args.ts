@@ -203,13 +203,6 @@ export const IdeCommand = Schema.Struct({
   open_file: Schema.optional(Ide.OpenFileRequest),
 }).annotate({ identifier: "Rika.Cli.Args.IdeCommand" })
 
-export interface InspectCommand extends Schema.Schema.Type<typeof InspectCommand> {}
-export const InspectCommand = Schema.Struct({
-  type: Schema.Literal("inspect"),
-  all: Schema.Boolean,
-  thread_id: Schema.optional(Ids.ThreadId),
-}).annotate({ identifier: "Rika.Cli.Args.InspectCommand" })
-
 export interface DoctorCommand extends Schema.Schema.Type<typeof DoctorCommand> {}
 export const DoctorCommand = Schema.Struct({
   type: Schema.Literal("doctor"),
@@ -231,7 +224,6 @@ export type Command =
   | ServerCommand
   | IdeCommand
   | DoctorCommand
-  | InspectCommand
 
 export class ArgsError extends Schema.TaggedErrorClass<ArgsError>()("ArgsError", {
   message: Schema.String,
@@ -270,8 +262,6 @@ export const usage = [
   "  rika extensions rollback-plugin <name> [--reason <text>] [--thread <id>]",
   "  rika server [--host <host>] [--port <n>] [--token <token>] [--workspace <path>] [--ephemeral]",
   "  rika doctor",
-  "  rika inspect --all",
-  "  rika inspect --thread <thread-id>",
   "  rika ide status [--server <url>] [--token <token>]",
   "  rika ide connect --client <id> [--server <url>] [--token <token>] [--workspace <path>] [--capabilities <csv>]",
   "  rika ide disconnect --client <id> [--server <url>] [--token <token>]",
@@ -402,11 +392,6 @@ const skillNameConfig = {
 
 const mcpServerConfig = {
   serverName: Argument.string("server-name").pipe(Argument.withDescription("MCP server name")),
-}
-
-const inspectConfig = {
-  all: Flag.boolean("all").pipe(Flag.withDescription("Open Rika Inspect for all telemetry")),
-  thread: Flag.string("thread").pipe(Flag.optional, Flag.withDescription("Open Rika Inspect for one thread id")),
 }
 
 const reviewConfig = {
@@ -636,7 +621,6 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
   const server = makeServerCommand(parsedRef)
   const ide = makeIdeCommand(parsedRef)
   const doctor = makeDoctorCommand(parsedRef)
-  const inspect = makeInspectCommand(parsedRef, rejectedRef)
 
   return CliCommand.make("rika", rootConfig, (input: RootInput) =>
     input.execute
@@ -667,7 +651,6 @@ const makeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef: Re
       extensions,
       server,
       doctor,
-      inspect,
       ide,
     ]),
   )
@@ -890,25 +873,6 @@ const makeDoctorCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
   CliCommand.make("doctor", {}, () => Ref.set(parsedRef, Option.some(toDoctorCommand()))).pipe(
     CliCommand.withDescription("Print local diagnostics without uploading telemetry"),
     CliCommand.withShortDescription("Print diagnostics"),
-  )
-
-const makeInspectCommand = (
-  parsedRef: Ref.Ref<Option.Option<Command>>,
-  rejectedRef: Ref.Ref<Option.Option<ArgsError>>,
-) =>
-  CliCommand.make("inspect", inspectConfig, (input: InspectInput) => {
-    const command = toInspectCommand(input)
-    return command === undefined
-      ? Ref.set(
-          rejectedRef,
-          Option.some(
-            new ArgsError({ message: "Expected exactly one of --all or --thread <thread-id>", exit_code: 2, usage }),
-          ),
-        )
-      : Ref.set(parsedRef, Option.some(command))
-  }).pipe(
-    CliCommand.withDescription("Open Rika Inspect telemetry"),
-    CliCommand.withShortDescription("Open telemetry inspector"),
   )
 
 const makeIdeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) => {
@@ -1269,21 +1233,6 @@ const toServerCommand = (input: ServerInput): ServerCommand => {
 }
 
 const toDoctorCommand = (): DoctorCommand => ({ type: "doctor" })
-
-interface InspectInput {
-  readonly all: boolean
-  readonly thread: Option.Option<string>
-}
-
-const toInspectCommand = (input: InspectInput): InspectCommand | undefined => {
-  const thread = Option.getOrUndefined(input.thread)
-  if (input.all === (thread !== undefined)) return undefined
-  return {
-    type: "inspect",
-    all: input.all,
-    ...(thread === undefined ? {} : { thread_id: Ids.ThreadId.make(thread) }),
-  }
-}
 
 const emptyIdeInput: IdeServerInput = { server: Option.none(), token: Option.none() }
 

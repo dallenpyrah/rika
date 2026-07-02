@@ -13,8 +13,6 @@ export const keymapText = [
   '  "amp.relaunch": null, // Quit, reopen Amp, and resume active threads',
   '  "amp.showVersion": null, // Show current Amp version',
   '  "amp.showWelcome": null, // Show the welcome message again',
-  '  "inspect.openAll": null, // Open Rika Inspect for all telemetry',
-  '  "inspect.openThread": null, // Open Rika Inspect for the active thread',
   '  "feedback.sendReportWithDiagnostics": null, // Generate and send a diagnostic report for Amp support',
   '  "ide.connect": null, // Connect to an IDE',
   '  "label.add": null, // Add label to thread',

@@ -24,32 +24,6 @@ describe("Backend thread options", () => {
   })
 })
 
-describe("Backend inspect targets", () => {
-  test("default to all telemetry before activity and the current thread after activity", () => {
-    const empty = ViewState.initial({ thread_id: threadId, workspace_path: "/workspace", mode: "smart" })
-    const active = ViewState.initial({
-      thread_id: threadId,
-      workspace_path: "/workspace",
-      mode: "smart",
-      events: [messageAdded(1, "hello")],
-    })
-    const context = {
-      state: empty,
-      thread_id: threadId,
-      workspace_path: "/workspace",
-      mode: "smart" as const,
-    }
-
-    expect(Backend.inspectTargetFor(context, undefined)).toEqual({ scope: "all" })
-    expect(Backend.inspectTargetFor({ ...context, state: active }, undefined)).toEqual({
-      scope: "thread",
-      thread_id: threadId,
-    })
-    expect(Backend.inspectTargetFor(context, "all")).toEqual({ scope: "all" })
-    expect(Backend.inspectTargetFor(context, `thread ${threadId}`)).toEqual({ scope: "thread", thread_id: threadId })
-  })
-})
-
 const messageAdded = (sequence: number, content: string): Event.MessageAdded => {
   const turnId = Ids.TurnId.make("turn_backend_inspect")
   return {

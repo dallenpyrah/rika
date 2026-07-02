@@ -37,7 +37,6 @@ import * as Extensions from "./extensions"
 import * as Help from "./help"
 import * as Ide from "./ide"
 import * as Input from "./input"
-import * as Inspect from "./inspect"
 import * as LocalBackend from "./local-backend"
 import * as Mcp from "./mcp"
 import * as Output from "./output"
@@ -113,11 +112,9 @@ export const runProcess: (input: ProcessInput) => Effect.Effect<number, never, O
                                           ? Doctor.executeCommand(command).pipe(
                                               Effect.provide(doctorLiveLayer(env, input.cwd)),
                                             )
-                                          : command.type === "inspect"
-                                            ? Inspect.executeCommand(command, env)
-                                            : Server.executeCommand(command).pipe(
-                                                Effect.provide(serverLiveLayer(command, env, input.cwd)),
-                                              )
+                                          : Server.executeCommand(command).pipe(
+                                              Effect.provide(serverLiveLayer(command, env, input.cwd)),
+                                            )
               ).pipe(
                 Effect.matchEffect({
                   onFailure: (error: RuntimeError) => Output.stderr(formatRuntimeError(error)).pipe(Effect.as(1)),
@@ -161,7 +158,6 @@ type RuntimeError =
   | Execute.ExecuteError
   | Extensions.ExtensionsError
   | FffSearch.FffSearchError
-  | Inspect.InspectError
   | Client.SdkError
   | Ide.IdeError
   | IdeBridge.IdeBridgeError
@@ -218,7 +214,6 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Config.ConfigError) return `Rika failed: ${error.message}`
   if (error instanceof Database.DatabaseError) return `Rika failed: ${error.message}`
   if (error instanceof Doctor.DoctorError) return Doctor.formatError(error)
-  if (error instanceof Inspect.InspectError) return Inspect.formatError(error)
   if (tagged(error, "RemoteSessionError")) return `Rika failed: ${error.message}`
   if (tagged(error, "SessionError")) return `Rika failed: ${error.message}`
   if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`

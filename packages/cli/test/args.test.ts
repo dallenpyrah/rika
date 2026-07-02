@@ -475,21 +475,6 @@ describe("CLI args", () => {
     expect(command).toEqual({ type: "doctor" })
   })
 
-  test("parses inspect commands", async () => {
-    const threadId = Ids.ThreadId.make("thread_args_inspect")
-    const all = await Effect.runPromise(Args.parse(["inspect", "--all"]))
-    const thread = await Effect.runPromise(Args.parse(["inspect", "--thread", threadId]))
-    const missing = await Effect.runPromise(Args.parse(["inspect"]).pipe(Effect.flip))
-    const conflicting = await Effect.runPromise(
-      Args.parse(["inspect", "--all", "--thread", threadId]).pipe(Effect.flip),
-    )
-
-    expect(all).toEqual({ type: "inspect", all: true })
-    expect(thread).toEqual({ type: "inspect", all: false, thread_id: threadId })
-    expect(missing).toBeInstanceOf(Args.ArgsError)
-    expect(conflicting).toBeInstanceOf(Args.ArgsError)
-  })
-
   test("parses IDE integration commands", async () => {
     const clientId = Ids.IdeClientId.make("ide_args_client")
     const connect = await Effect.runPromise(

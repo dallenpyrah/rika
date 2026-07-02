@@ -34,22 +34,6 @@ const leadingCommands: ReadonlyArray<Command> = [
   },
 ]
 
-const inspectAllCommand: Command = {
-  id: "inspect-open-all",
-  category: "inspect",
-  action: "open all",
-  hint: "open Rika Inspect for all telemetry",
-  command: "/inspect all",
-}
-
-const inspectThreadCommand: Command = {
-  id: "inspect-open-thread",
-  category: "inspect",
-  action: "open thread",
-  hint: "open Rika Inspect for the active thread",
-  command: "/inspect thread",
-}
-
 const trailingCommands: ReadonlyArray<Command> = [
   {
     id: "mcp-authenticate",
@@ -66,7 +50,7 @@ const trailingCommands: ReadonlyArray<Command> = [
   { id: "mode-deep3", category: "mode", action: "use deep3", hint: "switch to deep3 mode", command: "/mode deep3" },
 ]
 
-export const commands: ReadonlyArray<Command> = [...leadingCommands, inspectAllCommand, ...trailingCommands]
+export const commands: ReadonlyArray<Command> = [...leadingCommands, ...trailingCommands]
 
 const speedCommand = (fastMode: boolean): Command => ({
   id: "speed-fast",
@@ -77,12 +61,8 @@ const speedCommand = (fastMode: boolean): Command => ({
   key: "Opt+R",
 })
 
-export const commandsFor = (mode: Config.Mode, fastMode: boolean, threadActive = false): ReadonlyArray<Command> => {
-  const available = [
-    ...leadingCommands,
-    ...(threadActive ? [inspectThreadCommand, inspectAllCommand] : [inspectAllCommand]),
-    ...trailingCommands,
-  ]
+export const commandsFor = (mode: Config.Mode, fastMode: boolean, _threadActive = false): ReadonlyArray<Command> => {
+  const available = [...leadingCommands, ...trailingCommands]
   return isFastEligible(mode) ? [...available, speedCommand(fastMode)] : available
 }
 

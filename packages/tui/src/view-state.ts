@@ -115,8 +115,6 @@ export interface ThreadSwitcherState {
   readonly items: ReadonlyArray<ThreadSwitcherItem>
 }
 
-export type InspectTarget = { readonly scope: "all" } | { readonly scope: "thread"; readonly thread_id: Ids.ThreadId }
-
 export interface ViewState {
   readonly thread_id: Ids.ThreadId
   readonly workspace_path: string
@@ -351,7 +349,7 @@ export const withPalette = (state: ViewState): ViewState => ({
   palette_open: true,
   palette: { open: true, query: "", selected: 0 },
   shortcuts_open: false,
-  notice: `Command palette: /threads, /relaunch, /help, /welcome, /credits, /version, /exit, /ast-grep, ${hasActivity(state) ? "/inspect thread, /inspect all" : "/inspect all"}, /mcp, /mode rush, /mode smart, /mode deep1, /mode deep2, /mode deep3`,
+  notice: `Command palette: /threads, /relaunch, /help, /welcome, /credits, /version, /exit, /ast-grep, /mcp, /mode rush, /mode smart, /mode deep1, /mode deep2, /mode deep3`,
 })
 
 const nextReasoningMode = (mode: Config.Mode): Config.Mode =>

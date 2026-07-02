@@ -150,18 +150,6 @@ const handleCommand = (
     if (name === "/version") return Backend.commandResult(context, { state: ViewState.withNotice(state, "Rika 0.0.0") })
     if (name === "/ast-grep")
       return Backend.commandResult(context, { state: ViewState.withNotice(state, "ast-grep outline status: ready") })
-    if (name === "/inspect") {
-      const target = Backend.inspectTargetFor(context, argument)
-      if (target === undefined) {
-        return Backend.commandResult(context, {
-          state: ViewState.withNotice(state, "Usage: /inspect [all|thread [thread-id]]"),
-        })
-      }
-      return Backend.commandResult(context, {
-        state: ViewState.withNotice(state, Backend.inspectNotice(target)),
-        inspect: target,
-      })
-    }
     if (name === "/mcp")
       return Backend.commandResult(context, {
         state: ViewState.withNotice(

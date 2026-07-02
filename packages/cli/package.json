@@ -22,7 +22,6 @@
     "@rika/core": "workspace:*",
     "@rika/ide": "workspace:*",
     "@rika/llm": "workspace:*",
-    "@rika/motel": "workspace:*",
     "@rika/persistence": "workspace:*",
     "@rika/plugin": "workspace:*",
     "@rika/schema": "workspace:*",

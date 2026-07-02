@@ -189,22 +189,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
             quitRequested = true
             exitCode = 0
           }
-          if (result.inspect !== undefined) {
-            yield* openInspect(result.inspect)
-            return
-          }
-          yield* render()
-        })
-
-      const openInspect = (target: ViewState.InspectTarget) =>
-        Effect.gen(function* () {
-          yield* deps.renderer.runInspect(target).pipe(
-            Effect.catchCause((cause) =>
-              Effect.sync(() => {
-                state = ViewState.withNotice(state, `Inspect failed: ${errorMessage(Cause.squash(cause))}`)
-              }),
-            ),
-          )
           yield* render()
         })
 

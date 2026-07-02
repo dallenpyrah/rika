@@ -26,15 +26,6 @@ describe("palette.filter", () => {
     expect(Palette.filter("connect IDE", "smart", false)).toEqual([])
   })
 
-  test("offers contextual inspect commands", () => {
-    expect(Palette.filter("inspect", "smart", false).map((command) => command.id)).toEqual(["inspect-open-all"])
-    expect(Palette.filter("inspect", "smart", false, true).map((command) => command.id)).toEqual([
-      "inspect-open-thread",
-      "inspect-open-all",
-    ])
-    expect(Palette.commands.some((command) => command.id === "inspect-open")).toBe(false)
-  })
-
   test("at clamps the selected index into range", () => {
     expect(Palette.at("/mode", 0, "smart", false)?.id).toBe("mode-rush")
     expect(Palette.at("/mode", 99, "smart", false)?.id).toBe("mode-deep3")
