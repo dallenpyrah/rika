@@ -2,6 +2,10 @@
 
 Rika uses one `ThreadActor` contract for both local development and remote hosting. Deployment mode is a layer/configuration choice, not a different actor API.
 
+## Current status
+
+Rivet remains a parallel adapter while orbs use the RemoteControl HTTP+NDJSON API as their client contract. This note is the controlling status for orb work. See [ADR 0001](adr/0001-orb-contract-defer-rivet.md).
+
 ## Topology
 
 ```diagram
