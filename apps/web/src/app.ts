@@ -1,20 +1,23 @@
 import { Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
 import { Client } from "@rika/sdk"
 import * as ModelInfo from "@rika/llm/model-info"
+import { parsePatchFiles } from "@pierre/diffs"
 import * as Command from "foldkit/command"
 import { m } from "foldkit/message"
 import * as Mount from "foldkit/mount"
 import * as Subscription from "foldkit/subscription"
-import { Effect, Option, Schema as S, Stream } from "effect"
+import { Effect, Option, Queue, Schema as S, Stream } from "effect"
 import * as Tabs from "./components/ui/tabs-state"
 import {
   asFileDiffMetadata,
   collectPierreDiffPayloads,
   mountPierreDiff,
   payloadFileName,
+  toWebPierreDiffFromFileDiff,
   toWebPierreDiff,
   type WebPierreDiff,
 } from "./pierre-diff"
+import { mountPierreTree } from "./pierre-tree"
 
 export const Connection = S.Literals(["idle", "loading", "connected", "failed"])
 export type Connection = typeof Connection.Type
@@ -30,6 +33,66 @@ export const OrbTabItems: ReadonlyArray<Tabs.TabItem<OrbTab>> = [
 
 export const OrbTabs = Tabs.create()
 
+export const OrbDirectoryState = S.Union([
+  S.Struct({ state: S.Literal("loading") }),
+  S.Struct({ state: S.Literal("loaded") }),
+  S.Struct({ state: S.Literal("failed"), message: S.String }),
+])
+export type OrbDirectoryState = typeof OrbDirectoryState.Type
+
+export const OrbOpenedFile = S.Union([
+  S.Struct({ state: S.Literal("idle") }),
+  S.Struct({ state: S.Literal("loading"), path: S.String }),
+  S.Struct({ state: S.Literal("text"), path: S.String, content: S.String, truncated: S.Boolean }),
+  S.Struct({ state: S.Literal("binary"), path: S.String }),
+  S.Struct({ state: S.Literal("failed"), path: S.String, message: S.String }),
+])
+export type OrbOpenedFile = typeof OrbOpenedFile.Type
+
+export const OrbFilesModel = S.Struct({
+  directories: S.Record(S.String, OrbDirectoryState),
+  paths: S.Array(S.String),
+  path_kinds: S.Record(S.String, Remote.OrbFileKind),
+  selected_path: S.optional(S.String),
+  opened_file: OrbOpenedFile,
+})
+export type OrbFilesModel = typeof OrbFilesModel.Type
+
+export const OrbChangeDiff = S.Struct({
+  kind: S.Literal("diff"),
+  payload_id: S.String,
+  file_name: S.String,
+  additions: S.Int,
+  deletions: S.Int,
+  file_diff: S.Unknown,
+})
+export type OrbChangeDiff = typeof OrbChangeDiff.Type
+
+export const OrbChangeSkipped = S.Struct({
+  kind: S.Literal("skipped"),
+  payload_id: S.String,
+  file_name: S.String,
+  reason: S.String,
+})
+export type OrbChangeSkipped = typeof OrbChangeSkipped.Type
+
+export const OrbChangeRow = S.Union([OrbChangeDiff, OrbChangeSkipped])
+export type OrbChangeRow = typeof OrbChangeRow.Type
+
+export const OrbChangesModel = S.Union([
+  S.Struct({ state: S.Literal("idle") }),
+  S.Struct({ state: S.Literal("loading") }),
+  S.Struct({ state: S.Literal("failed"), message: S.String }),
+  S.Struct({
+    state: S.Literal("loaded"),
+    base_commit: S.String,
+    head_commit: S.String,
+    dirty: S.Boolean,
+    diffs: S.Array(OrbChangeRow),
+  }),
+])
+export type OrbChangesModel = typeof OrbChangesModel.Type
+
 export const Model = S.Struct({
   api_base_url: S.String,
   connection: Connection,
@@ -44,6 +107,8 @@ export const Model = S.Struct({
   selected_orb: S.optional(Remote.OrbSummary),
   selected_orb_tab: OrbTab,
   orb_tabs: Tabs.Model,
+  orb_files: OrbFilesModel,
+  orb_changes: OrbChangesModel,
   expanded_diff_ids: S.Array(S.String),
   confirm_kill_orb_id: S.optional(Ids.OrbId),
   backend: S.optional(Remote.BackendHealth),
@@ -105,6 +170,13 @@ export const CancelledKillOrb = m("CancelledKillOrb")
 export const ConfirmedKillOrb = m("ConfirmedKillOrb")
 export const UpdatedSelectedOrb = m("UpdatedSelectedOrb", { orb: Remote.OrbSummary })
 export const FailedOrbAction = m("FailedOrbAction", { message: S.String })
+export const LoadedOrbDirectory = m("LoadedOrbDirectory", { response: Remote.OrbFilesResponse })
+export const FailedLoadOrbDirectory = m("FailedLoadOrbDirectory", { path: S.String, message: S.String })
+export const SelectedOrbFile = m("SelectedOrbFile", { path: S.String })
+export const LoadedOrbFile = m("LoadedOrbFile", { response: Remote.OrbFileResponse })
+export const FailedLoadOrbFile = m("FailedLoadOrbFile", { path: S.String, message: S.String })
+export const LoadedOrbChanges = m("LoadedOrbChanges", { response: Remote.OrbChangesResponse })
+export const FailedLoadOrbChanges = m("FailedLoadOrbChanges", { message: S.String })
 export const ChangedDraft = m("ChangedDraft", { value: S.String })
 export const SubmittedDraft = m("SubmittedDraft")
 export const AcceptedTurn = m("AcceptedTurn", { response: Remote.StartTurnResponse })
@@ -114,6 +186,8 @@ export const ThreadSubscriptionFailed = m("ThreadSubscriptionFailed", { message:
 export const ClickedTogglePierreDiff = m("ClickedTogglePierreDiff", { payload_id: S.String })
 export const RenderedPierreDiff = m("RenderedPierreDiff", { payload_id: S.String })
 export const FailedRenderPierreDiff = m("FailedRenderPierreDiff", { payload_id: S.String, message: S.String })
+export const RenderedPierreTree = m("RenderedPierreTree", { selected_path: S.optional(S.String) })
+export const FailedRenderPierreTree = m("FailedRenderPierreTree", { message: S.String })
 
 export const AppMessage = S.Union([
   LoadedBackendHealth,
@@ -136,6 +210,13 @@ export const AppMessage = S.Union([
   ConfirmedKillOrb,
   UpdatedSelectedOrb,
   FailedOrbAction,
+  LoadedOrbDirectory,
+  FailedLoadOrbDirectory,
+  SelectedOrbFile,
+  LoadedOrbFile,
+  FailedLoadOrbFile,
+  LoadedOrbChanges,
+  FailedLoadOrbChanges,
   ChangedDraft,
   SubmittedDraft,
   AcceptedTurn,
@@ -145,8 +226,15 @@ export const AppMessage = S.Union([
   ClickedTogglePierreDiff,
   RenderedPierreDiff,
   FailedRenderPierreDiff,
+  RenderedPierreTree,
+  FailedRenderPierreTree,
 ]).pipe(S.toTaggedUnion("_tag"))
 export type AppMessage = typeof AppMessage.Type
+
+type PierreTreeMessage =
+  | typeof RenderedPierreTree.Type
+  | typeof SelectedOrbFile.Type
+  | typeof FailedRenderPierreTree.Type
 
 export type AppCommand = Command.Command<AppMessage>
 
@@ -191,6 +279,53 @@ export const MountPierreDiff = Mount.define(
         Effect.catch((cause: unknown) =>
           Effect.succeed(
             FailedRenderPierreDiff({ payload_id, message: cause instanceof Error ? cause.message : String(cause) }),
+          ),
+        ),
+      ),
+)
+
+export const MountPierreTree = Mount.defineStream(
+  "MountPierreTree",
+  { paths: S.Array(S.String), selected_path: S.optional(S.String) },
+  RenderedPierreTree,
+  SelectedOrbFile,
+  FailedRenderPierreTree,
+)(
+  ({ paths, selected_path }) =>
+    (element) =>
+      Stream.callback<PierreTreeMessage>((queue) =>
+        Effect.gen(function* () {
+          if (!(element instanceof HTMLElement)) {
+            Queue.offerUnsafe(queue, FailedRenderPierreTree({ message: "tree mount target unavailable" }))
+            return yield* Effect.never
+          }
+          yield* Effect.acquireRelease(
+            Effect.try({
+              try: () =>
+                mountPierreTree({
+                  container: element,
+                  paths,
+                  ...(selected_path === undefined ? {} : { selected_path }),
+                  onSelectedPath: (path) => Queue.offerUnsafe(queue, SelectedOrbFile({ path })),
+                }),
+              catch: (cause: unknown) => cause,
+            }),
+            (handle) => Effect.sync(() => handle.destroy()),
+          )
+          Queue.offerUnsafe(
+            queue,
+            selected_path === undefined ? RenderedPierreTree({}) : RenderedPierreTree({ selected_path }),
+          )
+          return yield* Effect.never
+        }).pipe(
+          Effect.catch((cause: unknown) =>
+            Effect.gen(function* () {
+              Queue.offerUnsafe(
+                queue,
+                FailedRenderPierreTree({ message: cause instanceof Error ? cause.message : String(cause) }),
+              )
+              return yield* Effect.never
+            }),
           ),
         ),
       ),
@@ -266,6 +401,48 @@ export const LoadSelectedOrb = Command.define(
     ),
 )
 
+export const LoadOrbDirectory = Command.define(
+  "LoadOrbDirectory",
+  { api_base_url: S.String, thread_id: Ids.ThreadId, path: S.String },
+  LoadedOrbDirectory,
+  FailedLoadOrbDirectory,
+)(({ api_base_url, thread_id, path }) =>
+  orbSdk(api_base_url, thread_id)
+    .orbFiles(path)
+    .pipe(
+      Effect.map((response) => LoadedOrbDirectory({ response })),
+      Effect.catch((error) => Effect.succeed(FailedLoadOrbDirectory({ path, message: error.message }))),
+    ),
+)
+
+export const LoadOrbFile = Command.define(
+  "LoadOrbFile",
+  { api_base_url: S.String, thread_id: Ids.ThreadId, path: S.String },
+  LoadedOrbFile,
+  FailedLoadOrbFile,
+)(({ api_base_url, thread_id, path }) =>
+  orbSdk(api_base_url, thread_id)
+    .orbFile(path)
+    .pipe(
+      Effect.map((response) => LoadedOrbFile({ response })),
+      Effect.catch((error) => Effect.succeed(FailedLoadOrbFile({ path, message: error.message }))),
+    ),
+)
+
+export const LoadOrbChanges = Command.define(
+  "LoadOrbChanges",
+  { api_base_url: S.String, thread_id: Ids.ThreadId },
+  LoadedOrbChanges,
+  FailedLoadOrbChanges,
+)(({ api_base_url, thread_id }) =>
+  orbSdk(api_base_url, thread_id)
+    .orbChanges()
+    .pipe(
+      Effect.map((response) => LoadedOrbChanges({ response })),
+      Effect.catch((error) => Effect.succeed(FailedLoadOrbChanges({ message: error.message }))),
+    ),
+)
+
 export const PauseSelectedOrb = Command.define(
   "PauseSelectedOrb",
   { api_base_url: S.String, orb_id: Ids.OrbId },
@@ -332,7 +509,7 @@ export const initialModel = (config: RuntimeConfig): Model => ({
   draft: "",
   pending_turn: false,
   expanded_diff_ids: [],
-  ...initialOrbTabs(),
+  ...initialOrbWorkspace(),
   ...(config.thread_id === undefined ? {} : { selected_thread_id: config.thread_id }),
 })
 
@@ -373,7 +550,7 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
           selected_thread_id: undefined,
           subscribed_thread_id: undefined,
           selected_orb: undefined,
-          ...initialOrbTabs(),
+          ...initialOrbWorkspace(),
           confirm_kill_orb_id: undefined,
           expanded_diff_ids: [],
           events: [],
@@ -417,6 +594,20 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return selectedOrbLoadedModel(model, message.orb)
     case "FailedOrbAction":
       return [{ ...model, confirm_kill_orb_id: undefined, notice: message.message }, []]
+    case "LoadedOrbDirectory":
+      return loadedOrbDirectoryModel(model, message.response)
+    case "FailedLoadOrbDirectory":
+      return failedLoadOrbDirectoryModel(model, message.path, message.message)
+    case "SelectedOrbFile":
+      return selectedOrbFileModel(model, message.path)
+    case "LoadedOrbFile":
+      return loadedOrbFileModel(model, message.response)
+    case "FailedLoadOrbFile":
+      return failedLoadOrbFileModel(model, message.path, message.message)
+    case "LoadedOrbChanges":
+      return loadedOrbChangesModel(model, message.response)
+    case "FailedLoadOrbChanges":
+      return [{ ...model, orb_changes: { state: "failed", message: message.message }, notice: message.message }, []]
     case "ChangedDraft":
       return [{ ...model, draft: message.value }, []]
     case "SubmittedDraft":
@@ -435,6 +626,10 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return [model, []]
     case "FailedRenderPierreDiff":
       return [{ ...model, notice: `${message.payload_id}: ${message.message}` }, []]
+    case "RenderedPierreTree":
+      return [model, []]
+    case "FailedRenderPierreTree":
+      return [{ ...model, notice: message.message }, []]
   }
   return [model, []]
 }
@@ -628,13 +823,16 @@ export const contextUsage = (model: Model): ContextUsage | undefined => {
 
 const sdk = (apiBaseUrl: string) => Client.make(Client.fetchTransport({ base_url: apiBaseUrl }))
 
+const orbSdk = (apiBaseUrl: string, threadId: Ids.ThreadId) =>
+  sdk(`${apiBaseUrl.replace(/\/$/, "")}/orb/by-thread/${encodeURIComponent(threadId)}`)
+
 const openThreadModel = (model: Model, threadId: Ids.ThreadId): readonly [Model, ReadonlyArray<AppCommand>] => [
   {
     ...model,
     selected_thread_id: threadId,
     subscribed_thread_id: undefined,
     selected_orb: undefined,
-    ...initialOrbTabs(),
+    ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
     events: [],
@@ -656,7 +854,7 @@ const createdThreadModel = (
     selected_thread_id: summary.thread_id,
     subscribed_thread_id: summary.thread_id,
     selected_orb: undefined,
-    ...initialOrbTabs(),
+    ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
     events: [],
@@ -680,7 +878,7 @@ const openedThreadModel = (model: Model, record: Remote.ThreadRecord): readonly 
     selected_thread_id: record.summary.thread_id,
     subscribed_thread_id: record.summary.thread_id,
     selected_orb: undefined,
-    ...initialOrbTabs(),
+    ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
     threads: newestFirst([
@@ -722,10 +920,17 @@ const orbTabsModel = (model: Model, message: Tabs.Message): readonly [Model, Rea
     onNone: () => model.selected_orb_tab,
     onSome: (outMessage) => (isOrbTab(outMessage.value) ? outMessage.value : model.selected_orb_tab),
   })
-  return [
-    { ...model, selected_orb_tab, orb_tabs },
-    Command.mapMessages(commands, (childMessage) => GotOrbTabsMessage({ message: childMessage })),
-  ]
+  const next = { ...model, selected_orb_tab, orb_tabs }
+  const tabCommands = Command.mapMessages(commands, (childMessage) => GotOrbTabsMessage({ message: childMessage }))
+  if (selected_orb_tab === "files" && model.selected_orb_tab !== "files") {
+    const [loaded, loadCommands] = loadOrbDirectoryModel(next, "")
+    return [loaded, [...tabCommands, ...loadCommands]]
+  }
+  if (selected_orb_tab === "changes" && model.selected_orb_tab !== "changes") {
+    const [loaded, loadCommands] = loadOrbChangesModel(next)
+    return [loaded, [...tabCommands, ...loadCommands]]
+  }
+  return [next, tabCommands]
 }
 
 const receivedEventModel = (model: Model, event: Event.Event): readonly [Model, ReadonlyArray<AppCommand>] => {
@@ -777,6 +982,221 @@ const confirmedKillOrbModel = (model: Model): readonly [Model, ReadonlyArray<App
   ]
 }
 
+const loadOrbDirectoryModel = (model: Model, path: string): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_thread_id === undefined || model.selected_orb === undefined) return [model, []]
+  const state = model.orb_files.directories[path]
+  if (state?.state === "loading" || state?.state === "loaded") return [model, []]
+  return [
+    {
+      ...model,
+      orb_files: {
+        ...model.orb_files,
+        directories: { ...model.orb_files.directories, [path]: { state: "loading" } },
+      },
+      notice: undefined,
+    },
+    [LoadOrbDirectory({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, path })],
+  ]
+}
+
+const loadOrbChangesModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_thread_id === undefined || model.selected_orb === undefined) return [model, []]
+  if (model.orb_changes.state === "loading" || model.orb_changes.state === "loaded") return [model, []]
+  return [
+    { ...model, orb_changes: { state: "loading" }, notice: undefined },
+    [LoadOrbChanges({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id })],
+  ]
+}
+
+const loadedOrbDirectoryModel = (
+  model: Model,
+  response: Remote.OrbFilesResponse,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const pathKinds = { ...model.orb_files.path_kinds }
+  const treePaths = response.entries.map((entry) => {
+    pathKinds[entry.path] = entry.kind
+    return treePath(entry)
+  })
+  return [
+    {
+      ...model,
+      orb_files: {
+        ...model.orb_files,
+        directories: { ...model.orb_files.directories, [response.path]: { state: "loaded" } },
+        paths: mergeTreePaths(model.orb_files.paths, treePaths),
+        path_kinds: pathKinds,
+      },
+      notice: undefined,
+    },
+    [],
+  ]
+}
+
+const failedLoadOrbDirectoryModel = (
+  model: Model,
+  path: string,
+  message: string,
+): readonly [Model, ReadonlyArray<AppCommand>] => [
+  {
+    ...model,
+    orb_files: {
+      ...model.orb_files,
+      directories: { ...model.orb_files.directories, [path]: { state: "failed", message } },
+    },
+    notice: message,
+  },
+  [],
+]
+
+const selectedOrbFileModel = (model: Model, path: string): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const normalized = normalizeTreeSelection(path)
+  const kind = model.orb_files.path_kinds[normalized]
+  if (kind === "dir") {
+    const [next, commands] = loadOrbDirectoryModel(
+      {
+        ...model,
+        orb_files: { ...model.orb_files, selected_path: normalized, opened_file: { state: "idle" } },
+      },
+      normalized,
+    )
+    return [next, commands]
+  }
+  if (model.selected_thread_id === undefined || model.selected_orb === undefined) return [model, []]
+  return [
+    {
+      ...model,
+      orb_files: {
+        ...model.orb_files,
+        selected_path: normalized,
+        opened_file: { state: "loading", path: normalized },
+      },
+      notice: undefined,
+    },
+    [LoadOrbFile({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, path: normalized })],
+  ]
+}
+
+const loadedOrbFileModel = (
+  model: Model,
+  response: Remote.OrbFileResponse,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.orb_files.selected_path !== response.path) return [model, []]
+  return [
+    {
+      ...model,
+      orb_files: {
+        ...model.orb_files,
+        opened_file:
+          response.kind === "text"
+            ? { state: "text", path: response.path, content: response.content, truncated: response.truncated }
+            : { state: "binary", path: response.path },
+      },
+      notice: undefined,
+    },
+    [],
+  ]
+}
+
+const failedLoadOrbFileModel = (
+  model: Model,
+  path: string,
+  message: string,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.orb_files.selected_path !== path) return [model, []]
+  return [
+    {
+      ...model,
+      orb_files: { ...model.orb_files, opened_file: { state: "failed", path, message } },
+      notice: message,
+    },
+    [],
+  ]
+}
+
+const loadedOrbChangesModel = (
+  model: Model,
+  response: Remote.OrbChangesResponse,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const parsed = parseOrbChanges(response)
+  return [{ ...model, orb_changes: parsed, notice: parsed.state === "failed" ? parsed.message : undefined }, []]
+}
+
+const parseOrbChanges = (response: Remote.OrbChangesResponse): OrbChangesModel => {
+  try {
+    const patches = response.diff.trim().length === 0 ? [] : parsePatchFiles(response.diff, "orb-changes", false)
+    const parsedFileNames = new Set<string>()
+    const diffs = patches.flatMap((patch, patchIndex) =>
+      patch.files.map((fileDiff, fileIndex): OrbChangeRow => {
+        parsedFileNames.add(fileDiff.name)
+        const payloadId = `orb-changes:${patchIndex}:${fileIndex}`
+        if (fileDiff.hunks.length === 0) {
+          return { kind: "skipped", payload_id: payloadId, file_name: fileDiff.name, reason: "No renderable hunks" }
+        }
+        return { kind: "diff", ...toWebPierreDiffFromFileDiff(fileDiff, payloadId) }
+      }),
+    )
+    const skipped = diffFileNames(response.diff)
+      .filter((fileName) => !parsedFileNames.has(fileName))
+      .map(
+        (fileName, index): OrbChangeSkipped => ({
+          kind: "skipped",
+          payload_id: `orb-changes:skipped:${index}`,
+          file_name: fileName,
+          reason: "Diff unavailable",
+        }),
+      )
+    return {
+      state: "loaded",
+      base_commit: response.base_commit,
+      head_commit: response.head_commit,
+      dirty: response.dirty,
+      diffs: [...diffs, ...skipped],
+    }
+  } catch (cause) {
+    const skipped = diffFileNames(response.diff).map(
+      (fileName, index): OrbChangeSkipped => ({
+        kind: "skipped",
+        payload_id: `orb-changes:skipped:${index}`,
+        file_name: fileName,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+    )
+    if (skipped.length > 0) {
+      return {
+        state: "loaded",
+        base_commit: response.base_commit,
+        head_commit: response.head_commit,
+        dirty: response.dirty,
+        diffs: skipped,
+      }
+    }
+    return { state: "failed", message: cause instanceof Error ? cause.message : String(cause) }
+  }
+}
+
+const diffFileNames = (diff: string): ReadonlyArray<string> =>
+  diff.split("\n").flatMap((line) => {
+    const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line)
+    return match?.[2] === undefined ? [] : [match[2]]
+  })
+
+const treePath = (entry: Remote.OrbFileEntry) => (entry.kind === "dir" ? `${entry.path}/` : entry.path)
+
+const mergeTreePaths = (current: ReadonlyArray<string>, next: ReadonlyArray<string>): ReadonlyArray<string> =>
+  [...new Set([...current, ...next])].toSorted(compareTreePaths)
+
+const compareTreePaths = (left: string, right: string) => {
+  const leftDir = left.endsWith("/")
+  const rightDir = right.endsWith("/")
+  if (leftDir !== rightDir) return leftDir ? -1 : 1
+  return left.localeCompare(right)
+}
+
+const normalizeTreeSelection = (path: string) => {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/g, "")
+  return normalized === "." ? "" : normalized
+}
+
 const updateThreadOrbStatus = (
   threads: ReadonlyArray<Remote.ThreadSummary>,
   orb: Remote.OrbSummary,
@@ -788,9 +1208,18 @@ const newestFirst = (threads: ReadonlyArray<Remote.ThreadSummary>): ReadonlyArra
 
 const lastEventSequence = (events: ReadonlyArray<Event.Event>) => events.at(-1)?.sequence ?? 0
 
-const initialOrbTabs = () => ({
+const initialOrbWorkspace = () => ({
   selected_orb_tab: "transcript" as const,
   orb_tabs: Tabs.init({ id: "orb-tabs" }),
+  orb_files: initialOrbFiles(),
+  orb_changes: { state: "idle" as const },
+})
+
+const initialOrbFiles = (): OrbFilesModel => ({
+  directories: {},
+  paths: [],
+  path_kinds: {},
+  opened_file: { state: "idle" },
 })
 
 const diffRows = (input: {

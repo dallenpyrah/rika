@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -1085,6 +1085,9 @@ describe("remote control API and SDK", () => {
       { method: "POST", path: "/v1/ide/context" },
       { method: "POST", path: "/v1/ide/open-file" },
       { method: "GET", path: "/v1/ide/navigation-requests" },
+      { method: "GET", path: "/v1/orb/files" },
+      { method: "GET", path: "/v1/orb/file?path=README.md" },
+      { method: "GET", path: "/v1/orb/changes" },
     ]
 
     try {
@@ -1144,6 +1147,59 @@ describe("remote control API and SDK", () => {
         })
         expect(body.diff).toContain("diff --git a/README.md b/README.md")
         expect(body.diff).toContain("+after")
+      } finally {
+        await runtime.runPromise(handle.close())
+      }
+    } finally {
+      await rm(workspace, { force: true, recursive: true })
+    }
+  })
+
+  test("serves read-only orb files only when the HTTP server is in orb mode", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "rika-orb-files-http-"))
+    await mkdir(join(workspace, "src"), { recursive: true })
+    await mkdir(join(workspace, ".rika"), { recursive: true })
+    await writeFile(join(workspace, "README.md"), "hello\n")
+    await writeFile(join(workspace, "src", "index.ts"), "export const value = 1\n")
+    await writeFile(join(workspace, ".rika", "runtime.db"), "internal\n")
+    const runtime = ManagedRuntime.make(makeLayer())
+
+    try {
+      const disabled = await runtime.runPromise(HttpServer.handle(new Request("http://rika.test/v1/orb/files")))
+      const handle = await runtime.runPromise(
+        HttpServer.serve({
+          port: 0,
+          token: "secret",
+          orb: true,
+          base_commit: "abc123",
+          workspace_root: workspace,
+        }),
+      )
+      try {
+        const listed = await fetch(`${handle.url}/v1/orb/files`, {
+          headers: { authorization: "Bearer secret" },
+        })
+        const opened = await fetch(`${handle.url}/v1/orb/file?path=README.md`, {
+          headers: { authorization: "Bearer secret" },
+        })
+        const invalid = await fetch(`${handle.url}/v1/orb/file?path=..%2Fsecret.txt`, {
+          headers: { authorization: "Bearer secret" },
+        })
+        const files = Schema.decodeUnknownSync(Remote.OrbFilesResponse)(await listed.json())
+        const file = Schema.decodeUnknownSync(Remote.OrbFileResponse)(await opened.json())
+
+        expect(disabled.status).toBe(404)
+        expect(listed.status).toBe(200)
+        expect(opened.status).toBe(200)
+        expect(invalid.status).toBe(400)
+        expect(files).toEqual({
+          path: "",
+          entries: [
+            { name: "src", path: "src", kind: "dir" },
+            { name: "README.md", path: "README.md", kind: "file", size: 6 },
+          ],
+        })
+        expect(file).toEqual({ path: "README.md", kind: "text", content: "hello\n", truncated: false })
       } finally {
         await runtime.runPromise(handle.close())
       }

@@ -1,4 +1,5 @@
 export * as OrbChanges from "./orb-changes"
+export * as OrbFiles from "./orb-files"
 export * as OrbActivity from "./orb-activity"
 export * as OrbPty from "./orb-pty"
 export * as OrbManager from "./orb-manager"

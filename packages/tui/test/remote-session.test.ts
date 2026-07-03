@@ -325,6 +325,10 @@ const fakeBackend = (): FakeBackend => {
       }),
     orbChanges: () =>
       Effect.fail(new Client.SdkError({ message: "orb changes unavailable", operation: "orbChanges", status: 404 })),
+    orbFiles: () =>
+      Effect.fail(new Client.SdkError({ message: "orb files unavailable", operation: "orbFiles", status: 404 })),
+    orbFile: () =>
+      Effect.fail(new Client.SdkError({ message: "orb file unavailable", operation: "orbFile", status: 404 })),
     listOrbs: () => Effect.succeed([...orbs.values()]),
     getOrbByThread: (threadId) =>
       Effect.suspend(() => {

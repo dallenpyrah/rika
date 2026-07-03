@@ -544,12 +544,39 @@ describe("Rika protocol schemas", () => {
       diff: "diff --git a/file b/file",
       dirty: true,
     }
+    const files: Remote.OrbFilesResponse = {
+      path: "src",
+      entries: [
+        { name: "index.ts", path: "src/index.ts", kind: "file", size: 42 },
+        { name: "components", path: "src/components", kind: "dir" },
+      ],
+    }
+    const textFile: Remote.OrbFileResponse = {
+      path: "src/index.ts",
+      kind: "text",
+      content: "export const value = 1\n",
+      truncated: false,
+    }
+    const binaryFile: Remote.OrbFileResponse = {
+      path: "image.bin",
+      kind: "binary",
+      binary: true,
+    }
 
     expect(Schema.decodeUnknownSync(Orb.OrbRecord)(Schema.encodeSync(Orb.OrbRecord)(orb))).toEqual(orb)
     expect(Schema.decodeUnknownSync(Orb.ProjectRecord)(Schema.encodeSync(Orb.ProjectRecord)(project))).toEqual(project)
     expect(
       Schema.decodeUnknownSync(Remote.OrbChangesResponse)(Schema.encodeSync(Remote.OrbChangesResponse)(changes)),
     ).toEqual(changes)
+    expect(
+      Schema.decodeUnknownSync(Remote.OrbFilesResponse)(Schema.encodeSync(Remote.OrbFilesResponse)(files)),
+    ).toEqual(files)
+    expect(
+      Schema.decodeUnknownSync(Remote.OrbFileResponse)(Schema.encodeSync(Remote.OrbFileResponse)(textFile)),
+    ).toEqual(textFile)
+    expect(
+      Schema.decodeUnknownSync(Remote.OrbFileResponse)(Schema.encodeSync(Remote.OrbFileResponse)(binaryFile)),
+    ).toEqual(binaryFile)
   })
 
   test("round-trips orb remote-control payloads", () => {

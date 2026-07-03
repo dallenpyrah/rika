@@ -9,9 +9,13 @@ import {
   ClickedPauseOrb,
   ConfirmedKillOrb,
   GotOrbTabsMessage,
+  LoadedOrbChanges,
+  LoadedOrbDirectory,
+  LoadedOrbFile,
   LoadedThreads,
   OpenedThread,
   ReceivedThreadEvent,
+  SelectedOrbFile,
   SubmittedDraft,
   UpdatedSelectedOrb,
   contextUsage,
@@ -57,12 +61,162 @@ describe("web app state", () => {
     expect(commands.map((command) => command.name)).toEqual(["FocusTab"])
   })
 
+  test("loads orb file state through the selected thread endpoint", () => {
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      selected_orb: orbSummary("running"),
+      threads: [summary(threadId, { orb_status: "running" })],
+    }
+
+    const [tabbed, tabCommands] = update(
+      model,
+      GotOrbTabsMessage({ message: { _tag: "SelectedTab", value: "files", index: 1 } }),
+    )
+    const [listed] = update(
+      tabbed,
+      LoadedOrbDirectory({
+        response: {
+          path: "",
+          entries: [
+            { name: "src", path: "src", kind: "dir" },
+            { name: "README.md", path: "README.md", kind: "file", size: 6 },
+          ],
+        },
+      }),
+    )
+    const [selected, selectCommands] = update(listed, SelectedOrbFile({ path: "README.md" }))
+    const [opened] = update(
+      selected,
+      LoadedOrbFile({
+        response: { path: "README.md", kind: "text", content: "hello\n", truncated: false },
+      }),
+    )
+
+    expect(tabbed.orb_files.directories[""]?.state).toBe("loading")
+    expect(tabCommands.map((command) => command.name)).toEqual(["FocusTab", "LoadOrbDirectory"])
+    expect(tabCommands[1]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, path: "" })
+    expect(listed.orb_files.paths).toEqual(["src/", "README.md"])
+    expect(listed.orb_files.path_kinds).toEqual({ src: "dir", "README.md": "file" })
+    expect(selected.orb_files.opened_file).toEqual({ state: "loading", path: "README.md" })
+    expect(selectCommands.map((command) => command.name)).toEqual(["LoadOrbFile"])
+    expect(selectCommands[0]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, path: "README.md" })
+    expect(opened.orb_files.opened_file).toEqual({
+      state: "text",
+      path: "README.md",
+      content: "hello\n",
+      truncated: false,
+    })
+  })
+
+  test("loads child directories when selecting a known orb directory", () => {
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      selected_orb: orbSummary("running"),
+      threads: [summary(threadId, { orb_status: "running" })],
+      orb_files: {
+        ...initialModel({ api_base_url: "/api/rika" }).orb_files,
+        paths: ["src/"],
+        path_kinds: { src: "dir" as const },
+        directories: { "": { state: "loaded" as const } },
+      },
+    }
+
+    const [selected, commands] = update(model, SelectedOrbFile({ path: "src/" }))
+
+    expect(selected.orb_files.selected_path).toBe("src")
+    expect(selected.orb_files.directories.src?.state).toBe("loading")
+    expect(selected.orb_files.opened_file).toEqual({ state: "idle" })
+    expect(commands.map((command) => command.name)).toEqual(["LoadOrbDirectory"])
+    expect(commands[0]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, path: "src" })
+  })
+
+  test("loads and parses orb changes through the selected thread endpoint", () => {
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      selected_orb: orbSummary("running"),
+      threads: [summary(threadId, { orb_status: "running" })],
+    }
+
+    const [tabbed, tabCommands] = update(
+      model,
+      GotOrbTabsMessage({ message: { _tag: "SelectedTab", value: "changes", index: 2 } }),
+    )
+    const [loaded] = update(
+      tabbed,
+      LoadedOrbChanges({
+        response: {
+          base_commit: "abc123",
+          head_commit: "def456",
+          dirty: true,
+          diff: gitPatch("README.md"),
+        },
+      }),
+    )
+
+    expect(tabbed.orb_changes.state).toBe("loading")
+    expect(tabCommands.map((command) => command.name)).toEqual(["FocusTab", "LoadOrbChanges"])
+    expect(tabCommands[1]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId })
+    expect(loaded.orb_changes).toMatchObject({
+      state: "loaded",
+      base_commit: "abc123",
+      head_commit: "def456",
+      dirty: true,
+    })
+    if (loaded.orb_changes.state !== "loaded") throw new Error("expected loaded changes")
+    expect(loaded.orb_changes.diffs).toHaveLength(1)
+    expect(loaded.orb_changes.diffs[0]).toMatchObject({
+      kind: "diff",
+      payload_id: "orb-changes:0:0",
+      file_name: "README.md",
+      additions: 1,
+      deletions: 0,
+    })
+  })
+
+  test("keeps unrenderable orb change files as skipped rows", () => {
+    const [loaded] = update(
+      {
+        ...initialModel({ api_base_url: "/api/rika" }),
+        selected_thread_id: threadId,
+        selected_orb: orbSummary("running"),
+        threads: [summary(threadId, { orb_status: "running" })],
+      },
+      LoadedOrbChanges({
+        response: {
+          base_commit: "abc123",
+          head_commit: "def456",
+          dirty: true,
+          diff: binaryGitPatch("image.bin"),
+        },
+      }),
+    )
+
+    expect(loaded.orb_changes.state).toBe("loaded")
+    if (loaded.orb_changes.state !== "loaded") throw new Error("expected loaded changes")
+    expect(loaded.orb_changes.diffs).toEqual([
+      {
+        kind: "skipped",
+        payload_id: "orb-changes:0:0",
+        file_name: "image.bin",
+        reason: "No renderable hunks",
+      },
+    ])
+  })
+
   test("resets orb tab state when changing thread scope", () => {
     const activeFiles = {
       ...initialModel({ api_base_url: "/api/rika" }),
       selected_thread_id: threadId,
       selected_orb_tab: "files" as const,
       orb_tabs: tabModel(1),
+      orb_files: {
+        ...initialModel({ api_base_url: "/api/rika" }).orb_files,
+        paths: ["README.md"],
+        path_kinds: { "README.md": "file" as const },
+      },
     }
 
     const [newThread] = update(activeFiles, ClickedNewThread())
@@ -75,6 +229,8 @@ describe("web app state", () => {
     expect(newThread.orb_tabs.activeIndex).toBe(0)
     expect(opened.selected_orb_tab).toBe("transcript")
     expect(opened.orb_tabs.activeIndex).toBe(0)
+    expect(newThread.orb_files.paths).toEqual([])
+    expect(opened.orb_files.paths).toEqual([])
   })
 
   test("opens a thread from durable events before starting the live subscription", () => {
@@ -490,3 +646,22 @@ const fileDiff = (name: string, additions: number, deletions: number) => ({
     },
   ],
 })
+
+const gitPatch = (name: string) => `diff --git a/${name} b/${name}
+index e69de29..b6fc4c6 100644
+--- a/${name}
++++ b/${name}
+@@ -0,0 +1 @@
++hello
+`
+
+const binaryGitPatch = (name: string) => `diff --git a/${name} b/${name}
+new file mode 100644
+index 0000000..1234567
+GIT binary patch
+literal 3
+KcmZQzU|?Wm5C8xG
+
+literal 0
+HcmV?d00001
+`

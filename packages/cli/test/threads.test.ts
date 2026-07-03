@@ -259,6 +259,8 @@ const emptyClient = (): Client.Interface => ({
   createThread: unexpectedClientCall,
   createOrbThread: unexpectedClientCall,
   orbChanges: unexpectedClientCall,
+  orbFiles: unexpectedClientCall,
+  orbFile: unexpectedClientCall,
   listOrbs: unexpectedClientCall,
   getOrbByThread: unexpectedClientCall,
   pauseOrb: unexpectedClientCall,

@@ -1,6 +1,19 @@
 import { Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
 import { describe, test } from "bun:test"
-import { initialModel, MountPierreDiff, RenderedPierreDiff, update, type Model, type OrbTab } from "../src/app"
+import {
+  initialModel,
+  LoadedOrbChanges,
+  LoadedOrbDirectory,
+  LoadedOrbFile,
+  MountPierreDiff,
+  MountPierreTree,
+  RenderedPierreDiff,
+  RenderedPierreTree,
+  SelectedOrbFile,
+  update,
+  type Model,
+  type OrbTab,
+} from "../src/app"
 
 Object.assign(globalThis, {
   window: {
@@ -31,12 +44,40 @@ describe("web app view", () => {
     )
   })
 
-  test("renders placeholder panels for downstream orb surfaces", () => {
+  test("renders the read-only orb file browser and opened text file", () => {
     Scene.scene(
       { update, view: View.view },
-      Scene.with(orbModel("files", 1)),
+      Scene.with(filesModel()),
       Scene.expect(Scene.role("tab", { name: "Files", selected: true })).toExist(),
-      Scene.expect(Scene.role("tabpanel")).toContainText("Files arrive with #58"),
+      Scene.expect(Scene.role("tabpanel")).toContainText("README.md"),
+      Scene.expect(Scene.role("tabpanel")).toContainText("hello from file"),
+      Scene.expect(Scene.selector("[data-pierre-tree]")).toExist(),
+      Scene.Mount.expectHas(MountPierreTree),
+      Scene.Mount.resolve(MountPierreTree, RenderedPierreTree({ selected_path: "README.md" })),
+    )
+  })
+
+  test("renders parsed orb changes as Pierre diff mounts", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(changesModel()),
+      Scene.expect(Scene.role("tab", { name: "Changes", selected: true })).toExist(),
+      Scene.expect(Scene.text("README.md")).toExist(),
+      Scene.expect(Scene.text("+1")).toExist(),
+      Scene.expect(Scene.selector('[data-orb-change-diff-id="orb-changes:0:0"]')).toExist(),
+      Scene.Mount.expectHas(MountPierreDiff),
+      Scene.Mount.resolve(MountPierreDiff, RenderedPierreDiff({ payload_id: "orb-changes:0:0" })),
+    )
+  })
+
+  test("renders unrenderable orb changes as skipped rows", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(skippedChangesModel()),
+      Scene.expect(Scene.role("tab", { name: "Changes", selected: true })).toExist(),
+      Scene.expect(Scene.text("image.bin")).toExist(),
+      Scene.expect(Scene.text("skipped")).toExist(),
+      Scene.expect(Scene.text("No renderable hunks")).toExist(),
     )
   })
 
@@ -91,6 +132,56 @@ const diffModel = (expanded_diff_ids: ReadonlyArray<string>): Model => {
     subscription_after_sequence: 2,
   }
   return model
+}
+
+const filesModel = (): Model => {
+  const [listed] = update(
+    orbModel("files", 1),
+    LoadedOrbDirectory({
+      response: {
+        path: "",
+        entries: [{ name: "README.md", path: "README.md", kind: "file", size: 15 }],
+      },
+    }),
+  )
+  const [selected] = update(listed, SelectedOrbFile({ path: "README.md" }))
+  const [opened] = update(
+    selected,
+    LoadedOrbFile({
+      response: { path: "README.md", kind: "text", content: "hello from file\n", truncated: false },
+    }),
+  )
+  return opened
+}
+
+const changesModel = (): Model => {
+  const [loaded] = update(
+    orbModel("changes", 2),
+    LoadedOrbChanges({
+      response: {
+        base_commit: "abc123",
+        head_commit: "def456",
+        dirty: true,
+        diff: gitPatch("README.md"),
+      },
+    }),
+  )
+  return loaded
+}
+
+const skippedChangesModel = (): Model => {
+  const [loaded] = update(
+    orbModel("changes", 2),
+    LoadedOrbChanges({
+      response: {
+        base_commit: "abc123",
+        head_commit: "def456",
+        dirty: true,
+        diff: binaryGitPatch("image.bin"),
+      },
+    }),
+  )
+  return loaded
 }
 
 const tabModel = (activeIndex: number) => ({
@@ -198,3 +289,22 @@ const fileDiff = (name: string, additions: number, deletions: number) => ({
     },
   ],
 })
+
+const gitPatch = (name: string) => `diff --git a/${name} b/${name}
+index e69de29..b6fc4c6 100644
+--- a/${name}
++++ b/${name}
+@@ -0,0 +1 @@
++hello
+`
+
+const binaryGitPatch = (name: string) => `diff --git a/${name} b/${name}
+new file mode 100644
+index 0000000..1234567
+GIT binary patch
+literal 3
+KcmZQzU|?Wm5C8xG
+
+literal 0
+HcmV?d00001
+`

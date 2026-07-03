@@ -31,6 +31,7 @@ describe("web Vite backend proxy", () => {
     })
 
     expect(target).toEqual({
+      kind: "proxy",
       url: `https://orb-endpoint.rika.test/v1/threads/${threadId}/events?after_sequence=1`,
       token: "orb-token",
       body: undefined,
@@ -58,6 +59,7 @@ describe("web Vite backend proxy", () => {
     })
 
     expect(target).toEqual({
+      kind: "proxy",
       url: "https://orb-endpoint.rika.test/v1/turns",
       token: "orb-token",
       body,
@@ -84,10 +86,58 @@ describe("web Vite backend proxy", () => {
     })
 
     expect(target).toEqual({
+      kind: "proxy",
       url: "http://127.0.0.1:45555/v1/threads",
       token: "local-token",
       body: undefined,
     })
     expect(resolved).toEqual([undefined])
+  })
+
+  test("routes explicit orb file requests through the thread orb endpoint and strips client credentials", async () => {
+    const resolved: Array<string | undefined> = []
+    const target = await resolveProxyTarget({
+      request_url: `/api/rika/orb/by-thread/${threadId}/v1/orb/file?path=src%2Findex.ts&token=client&thread_id=spoofed`,
+      method: "GET",
+      resolveEndpoint: async (input) => {
+        resolved.push(input.thread_id)
+        return {
+          kind: "orb",
+          url: "https://orb-endpoint.rika.test/",
+          token: "orb-token",
+          orb_id: Ids.OrbId.make("orb_web_proxy"),
+          thread_id: threadId,
+        }
+      },
+    })
+
+    expect(target).toEqual({
+      kind: "proxy",
+      url: "https://orb-endpoint.rika.test/v1/orb/file?path=src%2Findex.ts",
+      token: "orb-token",
+      body: undefined,
+    })
+    expect(resolved).toEqual([threadId])
+  })
+
+  test("rejects explicit orb file routes when the selected thread has no orb endpoint", async () => {
+    const target = await resolveProxyTarget({
+      request_url: `/api/rika/orb/by-thread/${threadId}/v1/orb/files?path=src`,
+      method: "GET",
+      resolveEndpoint: async () => ({
+        kind: "local",
+        url: "http://127.0.0.1:45555",
+        token: "local-token",
+        workspace_root: "/workspace/rika",
+        data_dir: "/workspace/rika/.rika",
+        pid: 123,
+      }),
+    })
+
+    expect(target).toEqual({
+      kind: "response",
+      status: 404,
+      body: { error: { message: `No running orb endpoint for thread ${threadId}`, code: "orb_endpoint_not_found" } },
+    })
   })
 })

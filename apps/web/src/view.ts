@@ -11,6 +11,7 @@ import {
   ConfirmedKillOrb,
   GotOrbTabsMessage,
   MountPierreDiff,
+  MountPierreTree,
   SubmittedDraft,
   contextUsage,
   eventRows,
@@ -193,13 +194,128 @@ const orbTabs = (model: Model): Html =>
 
 const orbTabPanel = (model: Model, tab: OrbTab): Html => {
   if (tab === "transcript") return transcript(model)
-  if (tab === "files") return downstreamPanel("Files arrive with #58")
-  if (tab === "changes") return downstreamPanel("Changes arrive with #58")
+  if (tab === "files") return orbFilesPanel(model)
+  if (tab === "changes") return orbChangesPanel(model)
   return downstreamPanel("Terminal arrives with #59")
 }
 
 const downstreamPanel = (label: string): Html =>
   Ui.card([H.Class("placeholder-card")], [H.div([H.Class("empty-state")], [label])])
+
+const orbFilesPanel = (model: Model): Html =>
+  Ui.card(
+    [H.Class("orb-files-card")],
+    [
+      model.orb_files.paths.length === 0
+        ? H.div([H.Class("empty-state")], [orbDirectoryStatus(model, "")])
+        : H.div(
+            [H.Class("orb-files-layout")],
+            [
+              H.div(
+                [
+                  H.Key(orbTreeKey(model)),
+                  H.Class("orb-file-tree"),
+                  H.DataAttribute("pierre-tree", ""),
+                  H.OnMount(MountPierreTree(orbTreeMountArgs(model))),
+                ],
+                [],
+              ),
+              orbFileViewer(model),
+            ],
+          ),
+    ],
+  )
+
+const orbFileViewer = (model: Model): Html => {
+  const opened = model.orb_files.opened_file
+  if (opened.state === "idle") return H.div([H.Class("orb-file-viewer empty-state")], ["Select a file"])
+  if (opened.state === "loading") return H.div([H.Class("orb-file-viewer empty-state")], [`Loading ${opened.path}`])
+  if (opened.state === "binary") return H.div([H.Class("orb-file-viewer empty-state")], [`${opened.path} is binary`])
+  if (opened.state === "failed") return H.div([H.Class("orb-file-viewer empty-state")], [opened.message])
+  return H.div(
+    [H.Class("orb-file-viewer")],
+    [
+      H.div(
+        [H.Class("orb-file-viewer-header")],
+        [H.strong([], [opened.path]), opened.truncated ? Ui.badge(["truncated"], "warning") : Ui.empty],
+      ),
+      H.pre([H.Class("orb-file-content")], [opened.content]),
+    ],
+  )
+}
+
+const orbChangesPanel = (model: Model): Html => {
+  const changes = model.orb_changes
+  if (changes.state === "idle")
+    return Ui.card([H.Class("orb-changes-card")], [H.div([H.Class("empty-state")], ["Changes not loaded"])])
+  if (changes.state === "loading")
+    return Ui.card([H.Class("orb-changes-card")], [H.div([H.Class("empty-state")], ["Loading changes"])])
+  if (changes.state === "failed")
+    return Ui.card([H.Class("orb-changes-card")], [H.div([H.Class("empty-state")], [changes.message])])
+  return Ui.card(
+    [H.Class("orb-changes-card")],
+    [
+      H.div(
+        [H.Class("orb-changes-summary")],
+        [
+          Ui.badge([changes.dirty ? "dirty" : "clean"], changes.dirty ? "warning" : "success"),
+          H.span([], [`base ${shortId(changes.base_commit)}`]),
+          H.span([], [`head ${shortId(changes.head_commit)}`]),
+        ],
+      ),
+      changes.diffs.length === 0
+        ? H.div([H.Class("empty-state")], [changes.dirty ? "No renderable file diffs" : "Workspace clean"])
+        : H.div([H.Class("orb-change-list")], changes.diffs.map(orbChangeRowView)),
+    ],
+  )
+}
+
+const orbChangeRowView = (row: Extract<Model["orb_changes"], { readonly state: "loaded" }>["diffs"][number]): Html =>
+  row.kind === "diff" ? orbChangeDiffView(row) : orbChangeSkippedView(row)
+
+const orbChangeSkippedView = (
+  row: Extract<Model["orb_changes"], { readonly state: "loaded" }>["diffs"][number] & { readonly kind: "skipped" },
+): Html =>
+  H.article(
+    [H.Key(row.payload_id), H.Class("event-row event-row-diff")],
+    [
+      H.div(
+        [H.Class("event-meta")],
+        [H.strong([], [row.file_name]), Ui.badge(["skipped"], "warning"), H.span([], [row.reason])],
+      ),
+    ],
+  )
+
+const orbChangeDiffView = (
+  diff: Extract<Model["orb_changes"], { readonly state: "loaded" }>["diffs"][number] & { readonly kind: "diff" },
+): Html =>
+  H.article(
+    [H.Key(diff.payload_id), H.Class("event-row event-row-diff")],
+    [
+      H.div(
+        [H.Class("event-meta")],
+        [
+          H.strong([], [diff.file_name]),
+          H.span([H.Class("diff-stat diff-stat-add")], [`+${diff.additions}`]),
+          H.span([H.Class("diff-stat diff-stat-delete")], [`-${diff.deletions}`]),
+        ],
+      ),
+      H.div(
+        [
+          H.Class("pierre-diff-mount"),
+          H.DataAttribute("orb-change-diff-id", diff.payload_id),
+          H.OnMount(
+            MountPierreDiff({
+              payload_id: diff.payload_id,
+              file_diff: diff.file_diff,
+              theme_type: "dark",
+            }),
+          ),
+        ],
+        [],
+      ),
+    ],
+  )
 
 const rowView = (row: TranscriptRow): Html => (row.kind === "pierre-diff" ? pierreDiffRowView(row) : textRowView(row))
 
@@ -294,6 +410,29 @@ const activeTitle = (model: Model) => {
     thread?.title_text ??
     (model.selected_thread_id === undefined ? "No thread selected" : shortId(model.selected_thread_id))
   )
+}
+
+const orbTreeMountArgs = (model: Model) => {
+  const selected = selectedTreePath(model)
+  return {
+    paths: model.orb_files.paths,
+    ...(selected === undefined ? {} : { selected_path: selected }),
+  }
+}
+
+const selectedTreePath = (model: Model) => {
+  const selected = model.orb_files.selected_path
+  if (selected === undefined) return undefined
+  return model.orb_files.path_kinds[selected] === "dir" ? `${selected}/` : selected
+}
+
+const orbTreeKey = (model: Model) => `${model.orb_files.paths.join("\n")}\n${selectedTreePath(model) ?? ""}`
+
+const orbDirectoryStatus = (model: Model, path: string) => {
+  const status = model.orb_files.directories[path]
+  if (status?.state === "loading") return "Loading files"
+  if (status?.state === "failed") return status.message
+  return "No files loaded"
 }
 
 const hasOrbWorkspace = (model: Model) => {

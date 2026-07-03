@@ -421,6 +421,65 @@ textarea {
   background: #020617;
 }
 
+.orb-files-card,
+.orb-changes-card {
+  overflow: auto;
+  min-height: 0;
+}
+
+.orb-files-layout {
+  display: grid;
+  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  min-height: 28rem;
+}
+
+.orb-file-tree {
+  overflow: auto;
+  min-width: 0;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  padding: 0.75rem;
+}
+
+.orb-file-viewer {
+  overflow: auto;
+  min-width: 0;
+}
+
+.orb-file-viewer.empty-state {
+  min-height: 28rem;
+}
+
+.orb-file-viewer-header,
+.orb-changes-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  padding: 0.75rem;
+}
+
+.orb-file-viewer-header strong {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8125rem;
+}
+
+.orb-file-content {
+  overflow: auto;
+  margin: 0;
+  padding: 0.9rem;
+  color: #dbeafe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.orb-change-list {
+  display: grid;
+}
+
 .composer {
   display: grid;
   gap: 0.7rem;
@@ -465,5 +524,15 @@ textarea {
   .orb-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .orb-files-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .orb-file-tree {
+    max-height: 16rem;
+    border-right: 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.16);
   }
 }

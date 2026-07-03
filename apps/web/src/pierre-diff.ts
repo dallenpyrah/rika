@@ -56,10 +56,18 @@ export const toWebPierreDiff = (
 ): WebPierreDiff | undefined => {
   const fileDiff = asFileDiffMetadata(payload.file_diff)
   if (fileDiff === undefined) return undefined
+  return toWebPierreDiffFromFileDiff(fileDiff, payloadId, payloadFileName(payload))
+}
+
+export const toWebPierreDiffFromFileDiff = (
+  fileDiff: FileDiffMetadata,
+  payloadId: string,
+  fileName?: string,
+): WebPierreDiff => {
   const stats = diffStats(fileDiff)
   return {
     payload_id: payloadId,
-    file_name: payloadFileName(payload) ?? fileDiff.name,
+    file_name: fileName ?? fileDiff.name,
     additions: stats.additions,
     deletions: stats.deletions,
     file_diff: fileDiff,

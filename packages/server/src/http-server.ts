@@ -1,5 +1,5 @@
 import { Diagnostics } from "@rika/core"
-import { OrbChanges, OrbPty } from "@rika/orb"
+import { OrbChanges, OrbFiles, OrbPty } from "@rika/orb"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Cause, Context, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
 import * as PresenceHub from "./presence-hub"
@@ -41,14 +41,20 @@ const serviceLayer = Layer.effect(
     const remote = yield* RemoteControl.Service
     const diagnostics = yield* Diagnostics.Service
     const orbChanges = yield* OrbChanges.Service
+    const orbFiles = yield* OrbFiles.Service
     const orbPty = yield* OrbPty.Service
     const presence = yield* PresenceHub.Service
-    return makeService(remote, diagnostics, orbChanges, orbPty, presence)
+    return makeService(remote, diagnostics, orbChanges, orbFiles, orbPty, presence)
   }),
 )
 
+export const layerWithOrbServices = (
+  orbChangesLayer: Layer.Layer<OrbChanges.Service>,
+  orbFilesLayer: Layer.Layer<OrbFiles.Service>,
+) => serviceLayer.pipe(Layer.provide(orbChangesLayer), Layer.provide(orbFilesLayer))
+
 export const layerWithOrbChanges = (orbChangesLayer: Layer.Layer<OrbChanges.Service>) =>
-  serviceLayer.pipe(Layer.provide(orbChangesLayer))
+  layerWithOrbServices(orbChangesLayer, OrbFiles.layer)
 
 export const layerFromEnv = (env: Record<string, string | undefined>) =>
   layerWithOrbChanges(OrbChanges.layer).pipe(Layer.provide(OrbPty.layerFromEnv(env)))
@@ -231,11 +237,12 @@ const makeService = (
   remote: RemoteControl.Interface,
   diagnostics: Diagnostics.Interface,
   orbChanges: OrbChanges.Interface,
+  orbFiles: OrbFiles.Interface,
   orbPty: OrbPty.Interface,
   presence: PresenceHub.Interface,
 ): Interface => {
   const handleRequest = (request: Request, requiredToken?: string, orbMode?: OrbRouteMode) =>
-    route(remote, orbChanges, presence, request, tokenValue(requiredToken), orbMode).pipe(
+    route(remote, orbChanges, orbFiles, presence, request, tokenValue(requiredToken), orbMode).pipe(
       Effect.provideService(Diagnostics.Service, diagnostics),
     )
   return Service.of({
@@ -292,6 +299,7 @@ const orbRouteMode = (input: ServeInput): Effect.Effect<OrbRouteMode | undefined
 const route = (
   remote: RemoteControl.Interface,
   orbChanges: OrbChanges.Interface,
+  orbFiles: OrbFiles.Interface,
   presence: PresenceHub.Interface,
   request: Request,
   requiredToken: string | undefined,
@@ -302,7 +310,7 @@ const route = (
   return Diagnostics.event(
     "http.request",
     (fields) =>
-      dispatch(remote, orbChanges, presence, request, url, requiredToken, orbMode).pipe(
+      dispatch(remote, orbChanges, orbFiles, presence, request, url, requiredToken, orbMode).pipe(
         Effect.tap((response) =>
           Effect.sync(() => {
             fields.status_code = response.status
@@ -346,6 +354,7 @@ const requestFields = (request: Request, url: URL, requestId: string): Diagnosti
 const dispatch = (
   remote: RemoteControl.Interface,
   orbChanges: OrbChanges.Interface,
+  orbFiles: OrbFiles.Interface,
   presence: PresenceHub.Interface,
   request: Request,
   url: URL,
@@ -363,6 +372,22 @@ const dispatch = (
 
     const segments = url.pathname.split("/").filter(Boolean)
     if (segments[0] !== "v1") return notFound()
+
+    if (request.method === "GET" && segments[1] === "orb" && segments[2] === "files" && segments.length === 3) {
+      if (orbMode === undefined) return notFound()
+      const path = url.searchParams.get("path") ?? ""
+      return yield* orbFiles
+        .list({ workspace_root: orbMode.workspace_root, path })
+        .pipe(Effect.mapError(orbFilesError), jsonEffect(Remote.OrbFilesResponse))
+    }
+
+    if (request.method === "GET" && segments[1] === "orb" && segments[2] === "file" && segments.length === 3) {
+      if (orbMode === undefined) return notFound()
+      const path = yield* orbFilePath(url)
+      return yield* orbFiles
+        .read({ workspace_root: orbMode.workspace_root, path })
+        .pipe(Effect.mapError(orbFilesError), jsonEffect(Remote.OrbFileResponse))
+    }
 
     if (request.method === "GET" && segments[1] === "orb" && segments[2] === "changes" && segments.length === 3) {
       if (orbMode === undefined) return notFound()
@@ -633,6 +658,30 @@ const isAuthorized = (request: Request, requiredToken: string | undefined) =>
   requiredToken !== undefined && request.headers.get("authorization") === `Bearer ${requiredToken}`
 
 const tokenValue = (token: string | undefined) => (token === undefined || token.length === 0 ? undefined : token)
+
+const orbFilePath = (url: URL): Effect.Effect<string, RemoteControl.RemoteControlError> => {
+  const path = url.searchParams.get("path")
+  if (path !== null && path.length > 0) return Effect.succeed(path)
+  return Effect.fail(
+    new RemoteControl.RemoteControlError({
+      message: "path query parameter is required",
+      operation: "orbFile",
+      status: 400,
+    }),
+  )
+}
+
+const orbFilesError = (error: OrbFiles.OrbFilesError) =>
+  new RemoteControl.RemoteControlError({
+    message: error.message,
+    operation: error.operation,
+    status:
+      error.kind === "invalid_path" || error.kind === "not_file" || error.kind === "not_directory"
+        ? 400
+        : error.kind === "not_found"
+          ? 404
+          : 500,
+  })
 
 const isLoopbackHost = (host: string) => {
   const normalized = host.toLowerCase()

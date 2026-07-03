@@ -13,11 +13,20 @@ const dataDir = process.env.RIKA_DATA_DIR ?? join(workspaceRoot, ".rika")
 const apiPrefix = "/api/rika"
 type ConfigMode = "rush" | "smart" | "deep1" | "deep2" | "deep3"
 
-interface ProxyTarget {
+interface ProxyForwardTarget {
+  readonly kind: "proxy"
   readonly url: string
   readonly token: string
   readonly body: Uint8Array | undefined
 }
+
+interface ProxyResponseTarget {
+  readonly kind: "response"
+  readonly status: number
+  readonly body: unknown
+}
+
+type ProxyTarget = ProxyForwardTarget | ProxyResponseTarget
 
 interface ResolveProxyTargetInput {
   readonly request_url: string
@@ -211,6 +220,10 @@ const proxyRequest = async (
   if (target === undefined) {
     return
   }
+  if (target.kind === "response") {
+    writeJson(response, target.status, target.body)
+    return
+  }
   const headers = proxyHeaders(request.headers, target.token)
   const requestInit: RequestInit & { duplex?: "half" } = {
     method,
@@ -235,14 +248,59 @@ const proxyRequest = async (
 
 export const resolveProxyTarget = async (input: ResolveProxyTargetInput): Promise<ProxyTarget> => {
   const url = new URL(input.request_url, "http://rika.local")
+  const explicitOrbTarget = explicitOrbProxyTarget(url)
+  if (explicitOrbTarget !== undefined) {
+    const endpoint = await input.resolveEndpoint({ thread_id: explicitOrbTarget.thread_id })
+    if (endpoint.kind !== "orb") {
+      return {
+        kind: "response",
+        status: 404,
+        body: {
+          error: {
+            message: `No running orb endpoint for thread ${explicitOrbTarget.thread_id}`,
+            code: "orb_endpoint_not_found",
+          },
+        },
+      }
+    }
+    return {
+      kind: "proxy",
+      url: `${endpoint.url.replace(/\/$/, "")}${explicitOrbTarget.path}${explicitOrbTarget.search}`,
+      token: endpoint.token,
+      body: input.body,
+    }
+  }
   const targetPath = url.pathname.slice(apiPrefix.length) || "/"
   const threadId = threadIdFromProxyRequest(targetPath, url, input.method, input.body)
   const endpoint = await input.resolveEndpoint(threadId === undefined ? {} : { thread_id: threadId })
   return {
+    kind: "proxy",
     url: `${endpoint.url.replace(/\/$/, "")}${targetPath}${url.search}`,
     token: endpoint.token,
     body: input.body,
   }
+}
+
+const explicitOrbProxyTarget = (
+  url: URL,
+): { readonly thread_id: string; readonly path: string; readonly search: string } | undefined => {
+  const prefix = `${apiPrefix}/orb/by-thread/`
+  if (!url.pathname.startsWith(prefix)) return undefined
+  const suffix = url.pathname.slice(prefix.length)
+  const slashIndex = suffix.indexOf("/")
+  if (slashIndex < 0) return undefined
+  const threadId = decodeURIComponent(suffix.slice(0, slashIndex))
+  const path = suffix.slice(slashIndex)
+  if (path !== "/v1/orb/files" && path !== "/v1/orb/file" && path !== "/v1/orb/changes") return undefined
+  return { thread_id: threadId, path, search: orbProxySearch(url) }
+}
+
+const orbProxySearch = (url: URL) => {
+  const params = new URLSearchParams()
+  const path = url.searchParams.get("path")
+  if (path !== null) params.set("path", path)
+  const text = params.toString()
+  return text.length === 0 ? "" : `?${text}`
 }
 
 const threadIdFromProxyRequest = (

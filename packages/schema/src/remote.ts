@@ -278,6 +278,43 @@ export const OrbChangesResponse = Schema.Struct({
   dirty: Schema.Boolean,
 }).annotate({ identifier: "Rika.Remote.OrbChangesResponse" })
 
+export const OrbFileKind = Schema.Literals(["file", "dir"])
+export type OrbFileKind = typeof OrbFileKind.Type
+
+export interface OrbFileEntry extends Schema.Schema.Type<typeof OrbFileEntry> {}
+export const OrbFileEntry = Schema.Struct({
+  name: Schema.String,
+  path: Schema.String,
+  kind: OrbFileKind,
+  size: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Remote.OrbFileEntry" })
+
+export interface OrbFilesResponse extends Schema.Schema.Type<typeof OrbFilesResponse> {}
+export const OrbFilesResponse = Schema.Struct({
+  path: Schema.String,
+  entries: Schema.Array(OrbFileEntry),
+}).annotate({ identifier: "Rika.Remote.OrbFilesResponse" })
+
+export interface OrbTextFileResponse extends Schema.Schema.Type<typeof OrbTextFileResponse> {}
+export const OrbTextFileResponse = Schema.Struct({
+  path: Schema.String,
+  kind: Schema.Literal("text"),
+  content: Schema.String,
+  truncated: Schema.Boolean,
+}).annotate({ identifier: "Rika.Remote.OrbTextFileResponse" })
+
+export interface OrbBinaryFileResponse extends Schema.Schema.Type<typeof OrbBinaryFileResponse> {}
+export const OrbBinaryFileResponse = Schema.Struct({
+  path: Schema.String,
+  kind: Schema.Literal("binary"),
+  binary: Schema.Literal(true),
+}).annotate({ identifier: "Rika.Remote.OrbBinaryFileResponse" })
+
+export const OrbFileResponse = Schema.Union([OrbTextFileResponse, OrbBinaryFileResponse]).annotate({
+  identifier: "Rika.Remote.OrbFileResponse",
+})
+export type OrbFileResponse = typeof OrbFileResponse.Type
+
 export interface OrbSummary extends Schema.Schema.Type<typeof OrbSummary> {}
 export const OrbSummary = Schema.Struct({
   orb_id: OrbId,

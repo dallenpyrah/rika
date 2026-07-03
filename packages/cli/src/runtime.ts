@@ -1045,6 +1045,8 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
     createThread: (thread) => request(endpointInputFor(thread?.thread_id), (remote) => remote.createThread(thread)),
     createOrbThread: (thread) => request({}, (remote) => remote.createOrbThread(thread)),
     orbChanges: () => request({}, (remote) => remote.orbChanges()),
+    orbFiles: (path) => request({}, (remote) => remote.orbFiles(path)),
+    orbFile: (path) => request({}, (remote) => remote.orbFile(path)),
     listOrbs: () => request({}, (remote) => remote.listOrbs()),
     getOrbByThread: (threadId) => request({ thread_id: threadId }, (remote) => remote.getOrbByThread(threadId)),
     pauseOrb: (orbId) => request({}, (remote) => remote.pauseOrb(orbId)),

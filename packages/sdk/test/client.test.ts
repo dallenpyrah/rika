@@ -301,6 +301,41 @@ describe("SDK client", () => {
     expect(calls).toEqual([{ method: "GET", path: "/v1/orb/changes" }])
   })
 
+  test("uses shared schemas for orb file requests", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const files: Remote.OrbFilesResponse = {
+      path: "src",
+      entries: [{ name: "index.ts", path: "src/index.ts", kind: "file", size: 23 }],
+    }
+    const file: Remote.OrbFileResponse = {
+      path: "src/index.ts",
+      kind: "text",
+      content: "export const value = 1\n",
+      truncated: false,
+    }
+    const client = Client.make({
+      requestJson: (input) => {
+        calls.push(input)
+        if (input.path === "/v1/orb/files?path=src") return Effect.succeed(Codec.encode(Remote.OrbFilesResponse)(files))
+        if (input.path === "/v1/orb/file?path=src%2Findex.ts") {
+          return Effect.succeed(Codec.encode(Remote.OrbFileResponse)(file))
+        }
+        return Effect.fail(new Client.SdkError({ message: `unexpected ${input.path}`, operation: "requestJson" }))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    const listed = await Effect.runPromise(client.orbFiles("src"))
+    const opened = await Effect.runPromise(client.orbFile("src/index.ts"))
+
+    expect(listed).toEqual(files)
+    expect(opened).toEqual(file)
+    expect(calls).toEqual([
+      { method: "GET", path: "/v1/orb/files?path=src" },
+      { method: "GET", path: "/v1/orb/file?path=src%2Findex.ts" },
+    ])
+  })
+
   test("uses shared schemas for orb lifecycle endpoints without endpoint credentials", async () => {
     const calls: Array<Client.RequestInput> = []
     const summary: Remote.OrbSummary = {
