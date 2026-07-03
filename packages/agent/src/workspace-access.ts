@@ -49,6 +49,10 @@ export interface Interface {
     summaries: ReadonlyArray<ThreadProjection.ThreadSummary>,
     userId?: Ids.UserId,
   ) => Effect.Effect<ReadonlyArray<ThreadProjection.ThreadSummary>, RunError>
+  readonly filterDiscoverableThreads: (
+    summaries: ReadonlyArray<ThreadProjection.ThreadSummary>,
+    userId?: Ids.UserId,
+  ) => Effect.Effect<ReadonlyArray<ThreadProjection.ThreadSummary>, RunError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@rika/agent/WorkspaceAccess") {}
@@ -93,11 +97,21 @@ export const layer = Layer.effect(
       ) {
         if (userId === undefined) return summaries
         const decisions = yield* Effect.forEach(summaries, (summary) =>
-          authorizeWorkspaceFromStore(dependencies, {
-            workspace_id: summary.workspace_id,
+          authorizeThreadSummary(dependencies, summary, {
+            thread_id: summary.thread_id,
             user_id: userId,
             action: "read",
           }),
+        )
+        return summaries.filter((_summary, index) => decisions[index]?.allowed === true)
+      }),
+      filterDiscoverableThreads: Effect.fn("WorkspaceAccess.filterDiscoverableThreads")(function* (
+        summaries: ReadonlyArray<ThreadProjection.ThreadSummary>,
+        userId?: Ids.UserId,
+      ) {
+        if (userId === undefined) return summaries
+        const decisions = yield* Effect.forEach(summaries, (summary) =>
+          authorizeThreadDiscovery(dependencies, summary, userId),
         )
         return summaries.filter((_summary, index) => decisions[index]?.allowed === true)
       }),
@@ -128,6 +142,7 @@ export const allowAllLayer = Layer.succeed(
       ),
     ensureWorkspaceForCreate: (input) => Effect.succeed(allow(input)),
     filterReadableThreads: (summaries) => Effect.succeed(summaries),
+    filterDiscoverableThreads: (summaries) => Effect.succeed(summaries),
   }),
 )
 
@@ -170,6 +185,14 @@ export const filterReadableThreads = Effect.fn("WorkspaceAccess.filterReadableTh
   return yield* service.filterReadableThreads(summaries, userId)
 })
 
+export const filterDiscoverableThreads = Effect.fn("WorkspaceAccess.filterDiscoverableThreads.call")(function* (
+  summaries: ReadonlyArray<ThreadProjection.ThreadSummary>,
+  userId?: Ids.UserId,
+) {
+  const service = yield* Service
+  return yield* service.filterDiscoverableThreads(summaries, userId)
+})
+
 const authorizeWorkspaceFromStore = (dependencies: Dependencies, input: WorkspaceAccessInput) =>
   Effect.gen(function* () {
     if (input.user_id === undefined) return allow(input)
@@ -199,12 +222,55 @@ const authorizeThreadFromProjection = (dependencies: Dependencies, input: Thread
         ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
       })
     }
-    return yield* authorizeWorkspaceFromStore(dependencies, {
+    return yield* authorizeThreadSummary(dependencies, summary, input)
+  })
+
+const authorizeThreadSummary = (
+  dependencies: Dependencies,
+  summary: ThreadProjection.ThreadSummary,
+  input: ThreadAccessInput,
+) =>
+  Effect.gen(function* () {
+    const workspaceInput: WorkspaceAccessInput = {
       workspace_id: summary.workspace_id,
       ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
       action: input.action,
-    })
+    }
+    if (input.user_id === undefined) return allow(workspaceInput)
+
+    const readDecision = yield* authorizeThreadRead(dependencies, summary, workspaceInput)
+    if (!readDecision.allowed) return readDecision
+    if (input.action === "read") return readDecision
+    if (input.action === "write" && summary.user_id !== undefined && summary.user_id === input.user_id) {
+      return readDecision
+    }
+    return yield* authorizeWorkspaceFromStore(dependencies, workspaceInput)
   })
+
+const authorizeThreadRead = (
+  dependencies: Dependencies,
+  summary: ThreadProjection.ThreadSummary,
+  input: WorkspaceAccessInput,
+) =>
+  Effect.gen(function* () {
+    if (summary.visibility === "unlisted") return allow(input)
+    if (summary.user_id !== undefined && summary.user_id === input.user_id) return allow(input)
+    if (summary.visibility === "private") {
+      return deny(input, `Thread ${summary.thread_id} is private`)
+    }
+    return yield* authorizeWorkspaceFromStore(dependencies, input)
+  })
+
+const authorizeThreadDiscovery = (
+  dependencies: Dependencies,
+  summary: ThreadProjection.ThreadSummary,
+  userId: Ids.UserId,
+) => {
+  const input: WorkspaceAccessInput = { workspace_id: summary.workspace_id, user_id: userId, action: "read" }
+  if (summary.user_id !== undefined && summary.user_id === userId) return Effect.succeed(allow(input))
+  if (summary.visibility === "unlisted") return Effect.succeed(deny(input, `Thread ${summary.thread_id} is unlisted`))
+  return authorizeThreadRead(dependencies, summary, input)
+}
 
 const ensureWorkspaceForCreateInternal = (dependencies: Dependencies, input: WorkspaceAccessInput) =>
   Effect.gen(function* () {

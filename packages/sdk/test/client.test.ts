@@ -22,6 +22,7 @@ describe("SDK client", () => {
       title_text: "ship",
       diff: { additions: 0, modifications: 0, deletions: 0 },
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }
@@ -86,6 +87,7 @@ describe("SDK client", () => {
       workspace_id: workspaceId,
       diff: { additions: 0, modifications: 0, deletions: 0 },
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }
@@ -99,6 +101,9 @@ describe("SDK client", () => {
         }
         if (input.path === "/v1/threads/thread_sdk_client?user_id=user_sdk_client") {
           return Effect.succeed(Codec.encode(Remote.ThreadRecord)({ summary, events: [] }))
+        }
+        if (input.path === "/v1/threads/thread_sdk_client/visibility?user_id=user_sdk_client") {
+          return Effect.succeed(Codec.encode(Remote.ThreadSummary)({ ...summary, visibility: "workspace" }))
         }
         if (input.path === "/v1/turns") {
           return Effect.succeed(Codec.encode(Remote.StartTurnResponse)({ thread_id: threadId, accepted: true }))
@@ -114,6 +119,7 @@ describe("SDK client", () => {
     await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
     await Effect.runPromise(client.listThreads())
     await Effect.runPromise(client.openThread(threadId))
+    await Effect.runPromise(client.setThreadVisibility(threadId, "workspace"))
     await Effect.runPromise(client.startTurn({ thread_id: threadId, workspace_id: workspaceId, content: "ship" }))
     await Effect.runPromise(client.listArtifacts({ thread_id: threadId }))
 
@@ -125,6 +131,11 @@ describe("SDK client", () => {
       },
       { method: "GET", path: "/v1/threads?user_id=user_sdk_client" },
       { method: "GET", path: "/v1/threads/thread_sdk_client?user_id=user_sdk_client" },
+      {
+        method: "POST",
+        path: "/v1/threads/thread_sdk_client/visibility?user_id=user_sdk_client",
+        body: { visibility: "workspace" },
+      },
       {
         method: "POST",
         path: "/v1/turns",
@@ -196,6 +207,7 @@ describe("SDK client", () => {
       latest_message_text: "Preview me",
       diff: { additions: 3, modifications: 1, deletions: 1 },
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }
@@ -238,6 +250,7 @@ describe("SDK client", () => {
       diff: { additions: 0, modifications: 0, deletions: 0 },
       orb_status: "running",
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }
@@ -486,6 +499,7 @@ describe("SDK client", () => {
       title_text: "forked",
       diff: { additions: 0, modifications: 0, deletions: 0 },
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }

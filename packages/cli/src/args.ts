@@ -35,6 +35,7 @@ export const ThreadAction = Schema.Literals([
   "unarchive",
   "compact",
   "fork",
+  "visibility",
   "tournament",
   "share",
   "reference",
@@ -49,6 +50,7 @@ export const ThreadCommand = Schema.Struct({
   thread_id: Schema.optional(Ids.ThreadId),
   query: Schema.optional(Schema.String),
   at_turn: Schema.optional(Ids.TurnId),
+  visibility: Schema.optional(Schema.Literals(["private", "workspace", "unlisted"])),
   message: Schema.optional(Schema.String),
   branch_count: Schema.optional(Schema.Int),
   modes: Schema.optional(Schema.Array(Config.Mode)),
@@ -295,6 +297,7 @@ export const usage = [
   "  rika threads search [--include-archived] [--limit <n>] <query>",
   "  rika threads archive <thread-id>",
   "  rika threads unarchive <thread-id>",
+  "  rika threads visibility <thread-id> <private|workspace|unlisted>",
   "  rika threads fork <thread-id> [--at-turn <turn-id>]",
   "  rika threads tournament <thread-id> --message <text|-> -n <2..4> [--modes smart,deep2,deep3] [--rubric <text>]",
   "  rika threads share <thread-id>",
@@ -437,6 +440,11 @@ const threadIdConfig = {
 const threadForkConfig = {
   ...threadIdConfig,
   atTurn: Flag.string("at-turn").pipe(Flag.optional, Flag.withDescription("Fork through the completed turn id")),
+}
+
+const threadVisibilityConfig = {
+  ...threadIdConfig,
+  visibility: Argument.string("visibility").pipe(Argument.withDescription("private, workspace, or unlisted")),
 }
 
 const threadTournamentConfig = {
@@ -628,6 +636,10 @@ interface ThreadIdInput {
 
 interface ThreadForkInput extends ThreadIdInput {
   readonly atTurn: Option.Option<string>
+}
+
+interface ThreadVisibilityInput extends ThreadIdInput {
+  readonly visibility: string
 }
 
 interface ThreadTournamentInput extends ThreadIdInput {
@@ -881,6 +893,15 @@ const makeThreadsCommand = (
     CliCommand.withShortDescription("Fork thread"),
   )
 
+  const visibility = CliCommand.make("visibility", threadVisibilityConfig, (input: ThreadVisibilityInput) => {
+    const parsed = toThreadVisibilityCommand(input)
+    if (parsed instanceof ArgsError) return Ref.set(rejectedRef, Option.some(parsed))
+    return Ref.set(parsedRef, Option.some(parsed))
+  }).pipe(
+    CliCommand.withDescription("Set a local thread visibility level"),
+    CliCommand.withShortDescription("Set thread visibility"),
+  )
+
   const tournament = CliCommand.make("tournament", threadTournamentConfig, (input: ThreadTournamentInput) => {
     const parsed = toThreadTournamentCommand(input)
     if (parsed instanceof ArgsError) return Ref.set(rejectedRef, Option.some(parsed))
@@ -923,6 +944,7 @@ const makeThreadsCommand = (
       unarchive,
       compact,
       fork,
+      visibility,
       tournament,
       share,
       reference,
@@ -1260,6 +1282,19 @@ const toThreadForkCommand = (input: ThreadForkInput): ThreadCommand => {
   }
 }
 
+const toThreadVisibilityCommand = (input: ThreadVisibilityInput): ThreadCommand | ArgsError => {
+  const visibility = parseThreadVisibility(input.visibility)
+  if (visibility === undefined) {
+    return new ArgsError({ message: `Invalid thread visibility: ${input.visibility}`, exit_code: 2, usage })
+  }
+  return {
+    type: "threads",
+    action: "visibility",
+    thread_id: Ids.ThreadId.make(input.threadId),
+    visibility,
+  }
+}
+
 const toThreadTournamentCommand = (input: ThreadTournamentInput): ThreadCommand | ArgsError => {
   const modes = parseModeList(Option.getOrUndefined(input.modes))
   if (modes instanceof ArgsError) return modes
@@ -1302,6 +1337,9 @@ const parseMode = (value: string): Config.Mode | undefined =>
   value === "rush" || value === "smart" || value === "deep1" || value === "deep2" || value === "deep3"
     ? value
     : undefined
+
+const parseThreadVisibility = (value: string) =>
+  value === "private" || value === "workspace" || value === "unlisted" ? value : undefined
 
 const toProjectCreateCommand = (input: ProjectCreateInput): ProjectCommand => {
   const repoOrigin = Option.getOrUndefined(input.repo)

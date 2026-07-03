@@ -2,7 +2,6 @@ import { Diagnostics } from "@rika/core"
 import { OrbChanges, OrbFiles, OrbPty } from "@rika/orb"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Cause, Context, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
-import * as PresenceHub from "./presence-hub"
 import * as RemoteControl from "./remote-control"
 
 const defaultHost = "127.0.0.1"
@@ -43,8 +42,7 @@ const serviceLayer = Layer.effect(
     const orbChanges = yield* OrbChanges.Service
     const orbFiles = yield* OrbFiles.Service
     const orbPty = yield* OrbPty.Service
-    const presence = yield* PresenceHub.Service
-    return makeService(remote, diagnostics, orbChanges, orbFiles, orbPty, presence)
+    return makeService(remote, diagnostics, orbChanges, orbFiles, orbPty)
   }),
 )
 
@@ -239,10 +237,9 @@ const makeService = (
   orbChanges: OrbChanges.Interface,
   orbFiles: OrbFiles.Interface,
   orbPty: OrbPty.Interface,
-  presence: PresenceHub.Interface,
 ): Interface => {
   const handleRequest = (request: Request, requiredToken?: string, orbMode?: OrbRouteMode) =>
-    route(remote, orbChanges, orbFiles, presence, request, tokenValue(requiredToken), orbMode).pipe(
+    route(remote, orbChanges, orbFiles, request, tokenValue(requiredToken), orbMode).pipe(
       Effect.provideService(Diagnostics.Service, diagnostics),
     )
   return Service.of({
@@ -300,7 +297,6 @@ const route = (
   remote: RemoteControl.Interface,
   orbChanges: OrbChanges.Interface,
   orbFiles: OrbFiles.Interface,
-  presence: PresenceHub.Interface,
   request: Request,
   requiredToken: string | undefined,
   orbMode: OrbRouteMode | undefined,
@@ -310,7 +306,7 @@ const route = (
   return Diagnostics.event(
     "http.request",
     (fields) =>
-      dispatch(remote, orbChanges, orbFiles, presence, request, url, requiredToken, orbMode).pipe(
+      dispatch(remote, orbChanges, orbFiles, request, url, requiredToken, orbMode).pipe(
         Effect.tap((response) =>
           Effect.sync(() => {
             fields.status_code = response.status
@@ -355,7 +351,6 @@ const dispatch = (
   remote: RemoteControl.Interface,
   orbChanges: OrbChanges.Interface,
   orbFiles: OrbFiles.Interface,
-  presence: PresenceHub.Interface,
   request: Request,
   url: URL,
   requiredToken: string | undefined,
@@ -369,6 +364,7 @@ const dispatch = (
 
     const unauthorized = unauthorizedResponse(request, requiredToken)
     if (unauthorized !== undefined) return unauthorized
+    const authorization = authorizationFromToken(requiredToken)
 
     const segments = url.pathname.split("/").filter(Boolean)
     if (segments[0] !== "v1") return notFound()
@@ -407,12 +403,12 @@ const dispatch = (
     }
 
     if (request.method === "GET" && segments[1] === "threads" && segments.length === 2) {
-      const input = listThreadsRequest(url)
+      const input = withAuthorization(listThreadsRequest(url), authorization)
       return yield* remote.listThreads(input).pipe(jsonEffect(Schema.Array(Remote.ThreadSummary)))
     }
 
     if (request.method === "POST" && segments[1] === "threads" && segments.length === 2) {
-      const input = yield* decodeBody(request, Remote.CreateThreadRequest)
+      const input = withAuthorization(yield* decodeBody(request, Remote.CreateThreadRequest), authorization)
       return yield* remote.createThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
@@ -524,12 +520,12 @@ const dispatch = (
     }
 
     if (request.method === "GET" && segments[1] === "threads" && segments[2] === "search" && segments.length === 3) {
-      const input = searchThreadsRequest(url)
+      const input = withAuthorization(searchThreadsRequest(url), authorization)
       return yield* remote.searchThreads(input).pipe(jsonEffect(Schema.Array(Remote.ThreadSearchResult)))
     }
 
     if (request.method === "GET" && segments[1] === "threads" && segments[2] !== undefined && segments.length === 3) {
-      const input = openThreadRequest(url, segments[2])
+      const input = withAuthorization(openThreadRequest(url, segments[2]), authorization)
       return yield* remote.openThread(input).pipe(jsonEffect(Remote.ThreadRecord))
     }
 
@@ -540,8 +536,19 @@ const dispatch = (
       segments[3] === "preview" &&
       segments.length === 4
     ) {
-      const input = previewThreadRequest(url, segments[2])
+      const input = withAuthorization(previewThreadRequest(url, segments[2]), authorization)
       return yield* remote.previewThread(input).pipe(jsonEffect(Remote.ThreadRecord))
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "visibility" &&
+      segments.length === 4
+    ) {
+      const input = withAuthorization(yield* setThreadVisibilityRequest(request, url, segments[2]), authorization)
+      return yield* remote.setThreadVisibility(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
     if (
@@ -551,7 +558,7 @@ const dispatch = (
       segments[3] === "archive" &&
       segments.length === 4
     ) {
-      const input = archiveThreadRequest(url, segments[2])
+      const input = withAuthorization(archiveThreadRequest(url, segments[2]), authorization)
       return yield* remote.archiveThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
@@ -562,7 +569,7 @@ const dispatch = (
       segments[3] === "unarchive" &&
       segments.length === 4
     ) {
-      const input = archiveThreadRequest(url, segments[2])
+      const input = withAuthorization(archiveThreadRequest(url, segments[2]), authorization)
       return yield* remote.unarchiveThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
@@ -573,7 +580,7 @@ const dispatch = (
       segments[3] === "compact" &&
       segments.length === 4
     ) {
-      const input = compactThreadRequest(url, segments[2])
+      const input = withAuthorization(compactThreadRequest(url, segments[2]), authorization)
       return yield* remote.compactThread(input).pipe(jsonEffect(Event.ContextCompacted))
     }
 
@@ -584,7 +591,7 @@ const dispatch = (
       segments[3] === "fork" &&
       segments.length === 4
     ) {
-      const input = yield* forkThreadRequest(request, segments[2])
+      const input = withAuthorization(yield* forkThreadRequest(request, segments[2]), authorization)
       return yield* remote.forkThread(input).pipe(jsonEffect(Remote.ThreadSummary))
     }
 
@@ -595,7 +602,7 @@ const dispatch = (
       segments[3] === "share" &&
       segments.length === 4
     ) {
-      const input = shareThreadRequest(url, segments[2])
+      const input = withAuthorization(shareThreadRequest(url, segments[2]), authorization)
       return yield* remote.shareThread(input).pipe(jsonEffect(Remote.ThreadExport))
     }
 
@@ -606,7 +613,7 @@ const dispatch = (
       segments[3] === "reference" &&
       segments.length === 4
     ) {
-      const input = referenceThreadRequest(url, segments[2])
+      const input = withAuthorization(referenceThreadRequest(url, segments[2]), authorization)
       return yield* remote.referenceThread(input).pipe(jsonEffect(Remote.ThreadReference))
     }
 
@@ -617,11 +624,11 @@ const dispatch = (
       segments[3] === "events" &&
       segments.length === 4
     ) {
-      const input = subscribeThreadEventsRequest(url, segments[2])
+      const input = withAuthorization(subscribeThreadEventsRequest(url, segments[2]), authorization)
       return ndjson(
         Stream.merge(
           remote.subscribeThreadEvents(input).pipe(Stream.map((event): Remote.StreamFrame => event)),
-          presence.subscribe(input.thread_id),
+          remote.subscribeThreadPresence(input).pipe(Stream.map((frame): Remote.StreamFrame => frame)),
         ),
       )
     }
@@ -633,27 +640,27 @@ const dispatch = (
       segments[3] === "presence" &&
       segments.length === 4
     ) {
-      const input = yield* setThreadPresenceRequest(request, segments[2])
+      const input = withAuthorization(yield* setThreadPresenceRequest(request, segments[2]), authorization)
       return yield* remote.setThreadPresence(input).pipe(jsonEffect(Remote.PresenceFrame))
     }
 
     if (request.method === "POST" && segments[1] === "turns" && segments.length === 2) {
-      const input = yield* decodeBody(request, Remote.StartTurnRequest)
+      const input = withAuthorization(yield* decodeBody(request, Remote.StartTurnRequest), authorization)
       return yield* remote.startTurn(input).pipe(jsonEffect(Remote.StartTurnResponse))
     }
 
     if (request.method === "POST" && segments[1] === "turns" && segments[2] === "interrupt" && segments.length === 3) {
-      const input = yield* decodeBody(request, Remote.InterruptTurnRequest)
+      const input = withAuthorization(yield* decodeBody(request, Remote.InterruptTurnRequest), authorization)
       return yield* remote.interruptTurn(input).pipe(jsonEffect(Event.TurnFailed))
     }
 
     if (request.method === "GET" && segments[1] === "artifacts" && segments.length === 2) {
-      const input = yield* listArtifactsRequest(url)
+      const input = withAuthorization(yield* listArtifactsRequest(url), authorization)
       return yield* remote.listArtifacts(input).pipe(jsonEffect(Schema.Array(Artifact.Artifact)))
     }
 
     if (request.method === "GET" && segments[1] === "artifacts" && segments[2] !== undefined && segments.length === 3) {
-      const input = getArtifactRequest(url, segments[2])
+      const input = withAuthorization(getArtifactRequest(url, segments[2]), authorization)
       return yield* remote.getArtifact(input).pipe(jsonEffect(Artifact.Artifact))
     }
 
@@ -703,6 +710,30 @@ const isAuthorized = (request: Request, requiredToken: string | undefined) =>
   requiredToken !== undefined && request.headers.get("authorization") === `Bearer ${requiredToken}`
 
 const tokenValue = (token: string | undefined) => (token === undefined || token.length === 0 ? undefined : token)
+
+const authorizationFromToken = (token: string | undefined): RemoteControl.AuthorizationContext => {
+  const userId = userIdFromToken(token)
+  return userId === undefined ? {} : { authorization_user_id: userId }
+}
+
+const userIdFromToken = (token: string | undefined): Ids.UserId | undefined => {
+  if (token === undefined || !token.startsWith("user:")) return undefined
+  const separator = token.indexOf(":", "user:".length)
+  if (separator <= "user:".length) return undefined
+  try {
+    return Ids.UserId.make(decodeURIComponent(token.slice("user:".length, separator)))
+  } catch {
+    return undefined
+  }
+}
+
+const withAuthorization = <A extends object>(
+  input: A,
+  authorization: RemoteControl.AuthorizationContext,
+): A & RemoteControl.AuthorizationContext =>
+  authorization.authorization_user_id === undefined
+    ? input
+    : { ...input, authorization_user_id: authorization.authorization_user_id }
 
 const orbFilePath = (url: URL): Effect.Effect<string, RemoteControl.RemoteControlError> => {
   const path = url.searchParams.get("path")
@@ -903,6 +934,22 @@ const archiveThreadRequest = (url: URL, encodedThreadId: string): Remote.Archive
     ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
   }
 }
+
+const setThreadVisibilityRequest = (
+  request: Request,
+  url: URL,
+  encodedThreadId: string,
+): Effect.Effect<Remote.SetThreadVisibilityRequest, RemoteControl.RemoteControlError> =>
+  decodeBody(request, Remote.SetThreadVisibilityBody).pipe(
+    Effect.map((input) => {
+      const userId = url.searchParams.get("user_id")
+      return {
+        thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+        ...(userId === null ? {} : { user_id: Ids.UserId.make(userId) }),
+        visibility: input.visibility,
+      }
+    }),
+  )
 
 const compactThreadRequest = (url: URL, encodedThreadId: string): Remote.CompactThreadRequest => {
   const userId = url.searchParams.get("user_id")

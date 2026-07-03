@@ -604,6 +604,7 @@ const threadSummary = (summaryThreadId: Ids.ThreadId) => ({
   workspace_id: Ids.WorkspaceId.make(workspaceRoot),
   diff: { additions: 0, modifications: 0, deletions: 0 },
   archived: false,
+  visibility: "private",
   created_at: now,
   updated_at: now,
 })

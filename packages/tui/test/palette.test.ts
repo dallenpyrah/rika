@@ -79,6 +79,21 @@ describe("palette.filter", () => {
     ])
   })
 
+  test("shows thread visibility only for an active thread", () => {
+    expect(Palette.filter("set visibility", "smart", false, { threadActive: false, orbBackedThread: false })).toEqual(
+      [],
+    )
+    expect(Palette.filter("set visibility", "smart", false, { threadActive: true, orbBackedThread: false })).toEqual([
+      {
+        id: "thread-visibility",
+        category: "thread",
+        action: "set visibility",
+        hint: "set this thread visible to workspace members",
+        command: "/thread visibility workspace",
+      },
+    ])
+  })
+
   test("does not advertise IDE connection commands", () => {
     expect(Palette.commands.some((command) => command.command.startsWith("/ide"))).toBe(false)
     expect(Palette.filter("connect IDE", "smart", false)).toEqual([])

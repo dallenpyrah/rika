@@ -117,6 +117,26 @@ describe("CLI thread commands", () => {
     expect(exported.events.map((event) => event.type)).toEqual(["thread.created", "message.added"])
   })
 
+  test("sets local thread visibility and prints the updated summary", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedThread()
+        return yield* Threads.executeCommand({
+          type: "threads",
+          action: "visibility",
+          thread_id: threadId,
+          visibility: "unlisted",
+        })
+      }).pipe(Effect.provide(makeLayer(output))),
+    )
+
+    expect(exitCode).toBe(0)
+    const summary = Schema.decodeUnknownSync(ThreadService.ThreadSummary)(JSON.parse(output.stdout[0] ?? "{}"))
+    expect(summary).toMatchObject({ thread_id: threadId, visibility: "unlisted" })
+  })
+
   test("prints a forked local thread id as JSON", async () => {
     const output: Output.MemoryOutput = { stdout: [], stderr: [] }
     const result = await Effect.runPromise(
@@ -277,6 +297,7 @@ const emptyClient = (): Client.Interface => ({
   previewThread: unexpectedClientCall,
   archiveThread: unexpectedClientCall,
   unarchiveThread: unexpectedClientCall,
+  setThreadVisibility: unexpectedClientCall,
   compactThread: unexpectedClientCall,
   forkThread: unexpectedClientCall,
   searchThreads: unexpectedClientCall,

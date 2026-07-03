@@ -33,6 +33,11 @@ export const ThreadCreated = Schema.Struct({
   }),
 }).annotate({ identifier: "Rika.Event.ThreadCreated" })
 
+export const ThreadVisibility = Schema.Literals(["private", "workspace", "unlisted"]).annotate({
+  identifier: "Rika.Event.ThreadVisibility",
+})
+export type ThreadVisibility = typeof ThreadVisibility.Type
+
 export interface TurnStarted extends Schema.Schema.Type<typeof TurnStarted> {}
 export const TurnMode = Schema.Literals(["rush", "smart", "deep1", "deep2", "deep3"]).annotate({
   identifier: "Rika.Event.TurnMode",
@@ -269,6 +274,13 @@ export const ThreadUnarchived = Schema.Struct({
   data: Schema.Struct({}),
 }).annotate({ identifier: "Rika.Event.ThreadUnarchived" })
 
+export interface ThreadVisibilitySet extends Schema.Schema.Type<typeof ThreadVisibilitySet> {}
+export const ThreadVisibilitySet = Schema.Struct({
+  ...fields,
+  type: Schema.Literal("thread.visibility.set"),
+  data: Schema.Struct({ visibility: ThreadVisibility }),
+}).annotate({ identifier: "Rika.Event.ThreadVisibilitySet" })
+
 export type Event =
   | ThreadCreated
   | TurnStarted
@@ -290,6 +302,7 @@ export type Event =
   | TurnFailed
   | ThreadArchived
   | ThreadUnarchived
+  | ThreadVisibilitySet
 
 export const Event = Schema.Union([
   ThreadCreated,
@@ -312,6 +325,7 @@ export const Event = Schema.Union([
   TurnFailed,
   ThreadArchived,
   ThreadUnarchived,
+  ThreadVisibilitySet,
 ]).pipe(Schema.toTaggedUnion("type"), Schema.annotate({ identifier: "Rika.Event" }))
 
 export interface References {

@@ -1207,6 +1207,14 @@ export const eventRows = (
         return { id: event.id, sequence: event.sequence, kind: "event", title: "Thread archived", body: "Archived" }
       case "thread.unarchived":
         return { id: event.id, sequence: event.sequence, kind: "event", title: "Thread unarchived", body: "Unarchived" }
+      case "thread.visibility.set":
+        return {
+          id: event.id,
+          sequence: event.sequence,
+          kind: "event",
+          title: "Thread visibility",
+          body: event.data.visibility,
+        }
       case "tool.call.input.started":
         return {
           id: event.id,

@@ -370,6 +370,7 @@ const summary = (id: Ids.ThreadId, input: Partial<Remote.ThreadSummary> = {}): R
   latest_message_text: "Latest",
   diff: { additions: 0, modifications: 0, deletions: 0 },
   archived: false,
+  visibility: "private",
   created_at: 1,
   updated_at: 2,
   ...input,

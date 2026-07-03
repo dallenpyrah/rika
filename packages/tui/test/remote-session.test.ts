@@ -81,6 +81,29 @@ describe("TUI remote session", () => {
     expect(backend.turns).toEqual([])
   })
 
+  test("reports invalid remote thread visibility commands as usage", async () => {
+    const backend = fakeBackend()
+    const rendered: Array<ViewState.ViewState> = []
+
+    const exitCode = await Effect.runPromise(
+      RemoteSession.run({ workspace_root: workspaceRoot, mode: "smart" }).pipe(
+        Effect.provide(RemoteSession.layerFromClient(backend.client)),
+        Effect.provide(
+          Adapter.memoryLayer({
+            rendered,
+            keys: ["/thread visibility group", "/thread visibility", "/exit"].flatMap(line),
+          }),
+        ),
+        Effect.provide(Ticker.memoryLayer),
+      ),
+    )
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(frames).toContain("Usage: /thread visibility <private|workspace|unlisted>")
+    expect(backend.turns).toEqual([])
+  })
+
   test("file UI actions open through the renderer", async () => {
     const backend = fakeBackend()
     const rendered: Array<ViewState.ViewState> = []
@@ -370,6 +393,7 @@ const fakeBackend = (): FakeBackend => {
       }),
     archiveThread: (threadId) => Effect.sync(() => setArchived(threads, threadId, true)),
     unarchiveThread: (threadId) => Effect.sync(() => setArchived(threads, threadId, false)),
+    setThreadVisibility: (threadId, visibility) => Effect.sync(() => setVisibility(threads, threadId, visibility)),
     compactThread: (threadId) =>
       Effect.sync(() => {
         const record = threads.get(threadId)
@@ -559,6 +583,17 @@ const setArchived = (
   return record.summary
 }
 
+const setVisibility = (
+  threads: Map<Ids.ThreadId, { summary: Remote.ThreadSummary; events: Array<Event.Event> }>,
+  threadId: Ids.ThreadId,
+  visibility: Remote.ThreadVisibility,
+) => {
+  const record = threads.get(threadId)
+  if (record === undefined) throw new Error(`Missing thread ${threadId}`)
+  record.summary = { ...record.summary, visibility }
+  return record.summary
+}
+
 const summary = (
   threadId: Ids.ThreadId,
   latest?: string,
@@ -570,6 +605,7 @@ const summary = (
   ...(latest === undefined ? {} : { title_text: latest }),
   diff: { additions: 0, modifications: 0, deletions: 0 },
   archived: false,
+  visibility: "private",
   ...(latest === "old remote message" ? { orb_status: "running" as const } : {}),
   created_at: Common.TimestampMillis.make(1),
   updated_at: Common.TimestampMillis.make(2),

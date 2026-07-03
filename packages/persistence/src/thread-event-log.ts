@@ -328,6 +328,7 @@ const redactEvent = (redactor: SecretRedactor.Interface | undefined, event: Even
     case "turn.completed":
     case "thread.archived":
     case "thread.unarchived":
+    case "thread.visibility.set":
       return event
     case "message.added":
       return { ...event, data: { message: redactMessage(redactor, event.data.message) } }

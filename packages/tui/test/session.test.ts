@@ -188,6 +188,15 @@ describe("TUI session", () => {
     expect(frames).not.toContain("Unknown command /compact")
   })
 
+  test("reports invalid local thread visibility commands as usage", async () => {
+    const { exitCode, rendered } = await runSession(["/thread visibility group", "/thread visibility", "/exit"])
+
+    const frames = text(rendered)
+    expect(exitCode).toBe(0)
+    expect(frames).toContain("Usage: /thread visibility <private|workspace|unlisted>")
+    expect(frames).not.toContain("Unknown command /thread")
+  })
+
   test("forks the active local thread and opens the fork", async () => {
     const { exitCode, rendered } = await runSession(["/new", "/fork", "/exit"])
 

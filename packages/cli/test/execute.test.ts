@@ -564,6 +564,7 @@ const threadSummary = (threadId: Ids.ThreadId, workspaceId: Ids.WorkspaceId) => 
   workspace_id: workspaceId,
   diff: { additions: 0, modifications: 0, deletions: 0 },
   archived: false,
+  visibility: "private",
   created_at: Common.TimestampMillis.make(1_950_000_000_000),
   updated_at: Common.TimestampMillis.make(1_950_000_000_000),
 })

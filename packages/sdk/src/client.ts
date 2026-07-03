@@ -71,6 +71,11 @@ export interface Interface {
     threadId: Ids.ThreadId,
     userId?: Ids.UserId,
   ) => Effect.Effect<Remote.ThreadSummary, SdkError>
+  readonly setThreadVisibility: (
+    threadId: Ids.ThreadId,
+    visibility: Remote.ThreadVisibility,
+    userId?: Ids.UserId,
+  ) => Effect.Effect<Remote.ThreadSummary, SdkError>
   readonly compactThread: (
     threadId: Ids.ThreadId,
     userId?: Ids.UserId,
@@ -230,6 +235,14 @@ export const make = (transport: Transport): Interface => ({
         path: `/v1/threads/${encodeURIComponent(threadId)}/unarchive${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "unarchiveThread"))),
+  setThreadVisibility: (threadId: Ids.ThreadId, visibility: Remote.ThreadVisibility, userId?: Ids.UserId) =>
+    transport
+      .requestJson({
+        method: "POST",
+        path: `/v1/threads/${encodeURIComponent(threadId)}/visibility${query(userIdQuery(transport, userId))}`,
+        body: Codec.encode(Remote.SetThreadVisibilityBody)({ visibility }),
+      })
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "setThreadVisibility"))),
   compactThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
       .requestJson({

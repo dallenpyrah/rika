@@ -90,8 +90,8 @@ describe("WorkspaceAccess", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         yield* Migration.migrate()
-        const created = yield* ThreadEventLog.append(threadCreated())
-        yield* ThreadProjection.apply(created)
+        yield* appendProjected(threadCreated())
+        yield* appendProjected(threadVisibilitySetForThread())
         yield* WorkspaceStore.putMembership(membership(memberId, "member", workspaceId))
         const memberRead = yield* WorkspaceAccess.authorizeThread({
           thread_id: threadId,
@@ -112,6 +112,99 @@ describe("WorkspaceAccess", () => {
     expect(result.memberRead.allowed).toBe(true)
     expect(result.outsiderRead.allowed).toBe(false)
     expect(result.readable.map((summary) => summary.thread_id)).toEqual([threadId])
+  })
+
+  test("enforces thread visibility for creator, members, outsiders, and local no-user reads", async () => {
+    const decisions = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* WorkspaceStore.putMembership(membership(ownerId, "owner", workspaceId))
+        yield* WorkspaceStore.putMembership(membership(memberId, "member", workspaceId))
+
+        for (const visibility of ["private", "workspace", "unlisted"] as const) {
+          yield* appendProjected(threadCreatedFor(visibility))
+          if (visibility !== "private") yield* appendProjected(threadVisibilitySet(visibility))
+        }
+
+        const matrix = new Map<string, boolean>()
+        for (const visibility of ["private", "workspace", "unlisted"] as const) {
+          const id = visibilityThreadId(visibility)
+          for (const [label, user_id] of [
+            ["creator", ownerId],
+            ["member", memberId],
+            ["outsider", outsiderId],
+          ] as const) {
+            const decision = yield* WorkspaceAccess.authorizeThread({ thread_id: id, user_id, action: "read" })
+            matrix.set(`${visibility}:${label}`, decision.allowed)
+          }
+          const local = yield* WorkspaceAccess.authorizeThread({ thread_id: id, action: "read" })
+          matrix.set(`${visibility}:local`, local.allowed)
+        }
+
+        const summaries = yield* ThreadProjection.listThreads()
+        const memberReadable = yield* WorkspaceAccess.filterReadableThreads(summaries, memberId)
+        const outsiderReadable = yield* WorkspaceAccess.filterReadableThreads(summaries, outsiderId)
+        const localReadable = yield* WorkspaceAccess.filterReadableThreads(summaries)
+        const ownerDiscoverable = yield* WorkspaceAccess.filterDiscoverableThreads(summaries, ownerId)
+        const memberDiscoverable = yield* WorkspaceAccess.filterDiscoverableThreads(summaries, memberId)
+        const outsiderDiscoverable = yield* WorkspaceAccess.filterDiscoverableThreads(summaries, outsiderId)
+        const creatorPrivateWrite = yield* WorkspaceAccess.authorizeThread({
+          thread_id: visibilityThreadId("private"),
+          user_id: ownerId,
+          action: "write",
+        })
+        const memberPrivateWrite = yield* WorkspaceAccess.authorizeThread({
+          thread_id: visibilityThreadId("private"),
+          user_id: memberId,
+          action: "write",
+        })
+        return {
+          matrix,
+          memberReadable,
+          outsiderReadable,
+          localReadable,
+          ownerDiscoverable,
+          memberDiscoverable,
+          outsiderDiscoverable,
+          creatorPrivateWrite,
+          memberPrivateWrite,
+        }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(Object.fromEntries(decisions.matrix)).toEqual({
+      "private:creator": true,
+      "private:member": false,
+      "private:outsider": false,
+      "private:local": true,
+      "workspace:creator": true,
+      "workspace:member": true,
+      "workspace:outsider": false,
+      "workspace:local": true,
+      "unlisted:creator": true,
+      "unlisted:member": true,
+      "unlisted:outsider": true,
+      "unlisted:local": true,
+    })
+    expect(decisions.memberReadable.map((summary) => summary.thread_id).toSorted()).toEqual([
+      visibilityThreadId("unlisted"),
+      visibilityThreadId("workspace"),
+    ])
+    expect(decisions.outsiderReadable.map((summary) => summary.thread_id)).toEqual([visibilityThreadId("unlisted")])
+    expect(decisions.localReadable.map((summary) => summary.thread_id).toSorted()).toEqual([
+      visibilityThreadId("private"),
+      visibilityThreadId("unlisted"),
+      visibilityThreadId("workspace"),
+    ])
+    expect(decisions.ownerDiscoverable.map((summary) => summary.thread_id).toSorted()).toEqual([
+      visibilityThreadId("private"),
+      visibilityThreadId("unlisted"),
+      visibilityThreadId("workspace"),
+    ])
+    expect(decisions.memberDiscoverable.map((summary) => summary.thread_id)).toEqual([visibilityThreadId("workspace")])
+    expect(decisions.outsiderDiscoverable).toEqual([])
+    expect(decisions.creatorPrivateWrite.allowed).toBe(true)
+    expect(decisions.memberPrivateWrite.allowed).toBe(false)
   })
 
   test("bootstraps an empty hosted workspace owner and leaves later create authorization open", async () => {
@@ -165,3 +258,45 @@ const threadCreated = (): Event.ThreadCreated => ({
   type: "thread.created",
   data: { workspace_id: workspaceId },
 })
+
+const threadVisibilitySetForThread = (): Event.Event =>
+  ({
+    id: Ids.EventId.make("event_access_thread_visibility"),
+    thread_id: threadId,
+    sequence: 2,
+    version: 1,
+    created_at: now,
+    type: "thread.visibility.set",
+    data: { visibility: "workspace" },
+  }) as Event.Event
+
+const appendProjected = (event: Event.Event) =>
+  Effect.gen(function* () {
+    const appended = yield* ThreadEventLog.append(event)
+    yield* ThreadProjection.apply(appended)
+    return appended
+  })
+
+const visibilityThreadId = (visibility: "private" | "workspace" | "unlisted") =>
+  Ids.ThreadId.make(`thread_access_${visibility}`)
+
+const threadCreatedFor = (visibility: "private" | "workspace" | "unlisted"): Event.ThreadCreated => ({
+  id: Ids.EventId.make(`event_access_${visibility}_created`),
+  thread_id: visibilityThreadId(visibility),
+  sequence: 1,
+  version: 1,
+  created_at: now,
+  type: "thread.created",
+  data: { workspace_id: workspaceId, user_id: ownerId },
+})
+
+const threadVisibilitySet = (visibility: "workspace" | "unlisted"): Event.Event =>
+  ({
+    id: Ids.EventId.make(`event_access_${visibility}_visibility`),
+    thread_id: visibilityThreadId(visibility),
+    sequence: 2,
+    version: 1,
+    created_at: now,
+    type: "thread.visibility.set",
+    data: { visibility },
+  }) as Event.Event

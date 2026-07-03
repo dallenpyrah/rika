@@ -1,0 +1,1 @@
+ALTER TABLE `thread_projections` ADD `visibility` text DEFAULT 'private' NOT NULL;

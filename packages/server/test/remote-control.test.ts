@@ -27,7 +27,7 @@ import {
 } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Artifact, Codec, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
-import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
+import { Effect, Fiber, Layer, ManagedRuntime, Schema, Stream } from "effect"
 import { HttpServer, OrbMirror, PresenceHub, RemoteControl } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_remote_contract")
@@ -43,6 +43,7 @@ const orphanedTurnId = Ids.TurnId.make("turn_remote_orphaned")
 const outsiderThreadId = Ids.ThreadId.make("thread_remote_outsider_create")
 const ideClientId = Ids.IdeClientId.make("ide_remote_contract")
 const ownerId = Ids.UserId.make("user_remote_owner")
+const memberId = Ids.UserId.make("user_remote_member")
 const outsiderId = Ids.UserId.make("user_remote_outsider")
 const now = Common.TimestampMillis.make(2_000_000_000_000)
 const ideContext: Ide.ContextSnapshot = {
@@ -904,6 +905,7 @@ describe("remote control API and SDK", () => {
           created_at: now,
         }),
       )
+      await Effect.runPromise(client.setThreadVisibility(threadId, "workspace", ownerId))
       await Effect.runPromise(
         client.startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId, content: "hold open" }),
       )
@@ -1174,6 +1176,7 @@ describe("remote control API and SDK", () => {
       { method: "GET", path: "/v1/threads/search" },
       { method: "GET", path: `/v1/threads/${threadId}` },
       { method: "GET", path: `/v1/threads/${threadId}/preview` },
+      { method: "POST", path: `/v1/threads/${threadId}/visibility` },
       { method: "POST", path: `/v1/threads/${threadId}/archive` },
       { method: "POST", path: `/v1/threads/${threadId}/unarchive` },
       { method: "POST", path: `/v1/threads/${threadId}/compact` },
@@ -1208,6 +1211,91 @@ describe("remote control API and SDK", () => {
       ).toEqual(routes.map((route) => ({ ...route, status: 401 })))
     } finally {
       await runtime.runPromise(handle.close())
+    }
+  })
+
+  test("HTTP thread authorization ignores self-asserted user_id", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const ownerToken = `user:${ownerId}:owner-secret`
+    const outsiderToken = `user:${outsiderId}:outsider-secret`
+    const forgedThreadId = Ids.ThreadId.make("thread_remote_forged_creator")
+    const ownerHandle = await runtime.runPromise(HttpServer.serve({ port: 0, token: ownerToken }))
+    const outsiderHandle = await runtime.runPromise(HttpServer.serve({ port: 0, token: outsiderToken }))
+
+    try {
+      const created = await fetch(`${ownerHandle.url}/v1/threads`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId }),
+      })
+      const forged = await fetch(`${outsiderHandle.url}/v1/threads/${threadId}?user_id=${ownerId}`, {
+        headers: { authorization: `Bearer ${outsiderToken}` },
+      })
+      const forgedCreate = await fetch(`${outsiderHandle.url}/v1/threads`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${outsiderToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ thread_id: forgedThreadId, workspace_id: workspaceId, user_id: ownerId }),
+      })
+      const forgedCreated = Schema.decodeUnknownSync(Remote.ThreadSummary)(await forgedCreate.json())
+      const ownerForgedOpen = await fetch(`${ownerHandle.url}/v1/threads/${forgedThreadId}`, {
+        headers: { authorization: `Bearer ${ownerToken}` },
+      })
+      const outsiderForgedOpen = await fetch(`${outsiderHandle.url}/v1/threads/${forgedThreadId}?user_id=${ownerId}`, {
+        headers: { authorization: `Bearer ${outsiderToken}` },
+      })
+
+      expect(created.status).toBe(200)
+      expect(forged.status).toBe(403)
+      expect(await forged.json()).toMatchObject({ error: { code: "workspace_access_denied" } })
+      expect(forgedCreate.status).toBe(200)
+      expect(forgedCreated.user_id).toBe(outsiderId)
+      expect(ownerForgedOpen.status).toBe(403)
+      expect(outsiderForgedOpen.status).toBe(200)
+    } finally {
+      await runtime.runPromise(ownerHandle.close())
+      await runtime.runPromise(outsiderHandle.close())
+    }
+  })
+
+  test("HTTP thread event subscriptions do not leak private presence", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const ownerToken = `user:${ownerId}:owner-secret`
+    const outsiderToken = `user:${outsiderId}:outsider-secret`
+    const presenceThreadId = Ids.ThreadId.make("thread_remote_private_presence")
+    const ownerHandle = await runtime.runPromise(HttpServer.serve({ port: 0, token: ownerToken }))
+    const outsiderHandle = await runtime.runPromise(HttpServer.serve({ port: 0, token: outsiderToken }))
+
+    try {
+      const created = await fetch(`${ownerHandle.url}/v1/threads`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ thread_id: presenceThreadId, workspace_id: workspaceId, user_id: ownerId }),
+      })
+      const presenceSet = await fetch(`${ownerHandle.url}/v1/threads/${presenceThreadId}/presence`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ user_id: ownerId, state: "active" }),
+      })
+      const events = await fetch(`${outsiderHandle.url}/v1/threads/${presenceThreadId}/events?user_id=${ownerId}`, {
+        headers: { authorization: `Bearer ${outsiderToken}` },
+      })
+      const body = await events.text()
+      const frames = body
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => Schema.decodeUnknownSync(Remote.StreamFrame)(JSON.parse(line)))
+
+      expect(created.status).toBe(200)
+      expect(presenceSet.status).toBe(200)
+      expect(events.status).toBe(200)
+      expect(frames).toEqual([
+        expect.objectContaining({ error: expect.objectContaining({ code: "workspace_access_denied" }) }),
+      ])
+      expect(body).not.toContain(ownerId)
+    } finally {
+      await runtime.runPromise(ownerHandle.close())
+      await runtime.runPromise(outsiderHandle.close())
     }
   })
 
@@ -1347,35 +1435,428 @@ describe("remote control API and SDK", () => {
     }
   })
 
-  test("remote user requests use user_id for attribution, not authorization", async () => {
+  test("remote thread visibility gates user reads", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
-    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const remote = yield* RemoteControl.Service
+        const created = yield* remote.createThread({
+          thread_id: threadId,
+          workspace_id: workspaceId,
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        yield* WorkspaceStore.putMembership({
+          workspace_id: workspaceId,
+          user_id: memberId,
+          role: "member",
+          created_at: now,
+        })
 
-    const created = await Effect.runPromise(
-      client.createThread({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId }),
-    )
-    const ownerThreads = await Effect.runPromise(client.listThreads({ user_id: ownerId }))
-    const outsiderThreads = await Effect.runPromise(client.listThreads({ user_id: outsiderId }))
-    const outsiderOpen = await Effect.runPromise(client.openThread(threadId, outsiderId))
-    const outsiderPreview = await Effect.runPromise(client.previewThread(threadId, { user_id: outsiderId }))
-    const outsiderTurn = await Effect.runPromise(
-      client.startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: outsiderId, content: "join in" }),
-    )
-    const outsiderCreated = await Effect.runPromise(
-      client.createThread({ thread_id: outsiderThreadId, workspace_id: workspaceId, user_id: outsiderId }),
+        const ownerThreads = yield* remote.listThreads({ user_id: ownerId, authorization_user_id: ownerId })
+        const privateOutsiderThreads = yield* remote.listThreads({
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const privateOutsiderOpen = yield* remote
+          .openThread({ thread_id: threadId, user_id: outsiderId, authorization_user_id: outsiderId })
+          .pipe(Effect.flip)
+        const privateOutsiderCreate = yield* remote
+          .createThread({
+            thread_id: threadId,
+            workspace_id: workspaceId,
+            user_id: outsiderId,
+            authorization_user_id: outsiderId,
+          })
+          .pipe(Effect.flip)
+
+        const workspaceVisible = yield* remote.setThreadVisibility({
+          thread_id: threadId,
+          visibility: "workspace",
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        const memberThreads = yield* remote.listThreads({ user_id: memberId, authorization_user_id: memberId })
+        const memberSearch = yield* remote.searchThreads({
+          query: "",
+          user_id: memberId,
+          authorization_user_id: memberId,
+        })
+        const outsiderThreads = yield* remote.listThreads({ user_id: outsiderId, authorization_user_id: outsiderId })
+
+        const unlisted = yield* remote.setThreadVisibility({
+          thread_id: threadId,
+          visibility: "unlisted",
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        const outsiderOpen = yield* remote.openThread({
+          thread_id: threadId,
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const outsiderPreview = yield* remote.previewThread({
+          thread_id: threadId,
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const outsiderUnlistedThreads = yield* remote.listThreads({
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const outsiderSearch = yield* remote.searchThreads({
+          query: "",
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const outsiderCreated = yield* remote.createThread({
+          thread_id: outsiderThreadId,
+          workspace_id: workspaceId,
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const outsiderArchivedOwnThread = yield* remote.archiveThread({
+          thread_id: outsiderThreadId,
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        return {
+          created,
+          ownerThreads,
+          privateOutsiderThreads,
+          privateOutsiderOpen,
+          privateOutsiderCreate,
+          workspaceVisible,
+          memberThreads,
+          memberSearch,
+          outsiderThreads,
+          unlisted,
+          outsiderOpen,
+          outsiderPreview,
+          outsiderUnlistedThreads,
+          outsiderSearch,
+          outsiderCreated,
+          outsiderArchivedOwnThread,
+        }
+      }),
     )
 
-    expect(created).toMatchObject({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId })
-    expect(ownerThreads.map((summary) => summary.thread_id)).toEqual([threadId])
-    expect(outsiderThreads.map((summary) => summary.thread_id)).toEqual([threadId])
-    expect(outsiderOpen.summary.thread_id).toBe(threadId)
-    expect(outsiderPreview.summary.thread_id).toBe(threadId)
-    expect(outsiderTurn).toEqual({ thread_id: threadId, accepted: true })
-    expect(outsiderCreated).toMatchObject({
+    expect(result.created).toMatchObject({
+      thread_id: threadId,
+      workspace_id: workspaceId,
+      user_id: ownerId,
+      visibility: "private",
+    })
+    expect(result.ownerThreads.map((summary) => summary.thread_id)).toEqual([threadId])
+    expect(result.privateOutsiderThreads).toEqual([])
+    expect(result.privateOutsiderOpen).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.privateOutsiderCreate).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.workspaceVisible.visibility).toBe("workspace")
+    expect(result.memberThreads.map((summary) => summary.thread_id)).toEqual([threadId])
+    expect(result.memberSearch.map((item) => item.summary.thread_id)).toEqual([threadId])
+    expect(result.outsiderThreads).toEqual([])
+    expect(result.unlisted.visibility).toBe("unlisted")
+    expect(result.outsiderOpen.summary.thread_id).toBe(threadId)
+    expect(result.outsiderPreview.summary.thread_id).toBe(threadId)
+    expect(result.outsiderUnlistedThreads).toEqual([])
+    expect(result.outsiderSearch).toEqual([])
+    expect(result.outsiderCreated).toMatchObject({
       thread_id: outsiderThreadId,
       workspace_id: workspaceId,
       user_id: outsiderId,
+      visibility: "private",
     })
+    expect(result.outsiderArchivedOwnThread.archived).toBe(true)
+  })
+
+  test("remote thread visibility applies limits after filtering unreadable threads", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const hiddenThreadIds = Array.from({ length: 1_001 }, (_value, index) =>
+      Ids.ThreadId.make(`thread_remote_filter_${index.toString().padStart(4, "0")}`),
+    )
+    const visibleThreadId = Ids.ThreadId.make("thread_remote_filter_z_visible")
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const remote = yield* RemoteControl.Service
+        yield* Effect.forEach(
+          hiddenThreadIds,
+          (hiddenThreadId) =>
+            remote.createThread({
+              thread_id: hiddenThreadId,
+              workspace_id: workspaceId,
+              user_id: ownerId,
+            }),
+          { discard: true },
+        )
+        yield* remote.createThread({
+          thread_id: visibleThreadId,
+          workspace_id: workspaceId,
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const listed = yield* remote.listThreads({ user_id: outsiderId, authorization_user_id: outsiderId, limit: 1 })
+        const searched = yield* remote.searchThreads({
+          query: "",
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+          limit: 1,
+        })
+        return { listed, searched }
+      }),
+    )
+
+    expect(result.listed.map((summary) => summary.thread_id)).toEqual([visibleThreadId])
+    expect(result.searched.map((item) => item.summary.thread_id)).toEqual([visibleThreadId])
+  })
+
+  test("remote thread visibility gates user writes", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const remote = yield* RemoteControl.Service
+        yield* remote.createThread({
+          thread_id: threadId,
+          workspace_id: workspaceId,
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        const archiveError = yield* remote
+          .archiveThread({ thread_id: threadId, user_id: outsiderId, authorization_user_id: outsiderId })
+          .pipe(Effect.flip)
+        const compactError = yield* remote
+          .compactThread({ thread_id: threadId, user_id: outsiderId, authorization_user_id: outsiderId })
+          .pipe(Effect.flip)
+        const forkError = yield* remote
+          .forkThread({ thread_id: threadId, user_id: outsiderId, authorization_user_id: outsiderId })
+          .pipe(Effect.flip)
+        const startError = yield* remote
+          .startTurn({
+            thread_id: threadId,
+            workspace_id: workspaceId,
+            user_id: outsiderId,
+            authorization_user_id: outsiderId,
+            content: "mutate private",
+          })
+          .pipe(Effect.flip)
+        const interruptError = yield* remote
+          .interruptTurn({
+            thread_id: threadId,
+            turn_id: Ids.TurnId.make("turn_remote_unauthorized"),
+            user_id: outsiderId,
+            authorization_user_id: outsiderId,
+          })
+          .pipe(Effect.flip)
+        const opened = yield* remote.openThread({
+          thread_id: threadId,
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        return { archiveError, compactError, forkError, startError, interruptError, opened }
+      }),
+    )
+
+    for (const error of [
+      result.archiveError,
+      result.compactError,
+      result.forkError,
+      result.startError,
+      result.interruptError,
+    ]) {
+      expect(error).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    }
+    expect(result.opened.summary.archived).toBe(false)
+    expect(result.opened.events.map((event) => event.type)).toEqual(["thread.created"])
+  })
+
+  test("remote authenticated creation records the trusted principal as thread owner", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const createThreadId = Ids.ThreadId.make("thread_remote_trusted_create")
+    const turnThreadId = Ids.ThreadId.make("thread_remote_trusted_turn")
+    const forkSourceThreadId = Ids.ThreadId.make("thread_remote_trusted_fork_source")
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const remote = yield* RemoteControl.Service
+        const created = yield* remote.createThread({
+          thread_id: createThreadId,
+          workspace_id: workspaceId,
+          user_id: ownerId,
+          authorization_user_id: outsiderId,
+        })
+        const ownerOpenCreate = yield* remote
+          .openThread({ thread_id: createThreadId, user_id: ownerId, authorization_user_id: ownerId })
+          .pipe(Effect.flip)
+        const outsiderOpenCreate = yield* remote.openThread({
+          thread_id: createThreadId,
+          user_id: ownerId,
+          authorization_user_id: outsiderId,
+        })
+
+        yield* remote.startTurn({
+          thread_id: turnThreadId,
+          workspace_id: workspaceId,
+          user_id: ownerId,
+          authorization_user_id: outsiderId,
+          content: "trusted creator",
+        })
+        yield* Effect.sleep("20 millis")
+        const ownerOpenTurn = yield* remote
+          .openThread({ thread_id: turnThreadId, user_id: ownerId, authorization_user_id: ownerId })
+          .pipe(Effect.flip)
+        const outsiderOpenTurn = yield* remote.openThread({
+          thread_id: turnThreadId,
+          user_id: ownerId,
+          authorization_user_id: outsiderId,
+        })
+
+        yield* remote.createThread({
+          thread_id: forkSourceThreadId,
+          workspace_id: workspaceId,
+          user_id: outsiderId,
+          authorization_user_id: outsiderId,
+        })
+        const forked = yield* remote.forkThread({
+          thread_id: forkSourceThreadId,
+          user_id: ownerId,
+          authorization_user_id: outsiderId,
+        })
+        const ownerOpenFork = yield* remote
+          .openThread({ thread_id: forked.thread_id, user_id: ownerId, authorization_user_id: ownerId })
+          .pipe(Effect.flip)
+        const outsiderOpenFork = yield* remote.openThread({
+          thread_id: forked.thread_id,
+          user_id: ownerId,
+          authorization_user_id: outsiderId,
+        })
+
+        return {
+          created,
+          ownerOpenCreate,
+          outsiderOpenCreate,
+          ownerOpenTurn,
+          outsiderOpenTurn,
+          forked,
+          ownerOpenFork,
+          outsiderOpenFork,
+        }
+      }),
+    )
+
+    expect(result.created.user_id).toBe(outsiderId)
+    expect(result.ownerOpenCreate).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.outsiderOpenCreate.summary.user_id).toBe(outsiderId)
+    expect(result.ownerOpenTurn).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.outsiderOpenTurn.summary.user_id).toBe(outsiderId)
+    expect(result.forked.user_id).toBe(outsiderId)
+    expect(result.ownerOpenFork).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.outsiderOpenFork.summary.user_id).toBe(outsiderId)
+  })
+
+  test("remote thread visibility gates artifacts and presence", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const artifact: Artifact.Artifact = {
+      id: artifactId,
+      thread_id: threadId,
+      kind: "research",
+      title: "Private artifact",
+      content: { ok: true },
+      created_at: now,
+    }
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const remote = yield* RemoteControl.Service
+        yield* remote.createThread({
+          thread_id: threadId,
+          workspace_id: workspaceId,
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        yield* ArtifactStore.put(artifact)
+        const listError = yield* remote
+          .listArtifacts({
+            thread_id: threadId,
+            kind: "research",
+            user_id: outsiderId,
+            authorization_user_id: outsiderId,
+          })
+          .pipe(Effect.flip)
+        const getError = yield* remote
+          .getArtifact({
+            artifact_id: artifactId,
+            user_id: outsiderId,
+            authorization_user_id: outsiderId,
+          })
+          .pipe(Effect.flip)
+        const presenceError = yield* remote
+          .setThreadPresence({
+            thread_id: threadId,
+            user_id: outsiderId,
+            state: "typing",
+            authorization_user_id: outsiderId,
+          })
+          .pipe(Effect.flip)
+        const ownerArtifacts = yield* remote.listArtifacts({
+          thread_id: threadId,
+          kind: "research",
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        const ownerArtifact = yield* remote.getArtifact({
+          artifact_id: artifactId,
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        return { listError, getError, presenceError, ownerArtifacts, ownerArtifact }
+      }),
+    )
+
+    expect(result.listError).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.getError).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.presenceError).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
+    expect(result.ownerArtifacts.map((item) => item.id)).toEqual([artifactId])
+    expect(result.ownerArtifact).toEqual(artifact)
+  })
+
+  test("remote thread event subscriptions stop when visibility is revoked", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const remote = yield* RemoteControl.Service
+        yield* remote.createThread({
+          thread_id: threadId,
+          workspace_id: workspaceId,
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        yield* remote.setThreadVisibility({
+          thread_id: threadId,
+          visibility: "unlisted",
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        const outsiderSubscription = remote
+          .subscribeThreadEvents({
+            thread_id: threadId,
+            user_id: outsiderId,
+            authorization_user_id: outsiderId,
+            after_sequence: 2,
+          })
+          .pipe(Stream.take(1), Stream.runCollect, Effect.timeout("2 seconds"), Effect.flip, Effect.forkChild)
+        const fiber = yield* outsiderSubscription
+        yield* remote.setThreadVisibility({
+          thread_id: threadId,
+          visibility: "private",
+          user_id: ownerId,
+          authorization_user_id: ownerId,
+        })
+        const subscriptionError = yield* Fiber.join(fiber)
+        return { subscriptionError }
+      }),
+    )
+
+    expect(result.subscriptionError).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
   })
 
   test("IDE clients can provide turn context and receive navigation requests", async () => {

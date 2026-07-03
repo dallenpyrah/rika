@@ -20,7 +20,7 @@ Log out by removing stored API key
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -58,7 +58,7 @@ Log in to Amp
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -97,7 +97,7 @@ Clone a workspace repository
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -140,7 +140,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -178,7 +178,7 @@ Continue the last thread directly.
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -244,7 +244,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -295,7 +295,7 @@ Create a new thread and print its ID. The thread will be empty. You can set the 
 Options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
 
 Global options:
 
@@ -345,7 +345,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -396,7 +396,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -434,7 +434,7 @@ Show display cost information for a thread. Accepts either a thread ID or thread
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -467,14 +467,21 @@ Global options:
 
 export const threadsVisibilityHelpStdoutText = (
   homeDir = homedir(),
-) => `Usage: amp threads visibility [options] [visibility]
+) => `Usage: rika threads visibility <thread-id> <private|workspace|unlisted>
 
-Print the explicit repo visibility override or "inherited", or set a new default (private, workspace, group).
+Set a thread's read visibility.
+
+Arguments:
+
+  <thread-id>
+      Thread to update
+  <visibility>
+      Thread visibility (private, workspace, unlisted)
 
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -530,7 +537,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -570,7 +577,7 @@ Add one or more labels to an existing thread without removing the labels it alre
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -603,12 +610,12 @@ Global options:
 
 export const threadsShareHelpStdoutText = (homeDir = homedir()) => `Usage: amp threads share [options] <threadIDOrURL>
 
-Change thread visibility (private, unlisted, workspace, group) or share with Amp support for debugging. Use --visibility to change who can access the thread, or --support to share with the Amp team for troubleshooting.
+Change thread visibility (private, unlisted, workspace) or share with Amp support for debugging. Use --visibility to change who can access the thread, or --support to share with the Amp team for troubleshooting.
 
 Options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   --support [message]
       Share thread with Amp support for debugging
 
@@ -657,7 +664,7 @@ Commands:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -700,7 +707,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -738,7 +745,7 @@ List all command IDs, descriptions, and effective keymap entries
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -788,7 +795,7 @@ Commands:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -852,7 +859,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -900,7 +907,7 @@ Examples:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -940,7 +947,7 @@ If [name] is provided, only show status for that specific server.
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -1041,7 +1048,7 @@ Options:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -1088,7 +1095,7 @@ Examples:
 Global options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -1187,7 +1194,7 @@ Commands:
 Options:
 
   --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace, group)
+      Set thread visibility (private, unlisted, workspace)
   -V, --version
       Print the version number and exit
   -v
@@ -1296,7 +1303,7 @@ Settings reference:
       Disable all command confirmation prompts (agent will execute all commands without asking)
   amp.defaultVisibility
       Define default thread visibility per repository origin using mappings like "github.com/org/repo": "workspace".
-      Values: private, workspace, group.
+      Values: private, workspace, unlisted.
   amp.experimental.modes
       Enable experimental agent modes by name. Available modes: deep1, deep2, deep3
   amp.fuzzy.alwaysIncludePaths

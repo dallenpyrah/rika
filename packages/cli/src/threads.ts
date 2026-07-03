@@ -64,6 +64,15 @@ export const layer = Layer.effect(
             yield* output.stdout(formatJson(summary))
             return 0
           }
+          case "visibility": {
+            const visibility = yield* requireVisibility(command)
+            const summary = yield* threads.setVisibility({
+              thread_id: yield* requireThreadId(command),
+              visibility,
+            })
+            yield* output.stdout(formatJson(summary))
+            return 0
+          }
           case "compact": {
             const remote = Option.getOrUndefined(remoteClient)
             if (remote === undefined) {
@@ -145,6 +154,11 @@ const requireThreadId = (command: Args.ThreadCommand) =>
   command.thread_id === undefined
     ? Effect.fail(new ThreadsError({ message: `Thread id is required for ${command.action}`, action: command.action }))
     : Effect.succeed(command.thread_id)
+
+const requireVisibility = (command: Args.ThreadCommand) =>
+  command.visibility === undefined
+    ? Effect.fail(new ThreadsError({ message: "Thread visibility is required", action: command.action }))
+    : Effect.succeed(command.visibility)
 
 const listInput = (command: Args.ThreadCommand): ThreadService.ListInput => ({
   ...(command.include_archived === undefined ? {} : { include_archived: command.include_archived }),

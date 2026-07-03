@@ -33,6 +33,7 @@ export const ThreadSummary = Schema.Struct({
   context_tokens: Schema.optional(Schema.Int),
   last_model: Schema.optional(Schema.String),
   archived: Schema.Boolean,
+  visibility: Event.ThreadVisibility,
   created_at: Schema.Int,
   updated_at: Schema.Int,
 }).annotate({ identifier: "Rika.ThreadProjection.ThreadSummary" })
@@ -172,6 +173,7 @@ interface ThreadProjectionRow {
   readonly last_context_tokens: number | null
   readonly last_model: string | null
   readonly archived: number
+  readonly visibility: string
   readonly last_sequence: number
   readonly created_at: number
   readonly updated_at: number
@@ -217,6 +219,8 @@ const applyEventRow = (database: ProjectionDatabase, event: Event.Event) => {
       return applyThreadArchived(database, event)
     case "thread.unarchived":
       return applyThreadUnarchived(database, event)
+    case "thread.visibility.set":
+      return applyThreadVisibilitySet(database, event)
     default:
       return applySequenceOnly(database, event)
   }
@@ -242,8 +246,8 @@ const applyFirstEvent = (database: ProjectionDatabase, event: Event.Event) => {
 
 const applyThreadCreated = (database: ProjectionDatabase, event: Event.ThreadCreated) =>
   database.run(sql`
-    insert into thread_projections (thread_id, workspace_id, user_id, last_user_id, title_text, archived, last_sequence, created_at, updated_at)
-    values (${event.thread_id}, ${event.data.workspace_id}, ${event.data.user_id ?? null}, ${event.data.user_id ?? null}, ${event.data.title_text ?? null}, 0, ${event.sequence}, ${event.created_at}, ${event.created_at})
+    insert into thread_projections (thread_id, workspace_id, user_id, last_user_id, title_text, archived, visibility, last_sequence, created_at, updated_at)
+    values (${event.thread_id}, ${event.data.workspace_id}, ${event.data.user_id ?? null}, ${event.data.user_id ?? null}, ${event.data.title_text ?? null}, 0, 'private', ${event.sequence}, ${event.created_at}, ${event.created_at})
   `)
 
 const applyMessageAdded = (database: ProjectionDatabase, event: Event.MessageAdded) => {
@@ -370,6 +374,15 @@ const applyThreadUnarchived = (database: ProjectionDatabase, event: Event.Thread
     where thread_id = ${event.thread_id}
   `)
 
+const applyThreadVisibilitySet = (database: ProjectionDatabase, event: Event.ThreadVisibilitySet) =>
+  database.run(sql`
+    update thread_projections set
+      visibility = ${event.data.visibility},
+      last_sequence = ${event.sequence},
+      updated_at = ${event.created_at}
+    where thread_id = ${event.thread_id}
+  `)
+
 const applySequenceOnly = (database: ProjectionDatabase, event: Event.Event) =>
   database.run(sql`
     update thread_projections set
@@ -432,6 +445,7 @@ const rowToSummary = (row: ThreadProjectionRow): ThreadSummary => ({
   context_tokens: row.last_context_tokens === null ? undefined : row.last_context_tokens,
   last_model: row.last_model === null ? undefined : row.last_model,
   archived: row.archived === 1,
+  visibility: visibilityOrDefault(row.visibility),
   created_at: row.created_at,
   updated_at: row.updated_at,
 })
@@ -444,6 +458,11 @@ const roleOrUndefined = (value: string | null) => {
 const turnStatusOrUndefined = (value: string | null) => {
   if (value === null) return undefined
   return Schema.decodeUnknownSync(TurnStatus)(value)
+}
+
+const visibilityOrDefault = (value: string | null) => {
+  if (value === null) return "private"
+  return Schema.decodeUnknownSync(Event.ThreadVisibility)(value)
 }
 
 const emptyDiff: ThreadDiffStats = { additions: 0, modifications: 0, deletions: 0 }

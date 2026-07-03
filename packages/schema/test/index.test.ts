@@ -459,6 +459,7 @@ describe("Rika protocol schemas", () => {
       context_tokens: 12_000,
       context_window: 400_000,
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }
@@ -469,6 +470,11 @@ describe("Rika protocol schemas", () => {
     const compact: Remote.CompactThreadRequest = {
       thread_id: threadId,
       user_id: remoteUserId,
+    }
+    const setVisibility: Remote.SetThreadVisibilityRequest = {
+      thread_id: threadId,
+      user_id: remoteUserId,
+      visibility: "workspace",
     }
     const fork: Remote.ForkThreadRequest = {
       thread_id: threadId,
@@ -500,6 +506,14 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Remote.CompactThreadRequest)(Codec.encode(Remote.CompactThreadRequest)(compact))).toEqual(
       compact,
     )
+    expect(
+      Codec.decode(Remote.SetThreadVisibilityRequest)(Codec.encode(Remote.SetThreadVisibilityRequest)(setVisibility)),
+    ).toEqual(setVisibility)
+    expect(
+      Codec.decode(Remote.SetThreadVisibilityBody)(
+        Codec.encode(Remote.SetThreadVisibilityBody)({ visibility: "workspace" }),
+      ),
+    ).toEqual({ visibility: "workspace" })
     expect(Codec.decode(Remote.ForkThreadRequest)(Codec.encode(Remote.ForkThreadRequest)(fork))).toEqual(fork)
     expect(Codec.decode(Remote.BackendHealth)(Codec.encode(Remote.BackendHealth)(health))).toEqual(health)
     expect(Codec.decode(Remote.PublicBackendHealth)(Codec.encode(Remote.PublicBackendHealth)(publicHealth))).toEqual(
@@ -609,6 +623,7 @@ describe("Rika protocol schemas", () => {
       diff: { additions: 0, modifications: 0, deletions: 0 },
       orb_status: "running",
       archived: false,
+      visibility: "private",
       created_at: now,
       updated_at: now,
     }

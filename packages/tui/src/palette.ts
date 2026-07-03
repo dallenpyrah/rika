@@ -125,6 +125,13 @@ const threadLifecycleCommands: ReadonlyArray<Command> = [
     hint: "compare read-only branch answers",
     command: "/tournament",
   },
+  {
+    id: "thread-visibility",
+    category: "thread",
+    action: "set visibility",
+    hint: "set this thread visible to workspace members",
+    command: "/thread visibility workspace",
+  },
 ]
 
 const speedCommand = (fastMode: boolean): Command => ({

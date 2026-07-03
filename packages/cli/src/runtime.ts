@@ -902,6 +902,7 @@ const remoteThreadSummary = (summary: Remote.ThreadSummary): ThreadService.Threa
   ...(summary.context_tokens === undefined ? {} : { context_tokens: summary.context_tokens }),
   ...(summary.context_window === undefined ? {} : { context_window: summary.context_window }),
   archived: summary.archived,
+  visibility: summary.visibility,
   created_at: summary.created_at,
   updated_at: summary.updated_at,
 })
@@ -1083,6 +1084,8 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
       request({ thread_id: threadId }, (remote) => remote.archiveThread(threadId, userId)),
     unarchiveThread: (threadId, userId) =>
       request({ thread_id: threadId }, (remote) => remote.unarchiveThread(threadId, userId)),
+    setThreadVisibility: (threadId, visibility, userId) =>
+      request({ thread_id: threadId }, (remote) => remote.setThreadVisibility(threadId, visibility, userId)),
     compactThread: (threadId, userId) =>
       request({ thread_id: threadId }, (remote) => remote.compactThread(threadId, userId)),
     forkThread: (threadId, forkInput) =>

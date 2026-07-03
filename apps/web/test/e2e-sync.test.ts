@@ -134,6 +134,15 @@ describe("web local sync e2e", () => {
       const secondSnapshots: Array<Remote.PresenceFrame["presence"]> = []
 
       await Effect.runPromise(firstTerminal.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      await runtime.runPromise(
+        WorkspaceStore.putMembership({
+          workspace_id: workspaceId,
+          user_id: secondUserId,
+          role: "member",
+          created_at: now,
+        }),
+      )
+      await Effect.runPromise(firstTerminal.setThreadVisibility(threadId, "workspace"))
       const firstFiber = Effect.runFork(
         firstTerminal
           .subscribeThreadEvents({ thread_id: threadId, onPresence: (snapshot) => firstSnapshots.push(snapshot) })

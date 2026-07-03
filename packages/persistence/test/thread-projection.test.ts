@@ -49,6 +49,26 @@ describe("ThreadProjection", () => {
     expect(summary).toMatchObject({ thread_id: threadId, archived: false })
   })
 
+  test("projects thread visibility changes and rebuilds them from the event log", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        for (const event of [...projectionEvents(), visibilitySetEvent()]) {
+          const appended = yield* ThreadEventLog.append(event)
+          yield* ThreadProjection.apply(appended)
+        }
+        const applied = yield* ThreadProjection.getThread(threadId)
+        yield* ThreadProjection.clear()
+        yield* ThreadProjection.rebuild()
+        const rebuilt = yield* ThreadProjection.getThread(threadId)
+        return { applied, rebuilt }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.applied).toMatchObject({ thread_id: threadId, visibility: "workspace" })
+    expect(result.rebuilt).toEqual(result.applied)
+  })
+
   test("rebuilds projections from only the event log", async () => {
     const summaries = await Effect.runPromise(
       Effect.gen(function* () {
@@ -267,6 +287,17 @@ const unarchivedEvent = (): Event.ThreadUnarchived => ({
   type: "thread.unarchived",
   data: {},
 })
+
+const visibilitySetEvent = (): Event.Event =>
+  ({
+    id: Ids.EventId.make("projection_thread_visibility_set"),
+    thread_id: threadId,
+    sequence: 5,
+    version: 1,
+    created_at: 5,
+    type: "thread.visibility.set",
+    data: { visibility: "workspace" },
+  }) as Event.Event
 
 const turnFailedEvent = (): Event.TurnFailed => ({
   id: Ids.EventId.make("projection_turn_failed"),

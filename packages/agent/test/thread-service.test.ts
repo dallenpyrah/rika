@@ -58,6 +58,28 @@ describe("ThreadService", () => {
     expect(result.activeAgain.map((summary) => summary.thread_id)).toEqual([threadId])
   })
 
+  test("sets thread visibility through an append-only event", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* ThreadService.create({ thread_id: threadId, workspace_id: workspaceId, user_id: userId })
+        const visible = yield* ThreadService.setVisibility({ thread_id: threadId, visibility: "workspace" })
+        const unchanged = yield* ThreadService.setVisibility({ thread_id: threadId, visibility: "workspace" })
+        const record = yield* ThreadService.open({ thread_id: threadId })
+        yield* ThreadProjection.clear()
+        yield* ThreadProjection.rebuild()
+        const rebuilt = yield* ThreadService.open({ thread_id: threadId })
+        return { created, visible, unchanged, record, rebuilt }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.created.visibility).toBe("private")
+    expect(result.visible.visibility).toBe("workspace")
+    expect(result.unchanged.visibility).toBe("workspace")
+    expect(result.record.events.map((event) => event.type)).toEqual(["thread.created", "thread.visibility.set"])
+    expect(result.rebuilt.summary).toEqual(result.record.summary)
+  })
+
   test("searches, exports, and renders compact thread references", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -82,6 +104,30 @@ describe("ThreadService", () => {
     expect(result.reference.rendered).toContain(`Thread ${threadId}`)
     expect(result.reference.rendered).toContain("Fix auth race")
     expect(result.reference.entries).toContain("File: src/auth.ts")
+  })
+
+  test("restricts search scoring to explicit thread candidates", async () => {
+    const hiddenThreadId = Ids.ThreadId.make("thread_service_search_hidden")
+    const visibleThreadId = Ids.ThreadId.make("thread_service_search_visible")
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* appendProjected(threadCreatedForThread(hiddenThreadId, "hidden"))
+        yield* appendProjected(
+          messageAddedForThread(2, turnId, "thread_service_hidden_message", "hidden needle", hiddenThreadId),
+        )
+        yield* appendProjected(threadCreatedForThread(visibleThreadId, "visible"))
+        yield* appendProjected(
+          messageAddedForThread(2, turnId, "thread_service_visible_message", "visible hay", visibleThreadId),
+        )
+        const candidateSearch = yield* ThreadService.search({ query: "needle", thread_ids: [visibleThreadId] })
+        const fullSearch = yield* ThreadService.search({ query: "needle" })
+        return { candidateSearch, fullSearch }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.candidateSearch).toEqual([])
+    expect(result.fullSearch.map((item) => item.summary.thread_id)).toEqual([hiddenThreadId])
   })
 
   test("enriches stored context usage with model context window", async () => {
@@ -191,6 +237,25 @@ describe("ThreadService", () => {
     expect(result.secondFork.latest_message_text).toBe("first turn")
   })
 
+  test("forks start private even when the source thread was shared", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* appendProjected(threadCreated())
+        yield* appendProjected(threadVisibilitySet(2, "unlisted"))
+        yield* appendProjected(messageAdded(3, "fork stays private"))
+        const forked = yield* ThreadService.fork({ thread_id: threadId })
+        const record = yield* ThreadService.open({ thread_id: forked.thread_id })
+        return { forked, record }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.forked.visibility).toBe("private")
+    expect(result.forked.latest_message_text).toBe("fork stays private")
+    expect(result.record.events.map((event) => event.type)).toEqual(["thread.created", "message.added"])
+    expect(result.record.events.map((event) => event.sequence)).toEqual([1, 2])
+  })
+
   test("seeds a fork title from durable thread-created data", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -267,6 +332,26 @@ const threadCreated = (): Event.ThreadCreated => ({
   data: { workspace_id: workspaceId },
 })
 
+const threadCreatedForThread = (createdThreadId: Ids.ThreadId, suffix: string): Event.ThreadCreated => ({
+  id: Ids.EventId.make(`thread_service_event_created_${suffix}`),
+  thread_id: createdThreadId,
+  sequence: 1,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now - 10),
+  type: "thread.created",
+  data: { workspace_id: workspaceId },
+})
+
+const threadVisibilitySet = (sequence: number, visibility: Event.ThreadVisibility): Event.ThreadVisibilitySet => ({
+  id: Ids.EventId.make(`thread_service_event_visibility_${sequence}`),
+  thread_id: threadId,
+  sequence,
+  version: 1,
+  created_at: Common.TimestampMillis.make(now + sequence),
+  type: "thread.visibility.set",
+  data: { visibility },
+})
+
 const turnStarted = (sequence: number, startedTurnId: Ids.TurnId): Event.TurnStarted => ({
   id: Ids.EventId.make(`thread_service_event_turn_started_${sequence}`),
   thread_id: threadId,
@@ -283,9 +368,10 @@ const messageAddedForThread = (
   messageTurnId: Ids.TurnId,
   messageIdValue: string,
   content: string,
+  messageThreadId: Ids.ThreadId = threadId,
 ): Event.MessageAdded => ({
-  id: Ids.EventId.make(`thread_service_event_message_${sequence}`),
-  thread_id: threadId,
+  id: Ids.EventId.make(`thread_service_event_message_${messageIdValue}_${sequence}`),
+  thread_id: messageThreadId,
   turn_id: messageTurnId,
   sequence,
   version: 1,
@@ -294,7 +380,7 @@ const messageAddedForThread = (
   data: {
     message: Message.user({
       id: Ids.MessageId.make(messageIdValue),
-      thread_id: threadId,
+      thread_id: messageThreadId,
       turn_id: messageTurnId,
       created_at: Common.TimestampMillis.make(now + sequence),
       content,

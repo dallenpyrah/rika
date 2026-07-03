@@ -159,6 +159,7 @@ describe("CLI local backend", () => {
       workspace_id: Ids.WorkspaceId.make(workspaceRoot),
       diff: { additions: 0, modifications: 0, deletions: 0 },
       archived: false,
+      visibility: "private",
       created_at: 1,
       updated_at: 2,
     }

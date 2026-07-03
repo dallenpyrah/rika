@@ -276,6 +276,20 @@ const handleCommand = (
     if (name === "/thread") {
       if (argument === undefined || argument.length === 0)
         return Backend.commandResult(context, { state: ViewState.withNotice(state, "Usage: /thread <thread-id>") })
+      const visibilityCommand = parseThreadVisibilityCommand(argument)
+      if (visibilityCommand?.kind === "usage")
+        return Backend.commandResult(context, {
+          state: ViewState.withNotice(state, threadVisibilityUsage),
+        })
+      if (visibilityCommand?.kind === "set") {
+        const summary = yield* dependencies.threadService.setVisibility({
+          thread_id: threadId,
+          visibility: visibilityCommand.visibility,
+        })
+        return Backend.commandResult(context, {
+          state: ViewState.withNotice(state, `Thread visibility: ${summary.visibility}`),
+        })
+      }
       const nextThreadId = Ids.ThreadId.make(argument)
       const record = yield* dependencies.threadService.open({ thread_id: nextThreadId })
       const next = ViewState.beginConnecting(
@@ -394,6 +408,21 @@ const modeCommand = (context: Backend.CommandContext, argument: string | undefin
 const parseMode = (value: string): Config.Mode | undefined => {
   const decoded = Schema.decodeUnknownOption(Config.Mode)(value)
   return Option.isSome(decoded) ? decoded.value : undefined
+}
+
+const threadVisibilityUsage = "Usage: /thread visibility <private|workspace|unlisted>"
+
+type ThreadVisibilityCommand =
+  | { readonly kind: "set"; readonly visibility: ThreadService.SetVisibilityInput["visibility"] }
+  | { readonly kind: "usage" }
+
+const parseThreadVisibilityCommand = (argument: string): ThreadVisibilityCommand | undefined => {
+  const [subcommand, value] = Backend.splitFirst(argument)
+  if (subcommand !== "visibility") return undefined
+  if (value === "private" || value === "workspace" || value === "unlisted") {
+    return { kind: "set" as const, visibility: value }
+  }
+  return { kind: "usage" as const }
 }
 
 const nextModeAfter = (mode: Config.Mode): Config.Mode => {

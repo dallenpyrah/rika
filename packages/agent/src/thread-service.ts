@@ -21,6 +21,12 @@ export const ThreadIdInput = Schema.Struct({
   thread_id: Ids.ThreadId,
 }).annotate({ identifier: "Rika.Agent.ThreadService.ThreadIdInput" })
 
+export interface SetVisibilityInput extends Schema.Schema.Type<typeof SetVisibilityInput> {}
+export const SetVisibilityInput = Schema.Struct({
+  thread_id: Ids.ThreadId,
+  visibility: Event.ThreadVisibility,
+}).annotate({ identifier: "Rika.Agent.ThreadService.SetVisibilityInput" })
+
 export interface ForkInput extends Schema.Schema.Type<typeof ForkInput> {}
 export const ForkInput = Schema.Struct({
   thread_id: Ids.ThreadId,
@@ -51,6 +57,7 @@ export const SearchInput = Schema.Struct({
   after: Schema.optional(Common.TimestampMillis),
   before: Schema.optional(Common.TimestampMillis),
   limit: Schema.optional(Schema.Int),
+  thread_ids: Schema.optional(Schema.Array(Ids.ThreadId)),
 }).annotate({ identifier: "Rika.Agent.ThreadService.SearchInput" })
 
 export interface ReferenceInput extends Schema.Schema.Type<typeof ReferenceInput> {}
@@ -77,6 +84,7 @@ export const ThreadSummary = Schema.Struct({
   context_tokens: Schema.optional(Schema.Int),
   context_window: Schema.optional(Schema.Int),
   archived: Schema.Boolean,
+  visibility: Event.ThreadVisibility,
   created_at: Schema.Int,
   updated_at: Schema.Int,
 }).annotate({ identifier: "Rika.Agent.ThreadService.ThreadSummary" })
@@ -146,6 +154,7 @@ export interface Interface {
   readonly fork: (input: ForkInput) => Effect.Effect<ThreadSummary, Error>
   readonly archive: (input: ThreadIdInput) => Effect.Effect<ThreadSummary, Error>
   readonly unarchive: (input: ThreadIdInput) => Effect.Effect<ThreadSummary, Error>
+  readonly setVisibility: (input: SetVisibilityInput) => Effect.Effect<ThreadSummary, Error>
   readonly deleteThread: (input: ThreadIdInput) => Effect.Effect<never, ThreadServiceError>
   readonly search: (input: SearchInput) => Effect.Effect<ReadonlyArray<SearchResult>, Error>
   readonly share: (input: ThreadIdInput) => Effect.Effect<ThreadExport, Error>
@@ -206,6 +215,13 @@ export const layer = Layer.effect(
           setArchived(dependencies, input.thread_id, false, fields),
         )
       }),
+      setVisibility: Effect.fn("ThreadService.setVisibility")(function* (input: SetVisibilityInput) {
+        return yield* threadEvent(
+          "thread.visibility",
+          { thread_id: input.thread_id, visibility: input.visibility },
+          (fields) => setVisibilityInternal(dependencies, input, fields),
+        )
+      }),
       deleteThread: Effect.fn("ThreadService.deleteThread")(function* (input: ThreadIdInput) {
         return yield* new ThreadServiceError({
           message: "Thread deletion is not supported by the append-only local event log",
@@ -246,6 +262,7 @@ export const fakeLayer = (overrides: Partial<Interface> = {}) => {
       fork: overrides.fork ?? ((input) => fail("fork", input.thread_id)),
       archive: overrides.archive ?? ((input) => fail("archive", input.thread_id)),
       unarchive: overrides.unarchive ?? ((input) => fail("unarchive", input.thread_id)),
+      setVisibility: overrides.setVisibility ?? ((input) => fail("setVisibility", input.thread_id)),
       deleteThread: overrides.deleteThread ?? ((input) => fail("deleteThread", input.thread_id)),
       search: overrides.search ?? (() => fail("search")),
       share: overrides.share ?? ((input) => fail("share", input.thread_id)),
@@ -287,6 +304,11 @@ export const archive = Effect.fn("ThreadService.archive.call")(function* (input:
 export const unarchive = Effect.fn("ThreadService.unarchive.call")(function* (input: ThreadIdInput) {
   const service = yield* Service
   return yield* service.unarchive(input)
+})
+
+export const setVisibility = Effect.fn("ThreadService.setVisibility.call")(function* (input: SetVisibilityInput) {
+  const service = yield* Service
+  return yield* service.setVisibility(input)
 })
 
 export const deleteThread = Effect.fn("ThreadService.deleteThread.call")(function* (input: ThreadIdInput) {
@@ -359,11 +381,11 @@ const listThreads = (dependencies: Dependencies, input: ListInput) =>
     const summaries = yield* dependencies.projection
       .listThreads()
       .pipe(Effect.provideService(Database.Service, dependencies.database))
-    return summaries
+    const filtered = summaries
       .filter((summary) => input.include_archived === true || !summary.archived)
       .filter((summary) => input.workspace_id === undefined || summary.workspace_id === input.workspace_id)
-      .slice(0, limit)
       .map(summaryFromProjection)
+    return limit === undefined ? filtered : filtered.slice(0, limit)
   })
 
 const openThread = (dependencies: Dependencies, threadId: Ids.ThreadId) =>
@@ -421,24 +443,87 @@ const setArchived = (
     return yield* requireSummary(dependencies, threadId, archived ? "archive" : "unarchive")
   })
 
+const setVisibilityInternal = (dependencies: Dependencies, input: SetVisibilityInput, fields: Diagnostics.Fields) =>
+  Effect.gen(function* () {
+    const record = yield* openThread(dependencies, input.thread_id)
+    fields.event_count = record.events.length
+    if (record.summary.visibility === input.visibility) {
+      fields.changed = false
+      return record.summary
+    }
+
+    const createdAt = yield* dependencies.time.nowMillis
+    const sequence = latestSequence(record.events) + 1
+    const event: Event.ThreadVisibilitySet = {
+      id: Ids.EventId.make(yield* dependencies.idGenerator.next("event")),
+      thread_id: input.thread_id,
+      sequence,
+      version: 1,
+      created_at: createdAt,
+      type: "thread.visibility.set",
+      data: { visibility: input.visibility },
+    }
+    yield* appendAndProject(dependencies, event)
+    fields.changed = true
+    fields.sequence = sequence
+    return yield* requireSummary(dependencies, input.thread_id, "setVisibility")
+  })
+
 const searchThreads = (dependencies: Dependencies, input: SearchInput) =>
   Effect.gen(function* () {
-    const summaries = yield* listThreads(dependencies, {
-      limit: 1_000,
-      ...(input.include_archived === undefined ? {} : { include_archived: input.include_archived }),
-      ...(input.workspace_id === undefined ? {} : { workspace_id: input.workspace_id }),
-    })
-    const events = groupEventsByThread(yield* readAll(dependencies))
+    const summaries = yield* searchCandidateSummaries(dependencies, input)
     const terms = tokenize(input.query ?? "")
-    const results = summaries
+    let scored: ReadonlyArray<SearchResult>
+    if (terms.length === 0) {
+      scored = summaries.map((summary) => scoreSummary(summary, [], terms))
+    } else if (input.thread_ids === undefined) {
+      scored = yield* scoreSummariesFromAllEvents(dependencies, summaries, terms)
+    } else {
+      scored = yield* scoreSummariesFromThreadEvents(dependencies, summaries, terms)
+    }
+    const results = scored
+      .filter((result) => terms.length === 0 || result.score > 0)
+      .toSorted((left, right) => right.score - left.score || right.summary.updated_at - left.summary.updated_at)
+    return results.slice(0, clamp(input.limit ?? defaultSearchLimit, 1, 1_000))
+  })
+
+const searchCandidateSummaries = (dependencies: Dependencies, input: SearchInput) =>
+  Effect.gen(function* () {
+    const threadIds =
+      input.thread_ids === undefined ? undefined : new Set(input.thread_ids.map((threadId) => String(threadId)))
+    const summaries = yield* dependencies.projection
+      .listThreads()
+      .pipe(Effect.provideService(Database.Service, dependencies.database))
+    return summaries
+      .filter((summary) => input.include_archived === true || !summary.archived)
+      .filter((summary) => input.workspace_id === undefined || summary.workspace_id === input.workspace_id)
+      .filter((summary) => threadIds === undefined || threadIds.has(String(summary.thread_id)))
       .filter((summary) => input.user_id === undefined || summary.user_id === input.user_id)
       .filter((summary) => input.after === undefined || summary.updated_at >= input.after)
       .filter((summary) => input.before === undefined || summary.updated_at <= input.before)
-      .map((summary) => scoreSummary(summary, events.get(summary.thread_id) ?? [], terms))
-      .filter((result) => terms.length === 0 || result.score > 0)
-      .toSorted((left, right) => right.score - left.score || right.summary.updated_at - left.summary.updated_at)
-    return results.slice(0, clamp(input.limit ?? defaultSearchLimit, 1, 100))
+      .map(summaryFromProjection)
   })
+
+const scoreSummariesFromAllEvents = (
+  dependencies: Dependencies,
+  summaries: ReadonlyArray<ThreadSummary>,
+  terms: ReadonlyArray<string>,
+) =>
+  readAll(dependencies).pipe(
+    Effect.map((events) => {
+      const grouped = groupEventsByThread(events)
+      return summaries.map((summary) => scoreSummary(summary, grouped.get(summary.thread_id) ?? [], terms))
+    }),
+  )
+
+const scoreSummariesFromThreadEvents = (
+  dependencies: Dependencies,
+  summaries: ReadonlyArray<ThreadSummary>,
+  terms: ReadonlyArray<string>,
+) =>
+  Effect.forEach(summaries, (summary) =>
+    readThread(dependencies, summary.thread_id).pipe(Effect.map((events) => scoreSummary(summary, events, terms))),
+  )
 
 const exportThread = (dependencies: Dependencies, threadId: Ids.ThreadId) =>
   Effect.gen(function* () {
@@ -454,9 +539,10 @@ const forkThread = (dependencies: Dependencies, input: ForkInput, fields: Diagno
 
     const cutoff = yield* forkCutoff(sourceEvents, input.thread_id, input.at_turn)
     const sourcePrefix = sourceEvents.filter((event) => event.sequence <= cutoff)
+    const forkedPrefix = sourcePrefix.filter((event) => event.type !== "thread.visibility.set")
     const forkThreadId = Ids.ThreadId.make(yield* dependencies.idGenerator.next("thread"))
     const created = requireThreadCreated(sourcePrefix, input.thread_id)
-    const forkedEvents = yield* Effect.forEach(sourcePrefix, (event, index) =>
+    const forkedEvents = yield* Effect.forEach(forkedPrefix, (event, index) =>
       forkEvent(dependencies, {
         event,
         sequence: index + 1,
@@ -507,6 +593,7 @@ const referenceEntries = (record: ThreadRecord, terms: ReadonlyArray<string>) =>
   const selected = uniqueStrings([
     `Thread ${record.summary.thread_id}`,
     `Workspace: ${record.summary.workspace_id}`,
+    `Visibility: ${record.summary.visibility}`,
     `Archived: ${record.summary.archived}`,
     ...(record.summary.latest_message_text === undefined
       ? []

@@ -524,6 +524,7 @@ describe("CLI args", () => {
     const archive = await Effect.runPromise(Args.parse(["threads", "archive", threadId]))
     const compact = await Effect.runPromise(Args.parse(["threads", "compact", threadId]))
     const fork = await Effect.runPromise(Args.parse(["threads", "fork", threadId, "--at-turn", "turn_args_threads"]))
+    const visibility = await Effect.runPromise(Args.parse(["threads", "visibility", threadId, "workspace"]))
     const reference = await Effect.runPromise(Args.parse(["threads", "reference", threadId, "auth", "race"]))
 
     expect(list).toEqual({ type: "threads", action: "list", include_archived: true, limit: 5 })
@@ -536,6 +537,7 @@ describe("CLI args", () => {
       thread_id: threadId,
       at_turn: Ids.TurnId.make("turn_args_threads"),
     })
+    expect(visibility).toEqual({ type: "threads", action: "visibility", thread_id: threadId, visibility: "workspace" })
     expect(reference).toEqual({ type: "threads", action: "reference", thread_id: threadId, query: "auth race" })
   })
 

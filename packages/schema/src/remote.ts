@@ -1,7 +1,11 @@
 import { Schema } from "effect"
 import { Kind as ArtifactKind } from "./artifact"
 import { JsonValue, TimestampMillis } from "./common"
-import { Event } from "./event"
+import {
+  Event,
+  ThreadVisibility as EventThreadVisibility,
+  type ThreadVisibility as EventThreadVisibilityType,
+} from "./event"
 import { ContextSnapshot as IdeContextSnapshot } from "./ide"
 import { ArtifactId, OrbId, ProjectId, ThreadId, TurnId, UserId, WorkspaceId } from "./ids"
 import { ContentPart } from "./message"
@@ -44,6 +48,9 @@ export const PresenceState = Schema.Literals(["active", "typing"]).annotate({
 })
 export type PresenceState = typeof PresenceState.Type
 
+export const ThreadVisibility = EventThreadVisibility.annotate({ identifier: "Rika.Remote.ThreadVisibility" })
+export type ThreadVisibility = EventThreadVisibilityType
+
 export interface ThreadDiffStats extends Schema.Schema.Type<typeof ThreadDiffStats> {}
 export const ThreadDiffStats = Schema.Struct({
   additions: Schema.Int,
@@ -66,6 +73,7 @@ export const ThreadSummary = Schema.Struct({
   context_window: Schema.optional(Schema.Int),
   orb_status: Schema.optional(OrbStatus),
   archived: Schema.Boolean,
+  visibility: ThreadVisibility,
   created_at: TimestampMillis,
   updated_at: TimestampMillis,
 }).annotate({ identifier: "Rika.Remote.ThreadSummary" })
@@ -166,6 +174,18 @@ export const ArchiveThreadRequest = Schema.Struct({
   thread_id: ThreadId,
   user_id: Schema.optional(UserId),
 }).annotate({ identifier: "Rika.Remote.ArchiveThreadRequest" })
+
+export interface SetThreadVisibilityBody extends Schema.Schema.Type<typeof SetThreadVisibilityBody> {}
+export const SetThreadVisibilityBody = Schema.Struct({
+  visibility: ThreadVisibility,
+}).annotate({ identifier: "Rika.Remote.SetThreadVisibilityBody" })
+
+export interface SetThreadVisibilityRequest extends Schema.Schema.Type<typeof SetThreadVisibilityRequest> {}
+export const SetThreadVisibilityRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: Schema.optional(UserId),
+  visibility: ThreadVisibility,
+}).annotate({ identifier: "Rika.Remote.SetThreadVisibilityRequest" })
 
 export interface CompactThreadRequest extends Schema.Schema.Type<typeof CompactThreadRequest> {}
 export const CompactThreadRequest = Schema.Struct({

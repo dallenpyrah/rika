@@ -46,6 +46,7 @@ export const thread_projections = sqliteTable(
     last_context_tokens: integer(),
     last_model: text(),
     archived: integer().notNull().default(0),
+    visibility: text().notNull().default("private"),
     last_sequence: integer().notNull(),
     created_at: integer().notNull(),
     updated_at: integer().notNull(),
