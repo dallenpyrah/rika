@@ -14,6 +14,7 @@
   "dependencies": {
     "@foldkit/ui": "catalog:",
     "@pierre/diffs": "1.2.11",
+    "@pierre/trees": "1.0.0-beta.5",
     "@rika/llm": "workspace:*",
     "@rika/schema": "workspace:*",
     "@rika/sdk": "workspace:*",
