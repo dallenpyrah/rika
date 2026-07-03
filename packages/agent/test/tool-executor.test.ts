@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Config } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import { Tool as AiTool } from "effect/unstable/ai"
 import { PermissionPolicy, ToolExecutor, ToolRegistry } from "../src/index"
 
 const call = (name: string, input: Common.JsonValue = {}): Tool.Call => ({
@@ -202,6 +203,48 @@ describe("ToolExecutor", () => {
       output: { synthesized: true },
       metadata: { permission_mode: "configured", permission_action: "synthesize" },
     })
+  })
+
+  test("per-turn definitions cannot shadow base registry tools", async () => {
+    let baseExecuted = false
+    let extraExecuted = false
+    const extra: ToolRegistry.Definition = {
+      tool: AiTool.make("fake_echo", {
+        description: "Extra echo",
+        parameters: Schema.Record(Schema.String, Schema.Json),
+        success: Schema.Json,
+        failure: Schema.Json,
+        failureMode: "return",
+      }),
+      execute: () =>
+        Effect.sync(() => {
+          extraExecuted = true
+          return { source: "extra" }
+        }),
+    }
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const executor = yield* ToolExecutor.Service
+        const descriptors = yield* executor.describeWithDefinitions([extra])
+        const executed = yield* executor.executeWithDefinitions(call("fake_echo"), [extra])
+        return { descriptors, executed }
+      }).pipe(
+        Effect.provide(
+          fakeToolLayer({
+            fake_echo: () =>
+              Effect.sync(() => {
+                baseExecuted = true
+                return { source: "base" }
+              }),
+          }),
+        ),
+      ),
+    )
+
+    expect(result.descriptors.filter((descriptor) => descriptor.name === "fake_echo")).toHaveLength(1)
+    expect(result.executed).toMatchObject({ status: "success", output: { source: "base" } })
+    expect(baseExecuted).toBe(true)
+    expect(extraExecuted).toBe(false)
   })
 })
 

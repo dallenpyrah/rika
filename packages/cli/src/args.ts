@@ -88,7 +88,7 @@ export const SkillCommand = Schema.Struct({
   name: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Cli.Args.SkillCommand" })
 
-export const McpAction = Schema.Literals(["list", "approve"]).annotate({
+export const McpAction = Schema.Literals(["list", "approve", "add", "remove", "doctor"]).annotate({
   identifier: "Rika.Cli.Args.McpAction",
 })
 export type McpAction = typeof McpAction.Type
@@ -98,6 +98,10 @@ export const McpCommand = Schema.Struct({
   type: Schema.Literal("mcp"),
   action: McpAction,
   server_name: Schema.optional(Schema.String),
+  global: Schema.optional(Schema.Boolean),
+  url: Schema.optional(Schema.String),
+  command: Schema.optional(Schema.String),
+  args: Schema.optional(Schema.Array(Schema.String)),
 }).annotate({ identifier: "Rika.Cli.Args.McpCommand" })
 
 export const ConfigAction = Schema.Literals(["keymap", "list", "edit"]).annotate({
@@ -310,6 +314,9 @@ export const usage = [
   "  rika skills list",
   "  rika skills inspect <name>",
   "  rika mcp list",
+  "  rika mcp add <name> [--global] [--url <url> | -- <command> [args...]]",
+  "  rika mcp remove <name> [--global]",
+  "  rika mcp doctor",
   "  rika mcp approve <server-name>",
   "  rika config list",
   "  rika config keymap",
@@ -355,6 +362,10 @@ export const parse = Effect.fn("Cli.Args.parse")(function* (argv: ReadonlyArray<
 
   const invalidExecuteAliasCommand = toInvalidExecuteAliasCommand(argv)
   if (invalidExecuteAliasCommand !== undefined) return invalidExecuteAliasCommand
+
+  const mcpCommand = toMcpCommand(argv)
+  if (mcpCommand instanceof ArgsError) return yield* mcpCommand
+  if (mcpCommand !== undefined) return mcpCommand
 
   const versionCommand = toVersionCommand(argv)
   if (versionCommand !== undefined) return versionCommand
@@ -1393,6 +1404,8 @@ const toMcpApproveCommand = (input: McpServerInput): McpCommand => ({
   server_name: input.serverName,
 })
 
+const toMcpDoctorCommand = (): McpCommand => ({ type: "mcp", action: "doctor" })
+
 const toConfigKeymapCommand = (): ConfigCommand => ({ type: "config", action: "keymap" })
 
 const toConfigListCommand = (): ConfigCommand => ({ type: "config", action: "list" })
@@ -1409,6 +1422,84 @@ const toVersionCommand = (argv: ReadonlyArray<string>): VersionCommand | undefin
   argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v" || argv[0] === "-V" || argv[0] === "version")
     ? toVersionCommandValue()
     : undefined
+
+const toMcpCommand = (argv: ReadonlyArray<string>): McpCommand | ArgsError | undefined => {
+  if (argv[0] !== "mcp") return undefined
+  const action = argv[1]
+  if (action === "doctor") {
+    return argv.length === 2 ? toMcpDoctorCommand() : mcpArgsError("rika mcp doctor does not accept arguments")
+  }
+  if (action === "remove") return parseMcpRemove(argv.slice(2))
+  if (action === "add") return parseMcpAdd(argv.slice(2))
+  return undefined
+}
+
+const parseMcpAdd = (argv: ReadonlyArray<string>): McpCommand | ArgsError => {
+  const separator = argv.indexOf("--")
+  const head = separator < 0 ? argv : argv.slice(0, separator)
+  const command = separator < 0 ? [] : argv.slice(separator + 1)
+  const parsed = parseMcpNameOptions(head)
+  if (parsed instanceof ArgsError) return parsed
+  if (parsed.name === undefined) return mcpArgsError("rika mcp add requires a server name")
+  if (parsed.url !== undefined && command.length > 0) {
+    return mcpArgsError("rika mcp add accepts either --url or command argv, not both")
+  }
+  if (parsed.url === undefined && command.length === 0) {
+    return mcpArgsError("rika mcp add requires --url or command argv after --")
+  }
+  return {
+    type: "mcp",
+    action: "add",
+    server_name: parsed.name,
+    ...(parsed.global ? { global: true } : {}),
+    ...(parsed.url === undefined ? { command: command[0] ?? "", args: command.slice(1) } : { url: parsed.url }),
+  }
+}
+
+const parseMcpRemove = (argv: ReadonlyArray<string>): McpCommand | ArgsError => {
+  const parsed = parseMcpNameOptions(argv)
+  if (parsed instanceof ArgsError) return parsed
+  if (parsed.url !== undefined) return mcpArgsError("rika mcp remove does not accept --url")
+  if (parsed.name === undefined) return mcpArgsError("rika mcp remove requires a server name")
+  return {
+    type: "mcp",
+    action: "remove",
+    server_name: parsed.name,
+    ...(parsed.global ? { global: true } : {}),
+  }
+}
+
+interface ParsedMcpNameOptions {
+  readonly name?: string
+  readonly url?: string
+  readonly global: boolean
+}
+
+const parseMcpNameOptions = (argv: ReadonlyArray<string>): ParsedMcpNameOptions | ArgsError => {
+  let name: string | undefined
+  let url: string | undefined
+  let global = false
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]
+    if (token === "--global") {
+      global = true
+      continue
+    }
+    if (token === "--url") {
+      const value = argv[index + 1]
+      if (value === undefined || value.length === 0) return mcpArgsError("rika mcp add --url requires a value")
+      url = value
+      index += 1
+      continue
+    }
+    if (token?.startsWith("--") === true) return mcpArgsError(`Unknown rika mcp option ${token}`)
+    if (name !== undefined) return mcpArgsError(`Unexpected rika mcp argument ${token}`)
+    name = token
+  }
+  return { global, ...(name === undefined ? {} : { name }), ...(url === undefined ? {} : { url }) }
+}
+
+const mcpArgsError = (message: string) => new ArgsError({ message, exit_code: 2, usage })
 
 const toHelpCommand = (argv: ReadonlyArray<string>): HelpCommand | undefined =>
   argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")

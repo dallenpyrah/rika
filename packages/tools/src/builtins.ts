@@ -1,14 +1,65 @@
-import { PermissionPolicy, SubagentRuntime, ToolAccess, ToolExecutor, ToolRegistry } from "@rika/agent"
+import {
+  PermissionPolicy,
+  SkillRegistry,
+  SkillToolProvider,
+  SubagentRuntime,
+  ToolAccess,
+  ToolExecutor,
+  ToolRegistry,
+} from "@rika/agent"
 import { Config } from "@rika/core"
 import { McpApprovalStore } from "@rika/persistence"
 import { PluginHost } from "@rika/plugin"
 import { Effect, Layer } from "effect"
+import { join } from "node:path"
 import * as AstGrepOutline from "./ast-grep-outline"
 import * as FffSearch from "./fff-search"
 import * as HashlineFile from "./hashline-file"
 import * as McpClient from "./mcp-client"
 import * as SemanticSearch from "./semantic-search"
 import * as SpecialtyTools from "./specialty-tools"
+
+export const skillMcpSources = (skills: ReadonlyArray<SkillRegistry.Skill>): ReadonlyArray<McpClient.SettingsSource> =>
+  skills.flatMap((skill) =>
+    skill.mcp_servers === undefined
+      ? []
+      : [
+          {
+            source: "workspace",
+            path: join(skill.summary.directory, "mcp.json"),
+            default_cwd: skill.summary.directory,
+            servers: skill.mcp_servers,
+          },
+        ],
+  )
+
+export const skillToolProviderLayerFromServices: Layer.Layer<SkillToolProvider.Service, never, McpClient.Service> =
+  Layer.effect(
+    SkillToolProvider.Service,
+    Effect.gen(function* () {
+      const mcp = yield* McpClient.Service
+      return SkillToolProvider.Service.of({
+        definitionsForSkills: Effect.fn("BuiltInTools.skillToolProvider.definitionsForSkills")(function* (skills) {
+          const sources = skillMcpSources(skills)
+          return yield* mcp.toolDefinitionsForSources(sources).pipe(
+            Effect.mapError(
+              (error) =>
+                new SkillToolProvider.SkillToolProviderError({
+                  message: error instanceof Error ? error.message : String(error),
+                  operation: "definitionsForSkills",
+                }),
+            ),
+          )
+        }),
+      })
+    }),
+  )
+
+export const skillToolProviderLayer: Layer.Layer<
+  SkillToolProvider.Service,
+  McpClient.RunError,
+  Config.Service | McpApprovalStore.Service
+> = skillToolProviderLayerFromServices.pipe(Layer.provideMerge(McpClient.layer))
 
 interface StandardDefinitionInput {
   readonly workspaceRoot: string

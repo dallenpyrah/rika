@@ -129,6 +129,39 @@ describe("CLI args", () => {
     expect(status).toEqual({ type: "memory", action: "status" })
   })
 
+  test("parses mcp add, remove, and doctor commands", async () => {
+    const remote = await Effect.runPromise(Args.parse(["mcp", "add", "remote", "--url", "https://example.com/mcp"]))
+    const global = await Effect.runPromise(
+      Args.parse(["mcp", "add", "local", "--global", "--", "node", "server.js", "--stdio"]),
+    )
+    const remove = await Effect.runPromise(Args.parse(["mcp", "remove", "local", "--global"]))
+    const doctor = await Effect.runPromise(Args.parse(["mcp", "doctor"]))
+
+    expect(remote).toEqual({ type: "mcp", action: "add", server_name: "remote", url: "https://example.com/mcp" })
+    expect(global).toEqual({
+      type: "mcp",
+      action: "add",
+      server_name: "local",
+      global: true,
+      command: "node",
+      args: ["server.js", "--stdio"],
+    })
+    expect(remove).toEqual({ type: "mcp", action: "remove", server_name: "local", global: true })
+    expect(doctor).toEqual({ type: "mcp", action: "doctor" })
+  })
+
+  test("rejects ambiguous mcp add input", async () => {
+    const result = await Effect.runPromise(
+      Effect.flip(Args.parse(["mcp", "add", "bad", "--url", "https://example.com/mcp", "--", "node"])),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "ArgsError",
+      message: "rika mcp add accepts either --url or command argv, not both",
+      exit_code: 2,
+    })
+  })
+
   test("parses orb list, kill, shell, and usage commands", async () => {
     const threadId = Ids.ThreadId.make("thread_args_orb_kill")
     const list = await Effect.runPromise(Args.parse(["orb", "list"]))

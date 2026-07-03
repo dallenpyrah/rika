@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { PermissionPolicy, SubagentRuntime, ToolExecutor } from "@rika/agent"
+import { PermissionPolicy, SkillRegistry, SkillToolProvider, SubagentRuntime, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { ArtifactStore, McpApprovalStore } from "@rika/persistence"
@@ -99,6 +99,57 @@ describe("BuiltInTools", () => {
       evidence: ["notes.txt"],
     })
     expect(await readFile(join(root, "notes.txt"), "utf8")).toBe("after\n")
+  })
+
+  test("skill MCP tools are provided only for selected skills", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-builtins-skill-mcp-"))
+    const calls: Array<string> = []
+    const skill: SkillRegistry.Skill = {
+      summary: {
+        name: "deploy",
+        description: "Deploy code",
+        source: "project",
+        directory: join(root, ".agents", "skills", "deploy"),
+        skill_file: join(root, ".agents", "skills", "deploy", "SKILL.md"),
+      },
+      instructions: "Deploy instructions",
+      resources: [],
+      mcp_servers: { deployer: { url: "https://example.com/mcp" } },
+    }
+    const connector: McpClient.Connector = (server) =>
+      Effect.succeed({
+        listTools: Effect.sync(() => {
+          calls.push(`list:${server.name}`)
+          calls.push(`cwd:${server.default_cwd}`)
+          return [{ name: "echo", inputSchema: { type: "object" } }]
+        }),
+        callTool: (name, input) => Effect.succeed({ name, input }),
+        close: Effect.void,
+      })
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const provider = yield* SkillToolProvider.Service
+        const hidden = yield* provider.definitionsForSkills([])
+        const selected = yield* provider.definitionsForSkills([skill])
+        return { hidden, selected }
+      }).pipe(
+        Effect.provide(
+          BuiltInTools.skillToolProviderLayerFromServices.pipe(
+            Layer.provideMerge(
+              McpClient.layerFromSources([], connector).pipe(
+                Layer.provideMerge(configLayer(root)),
+                Layer.provideMerge(McpApprovalStore.fakeLayer()),
+              ),
+            ),
+          ),
+        ),
+      ),
+    )
+
+    expect(result.hidden).toEqual([])
+    expect(result.selected.map((definition) => definition.tool.name)).toEqual(["mcp.deployer.echo"])
+    expect(calls).toEqual(["list:deployer", `cwd:${skill.summary.directory}`])
   })
 })
 

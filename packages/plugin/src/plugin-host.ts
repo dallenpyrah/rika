@@ -213,8 +213,17 @@ export const toolResultExecutorLayer = Layer.effect(
     return ToolExecutor.Service.of({
       tools: base.tools,
       describe: base.describe,
+      toolsWithDefinitions: base.toolsWithDefinitions,
+      describeWithDefinitions: base.describeWithDefinitions,
       execute: Effect.fn("PluginHost.ToolExecutor.execute")(function* (call: Call) {
         const result = yield* base.execute(call)
+        return yield* host.observeToolResult(result).pipe(Effect.catch(() => Effect.succeed(result)))
+      }),
+      executeWithDefinitions: Effect.fn("PluginHost.ToolExecutor.executeWithDefinitions")(function* (
+        call: Call,
+        definitions,
+      ) {
+        const result = yield* base.executeWithDefinitions(call, definitions)
         return yield* host.observeToolResult(result).pipe(Effect.catch(() => Effect.succeed(result)))
       }),
     })

@@ -7,6 +7,7 @@ import {
   PermissionPolicy,
   ReviewService,
   SkillRegistry,
+  SkillToolProvider,
   SubagentRuntime,
   ThreadMemoryIndexer,
   ThreadService,
@@ -296,6 +297,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (tagged(error, "SessionError")) return `Rika failed: ${error.message}`
   if (error instanceof SelfExtension.SelfExtensionError) return `Rika failed: ${error.message}`
   if (error instanceof SkillRegistry.SkillRegistryError) return `Rika failed: ${error.message}`
+  if (error instanceof SkillToolProvider.SkillToolProviderError) return `Rika failed: ${error.message}`
   if (error instanceof Skills.SkillsError) return Skills.formatError(error)
   if (error instanceof Sync.SyncError) return Sync.formatError(error)
   if (error instanceof ThreadService.ThreadForkError) return `Rika failed: ${error.message}`
@@ -461,6 +463,10 @@ export const liveLayer = (
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
   )
+  const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
@@ -473,6 +479,7 @@ export const liveLayer = (
     workspaceAccessLayer,
     contextResolverLayer,
     skillLayer,
+    skillToolProviderLayer,
     memoryIndexerLayer,
     toolLayer,
     llmLayer,
@@ -630,6 +637,10 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
   )
+  const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const checkLayer = CheckRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const reviewServiceLayer = ReviewService.layer.pipe(
@@ -647,6 +658,7 @@ const interactiveLiveLayerFromTui = (
     contextResolverLayer,
     reviewServiceLayer,
     skillLayer,
+    skillToolProviderLayer,
     memoryIndexerLayer,
     toolLayer,
     llmLayer,
@@ -1249,6 +1261,10 @@ export const threadsLiveLayer = (
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
   )
+  const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
   const managerLayer = OrbManager.layer.pipe(
@@ -1283,6 +1299,7 @@ export const threadsLiveLayer = (
     workspaceAccessLayer,
     contextResolverLayer,
     skillLayer,
+    skillToolProviderLayer,
     memoryIndexerLayer,
     toolLayer,
     diagnosticsLayer,
@@ -1520,7 +1537,12 @@ export const mcpLiveLayer = (
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const mcpClientLayer = McpClient.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const commandLayer = Mcp.layer.pipe(Layer.provideMerge(migratedStorageLayer), Layer.provideMerge(mcpClientLayer))
+  const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
+  const commandLayer = Mcp.layerFromInput({ env, cwd }).pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(mcpClientLayer),
+    Layer.provideMerge(skillLayer),
+  )
 
   return commandLayer
 }
@@ -1723,6 +1745,10 @@ export const serverLiveLayer = (
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
   )
+  const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
@@ -1734,6 +1760,7 @@ export const serverLiveLayer = (
     workspaceAccessLayer,
     contextResolverLayer,
     skillLayer,
+    skillToolProviderLayer,
     memoryIndexerLayer,
     toolLayer,
     llmLayer,
@@ -1870,6 +1897,7 @@ export type LiveLayerOutput =
   | SandboxClient.Service
   | Settings.Service
   | SkillRegistry.Service
+  | SkillToolProvider.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
   | ThreadEventLog.Service
@@ -1912,6 +1940,7 @@ export type InteractiveLayerOutput =
   | Router.Service
   | Session.Service
   | SkillRegistry.Service
+  | SkillToolProvider.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
   | Ticker.Service
@@ -2047,6 +2076,7 @@ export type McpLayerOutput =
   | McpClient.Service
   | Migration.Service
   | Output.Service
+  | SkillRegistry.Service
   | Time.Service
 
 export type ReviewLayerOutput =
@@ -2114,6 +2144,7 @@ export type ServerLayerOutput =
   | SandboxClient.Service
   | Server.Service
   | SkillRegistry.Service
+  | SkillToolProvider.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
   | ThreadEventLog.Service

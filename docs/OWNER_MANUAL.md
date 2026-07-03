@@ -186,12 +186,18 @@ Review checks live in `.agents/checks/` and are executed through read-only subag
 
 ## MCP
 
-MCP servers are external tool providers. Workspace command servers require explicit approval by server name plus config fingerprint:
+MCP servers are external tool providers. Workspace command servers require explicit approval by server name, config fingerprint, and effective launch directory:
 
 ```bash
+rika mcp add context7 -- npx -y @upstash/context7-mcp
+rika mcp add docs --url https://example.com/mcp
 rika mcp list
+rika mcp doctor
 rika mcp approve <server-name>
+rika mcp remove context7
 ```
+
+`rika mcp add` writes `rika.mcpServers` in `<workspace>/.rika/settings.json` by default. Use `--global` to target `~/.config/rika/settings.json`. Skills may also bundle an `mcp.json` next to `SKILL.md`; `list`, `doctor`, and `approve` include those servers, but their tools are registered only on turns where that skill is explicitly loaded.
 
 MCP tools still pass through normal tool policy; MCP is not a permission bypass.
 

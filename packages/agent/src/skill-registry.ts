@@ -3,6 +3,7 @@ import { homedir } from "node:os"
 import { basename, dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Config } from "@rika/core"
+import { Mcp } from "@rika/schema"
 import { Context, Effect, Layer, Schema } from "effect"
 
 export const Source = Schema.Literals(["project", "user", "legacy", "built-in"]).annotate({
@@ -36,6 +37,7 @@ export const Skill = Schema.Struct({
   summary: SkillSummary,
   instructions: Schema.String,
   resources: Schema.Array(SkillResource),
+  mcp_servers: Schema.optional(Mcp.ServerMap),
 }).annotate({ identifier: "Rika.Agent.SkillRegistry.Skill" })
 
 export interface SelectInput extends Schema.Schema.Type<typeof SelectInput> {}
@@ -169,6 +171,7 @@ const readSkill = (fileSystem: FileSystemAdapter, location: Location, directory:
     const parsed = parseSkillMarkdown(content)
     if (parsed === undefined) return undefined
     const resources = yield* resourcePaths(fileSystem, directory)
+    const mcpServers = yield* readMcpServers(fileSystem, directory)
     return {
       summary: {
         name: parsed.name,
@@ -179,6 +182,7 @@ const readSkill = (fileSystem: FileSystemAdapter, location: Location, directory:
       },
       instructions: parsed.body,
       resources,
+      ...(mcpServers === undefined ? {} : { mcp_servers: mcpServers }),
     }
   })
 
@@ -252,6 +256,24 @@ const parseSkillMarkdown = (content: string) => {
   if (name === undefined || name.length === 0 || description === undefined || description.length === 0) return undefined
   return { name, description, body: frontmatter.body }
 }
+
+const readMcpServers = (fileSystem: FileSystemAdapter, directory: string) =>
+  Effect.gen(function* () {
+    const path = join(directory, "mcp.json")
+    if (!(yield* fileSystem.isFile(path))) return undefined
+    const content = yield* fileSystem.readText(path)
+    const parsed = yield* Effect.try({
+      try: () => JSON.parse(content) as unknown,
+      catch: (cause) => fileError("parseMcpJson", path, cause),
+    })
+    const decoded = Schema.decodeUnknownOption(Mcp.ServerMap)(parsed)
+    if (decoded._tag === "Some") return decoded.value
+    return yield* new SkillRegistryError({
+      message: `Invalid skill MCP config in ${path}`,
+      operation: "decodeMcpJson",
+      path,
+    })
+  })
 
 const parseFrontmatter = (content: string) => {
   if (!content.startsWith("---\n")) return undefined

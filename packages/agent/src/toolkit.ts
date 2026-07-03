@@ -6,6 +6,7 @@ import type { Tool } from "effect/unstable/ai"
 import { Toolkit } from "effect/unstable/ai"
 import * as ToolAccess from "./tool-access"
 import * as ToolExecutor from "./tool-executor"
+import * as ToolRegistry from "./tool-registry"
 
 export interface Prepared {
   readonly toolkit: Provider.ToolkitInput
@@ -13,6 +14,7 @@ export interface Prepared {
 
 export interface BuildInput {
   readonly tool_access?: ToolAccess.TurnToolAccess
+  readonly definitions?: ReadonlyArray<ToolRegistry.Definition>
 }
 
 export interface Interface {
@@ -28,10 +30,11 @@ export const layer = Layer.effect(
     return Service.of({
       build: (input) =>
         Effect.gen(function* () {
-          const tools = yield* toolExecutor.tools
+          const definitions = input?.definitions ?? []
+          const tools = yield* toolExecutor.toolsWithDefinitions(definitions)
           return prepare(
             ToolAccess.filterTools(tools, input?.tool_access),
-            toolExecutor.execute,
+            (call) => toolExecutor.executeWithDefinitions(call, definitions),
             ToolAccess.metadata(input?.tool_access),
           )
         }),

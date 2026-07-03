@@ -2,6 +2,7 @@ import {
   AgentLoop,
   ContextResolver,
   SkillRegistry,
+  SkillToolProvider,
   SubagentRuntime,
   ThreadService,
   ToolExecutor,
@@ -49,6 +50,7 @@ type ServiceLayerOutput =
   | Router.Service
   | SecretRedactor.Service
   | SkillRegistry.Service
+  | SkillToolProvider.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
   | ThreadEventLog.Service
@@ -130,11 +132,16 @@ export const serviceLayerFromEnv = (
     Layer.provideMerge(configuredSpecialtyToolLayer),
     Layer.provideMerge(configuredSubagentLayer),
   )
+  const configuredSkillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const baseServiceLayer = Layer.mergeAll(
     storageAndThreadLayer,
     configuredWorkspaceAccessLayer,
     configuredContextResolverLayer,
     configuredSkillLayer,
+    configuredSkillToolProviderLayer,
     configuredToolLayer,
     configuredLlmLayer,
     configuredDiagnosticsLayer,

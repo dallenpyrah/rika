@@ -3,42 +3,24 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio"
 import { ToolRegistry } from "@rika/agent"
 import { Config } from "@rika/core"
 import { Database, McpApprovalStore } from "@rika/persistence"
-import { Common } from "@rika/schema"
+import { Common, Mcp } from "@rika/schema"
 import type { Call } from "@rika/schema/tool"
 import { Context, Effect, JsonSchema, Layer, Option, Schema } from "effect"
 import { Tool } from "effect/unstable/ai"
 import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
-import { join } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 
 const rikaSettingsKey = "rika.mcpServers"
 const legacySettingsKey = "mcpServers"
 export const settingsKey = rikaSettingsKey
 
-const StringRecord = Schema.Record(Schema.String, Schema.String)
-
-export interface CommandServerConfig extends Schema.Schema.Type<typeof CommandServerConfig> {}
-export const CommandServerConfig = Schema.Struct({
-  command: Schema.String,
-  args: Schema.optional(Schema.Array(Schema.String)),
-  env: Schema.optional(StringRecord),
-  cwd: Schema.optional(Schema.String),
-  includeTools: Schema.optional(Schema.Array(Schema.String)),
-  excludeTools: Schema.optional(Schema.Array(Schema.String)),
-}).annotate({ identifier: "Rika.Tools.McpClient.CommandServerConfig" })
-
-export interface RemoteServerConfig extends Schema.Schema.Type<typeof RemoteServerConfig> {}
-export const RemoteServerConfig = Schema.Struct({
-  url: Schema.String,
-  headers: Schema.optional(StringRecord),
-  includeTools: Schema.optional(Schema.Array(Schema.String)),
-  excludeTools: Schema.optional(Schema.Array(Schema.String)),
-}).annotate({ identifier: "Rika.Tools.McpClient.RemoteServerConfig" })
-
-export type ServerConfig = CommandServerConfig | RemoteServerConfig
-export const ServerConfig = Schema.Union([CommandServerConfig, RemoteServerConfig]).annotate({
-  identifier: "Rika.Tools.McpClient.ServerConfig",
-})
+export type CommandServerConfig = Mcp.CommandServerConfig
+export const CommandServerConfig = Mcp.CommandServerConfig
+export type RemoteServerConfig = Mcp.RemoteServerConfig
+export const RemoteServerConfig = Mcp.RemoteServerConfig
+export type ServerConfig = Mcp.ServerConfig
+export const ServerConfig = Mcp.ServerConfig
 
 export const ServerSource = Schema.Literals(["user", "workspace"]).annotate({
   identifier: "Rika.Tools.McpClient.ServerSource",
@@ -65,9 +47,27 @@ export const ServerSummary = Schema.Struct({
   reason: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.Tools.McpClient.ServerSummary" })
 
+export const ServerHealthStatus = Schema.Literals(["ok", "awaiting_approval", "unreachable"]).annotate({
+  identifier: "Rika.Tools.McpClient.ServerHealthStatus",
+})
+export type ServerHealthStatus = typeof ServerHealthStatus.Type
+
+export interface ServerHealth extends Schema.Schema.Type<typeof ServerHealth> {}
+export const ServerHealth = Schema.Struct({
+  name: Schema.String,
+  source: ServerSource,
+  kind: ServerKind,
+  status: ServerHealthStatus,
+  fingerprint: Schema.String,
+  tool_count: Schema.optional(Schema.Int),
+  error: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
+}).annotate({ identifier: "Rika.Tools.McpClient.ServerHealth" })
+
 export interface SettingsSource {
   readonly source: ServerSource
   readonly path: string
+  readonly default_cwd?: string
   readonly servers: Readonly<Record<string, ServerConfig>>
 }
 
@@ -82,9 +82,24 @@ export class McpClientError extends Schema.TaggedErrorClass<McpClientError>()("M
 export type RunError = Database.DatabaseError | McpClientError | McpApprovalStore.McpApprovalStoreError
 
 export interface Interface {
+  readonly settingsSources: Effect.Effect<ReadonlyArray<SettingsSource>, RunError>
   readonly servers: Effect.Effect<ReadonlyArray<ServerSummary>, RunError>
+  readonly serversForSources: (
+    sources: ReadonlyArray<SettingsSource>,
+  ) => Effect.Effect<ReadonlyArray<ServerSummary>, RunError>
   readonly approve: (serverName: string) => Effect.Effect<McpApprovalStore.Approval, RunError>
+  readonly approveForSources: (
+    serverName: string,
+    sources: ReadonlyArray<SettingsSource>,
+  ) => Effect.Effect<McpApprovalStore.Approval, RunError>
+  readonly doctor: Effect.Effect<ReadonlyArray<ServerHealth>, RunError>
+  readonly doctorForSources: (
+    sources: ReadonlyArray<SettingsSource>,
+  ) => Effect.Effect<ReadonlyArray<ServerHealth>, RunError>
   readonly toolDefinitions: Effect.Effect<ReadonlyArray<ToolRegistry.Definition>, RunError>
+  readonly toolDefinitionsForSources: (
+    sources: ReadonlyArray<SettingsSource>,
+  ) => Effect.Effect<ReadonlyArray<ToolRegistry.Definition>, RunError>
   readonly callTool: (
     serverName: string,
     toolName: string,
@@ -115,6 +130,7 @@ export interface ConfiguredServer {
   readonly source: ServerSource
   readonly path: string
   readonly workspace_root: string
+  readonly default_cwd: string
   readonly config: ServerConfig
   readonly fingerprint: string
 }
@@ -125,7 +141,9 @@ export const layerFromSources = (sources: ReadonlyArray<SettingsSource>, connect
 export const emptyLayer = Layer.succeed(
   Service,
   Service.of({
+    settingsSources: Effect.succeed([]),
     servers: Effect.succeed([]),
+    serversForSources: () => Effect.succeed([]),
     approve: (serverName: string) =>
       Effect.fail(
         new McpClientError({
@@ -134,7 +152,18 @@ export const emptyLayer = Layer.succeed(
           server_name: serverName,
         }),
       ),
+    approveForSources: (serverName: string) =>
+      Effect.fail(
+        new McpClientError({
+          message: `No MCP server named ${serverName}`,
+          operation: "approve",
+          server_name: serverName,
+        }),
+      ),
     toolDefinitions: Effect.succeed([]),
+    toolDefinitionsForSources: () => Effect.succeed([]),
+    doctor: Effect.succeed([]),
+    doctorForSources: () => Effect.succeed([]),
     callTool: (serverName: string, toolName: string) =>
       Effect.fail(
         new McpClientError({
@@ -152,14 +181,53 @@ export const servers = Effect.fn("McpClient.servers.call")(function* () {
   return yield* service.servers
 })
 
+export const settingsSources = Effect.fn("McpClient.settingsSources.call")(function* () {
+  const service = yield* Service
+  return yield* service.settingsSources
+})
+
+export const serversForSources = Effect.fn("McpClient.serversForSources.call")(function* (
+  sources: ReadonlyArray<SettingsSource>,
+) {
+  const service = yield* Service
+  return yield* service.serversForSources(sources)
+})
+
 export const approve = Effect.fn("McpClient.approve.call")(function* (serverName: string) {
   const service = yield* Service
   return yield* service.approve(serverName)
 })
 
+export const approveForSources = Effect.fn("McpClient.approveForSources.call")(function* (
+  serverName: string,
+  sources: ReadonlyArray<SettingsSource>,
+) {
+  const service = yield* Service
+  return yield* service.approveForSources(serverName, sources)
+})
+
+export const doctor = Effect.fn("McpClient.doctor.call")(function* () {
+  const service = yield* Service
+  return yield* service.doctor
+})
+
+export const doctorForSources = Effect.fn("McpClient.doctorForSources.call")(function* (
+  sources: ReadonlyArray<SettingsSource>,
+) {
+  const service = yield* Service
+  return yield* service.doctorForSources(sources)
+})
+
 export const toolDefinitions = Effect.fn("McpClient.toolDefinitions.call")(function* () {
   const service = yield* Service
   return yield* service.toolDefinitions
+})
+
+export const toolDefinitionsForSources = Effect.fn("McpClient.toolDefinitionsForSources.call")(function* (
+  sources: ReadonlyArray<SettingsSource>,
+) {
+  const service = yield* Service
+  return yield* service.toolDefinitionsForSources(sources)
 })
 
 export const callTool = Effect.fn("McpClient.callTool.call")(function* (
@@ -186,7 +254,8 @@ export const approvalInputForServer = (server: ConfiguredServer): McpApprovalSto
 
 export const serverConfigKind = (config: ServerConfig): ServerKind => serverKind(config)
 
-export const fingerprintServerConfig = (config: ServerConfig): string => fingerprintServer(config)
+export const fingerprintServerConfig = (config: ServerConfig, defaultCwd: string): string =>
+  fingerprintServer(config, defaultCwd)
 
 const layerWith = (loadSettings: SettingsLoader, connector: Connector) =>
   Layer.effect(
@@ -206,39 +275,40 @@ const makeService = (
   connector: Connector,
 ) =>
   Service.of({
+    settingsSources: loadSettings(values).pipe(Effect.mapError((error) => error as RunError)),
     servers: Effect.gen(function* () {
       const configured = yield* configuredServers(values, loadSettings)
-      return yield* Effect.forEach(configured, (server) => summarizeServer(server, approvals), { concurrency: 1 })
+      return yield* summarizeServers(configured, approvals)
+    }),
+    serversForSources: Effect.fn("McpClient.serversForSources")(function* (sources: ReadonlyArray<SettingsSource>) {
+      return yield* summarizeServers(mergeSources(sources, values.workspace_root), approvals)
     }),
     approve: Effect.fn("McpClient.approve")(function* (serverName: string) {
       const configured = yield* configuredServers(values, loadSettings)
-      const server = configured.find((candidate) => candidate.name === serverName)
-      if (server === undefined) {
-        return yield* new McpClientError({
-          message: `No MCP server named ${serverName}`,
-          operation: "approve",
-          server_name: serverName,
-        })
-      }
-      if (server.source !== "workspace" || serverKind(server.config) !== "command") {
-        return yield* new McpClientError({
-          message: `MCP server ${serverName} does not require workspace command approval`,
-          operation: "approve",
-          server_name: serverName,
-        })
-      }
-      return yield* approvals.approve(approvalInput(server)).pipe(Effect.mapError((error) => error as RunError))
+      return yield* approveConfiguredServer(serverName, configured, approvals)
+    }),
+    approveForSources: Effect.fn("McpClient.approveForSources")(function* (
+      serverName: string,
+      sources: ReadonlyArray<SettingsSource>,
+    ) {
+      return yield* approveConfiguredServer(serverName, mergeSources(sources, values.workspace_root), approvals)
+    }),
+    doctor: Effect.gen(function* () {
+      const configured = yield* configuredServers(values, loadSettings)
+      return yield* checkServers(configured, approvals, connector)
+    }),
+    doctorForSources: Effect.fn("McpClient.doctorForSources")(function* (sources: ReadonlyArray<SettingsSource>) {
+      return yield* checkServers(mergeSources(sources, values.workspace_root), approvals, connector)
     }),
     toolDefinitions: Effect.gen(function* () {
       const configured = yield* configuredServers(values, loadSettings)
-      const allowed = yield* Effect.forEach(configured, (server) => isRunnable(server, approvals), { concurrency: 1 })
-      const runnable = configured.filter((_server, index) => allowed[index] === true)
-      const nested = yield* Effect.forEach(
-        runnable,
-        (server) => definitionsForServer(server, connector).pipe(Effect.catch(() => Effect.succeed([]))),
-        { concurrency: 1 },
-      )
-      return nested.flat()
+      return yield* definitionsForServers(configured, approvals, connector)
+    }),
+    toolDefinitionsForSources: Effect.fn("McpClient.toolDefinitionsForSources")(function* (
+      sources: ReadonlyArray<SettingsSource>,
+    ) {
+      const configured = configuredServersFromSources(sources, values.workspace_root)
+      return yield* definitionsForServers(configured, approvals, connector)
     }),
     callTool: Effect.fn("McpClient.callTool")(function* (
       serverName: string,
@@ -289,10 +359,85 @@ const summarizeServer = (server: ConfiguredServer, approvals: McpApprovalStore.I
     } satisfies ServerSummary
   }).pipe(Effect.mapError((error) => error as RunError))
 
+const summarizeServers = (configured: ReadonlyArray<ConfiguredServer>, approvals: McpApprovalStore.Interface) =>
+  Effect.forEach(configured, (server) => summarizeServer(server, approvals), { concurrency: 1 })
+
+const approveConfiguredServer = (
+  serverName: string,
+  configured: ReadonlyArray<ConfiguredServer>,
+  approvals: McpApprovalStore.Interface,
+) =>
+  Effect.gen(function* () {
+    const server = configured.find((candidate) => candidate.name === serverName)
+    if (server === undefined) {
+      return yield* new McpClientError({
+        message: `No MCP server named ${serverName}`,
+        operation: "approve",
+        server_name: serverName,
+      })
+    }
+    if (server.source !== "workspace" || serverKind(server.config) !== "command") {
+      return yield* new McpClientError({
+        message: `MCP server ${serverName} does not require workspace command approval`,
+        operation: "approve",
+        server_name: serverName,
+      })
+    }
+    return yield* approvals.approve(approvalInput(server)).pipe(Effect.mapError((error) => error as RunError))
+  })
+
 const isRunnable = (server: ConfiguredServer, approvals: McpApprovalStore.Interface) =>
   server.source === "workspace" && serverKind(server.config) === "command"
     ? approvals.isApproved(approvalInput(server)).pipe(Effect.mapError((error) => error as RunError))
     : Effect.succeed(true)
+
+const checkServer = (
+  server: ConfiguredServer,
+  approvals: McpApprovalStore.Interface,
+  connector: Connector,
+): Effect.Effect<ServerHealth, RunError> =>
+  Effect.gen(function* () {
+    const kind = serverKind(server.config)
+    const runnable = yield* isRunnable(server, approvals)
+    if (!runnable) {
+      return {
+        name: server.name,
+        source: server.source,
+        kind,
+        status: "awaiting_approval",
+        fingerprint: server.fingerprint,
+        reason: "Workspace command MCP servers must be approved before doctor can execute them.",
+      } satisfies ServerHealth
+    }
+    return yield* withConnection(connector, server, (connection) => connection.listTools).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          ({
+            name: server.name,
+            source: server.source,
+            kind,
+            status: "unreachable",
+            fingerprint: server.fingerprint,
+            error: error.message,
+          }) satisfies ServerHealth,
+        onSuccess: (tools) =>
+          ({
+            name: server.name,
+            source: server.source,
+            kind,
+            status: "ok",
+            fingerprint: server.fingerprint,
+            tool_count: tools.length,
+          }) satisfies ServerHealth,
+      }),
+    )
+  })
+
+const checkServers = (
+  configured: ReadonlyArray<ConfiguredServer>,
+  approvals: McpApprovalStore.Interface,
+  connector: Connector,
+) => Effect.forEach(configured, (server) => checkServer(server, approvals, connector), { concurrency: 1 })
 
 const definitionsForServer = (server: ConfiguredServer, connector: Connector) =>
   withConnection(connector, server, (connection) => connection.listTools).pipe(
@@ -302,6 +447,22 @@ const definitionsForServer = (server: ConfiguredServer, connector: Connector) =>
         .map((tool) => toolDefinition(server, tool, connector)),
     ),
   )
+
+const definitionsForServers = (
+  configured: ReadonlyArray<ConfiguredServer>,
+  approvals: McpApprovalStore.Interface,
+  connector: Connector,
+) =>
+  Effect.gen(function* () {
+    const allowed = yield* Effect.forEach(configured, (server) => isRunnable(server, approvals), { concurrency: 1 })
+    const runnable = configured.filter((_server, index) => allowed[index] === true)
+    const nested = yield* Effect.forEach(
+      runnable,
+      (server) => definitionsForServer(server, connector).pipe(Effect.catch(() => Effect.succeed([]))),
+      { concurrency: 1 },
+    )
+    return nested.flat()
+  })
 
 const toolDefinition = (server: ConfiguredServer, tool: RemoteTool, connector: Connector): ToolRegistry.Definition => ({
   tool: remoteToolDefinition(server, tool),
@@ -391,7 +552,7 @@ const makeTransport = (server: ConfiguredServer) => {
     return new StdioClientTransport({
       command: server.config.command,
       stderr: "pipe",
-      cwd: server.config.cwd ?? server.workspace_root,
+      cwd: effectiveCommandCwd(server.config, server.default_cwd),
       ...(server.config.args === undefined ? {} : { args: [...server.config.args] }),
       ...(server.config.env === undefined ? {} : { env: { ...server.config.env } }),
     })
@@ -471,13 +632,15 @@ const mergeSources = (
   const merged = new Map<string, ConfiguredServer>()
   for (const source of sources) {
     for (const [name, config] of Object.entries(source.servers)) {
+      const defaultCwd = source.default_cwd ?? workspaceRoot
       merged.set(name, {
         name,
         source: source.source,
         path: source.path,
         workspace_root: workspaceRoot,
+        default_cwd: defaultCwd,
         config,
-        fingerprint: fingerprintServer(config),
+        fingerprint: fingerprintServer(config, defaultCwd),
       })
     }
   }
@@ -518,7 +681,17 @@ const toJsonValue = (value: unknown): Common.JsonValue => {
   return null
 }
 
-const fingerprintServer = (config: ServerConfig) => createHash("sha256").update(stableJson(config)).digest("hex")
+const fingerprintServer = (config: ServerConfig, defaultCwd: string) =>
+  createHash("sha256")
+    .update(
+      stableJson(isCommandServerConfig(config) ? { ...config, cwd: effectiveCommandCwd(config, defaultCwd) } : config),
+    )
+    .digest("hex")
+
+const effectiveCommandCwd = (config: CommandServerConfig, defaultCwd: string) => {
+  const cwd = config.cwd ?? defaultCwd
+  return isAbsolute(cwd) ? cwd : resolve(defaultCwd, cwd)
+}
 
 const stableJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`

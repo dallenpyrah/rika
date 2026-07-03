@@ -776,205 +776,82 @@ Global options:
 
 `
 
-export const mcpHelpStdoutText = (homeDir = homedir()) => `Usage: amp mcp [options] [command]
+export const mcpHelpStdoutText = (homeDir = homedir()) => `Usage: rika mcp [command]
 
-Add and manage MCP server configuration under amp.mcpServers
+Add, remove, inspect, and approve MCP server configuration under rika.mcpServers.
 
 Commands:
 
   add       Add an MCP server configuration
   list      List all MCP server configurations
   remove    Remove an MCP server configuration
-  oauth     Manage OAuth authentication for MCP servers
-    login   Register OAuth client credentials for an MCP server
-    logout  Remove OAuth credentials for an MCP server
-    status  Show OAuth status for an MCP server
   doctor    Check MCP server status
   approve   Approve a workspace MCP server
 
-Global options:
+Settings:
 
-  --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace)
-  -V, --version
-      Print the version number and exit
-  -v
-      Alias for --version
-  --settings-file <value>
-      Custom settings file path (overrides the default location ${homeDir}/.config/amp/settings.json)
-  --log-level <value>
-      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
-  --log-file <value>
-      Set log file location (overrides the default location ${homeDir}/.cache/amp/logs/cli.log)
-  --mcp-config <value>
-      JSON configuration or file path for MCP servers to merge with existing settings
-  -m, --mode <value>
-      Set the agent mode (rush, smart, deep1, deep2, deep3) — controls the model, system prompt, and tool selection
-  --effort <value>
-      Set reasoning effort for the new thread, when supported by the selected mode
-  --stream-json
-      When used with --execute, output Rika Event schema JSON lines.
-  --stream-json-thinking
-      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
-  --stream-json-input
-      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
-  --no-archive-after-execute
-      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
-      finishes.
-  -l, --label <label>
-      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+  Workspace default: <workspace>/.rika/settings.json
+  Global target:     ${homeDir}/.config/rika/settings.json
 
 `
 
-export const mcpAddHelpStdoutText = (homeDir = homedir()) => `Usage: amp mcp add [options] <name> [args...]
+export const mcpAddHelpStdoutText = (
+  homeDir = homedir(),
+) => `Usage: rika mcp add <name> [--global] [--url <url> | -- <command> [args...]]
 
-Add an MCP server to amp.mcpServers in the Amp CLI settings file.
+Add an MCP server to rika.mcpServers.
 
-By default, this modifies global settings (~/.config/amp/settings.json). Use --workspace to target workspace settings instead.
+By default, this modifies workspace settings at <workspace>/.rika/settings.json. Use --global to target ${homeDir}/.config/rika/settings.json.
 
 Usage:
-  amp mcp add <name> -- <command> [args...]                   (local MCP server, started with command)
-  amp mcp add <name> --env KEY=VAL -- <command> [args...]     (local MCP server, with env vars)
-  amp mcp add <name> <url>                                    (remote MCP server with auto-detected transport)
-  amp mcp add <name> --header KEY=VAL <url>                   (remote MCP server with HTTP headers)
-  amp mcp add <name> --workspace -- <command> [args...]       (add to workspace settings)
+  rika mcp add <name> -- <command> [args...]       (local MCP command server)
+  rika mcp add <name> --url <url>                  (remote MCP server)
+  rika mcp add <name> --global -- <command> [args...]  (add to global settings)
 
 Examples:
-  amp mcp add context7 -- npx -y @upstash/context7-mcp
-  amp mcp add postgres --env PGUSER=orb -- npx -y @modelcontextprotocol/server-postgres postgresql://localhost/orbing
-  amp mcp add sourcegraph --header "Authorization=token <sg-instance-token>" https://sourcegraph.example.com/.api/mcp/v1
-  amp mcp add hugging-face https://huggingface.co/mcp
-  amp mcp add monday --header "Authorization=Bearer <token>" https://mcp.monday.com/sse
-  amp mcp add project-specific --workspace -- npx -y @some/server
+  rika mcp add context7 -- npx -y @upstash/context7-mcp
+  rika mcp add docs --url https://example.com/mcp
+  rika mcp add user-wide --global -- node server.js
 
 Options:
 
-  --env <kv>
-      Environment variables as KEY=VALUE pairs (repeatable)
-  --header <kv>
-      HTTP headers as KEY=VALUE pairs for URL-based MCP servers (repeatable)
-  --workspace
-      Target workspace settings instead of global settings
-
-Global options:
-
-  --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace)
-  -V, --version
-      Print the version number and exit
-  -v
-      Alias for --version
-  --settings-file <value>
-      Custom settings file path (overrides the default location ${homeDir}/.config/amp/settings.json)
-  --log-level <value>
-      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
-  --log-file <value>
-      Set log file location (overrides the default location ${homeDir}/.cache/amp/logs/cli.log)
-  --mcp-config <value>
-      JSON configuration or file path for MCP servers to merge with existing settings
-  -m, --mode <value>
-      Set the agent mode (rush, smart, deep1, deep2, deep3) — controls the model, system prompt, and tool selection
-  --effort <value>
-      Set reasoning effort for the new thread, when supported by the selected mode
-  --stream-json
-      When used with --execute, output Rika Event schema JSON lines.
-  --stream-json-thinking
-      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
-  --stream-json-input
-      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
-  --no-archive-after-execute
-      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
-      finishes.
-  -l, --label <label>
-      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+  --url <url>
+      Configure a remote MCP server.
+  --global
+      Target global settings instead of workspace settings.
 
 `
 
-export const mcpRemoveHelpStdoutText = (homeDir = homedir()) => `Usage: amp mcp remove [options] <name>
+export const mcpRemoveHelpStdoutText = (homeDir = homedir()) => `Usage: rika mcp remove <name> [--global]
 
-Remove an MCP server from amp.mcpServers in the settings file.
+Remove an MCP server from rika.mcpServers.
 
-This command checks workspace settings first, then falls back to global settings (~/.config/amp/settings.json).
-This command does not modify VS Code or other editor settings.
+By default, this modifies workspace settings at <workspace>/.rika/settings.json. Use --global to target ${homeDir}/.config/rika/settings.json.
 
 Usage:
-  amp mcp remove <name>
+  rika mcp remove <name>
+  rika mcp remove <name> --global
 
 Examples:
-  amp mcp remove context7
-  amp mcp remove postgres
+  rika mcp remove context7
+  rika mcp remove user-wide --global
 
-Global options:
+Options:
 
-  --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace)
-  -V, --version
-      Print the version number and exit
-  -v
-      Alias for --version
-  --settings-file <value>
-      Custom settings file path (overrides the default location ${homeDir}/.config/amp/settings.json)
-  --log-level <value>
-      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
-  --log-file <value>
-      Set log file location (overrides the default location ${homeDir}/.cache/amp/logs/cli.log)
-  --mcp-config <value>
-      JSON configuration or file path for MCP servers to merge with existing settings
-  -m, --mode <value>
-      Set the agent mode (rush, smart, deep1, deep2, deep3) — controls the model, system prompt, and tool selection
-  --effort <value>
-      Set reasoning effort for the new thread, when supported by the selected mode
-  --stream-json
-      When used with --execute, output Rika Event schema JSON lines.
-  --stream-json-thinking
-      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
-  --stream-json-input
-      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
-  --no-archive-after-execute
-      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
-      finishes.
-  -l, --label <label>
-      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+  --global
+      Target global settings instead of workspace settings.
 
 `
 
-export const mcpDoctorHelpStdoutText = (homeDir = homedir()) => `Usage: amp mcp doctor [options] [name]
+export const mcpDoctorHelpStdoutText = () => `Usage: rika mcp doctor
 
-Wait for MCP service initialization and display the status of configured servers.
+Check configured MCP servers and print JSON health records.
 
-If [name] is provided, only show status for that specific server.
+Statuses:
 
-Global options:
-
-  --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace)
-  -V, --version
-      Print the version number and exit
-  -v
-      Alias for --version
-  --settings-file <value>
-      Custom settings file path (overrides the default location ${homeDir}/.config/amp/settings.json)
-  --log-level <value>
-      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
-  --log-file <value>
-      Set log file location (overrides the default location ${homeDir}/.cache/amp/logs/cli.log)
-  --mcp-config <value>
-      JSON configuration or file path for MCP servers to merge with existing settings
-  -m, --mode <value>
-      Set the agent mode (rush, smart, deep1, deep2, deep3) — controls the model, system prompt, and tool selection
-  --effort <value>
-      Set reasoning effort for the new thread, when supported by the selected mode
-  --stream-json
-      When used with --execute, output Rika Event schema JSON lines.
-  --stream-json-thinking
-      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
-  --stream-json-input
-      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
-  --no-archive-after-execute
-      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
-      finishes.
-  -l, --label <label>
-      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+  ok                 Handshake succeeded.
+  awaiting_approval  Workspace command server is not approved.
+  unreachable        Handshake failed; error contains the failure line.
 
 `
 
@@ -1034,95 +911,26 @@ Options:
   -h, --help   display help for command
 `
 
-export const mcpListHelpStdoutText = (homeDir = homedir()) => `Usage: amp mcp list [options]
+export const mcpListHelpStdoutText = () => `Usage: rika mcp list
 
-List all configured MCP servers from both global and workspace settings.
+List all configured MCP servers from global and workspace settings as JSON.
 
-Shows the server name, type (command or URL), and source (global or workspace).
-
-Options:
-
-  --json
-      Output as JSON
-
-Global options:
-
-  --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace)
-  -V, --version
-      Print the version number and exit
-  -v
-      Alias for --version
-  --settings-file <value>
-      Custom settings file path (overrides the default location ${homeDir}/.config/amp/settings.json)
-  --log-level <value>
-      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
-  --log-file <value>
-      Set log file location (overrides the default location ${homeDir}/.cache/amp/logs/cli.log)
-  --mcp-config <value>
-      JSON configuration or file path for MCP servers to merge with existing settings
-  -m, --mode <value>
-      Set the agent mode (rush, smart, deep1, deep2, deep3) — controls the model, system prompt, and tool selection
-  --effort <value>
-      Set reasoning effort for the new thread, when supported by the selected mode
-  --stream-json
-      When used with --execute, output Rika Event schema JSON lines.
-  --stream-json-thinking
-      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
-  --stream-json-input
-      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
-  --no-archive-after-execute
-      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
-      finishes.
-  -l, --label <label>
-      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+Each record includes name, source, kind, status, and fingerprint.
 
 `
 
-export const mcpApproveHelpStdoutText = (homeDir = homedir()) => `Usage: amp mcp approve [options] <name>
+export const mcpApproveHelpStdoutText = () => `Usage: rika mcp approve <name>
 
-Approve a workspace MCP server for execution.
+Approve a workspace command MCP server for execution.
 
-MCP servers added to workspace settings (.amp/settings.json) require explicit approval before they can run. This is a security measure to prevent untrusted code execution.
+Workspace command MCP servers require approval before they can run. Approval is scoped by workspace root, server name, and config fingerprint.
 
 Usage:
-  amp mcp approve <name>
+  rika mcp approve <name>
 
 Examples:
-  amp mcp approve my-server
-  amp mcp approve project-mcp
-
-Global options:
-
-  --visibility <visibility>
-      Set thread visibility (private, unlisted, workspace)
-  -V, --version
-      Print the version number and exit
-  -v
-      Alias for --version
-  --settings-file <value>
-      Custom settings file path (overrides the default location ${homeDir}/.config/amp/settings.json)
-  --log-level <value>
-      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
-  --log-file <value>
-      Set log file location (overrides the default location ${homeDir}/.cache/amp/logs/cli.log)
-  --mcp-config <value>
-      JSON configuration or file path for MCP servers to merge with existing settings
-  -m, --mode <value>
-      Set the agent mode (rush, smart, deep1, deep2, deep3) — controls the model, system prompt, and tool selection
-  --effort <value>
-      Set reasoning effort for the new thread, when supported by the selected mode
-  --stream-json
-      When used with --execute, output Rika Event schema JSON lines.
-  --stream-json-thinking
-      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
-  --stream-json-input
-      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
-  --no-archive-after-execute
-      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
-      finishes.
-  -l, --label <label>
-      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+  rika mcp approve my-server
+  rika mcp approve project-mcp
 
 `
 

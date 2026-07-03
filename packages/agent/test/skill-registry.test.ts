@@ -72,6 +72,24 @@ describe("SkillRegistry", () => {
     ])
   })
 
+  test("reads bundled mcp.json beside selected skill instructions", async () => {
+    const root = await tempRoot()
+    const skills = join(root, "skills")
+    await writeSkill(skills, "deploy", "deploy", "Deploy code", "Deploy instructions")
+    await writeFile(
+      join(skills, "deploy", "mcp.json"),
+      `${JSON.stringify({ deployer: { command: "node", args: ["server.js"] } }, null, 2)}\n`,
+    )
+
+    const skill = await Effect.runPromise(
+      SkillRegistry.inspect("deploy").pipe(
+        Effect.provide(SkillRegistry.layerFromLocations([{ source: "project", root: skills }])),
+      ),
+    )
+
+    expect(skill.mcp_servers).toEqual({ deployer: { command: "node", args: ["server.js"] } })
+  })
+
   test("selects full instructions only for explicitly requested skills", async () => {
     const root = await tempRoot()
     const skills = join(root, "skills")

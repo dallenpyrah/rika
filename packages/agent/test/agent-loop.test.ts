@@ -3,13 +3,14 @@ import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { Provider, Router, Tokens } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
-import { Effect, Exit, Fiber, Layer, Queue, Scope, Stream } from "effect"
-import { AiError, Prompt } from "effect/unstable/ai"
+import { Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream } from "effect"
+import { AiError, Prompt, Tool } from "effect/unstable/ai"
 import {
   AgentLoop,
   ContextResolver,
   PermissionPolicy,
   SkillRegistry,
+  SkillToolProvider,
   ThreadMemoryIndexer,
   ThreadService,
   ToolExecutor,
@@ -65,6 +66,7 @@ const makeLayer = (
   ]),
   diagnosticsLayer = Diagnostics.memoryLayer([]),
   activeConfigLayer = configLayer,
+  skillToolProviderLayer = SkillToolProvider.emptyLayer,
 ) => {
   const llmLayer = Router.layer.pipe(Layer.provideMerge(activeConfigLayer), Layer.provideMerge(providerLayer))
   const services = Layer.mergeAll(
@@ -91,6 +93,7 @@ const makeLayer = (
       total_chars: 41,
     }),
     skillLayer,
+    skillToolProviderLayer,
     toolLayer,
     llmLayer,
   )
@@ -1489,6 +1492,185 @@ describe("AgentLoop", () => {
     expect(system).toContain("- review: Review code")
     expect(system).toContain("Deploy instructions only when loaded")
     expect(system).not.toContain("Review instructions must stay unloaded")
+  })
+
+  test("exposes selected skill tools only for the invoking turn", async () => {
+    const captured: Array<Provider.GenerateRequest> = []
+    const providerLayer = Provider.registryLayerFromProviders([
+      providerServiceOf({
+        name: "openai",
+        complete: (request) =>
+          Effect.sync(() => {
+            captured.push(request)
+            return { provider: "openai", model: request.model, content: "done" }
+          }),
+        stream: (request) =>
+          Stream.sync(() => {
+            captured.push(request)
+            return Provider.streamEventsFromResponse(fakeResponse(request, "done"))
+          }).pipe(Stream.flatMap(Stream.fromIterable)),
+      }),
+    ])
+    const selectedTool = Tool.make("skill_deploy_echo", {
+      description: "Echo from the deploy skill MCP server.",
+      parameters: Schema.Record(Schema.String, Schema.Json),
+      success: Schema.Json,
+      failure: Schema.Json,
+      failureMode: "return",
+    })
+    const skillToolProviderLayer = Layer.succeed(
+      SkillToolProvider.Service,
+      SkillToolProvider.Service.of({
+        definitionsForSkills: (skills) =>
+          Effect.succeed(
+            skills.some((candidate) => candidate.summary.name === "deploy")
+              ? [
+                  {
+                    tool: selectedTool,
+                    execute: (call) => Effect.succeed({ selected_skill_tool: call.name }),
+                  },
+                ]
+              : [],
+          ),
+      }),
+    )
+    const layer = makeLayer(
+      [],
+      defaultToolLayer,
+      SkillRegistry.fakeLayer([skill("deploy", "Deploy safely", "Deploy instructions")]),
+      providerLayer,
+      Diagnostics.memoryLayer([]),
+      configLayer,
+      skillToolProviderLayer,
+    )
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_skill_tool_selected"),
+          workspace_id: workspaceId,
+          content: "Use skill deploy for this release",
+        })
+        yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_skill_tool_hidden"),
+          workspace_id: workspaceId,
+          content: "No skill needed here",
+        })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(await toolkitToolNames(captured[0])).toContain("skill_deploy_echo")
+    expect(await toolkitToolNames(captured[1])).not.toContain("skill_deploy_echo")
+  })
+
+  test("does not discover selected skill tools during read-only turns", async () => {
+    let discoveryCalls = 0
+    const captured: Array<Provider.GenerateRequest> = []
+    const providerLayer = Provider.registryLayerFromProviders([
+      providerServiceOf({
+        name: "openai",
+        complete: (request) =>
+          Effect.sync(() => {
+            captured.push(request)
+            return { provider: "openai", model: request.model, content: "done" }
+          }),
+        stream: (request) =>
+          Stream.sync(() => {
+            captured.push(request)
+            return Provider.streamEventsFromResponse(fakeResponse(request, "done"))
+          }).pipe(Stream.flatMap(Stream.fromIterable)),
+      }),
+    ])
+    const selectedTool = Tool.make("skill_deploy_echo", {
+      description: "Echo from the deploy skill MCP server.",
+      parameters: Schema.Record(Schema.String, Schema.Json),
+      success: Schema.Json,
+      failure: Schema.Json,
+      failureMode: "return",
+    })
+    const skillToolProviderLayer = Layer.succeed(
+      SkillToolProvider.Service,
+      SkillToolProvider.Service.of({
+        definitionsForSkills: () =>
+          Effect.sync(() => {
+            discoveryCalls += 1
+            return [
+              {
+                tool: selectedTool,
+                execute: (call) => Effect.succeed({ selected_skill_tool: call.name }),
+              },
+            ]
+          }),
+      }),
+    )
+    const layer = makeLayer(
+      [],
+      defaultToolLayer,
+      SkillRegistry.fakeLayer([skill("deploy", "Deploy safely", "Deploy instructions")]),
+      providerLayer,
+      Diagnostics.memoryLayer([]),
+      configLayer,
+      skillToolProviderLayer,
+    )
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_skill_tool_readonly"),
+          workspace_id: workspaceId,
+          content: "Use skill deploy for this release",
+          tool_access: "read-only",
+        })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(discoveryCalls).toBe(0)
+    expect(await toolkitToolNames(captured[0])).not.toContain("skill_deploy_echo")
+  })
+
+  test("does not discover selected skill tools for cancelled turns", async () => {
+    let discoveryCalls = 0
+    const skillToolProviderLayer = Layer.succeed(
+      SkillToolProvider.Service,
+      SkillToolProvider.Service.of({
+        definitionsForSkills: () =>
+          Effect.sync(() => {
+            discoveryCalls += 1
+            return []
+          }),
+      }),
+    )
+    const layer = makeLayer(
+      ["this response is never used"],
+      defaultToolLayer,
+      SkillRegistry.fakeLayer([skill("deploy", "Deploy safely", "Deploy instructions")]),
+      undefined,
+      Diagnostics.memoryLayer([]),
+      configLayer,
+      skillToolProviderLayer,
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const turn = yield* AgentLoop.runTurn({
+          thread_id: Ids.ThreadId.make("thread_agent_skill_tool_cancelled"),
+          workspace_id: workspaceId,
+          content: "Use skill deploy then stop",
+          cancelled: true,
+        })
+        const events = yield* ThreadEventLog.readThread({
+          thread_id: Ids.ThreadId.make("thread_agent_skill_tool_cancelled"),
+        })
+        return { turn, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(discoveryCalls).toBe(0)
+    expect(result.turn.status).toBe("cancelled")
+    expect(result.events.find((event) => event.type === "skill.loaded")).toMatchObject({ data: { name: "deploy" } })
   })
 
   test("records cancellation as a replayable turn failure", async () => {

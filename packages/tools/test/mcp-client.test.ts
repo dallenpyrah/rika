@@ -96,6 +96,119 @@ describe("McpClient", () => {
     expect(result.definitions.map((definition) => definition.tool.name)).toEqual(["mcp.local.echo"])
   })
 
+  test("doctor reports unapproved workspace commands without connecting", async () => {
+    const calls: Array<string> = []
+    const runtime = layer(
+      [workspaceSource({ local: { command: "node", args: ["server.js"] } })],
+      fakeConnector({ local: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } }, calls),
+    )
+
+    const health = await Effect.runPromise(McpClient.doctor().pipe(Effect.provide(runtime)))
+
+    expect(health).toMatchObject([{ name: "local", status: "awaiting_approval" }])
+    expect(calls).toEqual([])
+  })
+
+  test("skill-provided command definitions can be approved through source-aware approval", async () => {
+    const calls: Array<string> = []
+    const source: McpClient.SettingsSource = {
+      ...workspaceSource({ skill: { command: "node", args: ["skill-server.js"] } }),
+      default_cwd: "/repo/.agents/skills/deploy",
+    }
+    const runtime = layer([], (server) =>
+      fakeConnector(
+        { skill: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } },
+        calls,
+      )(server).pipe(Effect.tap(() => Effect.sync(() => calls.push(`cwd:${server.default_cwd}`)))),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const serversBefore = yield* McpClient.serversForSources([source])
+        const before = yield* McpClient.toolDefinitionsForSources([source])
+        const approval = yield* McpClient.approveForSources("skill", [source])
+        const serversAfter = yield* McpClient.serversForSources([source])
+        const after = yield* McpClient.toolDefinitionsForSources([source])
+        return { serversBefore, before, approval, serversAfter, after }
+      }).pipe(Effect.provide(runtime)),
+    )
+
+    expect(result.serversBefore).toMatchObject([{ name: "skill", status: "approval_required" }])
+    expect(result.before).toEqual([])
+    expect(result.approval.server_name).toBe("skill")
+    expect(result.serversAfter).toMatchObject([{ name: "skill", status: "ready" }])
+    expect(result.after.map((definition) => definition.tool.name)).toEqual(["mcp.skill.echo"])
+    expect(calls).toEqual(["connect:skill", "cwd:/repo/.agents/skills/deploy", "list:skill", "close:skill"])
+  })
+
+  test("skill command approval is scoped by effective launch cwd", async () => {
+    const sourceA: McpClient.SettingsSource = {
+      ...workspaceSource({ deployer: { command: "node", args: ["server.js"] } }),
+      path: "/repo/.agents/skills/a/mcp.json",
+      default_cwd: "/repo/.agents/skills/a",
+    }
+    const sourceB: McpClient.SettingsSource = {
+      ...workspaceSource({ deployer: { command: "node", args: ["server.js"] } }),
+      path: "/repo/.agents/skills/b/mcp.json",
+      default_cwd: "/repo/.agents/skills/b",
+    }
+    const runtime = layer(
+      [],
+      fakeConnector({ deployer: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } }),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* McpClient.approveForSources("deployer", [sourceA])
+        const a = yield* McpClient.serversForSources([sourceA])
+        const b = yield* McpClient.serversForSources([sourceB])
+        const bDefinitions = yield* McpClient.toolDefinitionsForSources([sourceB])
+        return { a, b, bDefinitions }
+      }).pipe(Effect.provide(runtime)),
+    )
+
+    expect(result.a).toMatchObject([{ name: "deployer", status: "ready" }])
+    expect(result.b).toMatchObject([{ name: "deployer", status: "approval_required" }])
+    expect(result.bDefinitions).toEqual([])
+  })
+
+  test("skill command approval normalizes relative cwd before fingerprinting", async () => {
+    const sourceA: McpClient.SettingsSource = {
+      ...workspaceSource({ deployer: { command: "node", args: ["server.js"], cwd: "." } }),
+      path: "/repo/.agents/skills/a/mcp.json",
+      default_cwd: "/repo/.agents/skills/a",
+    }
+    const sourceB: McpClient.SettingsSource = {
+      ...workspaceSource({ deployer: { command: "node", args: ["server.js"], cwd: "." } }),
+      path: "/repo/.agents/skills/b/mcp.json",
+      default_cwd: "/repo/.agents/skills/b",
+    }
+    const calls: Array<string> = []
+    const runtime = layer([], (server) =>
+      fakeConnector(
+        { deployer: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } },
+        calls,
+      )(server).pipe(Effect.tap(() => Effect.sync(() => calls.push(`cwd:${server.default_cwd}`)))),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* McpClient.approveForSources("deployer", [sourceA])
+        const a = yield* McpClient.serversForSources([sourceA])
+        const b = yield* McpClient.serversForSources([sourceB])
+        const aDefinitions = yield* McpClient.toolDefinitionsForSources([sourceA])
+        const bDefinitions = yield* McpClient.toolDefinitionsForSources([sourceB])
+        return { a, b, aDefinitions, bDefinitions }
+      }).pipe(Effect.provide(runtime)),
+    )
+
+    expect(result.a).toMatchObject([{ name: "deployer", status: "ready" }])
+    expect(result.b).toMatchObject([{ name: "deployer", status: "approval_required" }])
+    expect(result.aDefinitions.map((definition) => definition.tool.name)).toEqual(["mcp.deployer.echo"])
+    expect(result.bDefinitions).toEqual([])
+    expect(calls).toEqual(["connect:deployer", "cwd:/repo/.agents/skills/a", "list:deployer", "close:deployer"])
+  })
+
   test("filters tools before they reach the model context", async () => {
     const runtime = layer(
       [

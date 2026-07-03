@@ -21,7 +21,17 @@ export class ToolExecutorError extends Schema.TaggedErrorClass<ToolExecutorError
 export interface Interface {
   readonly tools: Effect.Effect<ReadonlyArray<Tool.Any>>
   readonly describe: Effect.Effect<ReadonlyArray<Descriptor>>
+  readonly toolsWithDefinitions: (
+    definitions: ReadonlyArray<ToolRegistry.Definition>,
+  ) => Effect.Effect<ReadonlyArray<Tool.Any>>
+  readonly describeWithDefinitions: (
+    definitions: ReadonlyArray<ToolRegistry.Definition>,
+  ) => Effect.Effect<ReadonlyArray<Descriptor>>
   readonly execute: (call: Call) => Effect.Effect<Result>
+  readonly executeWithDefinitions: (
+    call: Call,
+    definitions: ReadonlyArray<ToolRegistry.Definition>,
+  ) => Effect.Effect<Result>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@rika/agent/ToolExecutor") {}
@@ -31,6 +41,8 @@ export type FakeHandler = ToolRegistry.FakeHandler
 const makeExecutor = (registry: ToolRegistry.Interface, policy: PermissionPolicy.Interface): Interface => ({
   tools: registry.tools,
   describe: registry.describe,
+  toolsWithDefinitions: (definitions) => registryWithDefinitions(registry, definitions).tools,
+  describeWithDefinitions: (definitions) => registryWithDefinitions(registry, definitions).describe,
   execute: Effect.fn("ToolExecutor.execute")(function* (call: Call) {
     const diagnostics = Option.getOrElse(yield* Effect.serviceOption(Diagnostics.Service), () => noopDiagnostics)
     return yield* Diagnostics.event(
@@ -39,7 +51,67 @@ const makeExecutor = (registry: ToolRegistry.Interface, policy: PermissionPolicy
       executeSeed(call),
     ).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
   }),
+  executeWithDefinitions: Effect.fn("ToolExecutor.executeWithDefinitions")(function* (
+    call: Call,
+    definitions: ReadonlyArray<ToolRegistry.Definition>,
+  ) {
+    const diagnostics = Option.getOrElse(yield* Effect.serviceOption(Diagnostics.Service), () => noopDiagnostics)
+    const turnRegistry = registryWithDefinitions(registry, definitions)
+    return yield* Diagnostics.event(
+      "tool.exec",
+      (fields) => runExecute(turnRegistry, policy, call, fields),
+      executeSeed(call),
+    ).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
+  }),
 })
+
+const registryWithDefinitions = (
+  registry: ToolRegistry.Interface,
+  definitions: ReadonlyArray<ToolRegistry.Definition>,
+): ToolRegistry.Interface => {
+  if (definitions.length === 0) return registry
+  return {
+    tools: registry.tools.pipe(
+      Effect.map((tools) => [
+        ...tools,
+        ...definitionsWithoutCollisions(new Set(tools.map((tool) => tool.name)), definitions).map(
+          (definition) => definition.tool,
+        ),
+      ]),
+    ),
+    describe: registry.describe.pipe(
+      Effect.map((descriptors) => {
+        const selected = definitionsWithoutCollisions(
+          new Set(descriptors.map((descriptor) => descriptor.name)),
+          definitions,
+        )
+        return [...descriptors, ...selected.map((definition) => ToolRegistry.descriptorFromTool(definition.tool))]
+      }),
+    ),
+    execute: Effect.fn("ToolExecutor.extraRegistry.execute")(function* (call: Call) {
+      const tools = yield* registry.tools
+      if (tools.some((tool) => tool.name === call.name)) return yield* registry.execute(call)
+      const definitionsByName = definitionsWithoutCollisions(new Set(tools.map((tool) => tool.name)), definitions)
+      const definition = definitionsByName.find((candidate) => candidate.tool.name === call.name)
+      if (definition !== undefined) return yield* definition.execute(call)
+      return yield* registry.execute(call)
+    }),
+  }
+}
+
+const definitionsWithoutCollisions = (
+  blockedNames: Set<string>,
+  definitions: ReadonlyArray<ToolRegistry.Definition>,
+): ReadonlyArray<ToolRegistry.Definition> => {
+  const selected: Array<ToolRegistry.Definition> = []
+  for (const definition of definitions) {
+    const name = definition.tool.name
+    if (blockedNames.has(name)) continue
+    blockedNames.add(name)
+    selected.push(definition)
+  }
+  return selected
+}
 
 const noopDiagnostics: Diagnostics.Interface = { emit: () => Effect.void }
 
@@ -217,6 +289,14 @@ export const tools = Effect.fn("ToolExecutor.tools.call")(function* () {
 export const execute = Effect.fn("ToolExecutor.execute.call")(function* (call: Call) {
   const executor = yield* Service
   return yield* executor.execute(call)
+})
+
+export const executeWithDefinitions = Effect.fn("ToolExecutor.executeWithDefinitions.call")(function* (
+  call: Call,
+  definitions: ReadonlyArray<ToolRegistry.Definition>,
+) {
+  const executor = yield* Service
+  return yield* executor.executeWithDefinitions(call, definitions)
 })
 
 const executeRegistryCall = (registry: ToolRegistry.Interface, call: Call) =>

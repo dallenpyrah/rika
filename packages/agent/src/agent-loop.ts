@@ -9,10 +9,12 @@ import * as ContextResolver from "./context-resolver"
 import * as ContextBudget from "./context-budget"
 import * as ModelContext from "./model-context"
 import * as SkillRegistry from "./skill-registry"
+import * as SkillToolProvider from "./skill-tool-provider"
 import * as ThreadMemoryIndexer from "./thread-memory-indexer"
 import * as Toolkit from "./toolkit"
 import * as ToolAccess from "./tool-access"
 import * as ToolExecutor from "./tool-executor"
+import * as ToolRegistry from "./tool-registry"
 
 export interface RunTurnInput extends Schema.Schema.Type<typeof RunTurnInput> {}
 export const RunTurnInput = Schema.Struct({
@@ -73,6 +75,7 @@ export type RunError =
   | ContextBudget.Error
   | ContextResolver.ContextResolverError
   | SkillRegistry.SkillRegistryError
+  | SkillToolProvider.SkillToolProviderError
   | ToolExecutor.ToolExecutorError
 
 export interface Interface {
@@ -97,6 +100,7 @@ interface Dependencies {
   readonly compaction: CompactionService.Interface
   readonly contextResolver: ContextResolver.Interface
   readonly skillRegistry: SkillRegistry.Interface
+  readonly skillToolProvider: SkillToolProvider.Interface
   readonly toolExecutor: ToolExecutor.Interface
   readonly toolkit: Toolkit.Interface
   readonly memoryIndexer?: ThreadMemoryIndexer.Interface
@@ -113,6 +117,7 @@ interface ModelInput {
   readonly messages: ReadonlyArray<Provider.Message>
   readonly prompt: ReadonlyArray<Prompt.MessageEncoded>
   readonly tools: Toolkit.Prepared
+  readonly toolDefinitions: ReadonlyArray<ToolRegistry.Definition>
 }
 
 interface ModelTurn {
@@ -144,6 +149,10 @@ export const layer = Layer.effect(
     const compaction = yield* CompactionService.Service
     const contextResolver = yield* ContextResolver.Service
     const skillRegistry = yield* SkillRegistry.Service
+    const skillToolProvider = Option.getOrElse(
+      yield* Effect.serviceOption(SkillToolProvider.Service),
+      () => SkillToolProvider.empty,
+    )
     const toolExecutor = yield* ToolExecutor.Service
     const toolkit = yield* Toolkit.Service
     const memoryIndexer = Option.getOrUndefined(yield* Effect.serviceOption(ThreadMemoryIndexer.Service))
@@ -161,6 +170,7 @@ export const layer = Layer.effect(
       compaction,
       contextResolver,
       skillRegistry,
+      skillToolProvider,
       toolExecutor,
       toolkit,
       ...(memoryIndexer === undefined ? {} : { memoryIndexer }),
@@ -315,6 +325,11 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
       return
     }
 
+    let skillToolDefinitions: ReadonlyArray<ToolRegistry.Definition> = []
+    if (!ToolAccess.isReadOnlyTurn(input.tool_access)) {
+      skillToolDefinitions = yield* dependencies.skillToolProvider.definitionsForSkills(skillSelection.selected)
+    }
+
     const preTurnCompaction = yield* maybeAutoCompactBeforeTurn(
       dependencies,
       input,
@@ -323,7 +338,13 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
     )
 
     const history = [...existingEvents, ...appendedEvents]
-    let modelInput: ModelInput = yield* contextModelInput(dependencies, input, history, skillSelection)
+    let modelInput: ModelInput = yield* contextModelInput(
+      dependencies,
+      input,
+      history,
+      skillSelection,
+      skillToolDefinitions,
+    )
     if (
       preTurnCompaction.compacted &&
       preTurnCompaction.usable !== undefined &&
@@ -361,7 +382,7 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
         const events = yield* readThread(dependencies, { thread_id: input.thread_id })
         const filtered =
           excludedToolIds.size === 0 ? events : events.filter((event) => !eventReferencesTool(event, excludedToolIds))
-        const rebuilt = yield* contextModelInput(dependencies, input, filtered, skillSelection)
+        const rebuilt = yield* contextModelInput(dependencies, input, filtered, skillSelection, skillToolDefinitions)
         yield* emitCompactionDiagnostic(dependencies, result.event, Tokens.estimateMessages(rebuilt.messages))
         yield* emit(result.event)
         return rebuilt
@@ -685,7 +706,7 @@ const streamModelResponse = (
               Effect.asVoid,
             )
             if (streamEvent.provider_executed === true) return
-            const result = yield* dependencies.toolExecutor.execute(call)
+            const result = yield* dependencies.toolExecutor.executeWithDefinitions(call, modelInput.toolDefinitions)
             completedToolIds.add(result.id)
             toolResults.push(result)
             yield* makeToolCallCompleted(dependencies, input.thread_id, turnId, result, nextSequence()).pipe(
@@ -745,11 +766,17 @@ const contextModelInput = (
   input: RunTurnInput,
   events: ReadonlyArray<Event.Event>,
   skills: SkillRegistry.Selection,
+  toolDefinitions: ReadonlyArray<ToolRegistry.Definition>,
 ) =>
   Effect.gen(function* () {
-    const tools = ToolAccess.filterDescriptors(yield* dependencies.toolExecutor.describe, input.tool_access)
+    const tools = ToolAccess.filterDescriptors(
+      yield* dependencies.toolExecutor.describeWithDefinitions(toolDefinitions),
+      input.tool_access,
+    )
     const prepared = yield* dependencies.toolkit.build(
-      input.tool_access === undefined ? undefined : { tool_access: input.tool_access },
+      input.tool_access === undefined
+        ? { definitions: toolDefinitions }
+        : { tool_access: input.tool_access, definitions: toolDefinitions },
     )
     const config = yield* dependencies.config.get
     const resolvedContext = latestResolvedContext(events)
@@ -759,7 +786,7 @@ const contextModelInput = (
       ModelContext.providerMessageToPromptMessage(system),
       ...ModelContext.promptMessagesFromEvents(events),
     ]
-    return { messages, prompt, tools: prepared } satisfies ModelInput
+    return { messages, prompt, tools: prepared, toolDefinitions } satisfies ModelInput
   })
 
 const systemMessage = (
@@ -1627,7 +1654,8 @@ const isTurnLevelError = (error: RunError): boolean =>
   error instanceof Router.RouterError ||
   error instanceof ToolExecutor.ToolExecutorError ||
   error instanceof ContextResolver.ContextResolverError ||
-  error instanceof SkillRegistry.SkillRegistryError
+  error instanceof SkillRegistry.SkillRegistryError ||
+  error instanceof SkillToolProvider.SkillToolProviderError
 
 const isModelError = (error: RunError): error is AiError.AiError | Router.RouterError =>
   AiError.isAiError(error) || error instanceof Router.RouterError
@@ -1673,6 +1701,9 @@ const envelopeFromRunError = (error: RunError): ErrorEnvelope.Envelope => {
   }
   if (error instanceof SkillRegistry.SkillRegistryError) {
     return { kind: "validation", message: error.message, code: error.operation }
+  }
+  if (error instanceof SkillToolProvider.SkillToolProviderError) {
+    return { kind: "tool", message: error.message, code: error.operation }
   }
   if (error instanceof Router.RouterError) return { kind: "model", message: error.message }
   if (error instanceof ToolExecutor.ToolExecutorError) return ToolExecutor.errorEnvelope(error)

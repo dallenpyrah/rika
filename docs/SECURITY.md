@@ -9,7 +9,7 @@ Rika is a local-first coding agent that can inspect files, run commands, edit co
 | Workspace files     | Untrusted input to the model unless explicitly trusted by the user. |
 | Shell/tool calls    | Powerful local actions routed through `ToolExecutor` and policy.    |
 | Plugins             | Trusted local TypeScript. MVP plugins are **not sandboxed**.        |
-| MCP command servers | Untrusted executable code until approved by fingerprint.            |
+| MCP command servers | Untrusted executable code until approved by fingerprint and cwd.    |
 | Remote MCP servers  | External services; credentials stay in config.                      |
 | Remote-control API  | Localhost-first; bearer token required when configured.             |
 | Rivet actors        | Runtime ownership boundary; durable truth remains the event log.    |
@@ -72,7 +72,7 @@ Rules:
 
 ## MCP
 
-Workspace command MCP servers require explicit approval before spawn. Approval is scoped by workspace root, server name, and config fingerprint. Remote MCP tools should be filtered before entering model context to reduce prompt bloat and accidental capability exposure.
+Workspace command MCP servers require explicit approval before spawn. Approval is scoped by workspace root, server name, config fingerprint, and effective launch directory. Skill-bundled `mcp.json` command servers use the same approval store and are registered only when the skill is explicitly loaded. Remote MCP tools should be filtered before entering model context to reduce prompt bloat and accidental capability exposure.
 
 ## Remote control and hosted workspaces
 

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import { Config, Diagnostics, IdGenerator, SecretRedactor, Settings, Time } from "@rika/core"
 import { Database, McpApprovalStore, Migration, OrbStore, ProjectStore } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
@@ -293,7 +293,7 @@ describe("OrbManager", () => {
           yield* McpApprovalStore.approve({
             workspace_root: workspace,
             server_name: "approved",
-            fingerprint: mcpFingerprint(approvedConfig),
+            fingerprint: mcpFingerprint(approvedConfig, workspace),
           })
           yield* OrbManager.provisionForThread({
             thread_id: threadId,
@@ -962,7 +962,20 @@ const makeSystem = (
   }
 }
 
-const mcpFingerprint = (config: unknown) => createHash("sha256").update(stableJson(config)).digest("hex")
+const mcpFingerprint = (config: unknown, defaultCwd: string) =>
+  createHash("sha256")
+    .update(stableJson(mcpFingerprintInput(config, defaultCwd)))
+    .digest("hex")
+
+const mcpFingerprintInput = (config: unknown, defaultCwd: string) =>
+  isRecord(config) && typeof config.command === "string"
+    ? { ...config, cwd: effectiveMcpCwd(config.cwd, defaultCwd) }
+    : config
+
+const effectiveMcpCwd = (cwd: unknown, defaultCwd: string) => {
+  const value = typeof cwd === "string" ? cwd : defaultCwd
+  return isAbsolute(value) ? value : resolve(defaultCwd, value)
+}
 
 const stableJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`
