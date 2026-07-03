@@ -28,7 +28,7 @@ import {
 import { Client } from "@rika/sdk"
 import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
-import { HttpServer, OrbMirror, RemoteControl } from "../src/index"
+import { HttpServer, OrbMirror, PresenceHub, RemoteControl } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_remote_contract")
 const ideThreadId = Ids.ThreadId.make("thread_remote_ide")
@@ -40,6 +40,7 @@ const orbId = Ids.OrbId.make("orb_remote_contract")
 const orbThreadId = Ids.ThreadId.make("thread_remote_orb_contract")
 const orphanedThreadId = Ids.ThreadId.make("thread_remote_orphaned_turn")
 const orphanedTurnId = Ids.TurnId.make("turn_remote_orphaned")
+const outsiderThreadId = Ids.ThreadId.make("thread_remote_outsider_create")
 const ideClientId = Ids.IdeClientId.make("ide_remote_contract")
 const ownerId = Ids.UserId.make("user_remote_owner")
 const outsiderId = Ids.UserId.make("user_remote_outsider")
@@ -154,12 +155,14 @@ const makeLayer = (
   )
   const agentLayer = options.agentLayer ?? AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
   const compactionLayer = options.compactionLayer ?? CompactionService.layer.pipe(Layer.provideMerge(agentBase))
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(Time.fixedLayer(now)))
   const remoteLayer = RemoteControl.layer.pipe(
     Layer.provideMerge(agentLayer),
     Layer.provideMerge(compactionLayer),
     Layer.provideMerge(agentBase),
+    Layer.provideMerge(presenceLayer),
   )
-  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
+  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer), Layer.provideMerge(presenceLayer))
 
   return Layer.mergeAll(agentBase, agentLayer, compactionLayer, remoteLayer, httpLayer)
 }
@@ -784,6 +787,56 @@ describe("remote control API and SDK", () => {
     }
   })
 
+  test("startTurn conflicts include the active turn user id", async () => {
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), {
+        agentLayer: blockingAgentLoopLayer(),
+      }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId }))
+      await runtime.runPromise(
+        WorkspaceStore.putMembership({
+          workspace_id: workspaceId,
+          user_id: outsiderId,
+          role: "member",
+          created_at: now,
+        }),
+      )
+      await Effect.runPromise(
+        client.startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId, content: "hold open" }),
+      )
+
+      const response = await runtime.runPromise(
+        HttpServer.handle(
+          new Request("http://rika.test/v1/turns", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              thread_id: threadId,
+              workspace_id: workspaceId,
+              user_id: outsiderId,
+              content: "second turn",
+            }),
+          }),
+        ),
+      )
+      const body = await response.json()
+
+      expect(response.status).toBe(409)
+      expect(body).toMatchObject({
+        error: {
+          code: "startTurn",
+          details: { status: 409, active_user_id: ownerId },
+        },
+      })
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   test("forks completed thread history over the remote API", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
@@ -1133,7 +1186,7 @@ describe("remote control API and SDK", () => {
     }
   })
 
-  test("remote user requests are scoped to workspace membership", async () => {
+  test("remote user requests use user_id for attribution, not authorization", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
 
@@ -1142,24 +1195,26 @@ describe("remote control API and SDK", () => {
     )
     const ownerThreads = await Effect.runPromise(client.listThreads({ user_id: ownerId }))
     const outsiderThreads = await Effect.runPromise(client.listThreads({ user_id: outsiderId }))
-    const outsiderOpen = await Effect.runPromise(client.openThread(threadId, outsiderId).pipe(Effect.flip))
-    const outsiderPreview = await Effect.runPromise(
-      client.previewThread(threadId, { user_id: outsiderId }).pipe(Effect.flip),
-    )
-    const outsiderCompact = await Effect.runPromise(client.compactThread(threadId, outsiderId).pipe(Effect.flip))
+    const outsiderOpen = await Effect.runPromise(client.openThread(threadId, outsiderId))
+    const outsiderPreview = await Effect.runPromise(client.previewThread(threadId, { user_id: outsiderId }))
     const outsiderTurn = await Effect.runPromise(
-      client
-        .startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: outsiderId, content: "break in" })
-        .pipe(Effect.flip),
+      client.startTurn({ thread_id: threadId, workspace_id: workspaceId, user_id: outsiderId, content: "join in" }),
+    )
+    const outsiderCreated = await Effect.runPromise(
+      client.createThread({ thread_id: outsiderThreadId, workspace_id: workspaceId, user_id: outsiderId }),
     )
 
     expect(created).toMatchObject({ thread_id: threadId, workspace_id: workspaceId, user_id: ownerId })
     expect(ownerThreads.map((summary) => summary.thread_id)).toEqual([threadId])
-    expect(outsiderThreads).toEqual([])
-    expect(outsiderOpen).toMatchObject({ status: 403 })
-    expect(outsiderPreview).toMatchObject({ status: 403 })
-    expect(outsiderCompact).toMatchObject({ status: 403 })
-    expect(outsiderTurn).toMatchObject({ status: 403 })
+    expect(outsiderThreads.map((summary) => summary.thread_id)).toEqual([threadId])
+    expect(outsiderOpen.summary.thread_id).toBe(threadId)
+    expect(outsiderPreview.summary.thread_id).toBe(threadId)
+    expect(outsiderTurn).toEqual({ thread_id: threadId, accepted: true })
+    expect(outsiderCreated).toMatchObject({
+      thread_id: outsiderThreadId,
+      workspace_id: workspaceId,
+      user_id: outsiderId,
+    })
   })
 
   test("IDE clients can provide turn context and receive navigation requests", async () => {

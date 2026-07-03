@@ -2,6 +2,7 @@ import { Diagnostics } from "@rika/core"
 import { OrbChanges, OrbPty } from "@rika/orb"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Cause, Context, Effect, Fiber, Layer, Option, Schema, Stream } from "effect"
+import * as PresenceHub from "./presence-hub"
 import * as RemoteControl from "./remote-control"
 
 const defaultHost = "127.0.0.1"
@@ -41,7 +42,8 @@ const serviceLayer = Layer.effect(
     const diagnostics = yield* Diagnostics.Service
     const orbChanges = yield* OrbChanges.Service
     const orbPty = yield* OrbPty.Service
-    return makeService(remote, diagnostics, orbChanges, orbPty)
+    const presence = yield* PresenceHub.Service
+    return makeService(remote, diagnostics, orbChanges, orbPty, presence)
   }),
 )
 
@@ -230,9 +232,10 @@ const makeService = (
   diagnostics: Diagnostics.Interface,
   orbChanges: OrbChanges.Interface,
   orbPty: OrbPty.Interface,
+  presence: PresenceHub.Interface,
 ): Interface => {
   const handleRequest = (request: Request, requiredToken?: string, orbMode?: OrbRouteMode) =>
-    route(remote, orbChanges, request, tokenValue(requiredToken), orbMode).pipe(
+    route(remote, orbChanges, presence, request, tokenValue(requiredToken), orbMode).pipe(
       Effect.provideService(Diagnostics.Service, diagnostics),
     )
   return Service.of({
@@ -289,6 +292,7 @@ const orbRouteMode = (input: ServeInput): Effect.Effect<OrbRouteMode | undefined
 const route = (
   remote: RemoteControl.Interface,
   orbChanges: OrbChanges.Interface,
+  presence: PresenceHub.Interface,
   request: Request,
   requiredToken: string | undefined,
   orbMode: OrbRouteMode | undefined,
@@ -298,7 +302,7 @@ const route = (
   return Diagnostics.event(
     "http.request",
     (fields) =>
-      dispatch(remote, orbChanges, request, url, requiredToken, orbMode).pipe(
+      dispatch(remote, orbChanges, presence, request, url, requiredToken, orbMode).pipe(
         Effect.tap((response) =>
           Effect.sync(() => {
             fields.status_code = response.status
@@ -342,6 +346,7 @@ const requestFields = (request: Request, url: URL, requestId: string): Diagnosti
 const dispatch = (
   remote: RemoteControl.Interface,
   orbChanges: OrbChanges.Interface,
+  presence: PresenceHub.Interface,
   request: Request,
   url: URL,
   requiredToken: string | undefined,
@@ -543,7 +548,23 @@ const dispatch = (
       segments.length === 4
     ) {
       const input = subscribeThreadEventsRequest(url, segments[2])
-      return ndjson(remote.subscribeThreadEvents(input))
+      return ndjson(
+        Stream.merge(
+          remote.subscribeThreadEvents(input).pipe(Stream.map((event): Remote.StreamFrame => event)),
+          presence.subscribe(input.thread_id),
+        ),
+      )
+    }
+
+    if (
+      request.method === "POST" &&
+      segments[1] === "threads" &&
+      segments[2] !== undefined &&
+      segments[3] === "presence" &&
+      segments.length === 4
+    ) {
+      const input = yield* setThreadPresenceRequest(request, segments[2])
+      return yield* remote.setThreadPresence(input).pipe(jsonEffect(Remote.PresenceFrame))
     }
 
     if (request.method === "POST" && segments[1] === "turns" && segments.length === 2) {
@@ -640,7 +661,7 @@ const json = (value: unknown, status = 200) =>
     headers: { "content-type": "application/json" },
   })
 
-const ndjson = (events: Stream.Stream<Event.Event, RemoteControl.RunError>) => {
+const ndjson = (events: Stream.Stream<Remote.StreamFrame, RemoteControl.RunError>) => {
   const encoder = new TextEncoder()
   let closed = false
   let fiber: Fiber.Fiber<void> | undefined
@@ -860,6 +881,17 @@ const subscribeThreadEventsRequest = (url: URL, encodedThreadId: string): Remote
     ...(afterSequence === undefined ? {} : { after_sequence: afterSequence }),
   }
 }
+
+const setThreadPresenceRequest = (
+  request: Request,
+  encodedThreadId: string,
+): Effect.Effect<Remote.SetThreadPresenceRequest, RemoteControl.RemoteControlError> =>
+  decodeBody(request, Remote.PresenceRequest).pipe(
+    Effect.map((input) => ({
+      thread_id: Ids.ThreadId.make(decodeURIComponent(encodedThreadId)),
+      ...input,
+    })),
+  )
 
 const serverUrl = (url: URL) => `${url.protocol}//${url.host}`
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Codec, Common, Event, Ide, Ids, Remote } from "@rika/schema"
+import { Artifact, Codec, Common, Event, Ide, Ids, Remote } from "@rika/schema"
 import { Effect, Schema, Stream } from "effect"
 import { Client } from "../src/index"
 
@@ -77,6 +77,114 @@ describe("SDK client", () => {
         path: "/v1/threads/thread_sdk_client/events",
       },
     ])
+  })
+
+  test("applies transport user_id defaults to requests that carry user identity", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const summary: Remote.ThreadSummary = {
+      thread_id: threadId,
+      workspace_id: workspaceId,
+      diff: { additions: 0, modifications: 0, deletions: 0 },
+      archived: false,
+      created_at: now,
+      updated_at: now,
+    }
+    const client = Client.make({
+      user_id: userId,
+      requestJson: (input) => {
+        calls.push(input)
+        if (input.path === "/v1/threads") return Effect.succeed(Codec.encode(Remote.ThreadSummary)(summary))
+        if (input.path === "/v1/threads?user_id=user_sdk_client") {
+          return Effect.succeed(Codec.encode(Schema.Array(Remote.ThreadSummary))([summary]))
+        }
+        if (input.path === "/v1/threads/thread_sdk_client?user_id=user_sdk_client") {
+          return Effect.succeed(Codec.encode(Remote.ThreadRecord)({ summary, events: [] }))
+        }
+        if (input.path === "/v1/turns") {
+          return Effect.succeed(Codec.encode(Remote.StartTurnResponse)({ thread_id: threadId, accepted: true }))
+        }
+        if (input.path === "/v1/artifacts?thread_id=thread_sdk_client&user_id=user_sdk_client") {
+          return Effect.succeed(Codec.encode(Schema.Array(Artifact.Artifact))([]))
+        }
+        return Effect.fail(new Client.SdkError({ message: `unexpected ${input.path}`, operation: "requestJson" }))
+      },
+      streamJson: () => Stream.empty,
+    })
+
+    await Effect.runPromise(client.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+    await Effect.runPromise(client.listThreads())
+    await Effect.runPromise(client.openThread(threadId))
+    await Effect.runPromise(client.startTurn({ thread_id: threadId, workspace_id: workspaceId, content: "ship" }))
+    await Effect.runPromise(client.listArtifacts({ thread_id: threadId }))
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/v1/threads",
+        body: { thread_id: threadId, workspace_id: workspaceId, user_id: userId },
+      },
+      { method: "GET", path: "/v1/threads?user_id=user_sdk_client" },
+      { method: "GET", path: "/v1/threads/thread_sdk_client?user_id=user_sdk_client" },
+      {
+        method: "POST",
+        path: "/v1/turns",
+        body: { thread_id: threadId, workspace_id: workspaceId, user_id: userId, content: "ship" },
+      },
+      { method: "GET", path: "/v1/artifacts?thread_id=thread_sdk_client&user_id=user_sdk_client" },
+    ])
+  })
+
+  test("routes presence frames to callbacks while event subscribers remain event-only", async () => {
+    const calls: Array<Client.RequestInput> = []
+    const snapshots: Array<Remote.PresenceFrame["presence"]> = []
+    const started: Event.TurnStarted = {
+      id: eventId,
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 1,
+      version: 1,
+      created_at: now,
+      type: "turn.started",
+      data: { user_id: userId },
+    }
+    const presence: Remote.PresenceFrame = {
+      presence: {
+        thread_id: threadId,
+        users: [{ user_id: userId, state: "active", last_seen: now }],
+      },
+    }
+    const client = Client.make({
+      user_id: userId,
+      requestJson: (input) => {
+        calls.push(input)
+        return Effect.succeed(Codec.encode(Remote.PresenceFrame)(presence))
+      },
+      streamJson: (input) => {
+        calls.push(input)
+        return Stream.fromIterable([Codec.encode(Remote.StreamFrame)(presence), Codec.encode(Event.Event)(started)])
+      },
+    })
+
+    const events = await Effect.runPromise(
+      client
+        .subscribeThreadEvents({
+          thread_id: threadId,
+          onPresence: (snapshot) => snapshots.push(snapshot),
+        })
+        .pipe(Stream.take(1), Stream.runCollect),
+    )
+
+    expect(events).toEqual([started])
+    expect(snapshots).toEqual([presence.presence])
+    expect(calls).toContainEqual({
+      method: "GET",
+      path: "/v1/threads/thread_sdk_client/events?user_id=user_sdk_client",
+    })
+    expect(calls).toContainEqual({
+      method: "POST",
+      path: "/v1/threads/thread_sdk_client/presence",
+      body: { user_id: userId, state: "active" },
+    })
   })
 
   test("uses shared schemas for thread preview requests", async () => {

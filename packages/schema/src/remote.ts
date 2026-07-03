@@ -39,6 +39,11 @@ export const TurnStatus = Schema.Literals(["active", "completed", "failed"]).ann
 })
 export type TurnStatus = typeof TurnStatus.Type
 
+export const PresenceState = Schema.Literals(["active", "typing"]).annotate({
+  identifier: "Rika.Remote.PresenceState",
+})
+export type PresenceState = typeof PresenceState.Type
+
 export interface ThreadDiffStats extends Schema.Schema.Type<typeof ThreadDiffStats> {}
 export const ThreadDiffStats = Schema.Struct({
   additions: Schema.Int,
@@ -51,6 +56,7 @@ export const ThreadSummary = Schema.Struct({
   thread_id: ThreadId,
   workspace_id: WorkspaceId,
   user_id: Schema.optional(UserId),
+  last_user_id: Schema.optional(UserId),
   title_text: Schema.optional(Schema.String),
   latest_message_text: Schema.optional(Schema.String),
   diff: ThreadDiffStats,
@@ -204,6 +210,37 @@ export const SubscribeThreadEventsRequest = Schema.Struct({
   after_sequence: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Remote.SubscribeThreadEventsRequest" })
 
+export interface PresenceUser extends Schema.Schema.Type<typeof PresenceUser> {}
+export const PresenceUser = Schema.Struct({
+  user_id: UserId,
+  state: PresenceState,
+  last_seen: TimestampMillis,
+}).annotate({ identifier: "Rika.Remote.PresenceUser" })
+
+export interface PresencePayload extends Schema.Schema.Type<typeof PresencePayload> {}
+export const PresencePayload = Schema.Struct({
+  thread_id: ThreadId,
+  users: Schema.Array(PresenceUser),
+}).annotate({ identifier: "Rika.Remote.PresencePayload" })
+
+export interface PresenceFrame extends Schema.Schema.Type<typeof PresenceFrame> {}
+export const PresenceFrame = Schema.Struct({
+  presence: PresencePayload,
+}).annotate({ identifier: "Rika.Remote.PresenceFrame" })
+
+export interface PresenceRequest extends Schema.Schema.Type<typeof PresenceRequest> {}
+export const PresenceRequest = Schema.Struct({
+  user_id: UserId,
+  state: PresenceState,
+}).annotate({ identifier: "Rika.Remote.PresenceRequest" })
+
+export interface SetThreadPresenceRequest extends Schema.Schema.Type<typeof SetThreadPresenceRequest> {}
+export const SetThreadPresenceRequest = Schema.Struct({
+  thread_id: ThreadId,
+  user_id: UserId,
+  state: PresenceState,
+}).annotate({ identifier: "Rika.Remote.SetThreadPresenceRequest" })
+
 export interface StartTurnRequest extends Schema.Schema.Type<typeof StartTurnRequest> {}
 export const StartTurnRequest = Schema.Struct({
   thread_id: ThreadId,
@@ -275,7 +312,7 @@ export const ApiError = Schema.Struct({
   }),
 }).annotate({ identifier: "Rika.Remote.ApiError" })
 
-export const StreamFrame = Schema.Union([Event, ApiError]).annotate({
+export const StreamFrame = Schema.Union([Event, PresenceFrame, ApiError]).annotate({
   identifier: "Rika.Remote.StreamFrame",
 })
 export type StreamFrame = typeof StreamFrame.Type

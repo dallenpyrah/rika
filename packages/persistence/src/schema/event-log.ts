@@ -31,6 +31,7 @@ export const thread_projections = sqliteTable(
     thread_id: text().primaryKey(),
     workspace_id: text().notNull(),
     user_id: text(),
+    last_user_id: text(),
     latest_message_id: text(),
     latest_message_role: text(),
     latest_message_text: text(),

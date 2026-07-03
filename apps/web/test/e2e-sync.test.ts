@@ -23,9 +23,9 @@ import {
   WorkspaceStore,
 } from "@rika/persistence"
 import { Client } from "@rika/sdk"
-import { Common, Ids } from "@rika/schema"
-import { Effect, Layer, ManagedRuntime, Stream } from "effect"
-import { HttpServer, OrbMirror, RemoteControl } from "@rika/server"
+import { Common, Ids, Remote } from "@rika/schema"
+import { Effect, Fiber, Layer, ManagedRuntime, Stream } from "effect"
+import { HttpServer, OrbMirror, PresenceHub, RemoteControl } from "@rika/server"
 import {
   ChangedDraft,
   ClickedKillOrb,
@@ -105,6 +105,54 @@ describe("web local sync e2e", () => {
     }
   })
 
+  test("presence heartbeats and typing state sync over thread event subscriptions", async () => {
+    let currentTime = now
+    const timeLayer = Layer.succeed(Time.Service, Time.Service.of({ nowMillis: Effect.sync(() => currentTime) }))
+    const runtime = ManagedRuntime.make(makeLayer(timeLayer))
+    const handle = await runtime.runPromise(HttpServer.serve({ host: "127.0.0.1", port: 0 }))
+    try {
+      const firstUserId = Ids.UserId.make("user_web_presence_first")
+      const secondUserId = Ids.UserId.make("user_web_presence_second")
+      const firstTerminal = client(handle.url, firstUserId)
+      const secondTerminal = client(handle.url, secondUserId)
+      const firstSnapshots: Array<Remote.PresenceFrame["presence"]> = []
+      const secondSnapshots: Array<Remote.PresenceFrame["presence"]> = []
+
+      await Effect.runPromise(firstTerminal.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      const firstFiber = Effect.runFork(
+        firstTerminal
+          .subscribeThreadEvents({ thread_id: threadId, onPresence: (snapshot) => firstSnapshots.push(snapshot) })
+          .pipe(Stream.runDrain),
+      )
+      const secondFiber = Effect.runFork(
+        secondTerminal
+          .subscribeThreadEvents({ thread_id: threadId, onPresence: (snapshot) => secondSnapshots.push(snapshot) })
+          .pipe(Stream.runDrain),
+      )
+
+      try {
+        await waitFor(
+          () =>
+            hasPresence(firstSnapshots, secondUserId, "active") && hasPresence(secondSnapshots, firstUserId, "active"),
+        )
+        await Effect.runPromise(
+          secondTerminal.setThreadPresence({ thread_id: threadId, user_id: secondUserId, state: "typing" }),
+        )
+        await waitFor(() => hasPresence(firstSnapshots, secondUserId, "typing"))
+        currentTime = Common.TimestampMillis.make(now + 46_000)
+        await waitFor(() => lastSnapshot(firstSnapshots)?.users.length === 0)
+      } finally {
+        await Promise.all([
+          Effect.runPromise(Fiber.interrupt(firstFiber)),
+          Effect.runPromise(Fiber.interrupt(secondFiber)),
+        ])
+      }
+    } finally {
+      await Effect.runPromise(handle.close())
+      await runtime.dispose()
+    }
+  })
+
   test("orb controls load badge state and drive OrbStore lifecycle through the HTTP server", async () => {
     const runtime = ManagedRuntime.make(makeLayer())
     const handle = await runtime.runPromise(HttpServer.serve({ host: "127.0.0.1", port: 0 }))
@@ -161,14 +209,13 @@ describe("web local sync e2e", () => {
   })
 })
 
-const makeLayer = () => {
+const makeLayer = (timeLayer: Layer.Layer<Time.Service> = Time.fixedLayer(now)) => {
   const configLayer = Config.layerFromValues({
     workspace_root: "/workspace/rika-web-e2e",
     data_dir: "/workspace/rika-web-e2e/.rika",
     default_mode: "smart",
   })
   const databaseLayer = Database.memoryLayer
-  const timeLayer = Time.fixedLayer(now)
   const idLayer = IdGenerator.sequenceLayer(1)
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -222,9 +269,14 @@ const makeLayer = () => {
     fakeOrbManagerLayer().pipe(Layer.provideMerge(migratedStorageLayer)),
     fakeOrbMirrorLayer(),
   )
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
-  const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
-  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
+  const remoteLayer = RemoteControl.layer.pipe(
+    Layer.provideMerge(agentLayer),
+    Layer.provideMerge(agentBase),
+    Layer.provideMerge(presenceLayer),
+  )
+  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer), Layer.provideMerge(presenceLayer))
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
 
@@ -273,7 +325,8 @@ const fakeOrbMirrorLayer = () =>
     }),
   )
 
-const client = (baseUrl: string) => Client.make(Client.fetchTransport({ base_url: baseUrl }))
+const client = (baseUrl: string, userId?: Ids.UserId) =>
+  Client.make(Client.fetchTransport({ base_url: baseUrl, ...(userId === undefined ? {} : { user_id: userId }) }))
 
 const openWebModel = async (apiBaseUrl: string, selectedThreadId: Ids.ThreadId = threadId): Promise<Model> => {
   const [model, commands] = init({ api_base_url: apiBaseUrl, thread_id: selectedThreadId })
@@ -329,3 +382,20 @@ const collectWebMessages = (model: Model) => {
 const isTerminalTurnMessage = (message: AppMessage) =>
   message._tag === "ReceivedThreadEvent" &&
   (message.event.type === "turn.completed" || message.event.type === "turn.failed")
+
+const waitFor = async (predicate: () => boolean) => {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await Bun.sleep(10)
+  }
+  throw new Error("Timed out waiting for condition")
+}
+
+const hasPresence = (
+  snapshots: ReadonlyArray<Remote.PresenceFrame["presence"]>,
+  userId: Ids.UserId,
+  state: Remote.PresenceState,
+) => snapshots.some((snapshot) => snapshot.users.some((user) => user.user_id === userId && user.state === state))
+
+const lastSnapshot = (snapshots: ReadonlyArray<Remote.PresenceFrame["presence"]>) => snapshots.at(-1)

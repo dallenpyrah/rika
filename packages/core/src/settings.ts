@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises"
-import { homedir } from "node:os"
+import { homedir, userInfo } from "node:os"
 import { join } from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
 
@@ -20,6 +20,7 @@ export const SettingKey = Schema.Literals([
   "orb.template",
   "orb.idleTimeoutSeconds",
   "project.default",
+  "user.name",
   "mode.default",
   "compaction.auto",
   "compaction.reserved",
@@ -37,6 +38,7 @@ export const settingKeys: ReadonlyArray<SettingKey> = [
   "orb.template",
   "orb.idleTimeoutSeconds",
   "project.default",
+  "user.name",
   "mode.default",
   "compaction.auto",
   "compaction.reserved",
@@ -53,6 +55,7 @@ export const envNameByKey: Record<SettingKey, string> = {
   "orb.template": "RIKA_ORB_TEMPLATE",
   "orb.idleTimeoutSeconds": "RIKA_ORB_IDLE_TIMEOUT",
   "project.default": "RIKA_ORB_PROJECT",
+  "user.name": "RIKA_USER",
   "mode.default": "RIKA_MODE",
   "compaction.auto": "RIKA_COMPACTION_AUTO",
   "compaction.reserved": "RIKA_COMPACTION_RESERVED",
@@ -79,6 +82,9 @@ export interface Values {
   }
   readonly project: {
     readonly default?: string
+  }
+  readonly user: {
+    readonly name: string
   }
   readonly mode: {
     readonly default: Mode
@@ -143,6 +149,9 @@ export const defaultValues = (): Values => ({
     idleTimeoutSeconds: defaultOrbIdleTimeoutSeconds,
   },
   project: {},
+  user: {
+    name: defaultUserName(),
+  },
   mode: {
     default: defaultMode,
   },
@@ -259,6 +268,7 @@ const resolve = (env: Record<string, string | undefined>, loaded: LoadedSettings
     defaultOrbIdleTimeoutSeconds,
   )
   const projectDefault = resolveOptionalString("project.default", env.RIKA_ORB_PROJECT, loaded)
+  const userName = resolveString("user.name", env.RIKA_USER, loaded, defaultUserName())
   const modeDefault = resolveMode("mode.default", env.RIKA_MODE, loaded, defaultMode)
   const compactionAuto = resolveBooleanOption("compaction.auto", env.RIKA_COMPACTION_AUTO, loaded)
   const compactionReserved = resolveNonNegativeIntegerOption(
@@ -292,6 +302,9 @@ const resolve = (env: Record<string, string | undefined>, loaded: LoadedSettings
         idleTimeoutSeconds: idleTimeoutSeconds.value,
       },
       project: projectDefault.value === undefined ? {} : { default: projectDefault.value },
+      user: {
+        name: userName.value,
+      },
       mode: {
         default: modeDefault.value,
       },
@@ -311,6 +324,7 @@ const resolve = (env: Record<string, string | undefined>, loaded: LoadedSettings
       "orb.template": template.source,
       "orb.idleTimeoutSeconds": idleTimeoutSeconds.source,
       "project.default": projectDefault.source,
+      "user.name": userName.source,
       "mode.default": modeDefault.source,
       "compaction.auto": compactionAuto.source,
       "compaction.reserved": compactionReserved.source,
@@ -431,7 +445,7 @@ type ValidationResult =
   | { readonly valid: false; readonly message: string }
 
 const validateSettingValue = (key: SettingKey, value: unknown): ValidationResult => {
-  if (key === "orb.template" || key === "project.default" || key === "telemetry.endpoint") {
+  if (key === "orb.template" || key === "project.default" || key === "user.name" || key === "telemetry.endpoint") {
     const string = validString(value)
     return string === undefined
       ? { valid: false, message: `Setting ${key} must be a non-empty string.` }
@@ -465,6 +479,7 @@ const valueForKey = (values: Values, key: SettingKey): SettingValue => {
   if (key === "orb.template") return values.orb.template
   if (key === "orb.idleTimeoutSeconds") return values.orb.idleTimeoutSeconds
   if (key === "project.default") return values.project.default ?? null
+  if (key === "user.name") return values.user.name
   if (key === "mode.default") return values.mode.default
   if (key === "compaction.auto") return values.compaction.auto ?? null
   if (key === "compaction.reserved") return values.compaction.reserved ?? null
@@ -487,6 +502,8 @@ const validString = (value: unknown) => {
   const trimmed = value.trim()
   return trimmed.length === 0 ? undefined : trimmed
 }
+
+const defaultUserName = () => userInfo().username
 
 const validMode = (value: unknown): Mode | undefined => {
   if (value === "rush") return value

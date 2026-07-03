@@ -18,6 +18,7 @@ Rika local development uses one shared backend per workspace. Interactive termin
 
 - `startTurn` is submit-only. A successful response means the backend accepted the turn; it does not return turn events.
 - `subscribeThreadEvents` is the shared source of UI truth. TUI and web clients render only events from initial thread open plus the live subscription.
+- Presence frames may share the same NDJSON stream, but they are not thread events and do not have event `sequence` values. SDK consumers receive them through `onPresence`.
 - `ThreadEventLog` remains canonical durable truth. `ThreadLive` is notification and catch-up plumbing, not a second store.
 - Clients subscribe with `after_sequence`. The server attaches to live events, catches up from the event log, deduplicates by `sequence`, and repairs gaps from the log.
 - Clients must dedupe by `sequence` and must not optimistically append their own submitted user messages.

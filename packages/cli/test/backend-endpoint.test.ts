@@ -304,7 +304,7 @@ describe("CLI backend endpoint resolver", () => {
     expect(touched).toEqual([Ids.OrbId.make("orb_backend_endpoint")])
   })
 
-  test("reconnecting client forwards user identity for manual compaction", async () => {
+  test("reconnecting client forwards default user identity for manual compaction", async () => {
     const userId = Ids.UserId.make("user_backend_endpoint")
     const event: Event.ContextCompacted = {
       id: Ids.EventId.make("event_backend_endpoint_compacted"),
@@ -332,6 +332,7 @@ describe("CLI backend endpoint resolver", () => {
           data_dir: dataDir,
           pid: 123,
         }),
+      user_id: userId,
       fetch: async (input) => {
         const url = input instanceof Request ? input.url : String(input)
         urls.push(url)
@@ -339,7 +340,7 @@ describe("CLI backend endpoint resolver", () => {
       },
     })
 
-    const compacted = await Effect.runPromise(client.compactThread(threadId, userId))
+    const compacted = await Effect.runPromise(client.compactThread(threadId))
 
     expect(compacted).toEqual(event)
     expect(urls).toEqual([

@@ -18,6 +18,7 @@ import {
 
 const threadId = Ids.ThreadId.make("thread_agent_loop")
 const workspaceId = Ids.WorkspaceId.make("workspace_agent_loop")
+const userId = Ids.UserId.make("user_agent_loop")
 
 const configLayer = Config.layerFromValues({
   workspace_root: "/workspace/rika-test",
@@ -153,6 +154,31 @@ describe("AgentLoop", () => {
       latest_message_text: "tool saw hello",
       active_turn_status: "completed",
     })
+  })
+
+  test("stamps user attribution on turn and user message events", async () => {
+    const layer = makeLayer(["attributed response"])
+    const attributedThreadId = Ids.ThreadId.make("thread_agent_user_attribution")
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* AgentLoop.runTurn({
+          thread_id: attributedThreadId,
+          workspace_id: workspaceId,
+          user_id: userId,
+          content: "attribute me",
+        })
+        return yield* ThreadEventLog.readThread({ thread_id: attributedThreadId })
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const started = result.find((event): event is Event.TurnStarted => event.type === "turn.started")
+    const message = result.find(
+      (event): event is Event.MessageAdded => event.type === "message.added" && event.data.message.role === "user",
+    )
+
+    expect(started).toMatchObject({ data: { user_id: userId } })
+    expect(message?.data.message.metadata).toEqual({ user_id: userId })
   })
 
   test("indexes completed turns through the detached memory hook", async () => {

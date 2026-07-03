@@ -114,7 +114,7 @@ describe("WorkspaceAccess", () => {
     expect(result.readable.map((summary) => summary.thread_id)).toEqual([threadId])
   })
 
-  test("bootstraps an empty hosted workspace owner but denies later outsiders", async () => {
+  test("bootstraps an empty hosted workspace owner and leaves later create authorization open", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         yield* Migration.migrate()
@@ -128,13 +128,19 @@ describe("WorkspaceAccess", () => {
           user_id: outsiderId,
           action: "write",
         })
+        const outsiderCreate = yield* WorkspaceAccess.ensureWorkspaceForCreate({
+          workspace_id: otherWorkspaceId,
+          user_id: outsiderId,
+          action: "write",
+        })
         const memberships = yield* WorkspaceStore.listMemberships(otherWorkspaceId)
-        return { owner, outsider, memberships }
+        return { owner, outsider, outsiderCreate, memberships }
       }).pipe(Effect.provide(layer)),
     )
 
     expect(result.owner.allowed).toBe(true)
     expect(result.outsider.allowed).toBe(false)
+    expect(result.outsiderCreate.allowed).toBe(true)
     expect(result.memberships).toEqual([membership(ownerId, "owner", otherWorkspaceId)])
   })
 })

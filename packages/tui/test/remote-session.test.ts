@@ -423,6 +423,13 @@ const fakeBackend = (): FakeBackend => {
           subscribers.add(offer)
         }),
       ),
+    setThreadPresence: (input) =>
+      Effect.succeed({
+        presence: {
+          thread_id: input.thread_id,
+          users: [{ user_id: input.user_id, state: input.state, last_seen: Common.TimestampMillis.make(10) }],
+        },
+      }),
     startTurn: (input) =>
       Effect.sync(() => {
         workspaceIds.push(input.workspace_id)

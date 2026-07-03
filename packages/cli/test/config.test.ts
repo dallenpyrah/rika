@@ -64,6 +64,7 @@ describe("CLI config commands", () => {
                 env: {
                   HOME: home,
                   RIKA_MODE: "rush",
+                  RIKA_USER: "config-user",
                   RIKA_TELEMETRY_ENDPOINT: "http://env-otel.test",
                 },
                 cwd: workspace,
@@ -85,6 +86,7 @@ describe("CLI config commands", () => {
           { key: "orb.template", env: "RIKA_ORB_TEMPLATE", value: "rika-orb", source: "default" },
           { key: "orb.idleTimeoutSeconds", env: "RIKA_ORB_IDLE_TIMEOUT", value: 300, source: "default" },
           { key: "project.default", env: "RIKA_ORB_PROJECT", value: null, source: "default" },
+          { key: "user.name", env: "RIKA_USER", value: "config-user", source: "env" },
           { key: "mode.default", env: "RIKA_MODE", value: "rush", source: "env" },
           { key: "compaction.auto", env: "RIKA_COMPACTION_AUTO", value: true, source: "user" },
           { key: "compaction.reserved", env: "RIKA_COMPACTION_RESERVED", value: 4096, source: "workspace" },

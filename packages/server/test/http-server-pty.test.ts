@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Diagnostics } from "@rika/core"
+import { Diagnostics, Time } from "@rika/core"
 import { OrbChanges, OrbPty } from "@rika/orb"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
-import { HttpServer, RemoteControl } from "../src/index"
+import { HttpServer, PresenceHub, RemoteControl } from "../src/index"
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -192,7 +192,12 @@ const makeLayer = (pty: Layer.Layer<OrbPty.Service>) =>
     OrbChanges.testLayer({
       changes: () => Effect.succeed({ base_commit: "abc123", head_commit: "abc123", diff: "", dirty: false }),
     }),
-  ).pipe(Layer.provideMerge(pty), Layer.provideMerge(remoteLayer), Layer.provideMerge(Diagnostics.memoryLayer([])))
+  ).pipe(
+    Layer.provideMerge(pty),
+    Layer.provideMerge(remoteLayer),
+    Layer.provideMerge(PresenceHub.layer.pipe(Layer.provideMerge(Time.layer))),
+    Layer.provideMerge(Diagnostics.memoryLayer([])),
+  )
 
 const remoteLayer = Layer.succeed(
   RemoteControl.Service,
@@ -226,6 +231,7 @@ const remoteLayer = Layer.succeed(
     shareThread: () => unexpected("shareThread"),
     referenceThread: () => unexpected("referenceThread"),
     subscribeThreadEvents: () => Stream.empty,
+    setThreadPresence: () => unexpected("setThreadPresence"),
     startTurn: () => unexpected("startTurn"),
     interruptTurn: () => unexpected("interruptTurn"),
     listArtifacts: () => unexpected("listArtifacts"),

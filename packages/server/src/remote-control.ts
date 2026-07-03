@@ -1,11 +1,12 @@
 import { AgentLoop, CompactionService, ThreadService, WorkspaceAccess, WorkspaceIdentity } from "@rika/agent"
-import { Config, IdGenerator } from "@rika/core"
+import { Config, IdGenerator, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbManager } from "@rika/orb"
 import { ArtifactStore, Database, OrbStore, ProjectStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import * as OrbMirror from "./orb-mirror"
+import * as PresenceHub from "./presence-hub"
 import * as ThreadLive from "./thread-live"
 import * as TurnInterruption from "./turn-interruption"
 
@@ -13,6 +14,7 @@ export class RemoteControlError extends Schema.TaggedErrorClass<RemoteControlErr
   message: Schema.String,
   operation: Schema.String,
   status: Schema.Int,
+  active_user_id: Schema.optional(Ids.UserId),
 }) {}
 
 export type RunError =
@@ -57,6 +59,7 @@ export interface Interface {
   readonly shareThread: (input: Remote.ShareThreadRequest) => Effect.Effect<Remote.ThreadExport, RunError>
   readonly referenceThread: (input: Remote.ReferenceThreadRequest) => Effect.Effect<Remote.ThreadReference, RunError>
   readonly subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) => Stream.Stream<Event.Event, RunError>
+  readonly setThreadPresence: (input: Remote.SetThreadPresenceRequest) => Effect.Effect<Remote.PresenceFrame, RunError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Effect.Effect<Remote.StartTurnResponse, RunError>
   readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, RunError>
   readonly listArtifacts: (
@@ -92,14 +95,17 @@ export const layerWithLive = Layer.effect(
     const orbs = yield* OrbStore.Service
     const orbManager = yield* OrbManager.Service
     const orbMirror = yield* OrbMirror.Service
-    const activeThreads = new Set<Ids.ThreadId>()
+    const presence = yield* PresenceHub.Service
+    const activeThreads = new Map<Ids.ThreadId, Ids.UserId | undefined>()
     const activeThreadsMutex = yield* Semaphore.make(1)
-    const reserveThread = (threadId: Ids.ThreadId) =>
+    const reserveThread = (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
       activeThreadsMutex.withPermit(
         Effect.sync(() => {
-          if (activeThreads.has(threadId)) return false
-          activeThreads.add(threadId)
-          return true
+          if (activeThreads.has(threadId)) {
+            return { reserved: false as const, active_user_id: activeThreads.get(threadId) }
+          }
+          activeThreads.set(threadId, userId)
+          return { reserved: true as const }
         }),
       )
     const releaseThread = (threadId: Ids.ThreadId) =>
@@ -237,28 +243,18 @@ export const layerWithLive = Layer.effect(
         return toProjectSummary(project)
       }),
       listThreads: Effect.fn("RemoteControl.listThreads")(function* (input: Remote.ListThreadsRequest = {}) {
-        if (input.workspace_id !== undefined && input.user_id !== undefined) {
-          yield* workspaceAccess.requireWorkspace({
-            workspace_id: input.workspace_id,
-            user_id: input.user_id,
-            action: "read",
-          })
-        }
-        const summaries = yield* threads.list(input)
-        const readable = yield* workspaceAccess.filterReadableThreads(summaries, input.user_id)
-        return yield* Effect.forEach(readable, (summary) => withOrbStatus(orbs, summary))
+        const summaries = yield* threads.list({
+          ...(input.include_archived === undefined ? {} : { include_archived: input.include_archived }),
+          ...(input.workspace_id === undefined ? {} : { workspace_id: input.workspace_id }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        })
+        return yield* Effect.forEach(summaries, (summary) => withOrbStatus(orbs, summary))
       }),
       openThread: Effect.fn("RemoteControl.openThread")(function* (input: Remote.OpenThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
-        }
         const record = yield* threads.open({ thread_id: input.thread_id })
         return { summary: yield* withOrbStatus(orbs, record.summary), events: record.events }
       }),
       previewThread: Effect.fn("RemoteControl.previewThread")(function* (input: Remote.PreviewThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
-        }
         const record = yield* threads.preview({
           thread_id: input.thread_id,
           ...(input.limit === undefined ? {} : { limit: input.limit }),
@@ -266,9 +262,6 @@ export const layerWithLive = Layer.effect(
         return { summary: yield* withOrbStatus(orbs, record.summary), events: record.events }
       }),
       archiveThread: Effect.fn("RemoteControl.archiveThread")(function* (input: Remote.ArchiveThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
-        }
         const previousSequence = yield* latestLoggedSequence(input.thread_id)
         const summary = yield* threads.archive({ thread_id: input.thread_id })
         yield* pauseRunningOrb(input.thread_id)
@@ -276,25 +269,20 @@ export const layerWithLive = Layer.effect(
         return yield* withOrbStatus(orbs, summary)
       }),
       unarchiveThread: Effect.fn("RemoteControl.unarchiveThread")(function* (input: Remote.ArchiveThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
-        }
         const previousSequence = yield* latestLoggedSequence(input.thread_id)
         const summary = yield* threads.unarchive({ thread_id: input.thread_id })
         yield* publishLoggedEvents(input.thread_id, previousSequence)
         return yield* withOrbStatus(orbs, summary)
       }),
       compactThread: Effect.fn("RemoteControl.compactThread")(function* (input: Remote.CompactThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
-        }
         const previousSequence = yield* latestLoggedSequence(input.thread_id)
-        const reserved = yield* reserveThread(input.thread_id)
-        if (!reserved) {
+        const reserved = yield* reserveThread(input.thread_id, input.user_id)
+        if (!reserved.reserved) {
           return yield* new RemoteControlError({
             message: `Thread ${input.thread_id} already has active work`,
             operation: "compactThread",
             status: 409,
+            ...(reserved.active_user_id === undefined ? {} : { active_user_id: reserved.active_user_id }),
           })
         }
         return yield* Effect.gen(function* () {
@@ -304,15 +292,13 @@ export const layerWithLive = Layer.effect(
         }).pipe(Effect.ensuring(releaseThread(input.thread_id)))
       }),
       forkThread: Effect.fn("RemoteControl.forkThread")(function* (input: Remote.ForkThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
-        }
-        const reserved = yield* reserveThread(input.thread_id)
-        if (!reserved) {
+        const reserved = yield* reserveThread(input.thread_id, input.user_id)
+        if (!reserved.reserved) {
           return yield* new RemoteControlError({
             message: `Thread ${input.thread_id} already has active work`,
             operation: "forkThread",
             status: 409,
+            ...(reserved.active_user_id === undefined ? {} : { active_user_id: reserved.active_user_id }),
           })
         }
         return yield* Effect.gen(function* () {
@@ -322,51 +308,35 @@ export const layerWithLive = Layer.effect(
         }).pipe(Effect.ensuring(releaseThread(input.thread_id)))
       }),
       searchThreads: Effect.fn("RemoteControl.searchThreads")(function* (input: Remote.SearchThreadsRequest) {
-        if (input.workspace_id !== undefined && input.user_id !== undefined) {
-          yield* workspaceAccess.requireWorkspace({
-            workspace_id: input.workspace_id,
-            user_id: input.user_id,
-            action: "read",
-          })
-        }
-        const results = yield* threads.search(input)
-        const summaries = results.map((result) => result.summary)
-        const readable = yield* workspaceAccess.filterReadableThreads(summaries, input.user_id)
-        const readableIds = new Set(readable.map((summary) => summary.thread_id))
-        return yield* Effect.forEach(
-          results.filter((result) => readableIds.has(result.summary.thread_id)),
-          (result) => withOrbStatus(orbs, result.summary).pipe(Effect.map((summary) => ({ ...result, summary }))),
+        const results = yield* threads.search({
+          ...(input.query === undefined ? {} : { query: input.query }),
+          ...(input.include_archived === undefined ? {} : { include_archived: input.include_archived }),
+          ...(input.workspace_id === undefined ? {} : { workspace_id: input.workspace_id }),
+          ...(input.after === undefined ? {} : { after: input.after }),
+          ...(input.before === undefined ? {} : { before: input.before }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        })
+        return yield* Effect.forEach(results, (result) =>
+          withOrbStatus(orbs, result.summary).pipe(Effect.map((summary) => ({ ...result, summary }))),
         )
       }),
       shareThread: Effect.fn("RemoteControl.shareThread")(function* (input: Remote.ShareThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
-        }
         const exported = yield* threads.share({ thread_id: input.thread_id })
         return { ...exported, summary: yield* withOrbStatus(orbs, exported.summary) }
       }),
       referenceThread: Effect.fn("RemoteControl.referenceThread")(function* (input: Remote.ReferenceThreadRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
-        }
         return yield* threads.reference(input)
       }),
       subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) =>
-        Stream.unwrap(
-          Effect.gen(function* () {
-            if (input.user_id !== undefined) {
-              yield* workspaceAccess.requireThread({
-                thread_id: input.thread_id,
-                user_id: input.user_id,
-                action: "read",
-              })
-            }
-            return live.subscribe({
-              thread_id: input.thread_id,
-              ...(input.after_sequence === undefined ? {} : { after_sequence: input.after_sequence }),
-            })
-          }),
-        ),
+        live.subscribe({
+          thread_id: input.thread_id,
+          ...(input.after_sequence === undefined ? {} : { after_sequence: input.after_sequence }),
+        }),
+      setThreadPresence: Effect.fn("RemoteControl.setThreadPresence")(function* (
+        input: Remote.SetThreadPresenceRequest,
+      ) {
+        return yield* presence.heartbeat(input)
+      }),
       startTurn: Effect.fn("RemoteControl.startTurn")(function* (input: Remote.StartTurnRequest) {
         const values = yield* config.get
         const currentIdeContext = yield* ideBridge.currentContext()
@@ -376,26 +346,14 @@ export const layerWithLive = Layer.effect(
             workspace_root: values.workspace_root,
             ...(input.project_id === undefined ? {} : { project_id: input.project_id }),
           })
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess
-            .requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
-            .pipe(
-              Effect.catchTag("WorkspaceAccessError", () =>
-                workspaceAccess.ensureWorkspaceForCreate({
-                  workspace_id: workspaceId,
-                  user_id: input.user_id,
-                  action: "write",
-                }),
-              ),
-            )
-        }
         yield* resumePausedOrb(input.thread_id)
-        const reserved = yield* reserveThread(input.thread_id)
-        if (!reserved) {
+        const reserved = yield* reserveThread(input.thread_id, input.user_id)
+        if (!reserved.reserved) {
           return yield* new RemoteControlError({
             message: `Thread ${input.thread_id} already has an active turn`,
             operation: "startTurn",
             status: 409,
+            ...(reserved.active_user_id === undefined ? {} : { active_user_id: reserved.active_user_id }),
           })
         }
         const ideContext = input.ide_context ?? Option.getOrUndefined(currentIdeContext)
@@ -421,29 +379,16 @@ export const layerWithLive = Layer.effect(
         return { thread_id: input.thread_id, accepted: true }
       }),
       interruptTurn: Effect.fn("RemoteControl.interruptTurn")(function* (input: Remote.InterruptTurnRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "write" })
-        }
         const failed = yield* agentLoop.cancelTurn(input)
         yield* live.publish(failed)
         return failed
       }),
       listArtifacts: Effect.fn("RemoteControl.listArtifacts")(function* (input: Remote.ListArtifactsRequest) {
-        if (input.user_id !== undefined) {
-          yield* workspaceAccess.requireThread({ thread_id: input.thread_id, user_id: input.user_id, action: "read" })
-        }
         return yield* artifacts.list(input)
       }),
       getArtifact: Effect.fn("RemoteControl.getArtifact")(function* (input: Remote.GetArtifactRequest) {
         const artifact = yield* artifacts.get(input.artifact_id)
         if (Option.isSome(artifact)) {
-          if (input.user_id !== undefined) {
-            yield* workspaceAccess.requireThread({
-              thread_id: artifact.value.thread_id,
-              user_id: input.user_id,
-              action: "read",
-            })
-          }
           return artifact.value
         }
         return yield* new RemoteControlError({
@@ -474,7 +419,26 @@ export const layerWithLive = Layer.effect(
   }),
 )
 
-export const layer = layerWithLive.pipe(Layer.provideMerge(ThreadLive.layer))
+export const layer: Layer.Layer<
+  Service,
+  Database.DatabaseError | ThreadEventLog.ThreadEventLogError | ThreadProjection.ThreadProjectionError,
+  | AgentLoop.Service
+  | CompactionService.Service
+  | ThreadService.Service
+  | ArtifactStore.Service
+  | Config.Service
+  | IdGenerator.Service
+  | Database.Service
+  | ThreadEventLog.Service
+  | ThreadProjection.Service
+  | IdeBridge.Service
+  | WorkspaceAccess.Service
+  | ProjectStore.Service
+  | OrbStore.Service
+  | OrbManager.Service
+  | OrbMirror.Service
+  | Time.Service
+> = layerWithLive.pipe(Layer.provideMerge(ThreadLive.layer), Layer.provideMerge(PresenceHub.layer))
 
 export const createThread = Effect.fn("RemoteControl.createThread.call")(function* (input: Remote.CreateThreadRequest) {
   const service = yield* Service
@@ -597,6 +561,13 @@ export const referenceThread = Effect.fn("RemoteControl.referenceThread.call")(f
 export const subscribeThreadEvents = (input: Remote.SubscribeThreadEventsRequest) =>
   Stream.unwrap(Effect.map(Service, (service) => service.subscribeThreadEvents(input)))
 
+export const setThreadPresence = Effect.fn("RemoteControl.setThreadPresence.call")(function* (
+  input: Remote.SetThreadPresenceRequest,
+) {
+  const service = yield* Service
+  return yield* service.setThreadPresence(input)
+})
+
 export const startTurn = Effect.fn("RemoteControl.startTurn.call")(function* (input: Remote.StartTurnRequest) {
   const service = yield* Service
   return yield* service.startTurn(input)
@@ -669,7 +640,14 @@ export const errorToApi = (error: RunError): Remote.ApiError => ({
     error instanceof ThreadService.ThreadForkError ||
     error instanceof WorkspaceAccess.WorkspaceAccessDenied ||
     error instanceof WorkspaceAccess.WorkspaceAccessError
-      ? { details: { status: statusFromError(error) } }
+      ? {
+          details: {
+            status: statusFromError(error),
+            ...(error instanceof RemoteControlError && error.active_user_id !== undefined
+              ? { active_user_id: error.active_user_id }
+              : {}),
+          },
+        }
       : {}),
   },
 })
@@ -689,6 +667,7 @@ const toRemoteSummary = (summary: ThreadService.ThreadRecord["summary"]): Remote
   thread_id: summary.thread_id,
   workspace_id: summary.workspace_id,
   ...(summary.user_id === undefined ? {} : { user_id: summary.user_id }),
+  ...(summary.last_user_id === undefined ? {} : { last_user_id: summary.last_user_id }),
   ...(summary.title_text === undefined ? {} : { title_text: summary.title_text }),
   ...(summary.latest_message_text === undefined ? {} : { latest_message_text: summary.latest_message_text }),
   diff: summary.diff,

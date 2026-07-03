@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { tmpdir, userInfo } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { Settings } from "../src/index"
@@ -18,6 +18,7 @@ describe("Settings", () => {
         "orb.template": "user-template",
         "orb.idleTimeoutSeconds": 111,
         "project.default": "user-project",
+        "user.name": "user-name",
       }),
     )
     await writeFile(
@@ -25,6 +26,7 @@ describe("Settings", () => {
       JSON.stringify({
         "orb.template": "workspace-template",
         "project.default": "workspace-project",
+        "user.name": "workspace-name",
       }),
     )
 
@@ -37,6 +39,7 @@ describe("Settings", () => {
                 HOME: home,
                 RIKA_ORB_TEMPLATE: "env-template",
                 RIKA_ORB_IDLE_TIMEOUT: "42",
+                RIKA_USER: "env-name",
               },
               workspace,
             ),
@@ -52,6 +55,9 @@ describe("Settings", () => {
         project: {
           default: "workspace-project",
         },
+        user: {
+          name: "env-name",
+        },
         mode: {
           default: "smart",
         },
@@ -65,6 +71,7 @@ describe("Settings", () => {
         "orb.template": "env",
         "orb.idleTimeoutSeconds": "env",
         "project.default": "workspace",
+        "user.name": "env",
         "mode.default": "default",
         "telemetry.enabled": "default",
         "telemetry.endpoint": "default",
@@ -95,6 +102,9 @@ describe("Settings", () => {
           idleTimeoutSeconds: 300,
         },
         project: {},
+        user: {
+          name: userInfo().username,
+        },
         mode: {
           default: "smart",
         },

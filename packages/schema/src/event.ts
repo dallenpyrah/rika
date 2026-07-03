@@ -39,6 +39,7 @@ export const TurnStarted = Schema.Struct({
   turn_id: TurnId,
   type: Schema.Literal("turn.started"),
   data: Schema.Struct({
+    user_id: Schema.optional(UserId),
     tool_access: Schema.optional(TurnToolAccess),
   }),
 }).annotate({ identifier: "Rika.Event.TurnStarted" })

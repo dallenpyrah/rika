@@ -21,6 +21,7 @@ export const ThreadSummary = Schema.Struct({
   thread_id: Ids.ThreadId,
   workspace_id: Ids.WorkspaceId,
   user_id: Schema.optional(Ids.UserId),
+  last_user_id: Schema.optional(Ids.UserId),
   title_text: Schema.optional(Schema.String),
   latest_message_id: Schema.optional(Ids.MessageId),
   latest_message_role: Schema.optional(Message.Role),
@@ -157,6 +158,7 @@ interface ThreadProjectionRow {
   readonly thread_id: string
   readonly workspace_id: string
   readonly user_id: string | null
+  readonly last_user_id: string | null
   readonly latest_message_id: string | null
   readonly latest_message_role: string | null
   readonly latest_message_text: string | null
@@ -240,17 +242,22 @@ const applyFirstEvent = (database: ProjectionDatabase, event: Event.Event) => {
 
 const applyThreadCreated = (database: ProjectionDatabase, event: Event.ThreadCreated) =>
   database.run(sql`
-    insert into thread_projections (thread_id, workspace_id, user_id, title_text, archived, last_sequence, created_at, updated_at)
-    values (${event.thread_id}, ${event.data.workspace_id}, ${event.data.user_id ?? null}, ${event.data.title_text ?? null}, 0, ${event.sequence}, ${event.created_at}, ${event.created_at})
+    insert into thread_projections (thread_id, workspace_id, user_id, last_user_id, title_text, archived, last_sequence, created_at, updated_at)
+    values (${event.thread_id}, ${event.data.workspace_id}, ${event.data.user_id ?? null}, ${event.data.user_id ?? null}, ${event.data.title_text ?? null}, 0, ${event.sequence}, ${event.created_at}, ${event.created_at})
   `)
 
-const applyMessageAdded = (database: ProjectionDatabase, event: Event.MessageAdded) =>
-  database.run(sql`
+const applyMessageAdded = (database: ProjectionDatabase, event: Event.MessageAdded) => {
+  const userId = messageUserId(event)
+  return database.run(sql`
     update thread_projections set
       latest_message_id = ${event.data.message.id},
       latest_message_role = ${event.data.message.role},
       latest_message_text = ${messageText(event.data.message)},
       latest_message_created_at = ${event.data.message.created_at},
+      last_user_id = case
+        when ${userId} is null then last_user_id
+        else ${userId}
+      end,
       title_text = case
         when title_text is null then ${titleText(event.data.message) ?? null}
         else title_text
@@ -259,6 +266,7 @@ const applyMessageAdded = (database: ProjectionDatabase, event: Event.MessageAdd
       updated_at = ${event.created_at}
     where thread_id = ${event.thread_id}
   `)
+}
 
 const applyToolCallCompleted = (database: ProjectionDatabase, event: Event.ToolCallCompleted) => {
   const diff = diffStatsFromValue(event.data.result.output)
@@ -279,6 +287,10 @@ const applyTurnStarted = (database: ProjectionDatabase, event: Event.TurnStarted
     update thread_projections set
       active_turn_id = ${event.turn_id},
       active_turn_status = 'active',
+      last_user_id = case
+        when ${event.data.user_id ?? null} is null then last_user_id
+        else ${event.data.user_id ?? null}
+      end,
       last_sequence = ${event.sequence},
       updated_at = ${event.created_at}
     where thread_id = ${event.thread_id}
@@ -368,6 +380,12 @@ const applySequenceOnly = (database: ProjectionDatabase, event: Event.Event) =>
 
 const messageText = (message: Message.Message) => Message.displayText(message)
 
+const messageUserId = (event: Event.MessageAdded) => {
+  if (event.data.message.role !== "user") return null
+  const userId = event.data.message.metadata?.user_id
+  return typeof userId === "string" && userId.length > 0 ? userId : null
+}
+
 const titleText = (message: Message.Message): string | undefined => {
   if (message.role !== "user") return undefined
   const text = readableText(messageText(message))
@@ -398,6 +416,7 @@ const rowToSummary = (row: ThreadProjectionRow): ThreadSummary => ({
   thread_id: Ids.ThreadId.make(row.thread_id),
   workspace_id: Ids.WorkspaceId.make(row.workspace_id),
   user_id: row.user_id === null ? undefined : Ids.UserId.make(row.user_id),
+  last_user_id: row.last_user_id === null ? undefined : Ids.UserId.make(row.last_user_id),
   title_text: row.title_text === null ? undefined : row.title_text,
   latest_message_id: row.latest_message_id === null ? undefined : Ids.MessageId.make(row.latest_message_id),
   latest_message_role: roleOrUndefined(row.latest_message_role),

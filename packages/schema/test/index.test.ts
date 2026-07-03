@@ -12,6 +12,7 @@ const artifactId = Ids.ArtifactId.make("artifact_1")
 const workspaceId = Ids.WorkspaceId.make("workspace_1")
 const orbId = Ids.OrbId.make("orb_1")
 const projectId = Ids.ProjectId.make("project_1")
+const userId = Ids.UserId.make("user_1")
 
 describe("Rika protocol schemas", () => {
   test("round-trips messages", () => {
@@ -241,6 +242,48 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
 
+  test("round-trips user attribution and presence stream frames", () => {
+    const started: Event.Event = {
+      id: Ids.EventId.make("event_turn_started_user"),
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 2,
+      version: 1,
+      created_at: now,
+      type: "turn.started",
+      data: { user_id: userId },
+    }
+    const message: Event.Event = {
+      id: Ids.EventId.make("event_message_user"),
+      thread_id: threadId,
+      turn_id: turnId,
+      sequence: 3,
+      version: 1,
+      created_at: now,
+      type: "message.added",
+      data: {
+        message: Message.user({
+          id: messageId,
+          thread_id: threadId,
+          turn_id: turnId,
+          content: "Hello from a user",
+          created_at: now,
+          metadata: { user_id: userId },
+        }),
+      },
+    }
+    const presence: Remote.PresenceFrame = {
+      presence: {
+        thread_id: threadId,
+        users: [{ user_id: userId, state: "typing", last_seen: now }],
+      },
+    }
+
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(started))).toEqual(started)
+    expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(message))).toEqual(message)
+    expect(Codec.decode(Remote.StreamFrame)(Codec.encode(Remote.StreamFrame)(presence))).toEqual(presence)
+  })
+
   test("round-trips tool input delta events", () => {
     const event: Event.Event = {
       id: eventId,
@@ -393,7 +436,7 @@ describe("Rika protocol schemas", () => {
   })
 
   test("round-trips remote control API payloads", () => {
-    const userId = Ids.UserId.make("user_remote_payload")
+    const remoteUserId = Ids.UserId.make("user_remote_payload")
     const start: Remote.StartTurnRequest = {
       thread_id: threadId,
       workspace_id: workspaceId,
@@ -425,12 +468,12 @@ describe("Rika protocol schemas", () => {
     }
     const compact: Remote.CompactThreadRequest = {
       thread_id: threadId,
-      user_id: userId,
+      user_id: remoteUserId,
     }
     const fork: Remote.ForkThreadRequest = {
       thread_id: threadId,
       at_turn: turnId,
-      user_id: userId,
+      user_id: remoteUserId,
       title_text: "tournament:sdk/1",
     }
     const health: Remote.BackendHealth = {

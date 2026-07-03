@@ -65,6 +65,7 @@ export const ThreadSummary = Schema.Struct({
   thread_id: Ids.ThreadId,
   workspace_id: Ids.WorkspaceId,
   user_id: Schema.optional(Ids.UserId),
+  last_user_id: Schema.optional(Ids.UserId),
   title_text: Schema.optional(Schema.String),
   latest_message_id: Schema.optional(Ids.MessageId),
   latest_message_role: Schema.optional(Message.Role),

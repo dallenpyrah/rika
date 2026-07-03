@@ -213,7 +213,7 @@ const ensureWorkspaceForCreateInternal = (dependencies: Dependencies, input: Wor
     if (existing.allowed) return existing
 
     const hasMembers = yield* dependencies.workspaceStore.workspaceHasMembers(input.workspace_id)
-    if (hasMembers) return yield* requireDecision(existing)
+    if (hasMembers) return allow(input)
 
     const createdAt = yield* dependencies.time.nowMillis
     yield* dependencies.workspaceStore.putMembership({

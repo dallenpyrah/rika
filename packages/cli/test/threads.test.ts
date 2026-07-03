@@ -279,6 +279,7 @@ const emptyClient = (): Client.Interface => ({
   subscribeThreadEvents: () => {
     throw new Error("Unexpected SDK stream call")
   },
+  setThreadPresence: unexpectedClientCall,
   startTurn: unexpectedClientCall,
   interruptTurn: unexpectedClientCall,
   listArtifacts: unexpectedClientCall,

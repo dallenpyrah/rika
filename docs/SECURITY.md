@@ -74,12 +74,13 @@ Workspace command MCP servers require explicit approval before spawn. Approval i
 
 ## Remote control and hosted workspaces
 
-The HTTP server can require `Authorization: Bearer <token>`. Hosted user requests pass `user_id` through schema payloads and are checked by `WorkspaceAccess.Service` against durable workspace memberships.
+The HTTP server can require `Authorization: Bearer <token>`. That bearer token gates remote API access. `user_id` is a self-asserted participant identity for attribution, turn-conflict display, and presence; it is not an authorization secret and must not be treated as proof of workspace membership.
 
 - Requests without `user_id` keep local-first behavior.
-- Requests with `user_id` require workspace membership for thread/artifact reads and writes.
+- Requests with `user_id` stamp attribution where the schema supports it.
+- Presence uses `user_id` for ephemeral active/typing snapshots and is not persisted.
 - The first identified user to create an empty hosted workspace becomes owner.
-- Outsiders receive access-denied errors rather than filtered data.
+- Workspace membership remains durable security data, but remote-control routes must not infer access control from `user_id` alone.
 
 Remote control grants thread steering, not unrestricted filesystem access. Keep local filesystem mutation behind normal tools/policy.
 

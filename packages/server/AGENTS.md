@@ -25,13 +25,13 @@
 - `ThreadLive` is notification plumbing only: attach live, catch up from `ThreadEventLog`, dedupe by event `sequence`, and recover gaps from the log.
 - Localhost starts without auth for the MVP. If a token is configured, require `Authorization: Bearer <token>`.
 - Turn execution and permission behavior must continue through `AgentLoop.Service` and `ToolExecutor.Service`.
-- Hosted user requests must pass through `WorkspaceAccess.Service`; local requests without `user_id` remain local-first.
+- Remote API access is gated by bearer token when configured. `user_id` is attribution and presence identity, not authorization.
 
 ## For AI Agents
 
 - Read `../../docs/effect-module-conventions.md` before changing services.
 - Do not import provider SDKs, Drizzle, Rivet internals, or filesystem mutation APIs here.
-- Keep hosted/multi-user access checks delegated to `WorkspaceAccess.Service`; the server only adapts request identity into service calls.
+- Keep hosted access control separate from self-asserted `user_id`; the server only adapts request identity into service calls.
 
 ## Testing And Verification
 

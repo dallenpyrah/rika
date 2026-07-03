@@ -1,5 +1,5 @@
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
-import { Effect, Schema, Stream } from "effect"
+import { Effect, Schedule, Schema, Stream } from "effect"
 
 export interface RequestInput {
   readonly method: "GET" | "POST"
@@ -8,12 +8,14 @@ export interface RequestInput {
 }
 
 export interface Transport {
+  readonly user_id?: Ids.UserId
   readonly requestJson: (input: RequestInput) => Effect.Effect<unknown, SdkError>
   readonly streamJson: (input: RequestInput) => Stream.Stream<unknown, SdkError>
 }
 
 export interface FetchTransportInput {
   readonly base_url: string
+  readonly user_id?: Ids.UserId
   readonly token?: string
   readonly fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 }
@@ -23,6 +25,10 @@ export class SdkError extends Schema.TaggedErrorClass<SdkError>()("SdkError", {
   operation: Schema.String,
   status: Schema.optional(Schema.Int),
 }) {}
+
+export interface SubscribeThreadEventsInput extends Remote.SubscribeThreadEventsRequest {
+  readonly onPresence?: (presence: Remote.PresencePayload) => void
+}
 
 export interface Interface {
   readonly backendHealth: () => Effect.Effect<Remote.BackendHealth, SdkError>
@@ -62,7 +68,8 @@ export interface Interface {
   ) => Effect.Effect<ReadonlyArray<Remote.ThreadSearchResult>, SdkError>
   readonly shareThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) => Effect.Effect<Remote.ThreadExport, SdkError>
   readonly referenceThread: (input: Remote.ReferenceThreadRequest) => Effect.Effect<Remote.ThreadReference, SdkError>
-  readonly subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) => Stream.Stream<Event.Event, SdkError>
+  readonly subscribeThreadEvents: (input: SubscribeThreadEventsInput) => Stream.Stream<Event.Event, SdkError>
+  readonly setThreadPresence: (input: Remote.SetThreadPresenceRequest) => Effect.Effect<Remote.PresenceFrame, SdkError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Effect.Effect<Remote.StartTurnResponse, SdkError>
   readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, SdkError>
   readonly listArtifacts: (
@@ -79,6 +86,18 @@ export interface Interface {
 
 const ApiErrorDetails = Schema.Struct({ status: Schema.Int })
 
+const userIdFor = (transport: Transport, userId: Ids.UserId | undefined) => userId ?? transport.user_id
+
+const userIdQuery = (transport: Transport, userId: Ids.UserId | undefined) => {
+  const resolved = userIdFor(transport, userId)
+  return resolved === undefined ? {} : { user_id: resolved }
+}
+
+const withUserId = <A extends { readonly user_id?: Ids.UserId | undefined }>(transport: Transport, input: A): A => {
+  const userId = input.user_id ?? transport.user_id
+  return userId === undefined ? input : ({ ...input, user_id: userId } as A)
+}
+
 export const make = (transport: Transport): Interface => ({
   backendHealth: () =>
     transport
@@ -86,7 +105,11 @@ export const make = (transport: Transport): Interface => ({
       .pipe(Effect.flatMap(decodeEffect(Remote.BackendHealth, "backendHealth"))),
   createThread: (input: Remote.CreateThreadRequest = {}) =>
     transport
-      .requestJson({ method: "POST", path: "/v1/threads", body: Codec.encode(Remote.CreateThreadRequest)(input) })
+      .requestJson({
+        method: "POST",
+        path: "/v1/threads",
+        body: Codec.encode(Remote.CreateThreadRequest)(withUserId(transport, input)),
+      })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "createThread"))),
   createOrbThread: (input: Remote.CreateOrbThreadRequest) =>
     transport
@@ -126,41 +149,41 @@ export const make = (transport: Transport): Interface => ({
       .pipe(Effect.flatMap(decodeEffect(Remote.ProjectSummary, "createProject"))),
   listThreads: (input: Remote.ListThreadsRequest = {}) =>
     transport
-      .requestJson({ method: "GET", path: `/v1/threads${query(input)}` })
+      .requestJson({ method: "GET", path: `/v1/threads${query(withUserId(transport, input))}` })
       .pipe(Effect.flatMap(decodeEffect(Schema.Array(Remote.ThreadSummary), "listThreads"))),
   openThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
       .requestJson({
         method: "GET",
-        path: `/v1/threads/${encodeURIComponent(threadId)}${query(userId === undefined ? {} : { user_id: userId })}`,
+        path: `/v1/threads/${encodeURIComponent(threadId)}${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadRecord, "openThread"))),
   previewThread: (threadId: Ids.ThreadId, input: Omit<Remote.PreviewThreadRequest, "thread_id"> = {}) =>
     transport
       .requestJson({
         method: "GET",
-        path: `/v1/threads/${encodeURIComponent(threadId)}/preview${query(input)}`,
+        path: `/v1/threads/${encodeURIComponent(threadId)}/preview${query(withUserId(transport, input))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadRecord, "previewThread"))),
   archiveThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
       .requestJson({
         method: "POST",
-        path: `/v1/threads/${encodeURIComponent(threadId)}/archive${query(userId === undefined ? {} : { user_id: userId })}`,
+        path: `/v1/threads/${encodeURIComponent(threadId)}/archive${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "archiveThread"))),
   unarchiveThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
       .requestJson({
         method: "POST",
-        path: `/v1/threads/${encodeURIComponent(threadId)}/unarchive${query(userId === undefined ? {} : { user_id: userId })}`,
+        path: `/v1/threads/${encodeURIComponent(threadId)}/unarchive${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "unarchiveThread"))),
   compactThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
       .requestJson({
         method: "POST",
-        path: `/v1/threads/${encodeURIComponent(threadId)}/compact${query(userId === undefined ? {} : { user_id: userId })}`,
+        path: `/v1/threads/${encodeURIComponent(threadId)}/compact${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Event.ContextCompacted, "compactThread"))),
   forkThread: (threadId: Ids.ThreadId, input: Omit<Remote.ForkThreadRequest, "thread_id"> = {}) =>
@@ -168,62 +191,85 @@ export const make = (transport: Transport): Interface => ({
       .requestJson({
         method: "POST",
         path: `/v1/threads/${encodeURIComponent(threadId)}/fork`,
-        body: Codec.encode(Remote.ForkThreadRequest)({ thread_id: threadId, ...input }),
+        body: Codec.encode(Remote.ForkThreadRequest)(withUserId(transport, { thread_id: threadId, ...input })),
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadSummary, "forkThread"))),
   searchThreads: (input: Remote.SearchThreadsRequest) =>
     transport
-      .requestJson({ method: "GET", path: `/v1/threads/search${query(input)}` })
+      .requestJson({ method: "GET", path: `/v1/threads/search${query(withUserId(transport, input))}` })
       .pipe(Effect.flatMap(decodeEffect(Schema.Array(Remote.ThreadSearchResult), "searchThreads"))),
   shareThread: (threadId: Ids.ThreadId, userId?: Ids.UserId) =>
     transport
       .requestJson({
         method: "GET",
-        path: `/v1/threads/${encodeURIComponent(threadId)}/share${query(userId === undefined ? {} : { user_id: userId })}`,
+        path: `/v1/threads/${encodeURIComponent(threadId)}/share${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Remote.ThreadExport, "shareThread"))),
-  referenceThread: (input: Remote.ReferenceThreadRequest) =>
-    transport
+  referenceThread: (input: Remote.ReferenceThreadRequest) => {
+    const request = withUserId(transport, input)
+    return transport
       .requestJson({
         method: "GET",
         path: `/v1/threads/${encodeURIComponent(input.thread_id)}/reference${query({
-          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          ...(request.user_id === undefined ? {} : { user_id: request.user_id }),
           ...(input.query === undefined ? {} : { query: input.query }),
           ...(input.max_chars === undefined ? {} : { max_chars: input.max_chars }),
         })}`,
       })
-      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadReference, "referenceThread"))),
-  subscribeThreadEvents: (input: Remote.SubscribeThreadEventsRequest) =>
-    transport
+      .pipe(Effect.flatMap(decodeEffect(Remote.ThreadReference, "referenceThread")))
+  },
+  subscribeThreadEvents: (input: SubscribeThreadEventsInput) => {
+    const request = withUserId(transport, input)
+    const events = transport
       .streamJson({
         method: "GET",
-        path: `/v1/threads/${encodeURIComponent(input.thread_id)}/events${query({
-          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
-          ...(input.after_sequence === undefined ? {} : { after_sequence: input.after_sequence }),
+        path: `/v1/threads/${encodeURIComponent(request.thread_id)}/events${query({
+          ...(request.user_id === undefined ? {} : { user_id: request.user_id }),
+          ...(request.after_sequence === undefined ? {} : { after_sequence: request.after_sequence }),
         })}`,
       })
-      .pipe(Stream.mapEffect(decodeStreamFrame)),
+      .pipe(
+        Stream.mapEffect((value) => decodeStreamFrame(value, input.onPresence)),
+        Stream.flatMap((event) => (event === undefined ? Stream.empty : Stream.make(event))),
+      )
+    return request.user_id === undefined
+      ? events
+      : events.pipe(
+          Stream.mergeEffect(
+            setThreadPresenceRequest(transport, {
+              thread_id: request.thread_id,
+              user_id: request.user_id,
+              state: "active",
+            }).pipe(Effect.repeat(Schedule.spaced("15 seconds")), Effect.asVoid),
+          ),
+        )
+  },
+  setThreadPresence: (input: Remote.SetThreadPresenceRequest) => setThreadPresenceRequest(transport, input),
   startTurn: (input: Remote.StartTurnRequest) =>
     transport
-      .requestJson({ method: "POST", path: "/v1/turns", body: Codec.encode(Remote.StartTurnRequest)(input) })
+      .requestJson({
+        method: "POST",
+        path: "/v1/turns",
+        body: Codec.encode(Remote.StartTurnRequest)(withUserId(transport, input)),
+      })
       .pipe(Effect.flatMap(decodeEffect(Remote.StartTurnResponse, "startTurn"))),
   interruptTurn: (input: Remote.InterruptTurnRequest) =>
     transport
       .requestJson({
         method: "POST",
         path: "/v1/turns/interrupt",
-        body: Codec.encode(Remote.InterruptTurnRequest)(input),
+        body: Codec.encode(Remote.InterruptTurnRequest)(withUserId(transport, input)),
       })
       .pipe(Effect.flatMap(decodeEffect(Event.TurnFailed, "interruptTurn"))),
   listArtifacts: (input: Remote.ListArtifactsRequest) =>
     transport
-      .requestJson({ method: "GET", path: `/v1/artifacts${query(input)}` })
+      .requestJson({ method: "GET", path: `/v1/artifacts${query(withUserId(transport, input))}` })
       .pipe(Effect.flatMap(decodeEffect(Schema.Array(Artifact.Artifact), "listArtifacts"))),
   getArtifact: (artifactId: Ids.ArtifactId, userId?: Ids.UserId) =>
     transport
       .requestJson({
         method: "GET",
-        path: `/v1/artifacts/${encodeURIComponent(artifactId)}${query(userId === undefined ? {} : { user_id: userId })}`,
+        path: `/v1/artifacts/${encodeURIComponent(artifactId)}${query(userIdQuery(transport, userId))}`,
       })
       .pipe(Effect.flatMap(decodeEffect(Artifact.Artifact, "getArtifact"))),
   connectIde: (input: Ide.ConnectRequest) =>
@@ -256,6 +302,7 @@ export const fetchTransport = (input: FetchTransportInput): Transport => {
   const fetchImpl = input.fetch ?? fetch
   const baseUrl = input.base_url.replace(/\/$/, "")
   return {
+    ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
     requestJson: (request) =>
       Effect.tryPromise({
         try: async () => {
@@ -312,17 +359,38 @@ const decodeEffect =
           catch: (cause) => toSdkError(cause, operation),
         })
 
-const decodeStreamFrame = (value: unknown): Effect.Effect<Event.Event, SdkError> =>
+const setThreadPresenceRequest = (transport: Transport, input: Remote.SetThreadPresenceRequest) =>
+  transport
+    .requestJson({
+      method: "POST",
+      path: `/v1/threads/${encodeURIComponent(input.thread_id)}/presence`,
+      body: Codec.encode(Remote.PresenceRequest)({ user_id: input.user_id, state: input.state }),
+    })
+    .pipe(Effect.flatMap(decodeEffect(Remote.PresenceFrame, "setThreadPresence")))
+
+const decodeStreamFrame = (
+  value: unknown,
+  onPresence: ((presence: Remote.PresencePayload) => void) | undefined,
+): Effect.Effect<Event.Event | undefined, SdkError> =>
   decodeEffect(
     Remote.StreamFrame,
     "subscribeThreadEvents",
   )(value).pipe(
-    Effect.flatMap((frame) =>
-      isApiErrorFrame(frame) ? Effect.fail(apiError(frame, "subscribeThreadEvents")) : Effect.succeed(frame),
-    ),
+    Effect.flatMap((frame) => {
+      if (isApiErrorFrame(frame)) return Effect.fail(apiError(frame, "subscribeThreadEvents"))
+      if (isPresenceFrame(frame)) {
+        return Effect.try({
+          try: () => onPresence?.(frame.presence),
+          catch: (cause) => toSdkError(cause, "subscribeThreadEvents"),
+        }).pipe(Effect.as(undefined))
+      }
+      return Effect.succeed(frame)
+    }),
   )
 
 const isApiErrorFrame = (frame: Remote.StreamFrame): frame is Remote.ApiError => "error" in frame
+
+const isPresenceFrame = (frame: Remote.StreamFrame): frame is Remote.PresenceFrame => "presence" in frame
 
 const isApiErrorBody = (value: unknown): value is Remote.ApiError =>
   Schema.decodeUnknownOption(Remote.ApiError)(value)._tag === "Some"

@@ -16,7 +16,7 @@ import {
 import { Client } from "@rika/sdk"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
-import { HttpServer, OrbMirror, RemoteControl, ThreadLive } from "../src/index"
+import { HttpServer, OrbMirror, PresenceHub, RemoteControl, ThreadLive } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_orb_mirror")
 const projectId = Ids.ProjectId.make("project_orb_mirror")
@@ -644,6 +644,7 @@ const makeRemoteControlLiveLayer = () => {
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const liveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))
   const agentLayer = Layer.succeed(
     AgentLoop.Service,
     AgentLoop.Service.of({
@@ -662,10 +663,11 @@ const makeRemoteControlLiveLayer = () => {
     Layer.provideMerge(unusedCompactionLayer()),
     Layer.provideMerge(IdeBridge.layer),
     Layer.provideMerge(liveLayer),
+    Layer.provideMerge(presenceLayer),
     Layer.provideMerge(remoteOrbManagerLayer()),
     Layer.provideMerge(remoteOrbMirrorLayer()),
   )
-  return Layer.mergeAll(migratedStorageLayer, liveLayer, remoteLayer)
+  return Layer.mergeAll(migratedStorageLayer, liveLayer, presenceLayer, remoteLayer)
 }
 
 const unusedCompactionLayer = () =>
@@ -717,6 +719,7 @@ const makeRemoteBackendLiveLayer = () => {
   const remoteLayer = makeRemoteControlLiveLayer()
   const httpLayer = HttpServer.layer.pipe(
     Layer.provideMerge(remoteLayer),
+    Layer.provideMerge(PresenceHub.layer.pipe(Layer.provideMerge(Time.fixedLayer(now)))),
     Layer.provideMerge(Diagnostics.memoryLayer([])),
   )
   return Layer.mergeAll(remoteLayer, httpLayer)

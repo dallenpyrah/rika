@@ -116,6 +116,10 @@ _Avoid_: TUI backend, web server, hidden singleton
 The long-lived stream of thread events a client consumes after opening a thread. It starts after a known event sequence, catches up from the event log, then continues with live notifications.
 _Avoid_: Turn response stream, websocket state, UI cache
 
+**Thread Presence**:
+The ephemeral per-thread active/typing snapshot emitted beside live thread events. Presence is keyed by self-asserted user identity, expires by heartbeat TTL, and is not durable thread history.
+_Avoid_: Event log member state, workspace authorization, chat roster
+
 **Foldkit Web UI**:
 The local browser client for Rika threads, built with Foldkit and rendered from the same remote-control subscription path as interactive sessions.
 _Avoid_: React app, dashboard, separate frontend state

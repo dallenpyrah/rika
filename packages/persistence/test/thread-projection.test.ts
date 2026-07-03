@@ -7,6 +7,7 @@ const threadId = Ids.ThreadId.make("thread_projection_thread")
 const workspaceId = Ids.WorkspaceId.make("workspace_projection")
 const turnId = Ids.TurnId.make("turn_projection")
 const secondTurnId = Ids.TurnId.make("turn_projection_second")
+const userId = Ids.UserId.make("user_projection")
 const layer = Layer.mergeAll(Database.memoryLayer, Migration.layer, ThreadEventLog.layer, ThreadProjection.layer)
 
 describe("ThreadProjection", () => {
@@ -28,6 +29,7 @@ describe("ThreadProjection", () => {
       latest_message_text: "hello projection",
       active_turn_id: turnId,
       active_turn_status: "completed",
+      last_user_id: userId,
       archived: false,
     })
   })
@@ -62,7 +64,11 @@ describe("ThreadProjection", () => {
     )
 
     expect(summaries).toHaveLength(1)
-    expect(summaries[0]).toMatchObject({ latest_message_text: "hello projection", active_turn_status: "completed" })
+    expect(summaries[0]).toMatchObject({
+      latest_message_text: "hello projection",
+      active_turn_status: "completed",
+      last_user_id: userId,
+    })
   })
 
   test("projects stable thread titles and cumulative diff stats", async () => {
@@ -209,7 +215,7 @@ const projectionEvents = (): readonly [
     version: 1,
     created_at: 2,
     type: "turn.started",
-    data: {},
+    data: { user_id: userId },
   },
   {
     id: Ids.EventId.make("projection_message"),
@@ -226,6 +232,7 @@ const projectionEvents = (): readonly [
         turn_id: turnId,
         content: "hello projection",
         created_at: 3,
+        metadata: { user_id: userId },
       }),
     },
   },

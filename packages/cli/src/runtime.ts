@@ -34,7 +34,7 @@ import {
 import { PluginHost, PluginUi, SelfExtension } from "@rika/plugin"
 import { Client } from "@rika/sdk"
 import { Ids, Remote } from "@rika/schema"
-import { HttpServer, OrbMirror, RemoteControl, ThreadLive } from "@rika/server"
+import { HttpServer, OrbMirror, PresenceHub, RemoteControl, ThreadLive } from "@rika/server"
 import { BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
 import type { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
 import { Effect, Layer, Schedule, Stream } from "effect"
@@ -730,6 +730,8 @@ const interactiveRemoteLiveLayerFromTui = (
       const artifactStore = yield* ArtifactStore.Service
       const idGenerator = yield* IdGenerator.Service
       const time = yield* Time.Service
+      const settings = yield* Settings.Service
+      const snapshot = yield* settings.snapshot
       const workspaceId = yield* workspaceIdForRoot(workspaceRoot)
       const resolveEndpoint = (endpointInput: ReconnectingEndpointInput) =>
         BackendEndpoint.resolveEndpoint({
@@ -744,7 +746,11 @@ const interactiveRemoteLiveLayerFromTui = (
           Effect.provideService(BackendEndpoint.Health, health),
           Effect.provideService(BackendEndpoint.OrbResumer, resumer),
         )
-      const client = reconnectingClient({ resolveEndpoint, touchOrb: (orbId) => activity.touch(orbId) })
+      const client = reconnectingClient({
+        resolveEndpoint,
+        user_id: Ids.UserId.make(snapshot.values.user.name),
+        touchOrb: (orbId) => activity.touch(orbId),
+      })
       const runTournament = (input: {
         readonly thread_id: Ids.ThreadId
         readonly message: string
@@ -924,6 +930,7 @@ export interface ReconnectingClientInput {
   readonly resolveEndpoint: (
     input: ReconnectingEndpointInput,
   ) => Effect.Effect<BackendEndpoint.BackendEndpoint, ReconnectingResolveError>
+  readonly user_id?: Ids.UserId
   readonly touchOrb?: (orbId: Ids.OrbId) => Effect.Effect<void, OrbActivity.RunError>
   readonly fetch?: Client.FetchTransportInput["fetch"]
 }
@@ -969,6 +976,7 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
       Client.fetchTransport({
         base_url: resolvedEndpoint.url,
         token: resolvedEndpoint.token,
+        ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
         ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       }),
     )
@@ -1063,6 +1071,8 @@ export const reconnectingClient = (input: ReconnectingClientInput): Client.Inter
       request({ thread_id: reference.thread_id }, (remote) => remote.referenceThread(reference)),
     subscribeThreadEvents: (subscription) =>
       stream({ thread_id: subscription.thread_id }, (remote) => remote.subscribeThreadEvents(subscription)),
+    setThreadPresence: (presence) =>
+      request({ thread_id: presence.thread_id }, (remote) => remote.setThreadPresence(presence)),
     startTurn: (turn) => request({ thread_id: turn.thread_id }, (remote) => remote.startTurn(turn)),
     interruptTurn: (turn) => request({ thread_id: turn.thread_id }, (remote) => remote.interruptTurn(turn)),
     listArtifacts: (artifacts) =>
@@ -1235,6 +1245,7 @@ export const threadsLiveLayer = (
     }),
   )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
     storageAndThreadLayer,
@@ -1256,6 +1267,7 @@ export const threadsLiveLayer = (
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(orbMirrorLayer),
     Layer.provideMerge(threadLiveLayer),
+    Layer.provideMerge(presenceLayer),
   )
   const tournamentTurnControlLayer = Layer.effect(
     TournamentService.TurnControlService,
@@ -1303,6 +1315,8 @@ export const threadsLiveLayer = (
       const orbs = yield* OrbStore.Service
       const health = yield* BackendEndpoint.Health
       const resumer = yield* BackendEndpoint.OrbResumer
+      const settings = yield* Settings.Service
+      const snapshot = yield* settings.snapshot
       const resolveEndpoint = (input: ReconnectingEndpointInput) =>
         BackendEndpoint.resolveEndpoint({
           ...input,
@@ -1315,7 +1329,9 @@ export const threadsLiveLayer = (
           Effect.provideService(BackendEndpoint.Health, health),
           Effect.provideService(BackendEndpoint.OrbResumer, resumer),
         )
-      return Threads.RemoteClient.of(reconnectingClient({ resolveEndpoint }))
+      return Threads.RemoteClient.of(
+        reconnectingClient({ resolveEndpoint, user_id: Ids.UserId.make(snapshot.values.user.name) }),
+      )
     }),
   ).pipe(
     Layer.provideMerge(backendLayer),
@@ -1683,6 +1699,7 @@ export const serverLiveLayer = (
     Layer.provideMerge(timeLayer),
   )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
   const compactionLayer = CompactionService.layer.pipe(Layer.provideMerge(baseLayer))
   const orbMirrorLayer = OrbMirror.layer.pipe(
@@ -1697,6 +1714,7 @@ export const serverLiveLayer = (
     Layer.provideMerge(baseLayer),
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(threadLiveLayer),
+    Layer.provideMerge(presenceLayer),
     Layer.provideMerge(orbMirrorLayer),
   )
   const orbMirrorStartupLayer = Layer.effectDiscard(
@@ -1705,7 +1723,10 @@ export const serverLiveLayer = (
       Schedule.spaced("5 seconds"),
     ).pipe(Effect.forkScoped),
   ).pipe(Layer.provideMerge(orbMirrorLayer), Layer.provide(diagnosticsLayer))
-  const httpLayer = HttpServer.layerFromEnv(env).pipe(Layer.provideMerge(remoteLayer))
+  const httpLayer = HttpServer.layerFromEnv(env).pipe(
+    Layer.provideMerge(remoteLayer),
+    Layer.provideMerge(presenceLayer),
+  )
   const commandLayer = Layer.mergeAll(
     Server.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(httpLayer)),
     orbMirrorStartupLayer,

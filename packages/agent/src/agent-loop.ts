@@ -1165,13 +1165,24 @@ const makeTurnStarted = (dependencies: Dependencies, input: RunTurnInput, turnId
       version: 1,
       created_at: createdAt,
       type: "turn.started",
-      data: ToolAccess.metadata(input.tool_access),
+      data: {
+        ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+        ...ToolAccess.metadata(input.tool_access),
+      },
     }
     return event
   })
 
 const makeUserMessageAdded = (dependencies: Dependencies, input: RunTurnInput, turnId: Ids.TurnId, sequence: number) =>
-  makeMessageAdded(dependencies, input.thread_id, turnId, "user", input.content_parts ?? input.content, sequence)
+  makeMessageAdded(
+    dependencies,
+    input.thread_id,
+    turnId,
+    "user",
+    input.content_parts ?? input.content,
+    sequence,
+    input.user_id,
+  )
 
 const makeAssistantMessageAdded = (
   dependencies: Dependencies,
@@ -1240,6 +1251,7 @@ const makeMessageAdded = (
   role: "user" | "assistant",
   content: string | ReadonlyArray<Message.ContentPart>,
   sequence: number,
+  userId?: Ids.UserId,
 ) =>
   Effect.gen(function* () {
     const createdAt = yield* dependencies.time.nowMillis
@@ -1251,6 +1263,7 @@ const makeMessageAdded = (
       turn_id: turnId,
       content,
       created_at: createdAt,
+      ...(userId === undefined ? {} : { metadata: { user_id: userId } }),
     }
     const message =
       role === "user"

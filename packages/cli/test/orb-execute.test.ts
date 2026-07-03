@@ -28,7 +28,7 @@ import {
 import { Client } from "@rika/sdk"
 import { Codec, Common, Event, Ids, Orb } from "@rika/schema"
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect"
-import { HttpServer, OrbMirror, RemoteControl } from "@rika/server"
+import { HttpServer, OrbMirror, PresenceHub, RemoteControl } from "@rika/server"
 import { Args, OrbExecute, Output } from "../src/index"
 
 const now = Common.TimestampMillis.make(1_990_000_000_000)
@@ -505,8 +505,13 @@ const makeRemoteLayer = () => {
     remoteOrbMirrorLayer(),
   )
   const agentLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBase))
-  const remoteLayer = RemoteControl.layer.pipe(Layer.provideMerge(agentLayer), Layer.provideMerge(agentBase))
-  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer))
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))
+  const remoteLayer = RemoteControl.layer.pipe(
+    Layer.provideMerge(agentLayer),
+    Layer.provideMerge(agentBase),
+    Layer.provideMerge(presenceLayer),
+  )
+  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer), Layer.provideMerge(presenceLayer))
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
 

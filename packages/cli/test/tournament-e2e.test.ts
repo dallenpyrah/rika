@@ -25,7 +25,7 @@ import {
   WorkspaceStore,
 } from "@rika/persistence"
 import { Common, Ids, Orb } from "@rika/schema"
-import { OrbMirror, RemoteControl, ThreadLive } from "@rika/server"
+import { OrbMirror, PresenceHub, RemoteControl, ThreadLive } from "@rika/server"
 import { Effect, Layer, Stream } from "effect"
 import { AiError } from "effect/unstable/ai"
 import { Input, Output, Threads } from "../src/index"
@@ -188,6 +188,7 @@ interface LayerInput {
 }
 
 const makeLayer = (input: LayerInput) => {
+  const timeLayer = Time.fixedLayer(now)
   const baseStorageLayer = Layer.mergeAll(
     configLayer,
     Output.memoryLayer(input.output),
@@ -196,7 +197,7 @@ const makeLayer = (input: LayerInput) => {
     Migration.layer,
     ThreadEventLog.layer,
     ThreadProjection.layer,
-    Time.fixedLayer(now),
+    timeLayer,
     IdGenerator.sequenceLayer(1),
   )
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
@@ -246,11 +247,13 @@ const makeLayer = (input: LayerInput) => {
   })
   const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(agentBaseLayer))
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const presenceLayer = PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))
   const remoteControlLayer = RemoteControl.layerWithLive.pipe(
     Layer.provideMerge(agentLoopLayer),
     Layer.provideMerge(compactionLayer),
     Layer.provideMerge(agentBaseLayer),
     Layer.provideMerge(threadLiveLayer),
+    Layer.provideMerge(presenceLayer),
   )
   const tournamentTurnControlLayer = Layer.effect(
     TournamentService.TurnControlService,
