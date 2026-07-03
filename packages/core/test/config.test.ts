@@ -35,6 +35,39 @@ describe("Config", () => {
     })
   })
 
+  test("parses subagent tool mode from env", async () => {
+    const values = await Effect.runPromise(
+      Config.get().pipe(
+        Effect.provide(
+          Config.layerFromEnv(
+            {
+              RIKA_SUBAGENT_TOOLS: "full",
+            },
+            "/workspace/rika-config-test",
+          ),
+        ),
+      ),
+    )
+
+    expect(values.subagent_tools).toBe("full")
+  })
+
+  test("rejects invalid subagent tool mode env values", async () => {
+    const error = await Effect.runPromise(
+      Config.valuesFromEnv(
+        {
+          RIKA_SUBAGENT_TOOLS: "read-write",
+        },
+        "/workspace/rika-config-test",
+      ).pipe(Effect.flip),
+    )
+
+    expect(error).toMatchObject({
+      key: "RIKA_SUBAGENT_TOOLS",
+      message: "Invalid RIKA_SUBAGENT_TOOLS read-write",
+    })
+  })
+
   test("resolves settings-backed config values without allowing infra settings aliases", async () => {
     const root = await mkdtemp(join(tmpdir(), "rika-config-settings-"))
     const home = join(root, "home")

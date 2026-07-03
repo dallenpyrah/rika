@@ -83,6 +83,7 @@ describe("CLI config commands", () => {
           { key: "data.dir", env: "RIKA_DATA_DIR", value: `${workspace}/.rika`, source: "default" },
           { key: "database.url", env: "RIKA_DATABASE_URL", value: null, source: "default" },
           { key: "backend.id", env: "RIKA_BACKEND_ID", value: null, source: "default" },
+          { key: "subagent.tools", env: "RIKA_SUBAGENT_TOOLS", value: "readonly", source: "default" },
           { key: "orb.template", env: "RIKA_ORB_TEMPLATE", value: "rika-orb", source: "default" },
           { key: "orb.idleTimeoutSeconds", env: "RIKA_ORB_IDLE_TIMEOUT", value: 300, source: "default" },
           { key: "project.default", env: "RIKA_ORB_PROJECT", value: null, source: "default" },

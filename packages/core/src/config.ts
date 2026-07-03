@@ -6,6 +6,11 @@ export const Mode = Schema.Literals(["rush", "smart", "deep1", "deep2", "deep3"]
 })
 export type Mode = typeof Mode.Type
 
+export const SubagentTools = Schema.Literals(["readonly", "full"]).annotate({
+  identifier: "Rika.Config.SubagentTools",
+})
+export type SubagentTools = typeof SubagentTools.Type
+
 export interface Values extends Schema.Schema.Type<typeof Values> {}
 export const Values = Schema.Struct({
   workspace_root: Schema.String,
@@ -18,6 +23,7 @@ export const Values = Schema.Struct({
   compaction_prune: Schema.optional(Schema.Boolean),
   compaction_prune_protect: Schema.optional(Schema.Int),
   compaction_prune_minimum: Schema.optional(Schema.Int),
+  subagent_tools: Schema.optional(SubagentTools),
 }).annotate({ identifier: "Rika.Config.Values" })
 
 export class ConfigError extends Schema.TaggedErrorClass<ConfigError>()("ConfigError", {
@@ -75,6 +81,7 @@ export const valuesFromEnv = (
       env.RIKA_COMPACTION_PRUNE_MINIMUM === undefined
         ? settings.values.compaction.pruneMinimum
         : yield* parseNonNegativeIntOption(env.RIKA_COMPACTION_PRUNE_MINIMUM, "RIKA_COMPACTION_PRUNE_MINIMUM")
+    const subagentTools = yield* parseSubagentTools(env.RIKA_SUBAGENT_TOOLS)
     const base: Values = {
       workspace_root: workspaceRoot,
       data_dir: env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`,
@@ -84,6 +91,7 @@ export const valuesFromEnv = (
       ...(compactionPrune === undefined ? {} : { compaction_prune: compactionPrune }),
       ...(compactionPruneProtect === undefined ? {} : { compaction_prune_protect: compactionPruneProtect }),
       ...(compactionPruneMinimum === undefined ? {} : { compaction_prune_minimum: compactionPruneMinimum }),
+      ...(subagentTools === undefined ? {} : { subagent_tools: subagentTools }),
     }
     const values: Values = env.RIKA_DATABASE_URL === undefined ? base : { ...base, database_url: env.RIKA_DATABASE_URL }
     return env.RIKA_BACKEND_ID === undefined ? values : { ...values, backend_id: env.RIKA_BACKEND_ID }
@@ -120,10 +128,19 @@ export const requireEnv = Effect.fn("Config.requireEnv.call")(function* (key: st
   return yield* config.requireEnv(key)
 })
 
+export const subagentTools = (values: Values): SubagentTools => values.subagent_tools ?? "readonly"
+
 const parseMode = (value: string) => {
   const decoded = Schema.decodeUnknownOption(Mode)(value)
   if (Option.isSome(decoded)) return Effect.succeed(decoded.value)
   return new ConfigError({ message: `Invalid RIKA_MODE ${value}`, key: "RIKA_MODE" })
+}
+
+const parseSubagentTools = (value: string | undefined) => {
+  if (value === undefined) return Effect.succeed(undefined)
+  const decoded = Schema.decodeUnknownOption(SubagentTools)(value)
+  if (Option.isSome(decoded)) return Effect.succeed(decoded.value)
+  return new ConfigError({ message: `Invalid RIKA_SUBAGENT_TOOLS ${value}`, key: "RIKA_SUBAGENT_TOOLS" })
 }
 
 const parseBooleanOption = (value: string | undefined, key: string) => {

@@ -134,7 +134,7 @@ describe("OrbManager", () => {
       opts: {
         background: true,
         cwd: "/home/user/repo",
-        envs: { OPENAI_API_KEY: "secret-openai", RIKA_ENV: "test" },
+        envs: { OPENAI_API_KEY: "secret-openai", RIKA_ENV: "test", RIKA_SUBAGENT_TOOLS: "full" },
       },
     })
     expect(sandbox.calls.kill).toEqual([])
@@ -379,6 +379,12 @@ describe("OrbManager", () => {
       OPENAI_API_KEY: "secret-openai",
       RIKA_ENV: "test",
     })
+    expect(sandbox.calls.exec[3]?.opts.envs).toEqual({
+      GIT_TOKEN: "git-secret",
+      OPENAI_API_KEY: "secret-openai",
+      RIKA_ENV: "test",
+      RIKA_SUBAGENT_TOOLS: "full",
+    })
     expect(JSON.stringify(sandbox.calls.exec.map((call) => call.cmd))).not.toContain("git-secret")
     await rm(dataDir, { force: true, recursive: true })
   })
@@ -513,7 +519,7 @@ describe("OrbManager", () => {
       opts: {
         background: true,
         cwd: "/home/user/repo",
-        envs: {},
+        envs: { RIKA_SUBAGENT_TOOLS: "full" },
       },
     })
     expect(sandbox.calls.exec[1]).toEqual({

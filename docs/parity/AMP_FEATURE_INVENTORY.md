@@ -45,18 +45,18 @@ Status: `unverified` (claimed in code, not visually compared) · `partial` ·
 
 ## Tools & subagents
 
-| Feature             | Amp behavior                                                | Rika location                            | Status                   |
-| ------------------- | ----------------------------------------------------------- | ---------------------------------------- | ------------------------ |
-| Built-in tools list | `amp tools list`                                            | `packages/tools/`                        | unverified               |
-| File find/search    | ripgrep → **Rika: fff** (deliberate, §3)                    | `packages/tools/src/fff-search.ts`       | unverified               |
-| Read/edit           | hashline read/edit                                          | `packages/tools/src/hashline-file.ts`    | unverified               |
-| Semantic search     | **Rika addition** (§3)                                      | `packages/tools/`                        | unverified               |
-| AST-grep outline    | **Rika addition** (§3)                                      | `packages/tools/src/ast-grep-outline.ts` | unverified               |
-| Subagents           | own context, own tools, parallel, final-summary, auto-spawn | `packages/agent/src/subagent-runtime.ts` | **gap — see goal.md §4** |
-| Oracle              | GPT-5.5 second-opinion tool                                 | `packages/tools/src/specialty-tools.ts`  | unverified               |
-| Librarian           | cross-repo / GitHub code search subagent                    | `packages/tools/src/specialty-tools.ts`  | unverified               |
-| Painter             | image gen/edit tool                                         | `packages/tools/src/specialty-tools.ts`  | unverified               |
-| Code review         | `amp review` + checks subagents                             | `packages/agent/src/review-service.ts`   | unverified               |
+| Feature             | Amp behavior                                                | Rika location                            | Status                                                                |
+| ------------------- | ----------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------- |
+| Built-in tools list | `amp tools list`                                            | `packages/tools/`                        | unverified                                                            |
+| File find/search    | ripgrep → **Rika: fff** (deliberate, §3)                    | `packages/tools/src/fff-search.ts`       | unverified                                                            |
+| Read/edit           | hashline read/edit                                          | `packages/tools/src/hashline-file.ts`    | unverified                                                            |
+| Semantic search     | **Rika addition** (§3)                                      | `packages/tools/`                        | unverified                                                            |
+| AST-grep outline    | **Rika addition** (§3)                                      | `packages/tools/src/ast-grep-outline.ts` | unverified                                                            |
+| Subagents           | own context, own tools, parallel, final-summary, auto-spawn | `packages/agent/src/subagent-runtime.ts` | partial — full tool mode implemented; auto-spawn/rendering unverified |
+| Oracle              | GPT-5.5 second-opinion tool                                 | `packages/tools/src/specialty-tools.ts`  | unverified                                                            |
+| Librarian           | cross-repo / GitHub code search subagent                    | `packages/tools/src/specialty-tools.ts`  | unverified                                                            |
+| Painter             | image gen/edit tool                                         | `packages/tools/src/specialty-tools.ts`  | unverified                                                            |
+| Code review         | `amp review` + checks subagents                             | `packages/agent/src/review-service.ts`   | unverified                                                            |
 
 ## Guidance, skills, plugins, MCP
 

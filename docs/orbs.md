@@ -4,7 +4,7 @@ Orbs run a thread inside a remote sandbox created from a Project profile.
 
 ## Provisioning
 
-`OrbManager.provisionForThread` creates a staged orb row, starts an E2B sandbox with `thread_id` and `project_id` metadata, places the repository at `/home/user/repo`, runs setup there, starts `rika server --orb --base-commit <sha>`, waits for authenticated `/health`, then stores the endpoint and marks the orb running.
+`OrbManager.provisionForThread` creates a staged orb row, starts an E2B sandbox with `thread_id` and `project_id` metadata, places the repository at `/home/user/repo`, runs setup there, starts `rika server --orb --base-commit <sha>` with `RIKA_SUBAGENT_TOOLS=full`, waits for authenticated `/health`, then stores the endpoint and marks the orb running.
 
 The default repository transfer path is a local git bundle. This supports local branches that have not been pushed to the Project origin.
 

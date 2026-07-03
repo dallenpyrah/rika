@@ -191,11 +191,13 @@ Amp's model (from the owner's manual):
 - Spawned automatically for suitable tasks (mostly `smart` mode) and can be
   encouraged by the user mentioning subagents / parallel work.
 
-Rika today (`packages/agent/src/subagent-runtime.ts`) is a "read-only bounded"
-runtime. Parity work: bring it to the Amp model above (own context, own tools,
-parallel fan-out, final-summary return, auto-spawn heuristics), and render
-subagent activity in the transcript the way Amp does (the `subagent` card kind
-already exists in `packages/tui/src/view-state.ts`).
+Rika today (`packages/agent/src/subagent-runtime.ts`) has isolated context,
+parallel fan-out, final-summary return, and a configurable tool surface. Local
+processes default to `RIKA_SUBAGENT_TOOLS=readonly`; full mode exposes the
+standard toolset minus `task`, and orb servers are launched with full mode.
+Remaining parity work: auto-spawn heuristics and transcript rendering the way
+Amp does (the `subagent` card kind already exists in
+`packages/tui/src/view-state.ts`).
 
 ## 5. The comparison workflow (do this every iteration)
 

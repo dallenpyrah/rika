@@ -485,7 +485,7 @@ const startServer: (
       "--base-commit",
       baseCommit,
     ],
-    { cwd: repoRoot, envs, background: true },
+    { cwd: repoRoot, envs: serverEnv(envs), background: true },
     "start_server",
     orbId,
   )
@@ -695,6 +695,11 @@ const resumeProcessEnv = Effect.fn("OrbManager.resumeProcessEnv")(function* (
   if (project === undefined) return { envs: {}, entries: [] }
   const secrets = yield* projects.secretsForProvision(record.project_id)
   return { envs: { ...project.env, ...secrets }, entries: secretEntries(project.env, secrets) }
+})
+
+const serverEnv = (envs: Record<string, string>): Record<string, string> => ({
+  ...envs,
+  RIKA_SUBAGENT_TOOLS: "full",
 })
 
 type ResumeHookResult =

@@ -164,7 +164,7 @@ Guarded calls return a normal permission tool result and the agent continues. Ru
 
 ## Subagents and skills
 
-Subagents run isolated bounded tasks and return compact summaries. Skills are task-specific instruction packages discovered from project/user locations and loaded explicitly.
+Subagents run isolated bounded tasks and return compact summaries. Local processes default to read-only subagent tools. Set `RIKA_SUBAGENT_TOOLS=full` to expose the standard toolset to subagents without the recursive `task` tool; orb servers are launched this way automatically. Skills are task-specific instruction packages discovered from project/user locations and loaded explicitly.
 
 CLI skill commands:
 
@@ -297,6 +297,7 @@ Common environment variables:
 | `RIKA_TELEMETRY`                           | Enable or disable local OTLP telemetry export.              |
 | `RIKA_TELEMETRY_ENDPOINT`                  | OTLP base URL for traces and logs.                          |
 | `RIKA_COMPACTION_*`                        | Optional automatic compaction thresholds and pruning knobs. |
+| `RIKA_SUBAGENT_TOOLS`                      | `readonly` or `full`; local default is `readonly`.          |
 | `RIKA_API_KEY`                             | Model provider credentials.                                 |
 | `RIKA_EMBEDDINGS_API_KEY`                  | Optional dedicated key for thread memory embeddings.        |
 | `RIKA_BASE_URL`                            | Optional model provider proxy endpoint.                     |

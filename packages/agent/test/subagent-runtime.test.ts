@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { IdGenerator, Time } from "@rika/core"
+import { Config, IdGenerator, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { Common, Ids } from "@rika/schema"
 import type { Call } from "@rika/schema/tool"
@@ -23,8 +23,21 @@ const defaultToolLayer = ToolExecutor.fakeSubagentLayer(
   [readTool],
 )
 
-const makeLayer = (routerLayer: Layer.Layer<Router.Service>, toolLayer = defaultToolLayer) =>
+const configLayer = (subagentTools?: Config.SubagentTools) =>
+  Config.layerFromValues({
+    workspace_root: "/workspace/rika-subagent-runtime-test",
+    data_dir: "/workspace/rika-subagent-runtime-test/.rika",
+    default_mode: "smart",
+    ...(subagentTools === undefined ? {} : { subagent_tools: subagentTools }),
+  })
+
+const makeLayer = (
+  routerLayer: Layer.Layer<Router.Service>,
+  toolLayer = defaultToolLayer,
+  activeConfigLayer = configLayer(),
+) =>
   SubagentRuntime.layer.pipe(
+    Layer.provideMerge(activeConfigLayer),
     Layer.provideMerge(IdGenerator.sequenceLayer(1)),
     Layer.provideMerge(Time.fixedLayer(now)),
     Layer.provideMerge(routerLayer),
@@ -72,6 +85,89 @@ describe("SubagentRuntime", () => {
     expect(requests.map((request) => Object.hasOwn(request, "max_output_tokens"))).toEqual([false, false])
   })
 
+  test("defaults to the exact read-only tool list in readonly mode", async () => {
+    const routerRequests: Array<Router.Request> = []
+    const routerLayer = fakeRouterLayer((request) =>
+      Effect.sync(() => {
+        routerRequests.push(request)
+        return response("read-only done")
+      }),
+    )
+
+    const result = await Effect.runPromise(
+      SubagentRuntime.runBatch({ agents: [{ name: "reader", prompt: "inspect files" }] }).pipe(
+        Effect.provide(makeLayer(routerLayer)),
+      ),
+    )
+
+    expect(result.runs[0]).toMatchObject({
+      tool_access: "read-only",
+      tool_names: [...SubagentRuntime.readOnlyToolNames],
+    })
+    const systemPrompt = providerMessageText(routerRequests[0]?.messages[0]?.content ?? "")
+    expect(systemPrompt).toContain("Read-only tools available to this subagent:")
+    expect(systemPrompt).not.toContain("shell_command")
+    expect(systemPrompt).not.toContain("edit")
+    expect(systemPrompt).not.toContain("task")
+  })
+
+  test("defaults to the full non-recursive toolkit in full mode", async () => {
+    const routerRequests: Array<Router.Request> = []
+    const shellTool = Tool.make("shell_command", {
+      description: "Run a shell command",
+      parameters: Schema.Struct({ command: Schema.String }),
+      success: Schema.Json,
+      failure: Schema.Json,
+      failureMode: "return",
+    })
+    const editTool = Tool.make("edit", {
+      description: "Edit a workspace file",
+      parameters: Schema.Struct({ path: Schema.String }),
+      success: Schema.Json,
+      failure: Schema.Json,
+      failureMode: "return",
+    })
+    const taskTool = Tool.make("task", {
+      description: "Spawn a subagent",
+      parameters: Schema.Struct({ prompt: Schema.String }),
+      success: Schema.Json,
+      failure: Schema.Json,
+      failureMode: "return",
+    })
+    const routerLayer = fakeRouterLayer((request) =>
+      Effect.sync(() => {
+        routerRequests.push(request)
+        return response("full done")
+      }),
+    )
+    const toolLayer = ToolExecutor.fakeSubagentLayer(
+      {
+        read: () => Effect.succeed({ ok: true }),
+        shell_command: () => Effect.succeed({ ok: true }),
+        edit: () => Effect.succeed({ ok: true }),
+        task: () => Effect.succeed({ ok: true }),
+      },
+      [readTool, shellTool, editTool, taskTool],
+    )
+
+    const result = await Effect.runPromise(
+      SubagentRuntime.runBatch({ agents: [{ name: "writer", prompt: "edit files" }] }).pipe(
+        Effect.provide(makeLayer(routerLayer, toolLayer, configLayer("full"))),
+      ),
+    )
+
+    expect(result.runs[0]).toMatchObject({
+      tool_access: "read-write",
+      tool_names: ["read", "shell_command", "edit"],
+    })
+    const systemPrompt = providerMessageText(routerRequests[0]?.messages[0]?.content ?? "")
+    expect(systemPrompt).toContain("Tools available to this subagent:")
+    expect(systemPrompt).toContain("shell_command")
+    expect(systemPrompt).toContain("edit")
+    expect(systemPrompt).not.toContain("- task:")
+    expect(systemPrompt).not.toContain("Spawn a subagent")
+  })
+
   test("rejects mutating tool access before subagents run", async () => {
     let called = false
     const routerLayer = fakeRouterLayer(() =>
@@ -90,6 +186,32 @@ describe("SubagentRuntime", () => {
 
     expect(called).toBe(false)
     expect(error).toMatchObject({ message: expect.stringContaining("read-only") })
+  })
+
+  test("rejects explicit read-write access in readonly mode", async () => {
+    let called = false
+    const routerLayer = fakeRouterLayer(() =>
+      Effect.sync(() => {
+        called = true
+        return response("should not run")
+      }),
+    )
+
+    const error = await Effect.runPromise(
+      SubagentRuntime.runBatch({
+        agents: [
+          {
+            name: "writer",
+            prompt: "edit files",
+            tool_access: "read-write",
+            tool_names: ["edit"],
+          },
+        ],
+      }).pipe(Effect.provide(makeLayer(routerLayer)), Effect.flip),
+    )
+
+    expect(called).toBe(false)
+    expect(error).toMatchObject({ message: "Subagents are read-only; disallowed tools: read-write" })
   })
 
   test("allows read-write subagents to use workspace tools", async () => {
@@ -134,7 +256,7 @@ describe("SubagentRuntime", () => {
             tool_names: ["shell_command"],
           },
         ],
-      }).pipe(Effect.provide(makeLayer(routerLayer, toolLayer))),
+      }).pipe(Effect.provide(makeLayer(routerLayer, toolLayer, configLayer("full")))),
     )
 
     expect(result.runs[0]).toMatchObject({

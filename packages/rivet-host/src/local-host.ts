@@ -109,15 +109,20 @@ export const serviceLayerFromEnv = (
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const configuredWorkspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const configuredContextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
-  const configuredSubagentToolLayer = BuiltInTools.subagentToolExecutorLayer.pipe(Layer.provideMerge(configLayer))
+  const configuredSpecialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(configuredLlmLayer),
+  )
+  const configuredSubagentToolLayer = BuiltInTools.subagentToolExecutorLayer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(configuredPluginLayer),
+    Layer.provideMerge(configuredSpecialtyToolLayer),
+  )
   const configuredSubagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(configuredLlmLayer),
     Layer.provideMerge(configuredSubagentToolLayer),
-  )
-  const configuredSpecialtyToolLayer = SpecialtyTools.layer.pipe(
-    Layer.provideMerge(migratedStorageLayer),
-    Layer.provideMerge(configuredLlmLayer),
   )
   const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(
     Layer.provideMerge(migratedStorageLayer),

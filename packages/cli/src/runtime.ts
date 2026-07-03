@@ -438,17 +438,20 @@ export const liveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const specialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+  )
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(pluginLayer),
+    Layer.provideMerge(specialtyToolLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
     Layer.provide(subagentToolLayer),
-  )
-  const specialtyToolLayer = SpecialtyTools.layer.pipe(
-    Layer.provideMerge(migratedStorageLayer),
-    Layer.provideMerge(llmLayer),
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -600,17 +603,20 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const specialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+  )
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(pluginLayer),
+    Layer.provideMerge(specialtyToolLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
     Layer.provide(subagentToolLayer),
-  )
-  const specialtyToolLayer = SpecialtyTools.layer.pipe(
-    Layer.provideMerge(migratedStorageLayer),
-    Layer.provideMerge(llmLayer),
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1207,17 +1213,20 @@ export const threadsLiveLayer = (
     Layer.provideMerge(diagnosticsLayer),
   )
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const specialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+  )
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(pluginLayer),
+    Layer.provideMerge(specialtyToolLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
     Layer.provide(subagentToolLayer),
-  )
-  const specialtyToolLayer = SpecialtyTools.layer.pipe(
-    Layer.provideMerge(migratedStorageLayer),
-    Layer.provideMerge(llmLayer),
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1507,6 +1516,7 @@ export const reviewLiveLayer = (
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     Output.layer,
@@ -1515,12 +1525,23 @@ export const reviewLiveLayer = (
     timeLayer,
     IdGenerator.layer,
     artifactLayer,
+    mcpApprovalLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const specialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+  )
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(
     PermissionPolicy.configFromEnv(env),
-  ).pipe(Layer.provideMerge(configLayer))
+  ).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(pluginLayer),
+    Layer.provideMerge(specialtyToolLayer),
+  )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -1657,17 +1678,20 @@ export const serverLiveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const specialtyToolLayer = SpecialtyTools.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(llmLayer),
+  )
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(pluginLayer),
+    Layer.provideMerge(specialtyToolLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
     Layer.provide(subagentToolLayer),
-  )
-  const specialtyToolLayer = SpecialtyTools.layer.pipe(
-    Layer.provideMerge(migratedStorageLayer),
-    Layer.provideMerge(llmLayer),
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),

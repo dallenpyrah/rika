@@ -75,6 +75,7 @@ interface Dependencies {
   readonly time: Time.Interface
   readonly router: Router.Interface
   readonly toolExecutor: ToolExecutor.Interface
+  readonly subagentTools: Config.SubagentTools
 }
 
 export const readOnlyToolNames = ToolAccessPolicy.readOnlyToolNames
@@ -86,11 +87,19 @@ export const layer = Layer.effect(
     const time = yield* Time.Service
     const router = yield* Router.Service
     const toolExecutor = yield* ToolExecutor.SubagentService
-    const dependencies: Dependencies = { idGenerator, time, router, toolExecutor }
+    const config = yield* Config.Service
+    const values = yield* config.get
+    const dependencies: Dependencies = {
+      idGenerator,
+      time,
+      router,
+      toolExecutor,
+      subagentTools: Config.subagentTools(values),
+    }
 
     return Service.of({
       runBatch: Effect.fn("SubagentRuntime.runBatch")(function* (input: RunBatchInput) {
-        yield* validateBatchInput(input)
+        yield* validateBatchInput(input, dependencies.subagentTools)
         const runs = yield* Effect.forEach(input.agents, (spec, index) => runOne(dependencies, spec, index, input), {
           concurrency: "unbounded",
         })
@@ -141,7 +150,7 @@ export const toolDefinitions = (runtime: Interface): ReadonlyArray<ToolRegistry.
   },
 ]
 
-const validateBatchInput = (input: RunBatchInput) =>
+const validateBatchInput = (input: RunBatchInput, subagentTools: Config.SubagentTools) =>
   Effect.gen(function* () {
     if (input.agents.length === 0) {
       return yield* new SubagentRuntimeError({ message: "At least one subagent is required", operation: "runBatch" })
@@ -160,9 +169,16 @@ const validateBatchInput = (input: RunBatchInput) =>
           ...(spec.name === undefined ? {} : { name: spec.name }),
         })
       }
-      const toolAccess = spec.tool_access ?? "read-only"
+      const toolAccess = effectiveToolAccess(subagentTools, spec)
+      if (subagentTools === "readonly" && toolAccess === "read-write") {
+        return yield* new SubagentRuntimeError({
+          message: "Subagents are read-only; disallowed tools: read-write",
+          operation: "runBatch",
+          ...(spec.name === undefined ? {} : { name: spec.name }),
+        })
+      }
       const disallowed =
-        toolAccess === "read-write" ? [] : requestedToolNames(spec).filter((name) => !readOnlyToolSet.has(name))
+        toolAccess === "read-write" ? [] : validationToolNames(spec).filter((name) => !readOnlyToolSet.has(name))
       if (disallowed.length > 0) {
         return yield* new SubagentRuntimeError({
           message: `Subagents are read-only; disallowed tools: ${disallowed.join(", ")}`,
@@ -179,8 +195,8 @@ const runOne = (dependencies: Dependencies, spec: Spec, index: number, input: Ru
     const subagentId = yield* dependencies.idGenerator.next("subagent")
     const startedAt = yield* dependencies.time.nowMillis
     const name = spec.name ?? `subagent-${index + 1}`
-    const toolAccess = spec.tool_access ?? "read-only"
-    const toolNames = toolAccess === "none" ? [] : requestedToolNames(spec)
+    const toolAccess = effectiveToolAccess(dependencies.subagentTools, spec)
+    const toolNames = yield* selectedToolNames(dependencies, spec, toolAccess)
     const metadata = subagentMetadata(input, subagentId, name)
     const messages = yield* subagentMessages(dependencies, spec, name, toolAccess, toolNames)
 
@@ -369,8 +385,30 @@ const toolInstructions = (toolAccess: ToolAccess, descriptors: ReadonlyArray<Too
   ].join("\n")
 }
 
-const requestedToolNames = (spec: Spec): ReadonlyArray<string> =>
+const effectiveToolAccess = (subagentTools: Config.SubagentTools, spec: Spec): ToolAccess =>
+  spec.tool_access ?? (subagentTools === "full" ? "read-write" : "read-only")
+
+const selectedToolNames = (
+  dependencies: Dependencies,
+  spec: Spec,
+  toolAccess: ToolAccess,
+): Effect.Effect<ReadonlyArray<string>> => {
+  if (toolAccess === "none") return Effect.succeed([])
+  if (spec.tool_names !== undefined && spec.tool_names.length > 0) {
+    return Effect.succeed(spec.tool_names.filter(isSubagentCallableToolName))
+  }
+  if (toolAccess === "read-write" && dependencies.subagentTools === "full") {
+    return dependencies.toolExecutor.describe.pipe(
+      Effect.map((descriptors) => descriptors.map((descriptor) => descriptor.name).filter(isSubagentCallableToolName)),
+    )
+  }
+  return Effect.succeed([...readOnlyToolNames])
+}
+
+const validationToolNames = (spec: Spec): ReadonlyArray<string> =>
   spec.tool_names === undefined || spec.tool_names.length === 0 ? [...readOnlyToolNames] : [...spec.tool_names]
+
+const isSubagentCallableToolName = (name: string) => name !== "task"
 
 const subagentMetadata = (input: RunBatchInput, subagentId: string, name: string): Provider.Metadata => ({
   subagent_id: subagentId,

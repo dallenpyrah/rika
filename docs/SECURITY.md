@@ -18,6 +18,8 @@ Rika is a local-first coding agent that can inspect files, run commands, edit co
 
 Tool calls run through `ToolExecutor.Service`; plugins and MCP tools do not bypass the normal policy path. Rika's default policy is `allow-all`, matching Amp's no-approval local workflow: read, write, shell, MCP, specialty, and plugin tools run without prompting unless configuration or trusted plugins override the decision.
 
+Subagents default to `RIKA_SUBAGENT_TOOLS=readonly` in local processes. `RIKA_SUBAGENT_TOOLS=full` gives subagents the standard tool surface except the recursive `task` tool; every subagent tool call still goes through `ToolExecutor.Service` and `PermissionPolicy.Service`. Orb servers are launched with full subagent tools because the workspace is already inside the sandbox boundary.
+
 The centralized `PermissionPolicy.Service` supports four decisions for every tool call:
 
 - `allow` — execute the original call.

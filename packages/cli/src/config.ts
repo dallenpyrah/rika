@@ -150,6 +150,12 @@ const executeList = (input: Input, output: Output.Interface): Effect.Effect<numb
       runtimeEntry("data.dir", "RIKA_DATA_DIR", config.data_dir, input.env.RIKA_DATA_DIR),
       runtimeEntry("database.url", "RIKA_DATABASE_URL", config.database_url ?? null, input.env.RIKA_DATABASE_URL),
       runtimeEntry("backend.id", "RIKA_BACKEND_ID", config.backend_id ?? null, input.env.RIKA_BACKEND_ID),
+      runtimeEntry(
+        "subagent.tools",
+        "RIKA_SUBAGENT_TOOLS",
+        Config.subagentTools(config),
+        input.env.RIKA_SUBAGENT_TOOLS,
+      ),
       ...Settings.entries(snapshot),
     ]
     yield* output.stdout(formatJson({ entries, warnings: snapshot.warnings }))
