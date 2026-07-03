@@ -104,6 +104,10 @@ _Avoid_: Session process, worker, server object
 The deployment choice that selects local or remote Rivet actor hosting while preserving the same Thread Actor contract.
 _Avoid_: Actor API variant, cloud mode, runtime fork
 
+**Hosted Control Plane**:
+A remote service that owns hosted orb records, workspace authorization, thread fan-out, and orb lifecycle calls while preserving the local `OrbManager` and Remote Control contracts.
+_Avoid_: Cloud mode, hosted backend, remote singleton
+
 **Interactive Session**:
 A terminal UI run that renders thread events, accepts prompts and command-palette commands, and delegates turns to the agent loop. Interactive sessions are adapters over durable threads, not a separate source of truth.
 _Avoid_: Terminal state, chat UI, REPL transcript

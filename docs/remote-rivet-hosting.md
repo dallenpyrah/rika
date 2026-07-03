@@ -4,7 +4,7 @@ Rika uses one `ThreadActor` contract for both local development and remote hosti
 
 ## Current status
 
-Rivet remains a parallel adapter while orbs use the RemoteControl HTTP+NDJSON API as their client contract. This note is the controlling status for orb work. See [ADR 0001](adr/0001-orb-contract-defer-rivet.md).
+Rivet remains a parallel adapter while local-first orbs use the RemoteControl HTTP+NDJSON API as their client contract. Hosted control-plane decisions now live in [orbs-hosted-control-plane.md](orbs-hosted-control-plane.md). See [ADR 0001](adr/0001-orb-contract-defer-rivet.md).
 
 ## Topology
 
