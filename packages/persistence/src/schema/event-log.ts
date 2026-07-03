@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm"
 import { blob, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core"
 
 export const thread_events = sqliteTable(
@@ -182,3 +183,23 @@ export const orbs = sqliteTable(
 
 export type OrbRow = typeof orbs.$inferSelect
 export type NewOrbRow = typeof orbs.$inferInsert
+
+export const orb_usage_intervals = sqliteTable(
+  "orb_usage_intervals",
+  {
+    id: text().primaryKey(),
+    orb_id: text().notNull(),
+    started_at: integer().notNull(),
+    ended_at: integer(),
+  },
+  (table) => [
+    index("orb_usage_intervals_orb_idx").on(table.orb_id),
+    index("orb_usage_intervals_started_idx").on(table.started_at),
+    uniqueIndex("orb_usage_intervals_open_orb_idx")
+      .on(table.orb_id)
+      .where(sql`${table.ended_at} is null`),
+  ],
+)
+
+export type OrbUsageIntervalRow = typeof orb_usage_intervals.$inferSelect
+export type NewOrbUsageIntervalRow = typeof orb_usage_intervals.$inferInsert

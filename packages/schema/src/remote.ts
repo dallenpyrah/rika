@@ -352,6 +352,7 @@ export const OrbSummary = Schema.Struct({
   base_commit: Schema.NullOr(Schema.String),
   created_at: TimestampMillis,
   last_active_at: TimestampMillis,
+  running_minutes: Schema.Number,
 }).annotate({ identifier: "Rika.Remote.OrbSummary" })
 
 export interface ListArtifactsRequest extends Schema.Schema.Type<typeof ListArtifactsRequest> {}

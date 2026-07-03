@@ -429,7 +429,9 @@ export const liveLayer = (
     IdGenerator.layer,
     orbStoreLayer,
   )
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const embeddingsLayer = Embeddings.layer(
     Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
   )
@@ -537,7 +539,9 @@ export const orbExecuteLiveLayer = (
     projectStoreLayer,
     orbStoreLayer,
   )
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const managerLayer = OrbManager.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(sandboxLayer),
@@ -709,7 +713,9 @@ const interactiveRemoteLiveLayerFromTui = (
     projectStoreLayer,
     orbStoreLayer,
   )
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
   const activityLayer = OrbActivity.layer.pipe(
     Layer.provideMerge(configLayer),
@@ -1196,7 +1202,9 @@ export const threadsLiveLayer = (
   const projectStoreLayer = ProjectStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
   const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
   const storageLayer = Layer.mergeAll(baseStorageLayer, projectStoreLayer, orbStoreLayer)
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
@@ -1407,7 +1415,9 @@ export const orbLiveLayer = (
     timeLayer,
     IdGenerator.layer,
   )
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(redactorLayer))
   const activityLayer = OrbActivity.layer.pipe(
@@ -1602,9 +1612,12 @@ export const doctorLiveLayer = (
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
-  const storageLayer = Layer.mergeAll(configLayer, databaseLayer, Migration.layer, Time.layer, IdGenerator.layer)
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const baseStorageLayer = Layer.mergeAll(configLayer, databaseLayer, Migration.layer, Time.layer, IdGenerator.layer)
+  const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
+  const storageLayer = Layer.mergeAll(baseStorageLayer, orbStoreLayer)
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
   const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
   return Doctor.layerFromInput({ env, cwd }).pipe(
@@ -1669,7 +1682,9 @@ export const serverLiveLayer = (
     timeLayer,
     IdGenerator.layer,
   )
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const embeddingsLayer = Embeddings.layer(
     Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
   )
@@ -1801,7 +1816,9 @@ export const syncLiveLayer = (
     projectStoreLayer,
     orbStoreLayer,
   )
-  const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
   const managerLayer = OrbManager.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(sandboxLayer),

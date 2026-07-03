@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test"
 import { IdGenerator, Time } from "@rika/core"
 import { Common, Ids, Orb } from "@rika/schema"
+import { sql } from "drizzle-orm"
 import { Effect, Layer } from "effect"
 import { Database, Migration, OrbStore } from "../src/index"
 
 const createdAt = Common.TimestampMillis.make(1_980_000_001_000)
 const touchedAt = Common.TimestampMillis.make(1_980_000_001_500)
 const statusAt = Common.TimestampMillis.make(1_980_000_002_000)
+const runningAt = Common.TimestampMillis.make(1_980_000_060_000)
+const duplicateRunningAt = Common.TimestampMillis.make(1_980_000_120_000)
+const pausedAt = Common.TimestampMillis.make(1_980_000_180_000)
+const resumedAt = Common.TimestampMillis.make(1_980_000_240_000)
+const killedAt = Common.TimestampMillis.make(1_980_000_300_000)
+const usageReadAt = Common.TimestampMillis.make(1_980_000_360_000)
 const orbId = Ids.OrbId.make("orb_1")
 const threadId = Ids.ThreadId.make("thread_orb_store")
 const projectId = Ids.ProjectId.make("project_orb_store")
@@ -158,6 +165,73 @@ describe("OrbStore", () => {
     expect(result.last_active_at).toBe(touchedAt)
   })
 
+  test("status transitions record one usage interval per running span", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* OrbStore.create(createInput())
+        yield* OrbStore.setStatus(orbId, "running")
+        yield* OrbStore.setStatus(orbId, "running")
+        yield* OrbStore.setStatus(orbId, "paused")
+        yield* OrbStore.setStatus(orbId, "running")
+        yield* OrbStore.setStatus(orbId, "killed")
+        const usage = yield* OrbStore.usage()
+        return usage
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            times: [createdAt, runningAt, duplicateRunningAt, pausedAt, resumedAt, killedAt, usageReadAt],
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toEqual([
+      {
+        orb_id: orbId,
+        thread_id: threadId,
+        project_id: projectId,
+        project: projectId,
+        total_running_minutes: 3,
+        interval_count: 2,
+      },
+    ])
+  })
+
+  test("usage includes open running intervals through the read time", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* OrbStore.create(createInput())
+        yield* OrbStore.setStatus(orbId, "running")
+        yield* OrbStore.setStatus(orbId, "paused")
+        yield* OrbStore.setStatus(orbId, "running")
+        return yield* OrbStore.usage()
+      }).pipe(Effect.provide(makeLayer({ times: [createdAt, runningAt, pausedAt, resumedAt, usageReadAt] }))),
+    )
+
+    expect(result[0]?.total_running_minutes).toBe(4)
+    expect(result[0]?.interval_count).toBe(2)
+  })
+
+  test("repairs stale open intervals using the orb last activity time", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* OrbStore.create(createInput())
+        yield* OrbStore.setStatus(orbId, "running")
+        yield* simulateCrashPausedOrb(orbId, pausedAt)
+        yield* OrbStore.repairUsageIntervals()
+        yield* OrbStore.setStatus(orbId, "running")
+        yield* OrbStore.setStatus(orbId, "killed")
+        return yield* OrbStore.usage()
+      }).pipe(Effect.provide(makeLayer({ times: [createdAt, runningAt, resumedAt, killedAt, usageReadAt] }))),
+    )
+
+    expect(result[0]?.total_running_minutes).toBe(3)
+    expect(result[0]?.interval_count).toBe(2)
+  })
+
   test("normal record reads do not select endpoint tokens", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -264,6 +338,16 @@ const rejectRecordTokenRead = (query: unknown) => {
     throw new Error("orb record read selected endpoint token")
   }
 }
+
+const simulateCrashPausedOrb = (id: Ids.OrbId, at: Common.TimestampMillis) =>
+  Effect.gen(function* () {
+    const database = yield* Database.Service
+    yield* database.withDatabaseEffect((client) =>
+      Effect.sync(() => {
+        client.run(sql`update orbs set status = 'paused', last_active_at = ${at} where orb_id = ${id}`)
+      }),
+    )
+  })
 
 const queryText = (query: unknown): string => {
   if (typeof query === "string") return query

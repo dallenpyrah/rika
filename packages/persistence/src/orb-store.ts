@@ -3,7 +3,7 @@ import { Common, Ids, Orb } from "@rika/schema"
 import { Context, Effect, Layer, Schema } from "effect"
 import { sql } from "drizzle-orm"
 import * as Database from "./database"
-import { orbs } from "./schema"
+import { orb_usage_intervals, orbs } from "./schema"
 
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 export const CreateInput = Schema.Struct({
@@ -25,6 +25,23 @@ export interface ListFilter extends Schema.Schema.Type<typeof ListFilter> {}
 export const ListFilter = Schema.Struct({
   status: Schema.optional(Orb.OrbStatus),
 }).annotate({ identifier: "Rika.Persistence.OrbStore.ListFilter" })
+
+export interface UsageFilter extends Schema.Schema.Type<typeof UsageFilter> {}
+export const UsageFilter = Schema.Struct({
+  orb_id: Schema.optional(Ids.OrbId),
+  project_name: Schema.optional(Schema.String),
+  since: Schema.optional(Common.TimestampMillis),
+}).annotate({ identifier: "Rika.Persistence.OrbStore.UsageFilter" })
+
+export interface UsageRow extends Schema.Schema.Type<typeof UsageRow> {}
+export const UsageRow = Schema.Struct({
+  orb_id: Ids.OrbId,
+  thread_id: Ids.ThreadId,
+  project_id: Ids.ProjectId,
+  project: Schema.String,
+  total_running_minutes: Schema.Number,
+  interval_count: Schema.Int,
+}).annotate({ identifier: "Rika.Persistence.OrbStore.UsageRow" })
 
 export const ErrorReason = Schema.Literals(["not_found", "invalid_transition", "unique_thread", "database"]).annotate({
   identifier: "Rika.Persistence.OrbStore.ErrorReason",
@@ -49,6 +66,10 @@ export interface Interface {
   readonly list: (
     filter?: ListFilter,
   ) => Effect.Effect<ReadonlyArray<Orb.OrbRecord>, Database.DatabaseError | OrbStoreError>
+  readonly usage: (
+    filter?: UsageFilter,
+  ) => Effect.Effect<ReadonlyArray<UsageRow>, Database.DatabaseError | OrbStoreError>
+  readonly repairUsageIntervals: () => Effect.Effect<number, Database.DatabaseError | OrbStoreError>
   readonly setStatus: (
     orbId: Ids.OrbId,
     status: Orb.OrbStatus,
@@ -131,8 +152,36 @@ export const layer = Layer.effect(
           }),
         )
       }),
+      usage: Effect.fn("OrbStore.usage")(function* (filter: UsageFilter = {}) {
+        const now = yield* time.nowMillis
+        return yield* databaseService.withDatabaseEffect((database) =>
+          Effect.try({
+            try: () => usageRows(database, filter, now),
+            catch: (cause) => toError(cause, "usage", filter.orb_id === undefined ? {} : { orbId: filter.orb_id }),
+          }),
+        )
+      }),
+      repairUsageIntervals: Effect.fn("OrbStore.repairUsageIntervals")(function* () {
+        return yield* databaseService.withDatabaseEffect((database) =>
+          Effect.try({
+            try: () =>
+              database.transaction((transaction) => {
+                const rows = staleOpenIntervalRows(transaction)
+                for (const row of rows) {
+                  transaction.run(
+                    sql`update orb_usage_intervals set ended_at = ${row.last_active_at} where id = ${row.id}`,
+                  )
+                }
+                return rows.length
+              }),
+            catch: (cause) => toError(cause, "repairUsageIntervals"),
+          }),
+        )
+      }),
       setStatus: Effect.fn("OrbStore.setStatus")(function* (orbId: Ids.OrbId, status: Orb.OrbStatus) {
         const now = yield* time.nowMillis
+        const intervalId =
+          status === "running" ? Ids.OrbUsageIntervalId.make(yield* idGenerator.next("orb_usage_interval")) : undefined
         return yield* databaseService.withDatabaseEffect((database) =>
           Effect.try({
             try: () =>
@@ -146,6 +195,13 @@ export const layer = Layer.effect(
                     orb_id: orbId,
                     status,
                   })
+                }
+                if (existing.status !== "running" && status === "running" && intervalId !== undefined) {
+                  closeOpenIntervals(transaction, orbId, existing.last_active_at)
+                  openInterval(transaction, intervalId, orbId, now)
+                }
+                if (existing.status === "running" && status !== "running") {
+                  closeOpenIntervals(transaction, orbId, now)
                 }
                 transaction.run(
                   sql`update orbs set status = ${status}, last_active_at = ${now} where orb_id = ${orbId}`,
@@ -246,6 +302,16 @@ export const list = Effect.fn("OrbStore.list.call")(function* (filter?: ListFilt
   return yield* store.list(filter)
 })
 
+export const usage = Effect.fn("OrbStore.usage.call")(function* (filter?: UsageFilter) {
+  const store = yield* Service
+  return yield* store.usage(filter)
+})
+
+export const repairUsageIntervals = Effect.fn("OrbStore.repairUsageIntervals.call")(function* () {
+  const store = yield* Service
+  return yield* store.repairUsageIntervals()
+})
+
 export const setStatus = Effect.fn("OrbStore.setStatus.call")(function* (orbId: Ids.OrbId, status: Orb.OrbStatus) {
   const store = yield* Service
   return yield* store.setStatus(orbId, status)
@@ -293,6 +359,22 @@ interface EndpointRow {
   readonly token: string | null
 }
 
+interface UsageIntervalQueryRow {
+  readonly orb_id: string
+  readonly thread_id: string
+  readonly project_id: string
+  readonly project_name: string | null
+  readonly status: string
+  readonly last_active_at: number
+  readonly started_at: number
+  readonly ended_at: number | null
+}
+
+interface StaleOpenIntervalRow {
+  readonly id: string
+  readonly last_active_at: number
+}
+
 const listRows = (database: Pick<Database.DrizzleDatabase, "all">, filter: ListFilter) => {
   if (filter.status !== undefined) {
     return database.all<OrbRecordRow>(
@@ -300,6 +382,64 @@ const listRows = (database: Pick<Database.DrizzleDatabase, "all">, filter: ListF
     )
   }
   return database.all<OrbRecordRow>(sql`${recordColumns} from orbs order by last_active_at desc`)
+}
+
+const usageRows = (
+  database: Pick<Database.DrizzleDatabase, "all">,
+  filter: UsageFilter,
+  now: Common.TimestampMillis,
+) => {
+  const since = filter.since
+  const rows = database
+    .all<UsageIntervalQueryRow>(
+      sql`
+        select
+          i.orb_id,
+          o.thread_id,
+          o.project_id,
+          p.name as project_name,
+          o.status,
+          o.last_active_at,
+          i.started_at,
+          i.ended_at
+        from orb_usage_intervals i
+        join orbs o on o.orb_id = i.orb_id
+        left join projects p on p.project_id = o.project_id
+        order by o.last_active_at desc, i.started_at asc
+      `,
+    )
+    .filter((row) => filter.orb_id === undefined || row.orb_id === filter.orb_id)
+    .filter((row) => filter.project_name === undefined || row.project_name === filter.project_name)
+
+  const grouped = new Map<string, UsageRow>()
+  for (const row of rows) {
+    const endedAt = row.ended_at ?? (row.status === "running" ? now : row.last_active_at)
+    const startedAt = since === undefined ? row.started_at : Math.max(row.started_at, since)
+    const runningMillis = Math.max(0, endedAt - startedAt)
+    if (runningMillis <= 0) continue
+    const existing = grouped.get(row.orb_id)
+    const minutes = runningMillis / 60_000
+    if (existing === undefined) {
+      grouped.set(row.orb_id, {
+        orb_id: Ids.OrbId.make(row.orb_id),
+        thread_id: Ids.ThreadId.make(row.thread_id),
+        project_id: Ids.ProjectId.make(row.project_id),
+        project: row.project_name ?? row.project_id,
+        total_running_minutes: minutes,
+        interval_count: 1,
+      })
+    } else {
+      grouped.set(row.orb_id, {
+        ...existing,
+        total_running_minutes: existing.total_running_minutes + minutes,
+        interval_count: existing.interval_count + 1,
+      })
+    }
+  }
+  return [...grouped.values()].map((row) => ({
+    ...row,
+    total_running_minutes: normalizedMinutes(row.total_running_minutes),
+  }))
 }
 
 const requireOrb = (database: Pick<Database.DrizzleDatabase, "get">, orbId: Ids.OrbId, operation: string) => {
@@ -314,6 +454,33 @@ const requireOrb = (database: Pick<Database.DrizzleDatabase, "get">, orbId: Ids.
   }
   return record
 }
+
+const openInterval = (
+  database: Pick<Database.DrizzleDatabase, "insert">,
+  id: Ids.OrbUsageIntervalId,
+  orbId: Ids.OrbId,
+  startedAt: Common.TimestampMillis,
+) => {
+  database.insert(orb_usage_intervals).values({ id, orb_id: orbId, started_at: startedAt, ended_at: null }).run()
+}
+
+const closeOpenIntervals = (
+  database: Pick<Database.DrizzleDatabase, "run">,
+  orbId: Ids.OrbId,
+  endedAt: Common.TimestampMillis,
+) => {
+  database.run(sql`update orb_usage_intervals set ended_at = ${endedAt} where orb_id = ${orbId} and ended_at is null`)
+}
+
+const staleOpenIntervalRows = (database: Pick<Database.DrizzleDatabase, "all">) =>
+  database.all<StaleOpenIntervalRow>(
+    sql`
+      select i.id, o.last_active_at
+      from orb_usage_intervals i
+      join orbs o on o.orb_id = i.orb_id
+      where i.ended_at is null and o.status <> 'running'
+    `,
+  )
 
 const recordToRow = (record: Orb.OrbRecord, token: string | null) => ({
   orb_id: record.orb_id,
@@ -354,6 +521,8 @@ const recordByOrbIdQuery = (orbId: Ids.OrbId) => sql`${recordColumns} from orbs 
 
 const recordByThreadIdQuery = (threadId: Ids.ThreadId) =>
   sql`${recordColumns} from orbs where thread_id = ${threadId} limit 1`
+
+const normalizedMinutes = (value: number) => Number(value.toFixed(6))
 
 const canTransition = (from: Orb.OrbStatus, to: Orb.OrbStatus) => {
   if (from === to) return true

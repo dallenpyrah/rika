@@ -668,6 +668,7 @@ const orbSummary = (status: Remote.OrbSummary["status"]): Remote.OrbSummary => (
   base_commit: "abc123",
   created_at: 1,
   last_active_at: 121_001,
+  running_minutes: 7,
 })
 
 const projectSummary = (): Remote.ProjectSummary => ({

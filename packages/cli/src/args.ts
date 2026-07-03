@@ -1,6 +1,6 @@
 import { NodeServices } from "@effect/platform-node"
 import { Config } from "@rika/core"
-import { Ide, Ids } from "@rika/schema"
+import { Common, Ide, Ids } from "@rika/schema"
 import { Console, Effect, Option, Ref, Schema } from "effect"
 import { Argument, CliError, Command as CliCommand, Flag } from "effect/unstable/cli"
 
@@ -110,7 +110,7 @@ export const ConfigCommand = Schema.Struct({
   workspace: Schema.optional(Schema.Boolean),
 }).annotate({ identifier: "Rika.Cli.Args.ConfigCommand" })
 
-export const OrbAction = Schema.Literals(["list", "kill", "shell"]).annotate({
+export const OrbAction = Schema.Literals(["list", "kill", "shell", "usage"]).annotate({
   identifier: "Rika.Cli.Args.OrbAction",
 })
 export type OrbAction = typeof OrbAction.Type
@@ -121,6 +121,8 @@ export const OrbCommand = Schema.Struct({
   action: OrbAction,
   thread_id: Schema.optional(Ids.ThreadId),
   force: Schema.optional(Schema.Boolean),
+  project_name: Schema.optional(Schema.String),
+  since: Schema.optional(Common.TimestampMillis),
 }).annotate({ identifier: "Rika.Cli.Args.OrbCommand" })
 
 export interface VersionCommand extends Schema.Schema.Type<typeof VersionCommand> {}
@@ -310,6 +312,7 @@ export const usage = [
   "  rika config keymap",
   "  rika config edit [--workspace]",
   "  rika orb list",
+  "  rika orb usage [--project <name>] [--since <iso-date>]",
   "  rika orb kill <thread-id> [--force]",
   "  rika orb shell <thread-id>",
   "  rika review [--staged] [--base <ref>] [--workspace <path>] [--ephemeral] [paths...]",
@@ -549,6 +552,11 @@ const orbShellConfig = {
   threadId: Argument.string("thread-id").pipe(Argument.withDescription("Thread id")),
 }
 
+const orbUsageConfig = {
+  project: Flag.string("project").pipe(Flag.optional, Flag.withDescription("Project name")),
+  since: Flag.string("since").pipe(Flag.optional, Flag.withDescription("ISO date lower bound")),
+}
+
 const ideServerConfig = {
   server: Flag.string("server").pipe(Flag.optional, Flag.withDescription("Remote-control server URL")),
   token: Flag.string("token").pipe(Flag.optional, Flag.withDescription("Bearer token for the remote-control server")),
@@ -719,6 +727,11 @@ interface OrbKillInput {
 
 interface OrbShellInput {
   readonly threadId: string
+}
+
+interface OrbUsageInput {
+  readonly project: Option.Option<string>
+  readonly since: Option.Option<string>
 }
 
 interface IdeServerInput {
@@ -1040,12 +1053,18 @@ const makeOrbCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef:
     CliCommand.withShortDescription("Shell orb"),
   )
 
+  const usageCommand = CliCommand.make("usage", orbUsageConfig, (input: OrbUsageInput) => {
+    const parsed = toOrbUsageCommand(input)
+    if (parsed instanceof ArgsError) return Ref.set(rejectedRef, Option.some(parsed))
+    return Ref.set(parsedRef, Option.some(parsed))
+  }).pipe(CliCommand.withDescription("Print orb running-minute usage"), CliCommand.withShortDescription("Orb usage"))
+
   return CliCommand.make("orb", {}, () =>
     Ref.set(rejectedRef, Option.some(new ArgsError({ message: "Expected an orb subcommand", exit_code: 2, usage }))),
   ).pipe(
     CliCommand.withDescription("Manage local orbs"),
     CliCommand.withShortDescription("Manage orbs"),
-    CliCommand.withSubcommands([list, kill, shell]),
+    CliCommand.withSubcommands([list, kill, shell, usageCommand]),
   )
 }
 
@@ -1604,6 +1623,21 @@ const toOrbShellCommand = (input: OrbShellInput): OrbCommand => ({
   action: "shell",
   thread_id: Ids.ThreadId.make(input.threadId),
 })
+
+const toOrbUsageCommand = (input: OrbUsageInput): OrbCommand | ArgsError => {
+  const projectName = Option.getOrUndefined(input.project)
+  const sinceText = Option.getOrUndefined(input.since)
+  const since = sinceText === undefined ? undefined : Date.parse(sinceText)
+  if (sinceText !== undefined && Number.isNaN(since)) {
+    return new ArgsError({ message: `Invalid --since date: ${sinceText}`, exit_code: 2, usage })
+  }
+  return {
+    type: "orb",
+    action: "usage",
+    ...(projectName === undefined ? {} : { project_name: projectName }),
+    ...(since === undefined ? {} : { since: Common.TimestampMillis.make(since) }),
+  }
+}
 
 const toDoctorCommand = (): DoctorCommand => ({ type: "doctor" })
 

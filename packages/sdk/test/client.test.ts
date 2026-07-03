@@ -398,6 +398,7 @@ describe("SDK client", () => {
       base_commit: "abc123",
       created_at: now,
       last_active_at: now,
+      running_minutes: 7,
     }
     const paused: Remote.OrbSummary = { ...summary, status: "paused" }
     const killed: Remote.OrbSummary = { ...summary, status: "killed" }

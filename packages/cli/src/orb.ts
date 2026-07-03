@@ -118,6 +118,18 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
               yield* Effect.forEach(records, (record) => output.stdout(formatRecord(record)), { discard: true })
               return 0
             }
+            case "usage": {
+              const rows = yield* orbs.usage({
+                ...(command.project_name === undefined ? {} : { project_name: command.project_name }),
+                ...(command.since === undefined ? {} : { since: command.since }),
+              })
+              const totalMinutes = rows.reduce((total, row) => total + row.total_running_minutes, 0)
+              const totalIntervals = rows.reduce((total, row) => total + row.interval_count, 0)
+              yield* output.stdout("thread\tproject\trunning_minutes\tintervals")
+              yield* Effect.forEach(rows, (row) => output.stdout(formatUsageRow(row)), { discard: true })
+              yield* output.stdout(`TOTAL\t\t${formatMinutes(totalMinutes)}\t${totalIntervals}`)
+              return 0
+            }
             case "kill": {
               const threadId = yield* requireThreadId(command)
               const orb = yield* orbs.getByThread(threadId)
@@ -173,6 +185,14 @@ const requireThreadId = (command: Args.OrbCommand) =>
 
 const formatRecord = (record: Orb.OrbRecord) =>
   `${record.thread_id}\t${record.project_id}\t${record.status}\t${record.last_active_at}`
+
+const formatUsageRow = (row: OrbStore.UsageRow) =>
+  `${row.thread_id}\t${row.project}\t${formatMinutes(row.total_running_minutes)}\t${row.interval_count}`
+
+const formatMinutes = (minutes: number) => {
+  if (Number.isInteger(minutes)) return String(minutes)
+  return minutes.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+}
 
 const failureMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
 

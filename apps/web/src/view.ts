@@ -372,7 +372,7 @@ const orbHeader = (model: Model): Html => {
         [
           Ui.badge([orb.status], orbBadgeTone(orb.status)),
           H.span([], [`last active ${relativeTime(orb.last_active_at)}`]),
-          H.span([], [`runtime ${runningMinutes(orb)}m`]),
+          H.span([], [`runtime ${formatMinutes(orb.running_minutes)}m`]),
           H.span([], [orb.base_commit === null ? "base pending" : `base ${shortId(orb.base_commit)}`]),
         ],
       ),
@@ -770,7 +770,9 @@ const relativeTime = (timestamp: number) => {
   return `${Math.floor(hours / 24)}d ago`
 }
 
-const runningMinutes = (orb: NonNullable<Model["selected_orb"]>) =>
-  Math.max(0, Math.round((orb.last_active_at - orb.created_at) / 60_000))
+const formatMinutes = (minutes: number) => {
+  if (Number.isInteger(minutes)) return String(minutes)
+  return minutes.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+}
 
 const shortId = (value: string) => (value.length <= 16 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`)

@@ -192,9 +192,9 @@ async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModule
     projectStoreLayer,
     orbStoreLayer,
   )
-  const migratedStorageLayer = EffectRuntime.Layer.effectDiscard(Persistence.Migration.migrate()).pipe(
-    EffectRuntime.Layer.provideMerge(storageLayer),
-  )
+  const migratedStorageLayer = EffectRuntime.Layer.effectDiscard(
+    Persistence.Migration.migrate().pipe(EffectRuntime.Effect.andThen(Persistence.OrbStore.repairUsageIntervals())),
+  ).pipe(EffectRuntime.Layer.provideMerge(storageLayer))
   const managerLayer = Orb.OrbManager.layer.pipe(
     EffectRuntime.Layer.provideMerge(migratedStorageLayer),
     EffectRuntime.Layer.provideMerge(sandboxLayer),

@@ -45,6 +45,7 @@ describe("web app view", () => {
       Scene.expect(Scene.role("tab", { name: "Changes" })).toExist(),
       Scene.expect(Scene.role("tab", { name: "Terminal" })).toExist(),
       Scene.expect(Scene.role("tabpanel")).toContainText("hello from view"),
+      Scene.expect(Scene.text("runtime 7m")).toExist(),
     )
   })
 
@@ -382,6 +383,7 @@ const orbSummary = (status: Remote.OrbSummary["status"]): Remote.OrbSummary => (
   base_commit: "abc123",
   created_at: 1,
   last_active_at: 121_001,
+  running_minutes: 7,
 })
 
 const messageAdded = (sequence: number, role: RikaMessage.Role, text: string): Event.MessageAdded => ({

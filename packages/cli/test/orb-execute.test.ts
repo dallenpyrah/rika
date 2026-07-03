@@ -431,6 +431,8 @@ const orbStoreFakeLayer = () =>
       get: () => Effect.never,
       getByThread: () => Effect.never,
       list: () => Effect.never,
+      usage: () => Effect.never,
+      repairUsageIntervals: () => Effect.never,
       setStatus: () => Effect.never,
       setSandbox: () => Effect.never,
       setBaseCommit: () => Effect.never,

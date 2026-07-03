@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OrbManager } from "@rika/orb"
-import { ArtifactStore, Database, Migration, OrbStore } from "@rika/persistence"
+import { ArtifactStore, Database, Migration, OrbStore, ProjectStore } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Artifact, Common, Ids, Orb, Remote } from "@rika/schema"
 import { OrbMirror } from "@rika/server"
@@ -12,6 +12,11 @@ const threadId = Ids.ThreadId.make("thread_cli_orb")
 const projectId = Ids.ProjectId.make("project_cli_orb")
 const orbId = Ids.OrbId.make("orb_1")
 const now = Common.TimestampMillis.make(1_970_000_000_000)
+const usageRunningAt = Common.TimestampMillis.make(now + 60_000)
+const usageSinceAt = Common.TimestampMillis.make(now + 120_000)
+const usagePausedAt = Common.TimestampMillis.make(now + 180_000)
+const usageResumedAt = Common.TimestampMillis.make(now + 240_000)
+const usageReadAt = Common.TimestampMillis.make(now + 360_000)
 const finalDiff: Remote.OrbChangesResponse = {
   base_commit: "abc123",
   head_commit: "def456",
@@ -35,6 +40,37 @@ describe("CLI orb commands", () => {
     expect(output.stdout).toEqual([
       "thread\tproject\tstatus\tlast_active_at",
       `${threadId}\t${projectId}\trunning\t${now}`,
+    ])
+  })
+
+  test("usage prints project-filtered running minutes from stored intervals", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedUsageOrb()
+        return yield* CliOrb.executeCommand({
+          type: "orb",
+          action: "usage",
+          project_name: "demo",
+          since: usageSinceAt,
+        })
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            times: [now, now, usageRunningAt, usagePausedAt, usageResumedAt, usageReadAt],
+          }),
+        ),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(output.stderr).toEqual([])
+    expect(output.stdout).toEqual([
+      "thread\tproject\trunning_minutes\tintervals",
+      "thread_cli_orb_usage\tdemo\t3\t2",
+      "TOTAL\t\t3\t2",
     ])
   })
 
@@ -241,6 +277,7 @@ const makeLayer = (input: {
   readonly changesFails?: boolean
   readonly killFails?: boolean
   readonly shellThreads?: Array<Ids.ThreadId>
+  readonly times?: ReadonlyArray<Common.TimestampMillis>
 }) => {
   const calls = input.calls ?? []
   const configLayer = Config.layerFromValues({
@@ -249,9 +286,15 @@ const makeLayer = (input: {
     default_mode: "smart",
   })
   const databaseLayer = Database.memoryLayer
-  const timeLayer = Time.fixedLayer(now)
+  const timeLayer = input.times === undefined ? Time.fixedLayer(now) : timeSequenceLayer(input.times)
   const idLayer = IdGenerator.sequenceLayer(1)
   const artifactLayer = artifactStoreLayer(calls, input.artifactPutFails === true)
+  const projectLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(idLayer),
+  )
   const storageLayer = Layer.mergeAll(
     configLayer,
     databaseLayer,
@@ -259,6 +302,7 @@ const makeLayer = (input: {
     timeLayer,
     idLayer,
     artifactLayer,
+    projectLayer,
     OrbStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer), Layer.provideMerge(idLayer)),
   )
   const clientFactory: CliOrb.ClientFactory = () =>
@@ -395,6 +439,39 @@ const seedOrb = (status: Extract<Orb.OrbStatus, "running" | "paused">) =>
     })
     return yield* OrbStore.setStatus(created.orb_id, status)
   })
+
+const seedUsageOrb = () =>
+  Effect.gen(function* () {
+    const project = yield* ProjectStore.create({
+      name: "demo",
+      repo_origin: "https://github.com/example/demo.git",
+    })
+    const created = yield* OrbStore.create({
+      thread_id: Ids.ThreadId.make("thread_cli_orb_usage"),
+      project_id: project.project_id,
+      sandbox_id: "sandbox_cli_orb",
+      base_commit: "abc123",
+      endpoint_url: "https://orb.cli.test",
+      token: "orb-token",
+    })
+    yield* OrbStore.setStatus(created.orb_id, "running")
+    yield* OrbStore.setStatus(created.orb_id, "paused")
+    return yield* OrbStore.setStatus(created.orb_id, "running")
+  })
+
+const timeSequenceLayer = (times: ReadonlyArray<Common.TimestampMillis>) => {
+  let index = 0
+  return Layer.succeed(
+    Time.Service,
+    Time.Service.of({
+      nowMillis: Effect.sync(() => {
+        const value = times[Math.min(index, times.length - 1)] ?? now
+        index += 1
+        return value
+      }),
+    }),
+  )
+}
 
 const orbRecord = (override: Partial<Orb.OrbRecord> = {}): Orb.OrbRecord => ({
   orb_id: orbId,

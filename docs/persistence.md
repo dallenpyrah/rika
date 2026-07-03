@@ -31,3 +31,4 @@ Tests should use `Database.memoryLayer` unless the behavior being tested require
 - Backend and orb lifecycle recovery writes synthetic `turn.failed` events to the same append-only log. Projection replay treats the first terminal event for a turn as authoritative while keeping sequence advancement monotonic for later terminal events on that same turn.
 - Thread forks copy conversation events into a new thread id and may preserve `artifact.created` payloads that point at source-thread artifacts. Forking does not copy artifact rows.
 - `WorkspaceStore` owns durable workspace memberships for hosted access. Authorization decisions stay in `WorkspaceAccess`, not in the Drizzle adapter.
+- `OrbStore` owns orb lifecycle rows and usage intervals. `setStatus` is the only writer for opening and closing running intervals; startup repair closes stale open intervals for non-running orbs after migrations apply.

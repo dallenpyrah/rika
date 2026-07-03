@@ -251,6 +251,17 @@ rika sync thread_123
 
 The command writes to `<workspace>/.rika/worktrees/<thread-id>` on branch `rika/orb/<thread-id>`, verifies the orb base commit exists locally, resets the worktree to that base, cleans stale untracked files, and applies the orb's binary diff. Empty orb diffs print `no changes yet`.
 
+## Orb usage
+
+Inspect orb running-minute visibility:
+
+```bash
+rika orb usage
+rika orb usage --project demo --since 2026-07-03T00:00:00Z
+```
+
+The report prints thread, project, total running minutes, interval count, and a grand total. It is an operations and hosted-control-plane seam, not a billing system.
+
 ## Remote control, IDEs, and SDK
 
 Start the local remote-control server:

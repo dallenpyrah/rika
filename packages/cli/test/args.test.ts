@@ -129,17 +129,26 @@ describe("CLI args", () => {
     expect(status).toEqual({ type: "memory", action: "status" })
   })
 
-  test("parses orb list, kill, and shell commands", async () => {
+  test("parses orb list, kill, shell, and usage commands", async () => {
     const threadId = Ids.ThreadId.make("thread_args_orb_kill")
     const list = await Effect.runPromise(Args.parse(["orb", "list"]))
     const kill = await Effect.runPromise(Args.parse(["orb", "kill", threadId]))
     const forcedKill = await Effect.runPromise(Args.parse(["orb", "kill", threadId, "--force"]))
     const shell = await Effect.runPromise(Args.parse(["orb", "shell", threadId]))
+    const usage = await Effect.runPromise(
+      Args.parse(["orb", "usage", "--project", "demo", "--since", "2026-07-03T12:00:00.000Z"]),
+    )
 
     expect(list).toEqual({ type: "orb", action: "list" })
     expect(kill).toEqual({ type: "orb", action: "kill", thread_id: threadId, force: false })
     expect(forcedKill).toEqual({ type: "orb", action: "kill", thread_id: threadId, force: true })
     expect(shell).toEqual({ type: "orb", action: "shell", thread_id: threadId })
+    expect(usage).toEqual({
+      type: "orb",
+      action: "usage",
+      project_name: "demo",
+      since: Date.parse("2026-07-03T12:00:00.000Z"),
+    })
   })
 
   test("allows execute without a prompt so piped stdin can supply it", async () => {

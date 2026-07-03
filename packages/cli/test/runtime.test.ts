@@ -16,6 +16,22 @@ const ConfigListReport = Schema.Struct({
   ),
 })
 
+const expectOrbStoreMigrationsRepairUsage = (path: string, source: string) => {
+  const violations = source
+    .split("const storageLayer =")
+    .slice(1)
+    .flatMap((segment, index) => {
+      const [storageBlock, migratedBlock = ""] = segment.split("const migratedStorageLayer =")
+
+      return storageBlock?.includes("orbStoreLayer") === true &&
+        !migratedBlock.slice(0, 600).includes("repairUsageIntervals")
+        ? [`${path}: storageLayer ${index + 1}`]
+        : []
+    })
+
+  expect(violations).toEqual([])
+}
+
 describe("CLI runtime", () => {
   const rawOutputLayer = (output: { stdout: Array<string>; stderr: Array<string> }) =>
     Layer.succeed(
@@ -51,6 +67,17 @@ describe("CLI runtime", () => {
     expect(exitCode).toBe(1)
     expect(output.stdout).toEqual([])
     expect(output.stderr).toEqual([Args.invalidExecuteAliasErrorText])
+  })
+
+  test("repairs orb usage intervals after migrations in every orb storage graph", async () => {
+    expectOrbStoreMigrationsRepairUsage(
+      "packages/cli/src/runtime.ts",
+      await readFile(new URL("../src/runtime.ts", import.meta.url), "utf8"),
+    )
+    expectOrbStoreMigrationsRepairUsage(
+      "apps/web/vite.config.ts",
+      await readFile(new URL("../../../apps/web/vite.config.ts", import.meta.url), "utf8"),
+    )
   })
 
   test("writes Amp's invalid -e shorthand error without a final newline", async () => {

@@ -23,3 +23,9 @@ The orb server token is generated per provisioning run and stored only through `
 `rika sync <thread-id>` mirrors a running orb thread's workspace changes into a local dedicated worktree at `<workspace>/.rika/worktrees/<thread-id>`. The CLI resolves the thread's orb endpoint, fetches `/v1/orb/changes`, verifies the orb base commit exists locally, then resets and cleans the worktree before applying the binary patch.
 
 The worktree stays under `.rika/`, which is ignored by the repository. Re-running sync is idempotent for tracked edits, new untracked files, and binary files because the worktree is reset to the base commit and cleaned before each apply.
+
+## Usage Visibility
+
+`OrbStore` records running intervals when an orb enters `running` and closes them when it leaves `running`. Startup repair closes stale open intervals for non-running orbs at the orb's `last_active_at` timestamp.
+
+Use `rika orb usage [--project <name>] [--since <ISO date>]` to print per-orb running minutes and interval counts plus a grand total. This is operational visibility only; Rika does not implement hosted billing or pricing.

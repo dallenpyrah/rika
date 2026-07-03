@@ -331,6 +331,7 @@ const remoteOrbSummary = (record: Orb.OrbRecord): Remote.OrbSummary => ({
   base_commit: record.base_commit,
   created_at: record.created_at,
   last_active_at: record.last_active_at,
+  running_minutes: 0,
 })
 
 const createRunningOrbRecord = (recordThreadId: Ids.ThreadId) =>

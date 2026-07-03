@@ -587,6 +587,7 @@ const orbSummary = (
   base_commit: "abc123",
   created_at: Common.TimestampMillis.make(1),
   last_active_at: Common.TimestampMillis.make(2),
+  running_minutes: 0,
 })
 
 const lifecycleOrb = (

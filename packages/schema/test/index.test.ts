@@ -620,6 +620,7 @@ describe("Rika protocol schemas", () => {
       base_commit: "abc123",
       created_at: now,
       last_active_at: now,
+      running_minutes: 12,
     }
 
     expect(

@@ -224,24 +224,24 @@ export const layerWithLive = Layer.effect(
       }),
       listOrbs: Effect.fn("RemoteControl.listOrbs")(function* () {
         const records = yield* orbs.list()
-        return records.map(toOrbSummary)
+        return yield* Effect.forEach(records, (record) => toOrbSummary(orbs, record))
       }),
       getOrbByThread: Effect.fn("RemoteControl.getOrbByThread")(function* (threadId: Ids.ThreadId) {
         const record = yield* orbs.getByThread(threadId)
         if (record === undefined) return yield* orbNotFound({ thread_id: threadId }, "getOrbByThread")
-        return toOrbSummary(record)
+        return yield* toOrbSummary(orbs, record)
       }),
       pauseOrb: Effect.fn("RemoteControl.pauseOrb")(function* (orbId: Ids.OrbId) {
         const record = yield* orbManager.pause(orbId)
-        return toOrbSummary(record)
+        return yield* toOrbSummary(orbs, record)
       }),
       resumeOrb: Effect.fn("RemoteControl.resumeOrb")(function* (orbId: Ids.OrbId) {
         const record = yield* orbManager.resume(orbId)
-        return toOrbSummary(record)
+        return yield* toOrbSummary(orbs, record)
       }),
       killOrb: Effect.fn("RemoteControl.killOrb")(function* (orbId: Ids.OrbId) {
         const record = yield* orbManager.kill(orbId)
-        return toOrbSummary(record)
+        return yield* toOrbSummary(orbs, record)
       }),
       listProjects: Effect.fn("RemoteControl.listProjects")(function* () {
         const records = yield* projects.list()
@@ -768,14 +768,18 @@ const withOrbStatus = Effect.fn("RemoteControl.withOrbStatus")(function* (
   return orb === undefined ? remote : { ...remote, orb_status: orb.status }
 })
 
-const toOrbSummary = (orb: Orb.OrbRecord): Remote.OrbSummary => ({
-  orb_id: orb.orb_id,
-  thread_id: orb.thread_id,
-  project_id: orb.project_id,
-  status: orb.status,
-  base_commit: orb.base_commit,
-  created_at: orb.created_at,
-  last_active_at: orb.last_active_at,
+const toOrbSummary = Effect.fn("RemoteControl.toOrbSummary")(function* (orbs: OrbStore.Interface, orb: Orb.OrbRecord) {
+  const usage = yield* orbs.usage({ orb_id: orb.orb_id })
+  return {
+    orb_id: orb.orb_id,
+    thread_id: orb.thread_id,
+    project_id: orb.project_id,
+    status: orb.status,
+    base_commit: orb.base_commit,
+    created_at: orb.created_at,
+    last_active_at: orb.last_active_at,
+    running_minutes: usage[0]?.total_running_minutes ?? 0,
+  }
 })
 
 const toProjectSummary = (project: Orb.ProjectRecord): Remote.ProjectSummary => ({
