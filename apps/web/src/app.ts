@@ -1,6 +1,6 @@
 import { Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
 import { Client } from "@rika/sdk"
-import { ModelInfo } from "@rika/llm"
+import * as ModelInfo from "@rika/llm/model-info"
 import * as Command from "foldkit/command"
 import { m } from "foldkit/message"
 import * as Subscription from "foldkit/subscription"
@@ -511,7 +511,9 @@ export const contextUsage = (model: Model): ContextUsage | undefined => {
   const selected = model.threads.find((thread) => thread.thread_id === model.selected_thread_id)
   const tokens = latest?.data.usage?.input_tokens ?? selected?.context_tokens
   const window =
-    latest?.data.model === undefined ? selected?.context_window : ModelInfo.modelInfo(latest.data.model).context_window
+    latest?.data.model === undefined
+      ? selected?.context_window
+      : ModelInfo.modelInfo(latest.data.model, {}).context_window
   if (tokens === undefined || window === undefined) return undefined
   const percent = Math.min(100, Math.max(0, Math.round((tokens / window) * 100)))
   return {

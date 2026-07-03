@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { Ids } from "@rika/schema"
-import { resolveProxyTarget } from "../vite.config"
+import { isApiRequestUrl, resolveProxyTarget } from "../vite.config"
 
 const threadId = Ids.ThreadId.make("thread_web_proxy_orb")
 
 describe("web Vite backend proxy", () => {
+  test("skips non-api Vite requests before loading backend resolver modules", () => {
+    expect(isApiRequestUrl(undefined)).toBe(false)
+    expect(isApiRequestUrl("/")).toBe(false)
+    expect(isApiRequestUrl("/src/entry.ts")).toBe(false)
+    expect(isApiRequestUrl("/@vite/client")).toBe(false)
+    expect(isApiRequestUrl("/api/rika/v1/threads")).toBe(true)
+  })
+
   test("routes thread path requests through the matching orb endpoint", async () => {
     const resolved: Array<string | undefined> = []
     const target = await resolveProxyTarget({

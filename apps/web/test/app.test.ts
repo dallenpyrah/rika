@@ -28,6 +28,13 @@ const orbId = Ids.OrbId.make("orb-web")
 const projectId = Ids.ProjectId.make("project-web")
 
 describe("web app state", () => {
+  test("imports only browser-safe LLM modules", async () => {
+    const source = await Bun.file(new URL("../src/app.ts", import.meta.url)).text()
+
+    expect(source).not.toContain('from "@rika/llm"')
+    expect(source).toContain('from "@rika/llm/model-info"')
+  })
+
   test("initializes by loading backend state and the requested thread", () => {
     const [model, commands] = init({ api_base_url: "/api/rika", thread_id: threadId })
 

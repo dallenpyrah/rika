@@ -40,6 +40,8 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 | `package.json`                      | Bun workspace, dependency catalog, and root verification scripts.                                                   |
 | `turbo.json`                        | Monorepo task graph for package build, typecheck, and test commands.                                                |
 | `.oxlintrc.json`                    | Root oxlint configuration.                                                                                          |
+| `.mcp.json`                         | MCP server entries for MCP-aware tools, including FoldKit devtools.                                                 |
+| `.codex/config.toml`                | Codex project agent and MCP server configuration.                                                                   |
 | `scripts/check-docs.ts`             | Lightweight check that documented scripts and guidance files still exist.                                           |
 
 ## Current Standards
@@ -60,6 +62,7 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 - Make `fff`, hashline read/edit, semantic search, and ast-grep outline default built-in tools.
 - Keep tool permissions centralized through `PermissionPolicy.Service`; Rika's default product policy is allow-all unless configuration or plugin hooks override it.
 - Keep implementation simple. Do not add abstractions unless they make dependencies swappable, remove real duplication, or match the established OpenCode-style shape.
+- The FoldKit web app exposes the devtools MCP relay in development on port `9988`; `.mcp.json` and `.codex/config.toml` launch pinned `@foldkit/devtools-mcp@0.13.0`.
 
 ## Subdirectories
 
@@ -105,7 +108,7 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 
 <!-- AGENTS-SKILLS-START -->
 
-[Skills Index]|local: ./.agents/skills|IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning. When a task matches a skill, read its SKILL.md and follow it.|relevant:{add-effect-service}
+[Skills Index]|local: ./.agents/skills|IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning. When a task matches a skill, read its SKILL.md and follow it.|relevant:{add-effect-service,audit-program,author-component,effect-logging,foldcn,foldkit,generate-program,motel-debug,use-foldkit-mcp}
 
 <!-- AGENTS-SKILLS-END -->
 

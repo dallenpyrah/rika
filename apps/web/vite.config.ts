@@ -4,7 +4,8 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { foldkit } from "@foldkit/vite-plugin"
 import type * as BackendEndpoint from "@rika/cli/backend-endpoint"
-import { defineConfig, type Plugin } from "vite"
+import { createServerModuleRunner, defineConfig, type Plugin } from "vite"
+import type { ModuleRunner } from "vite/module-runner"
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const workspaceRoot = process.env.RIKA_WORKSPACE_ROOT ?? rootDir
@@ -30,8 +31,20 @@ interface ProxyResolver {
   readonly dispose: () => Promise<void>
 }
 
+interface ProxyModules {
+  readonly Core: typeof import("@rika/core")
+  readonly Persistence: typeof import("@rika/persistence")
+  readonly SchemaModule: typeof import("@rika/schema")
+  readonly EffectRuntime: typeof import("effect")
+  readonly BackendEndpointModule: typeof import("@rika/cli/backend-endpoint")
+  readonly LocalBackend: typeof import("@rika/cli/local-backend")
+  readonly Orb: typeof import("@rika/orb")
+}
+
+type LoadProxyModules = () => Promise<ProxyModules>
+
 export default defineConfig({
-  plugins: [foldkit(), localBackendProxy()],
+  plugins: [foldkit(process.env.NODE_ENV === "test" ? {} : { devToolsMcpPort: 9988 }), localBackendProxy()],
   resolve: {
     alias: [{ find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) }],
   },
@@ -39,26 +52,57 @@ export default defineConfig({
 
 function localBackendProxy(): Plugin {
   let resolver: Promise<ProxyResolver> | undefined
-  const proxyResolver = () => {
-    resolver ??= makeProxyResolver()
+  let moduleRunner: ModuleRunner | undefined
+  const proxyResolver = (loadModules: LoadProxyModules) => {
+    resolver ??= makeProxyResolver(loadModules)
     return resolver
   }
   return {
     name: "rika-local-backend-proxy",
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
-        void proxyResolver()
+        if (!isApiRequestUrl(request.url)) {
+          next()
+          return
+        }
+        const loadModules: LoadProxyModules = async () => {
+          moduleRunner ??= createServerModuleRunner(server.environments.ssr)
+          return {
+            Core: await moduleRunner.import<typeof import("@rika/core")>("@rika/core"),
+            Persistence: await moduleRunner.import<typeof import("@rika/persistence")>("@rika/persistence"),
+            SchemaModule: await moduleRunner.import<typeof import("@rika/schema")>("@rika/schema"),
+            EffectRuntime: await moduleRunner.import<typeof import("effect")>("effect"),
+            BackendEndpointModule:
+              await moduleRunner.import<typeof import("@rika/cli/backend-endpoint")>("@rika/cli/backend-endpoint"),
+            LocalBackend:
+              await moduleRunner.import<typeof import("@rika/cli/local-backend")>("@rika/cli/local-backend"),
+            Orb: await moduleRunner.import<typeof import("@rika/orb")>("@rika/orb"),
+          }
+        }
+        void proxyResolver(loadModules)
           .then((runtime) => proxyRequest(request, response, next, runtime.resolveEndpoint))
-          .catch(next)
+          .catch((error: unknown) => writeBackendUnavailable(response, error))
       })
       server.httpServer?.once("close", () => {
-        if (resolver !== undefined) void resolver.then((runtime) => runtime.dispose())
+        if (resolver !== undefined) void resolver.then((runtime) => runtime.dispose()).catch(() => undefined)
+        if (moduleRunner !== undefined) void moduleRunner.close().catch(() => undefined)
       })
     },
   }
 }
 
-async function makeProxyResolver(): Promise<ProxyResolver> {
+const writeBackendUnavailable = (response: ServerResponse, error: unknown): void =>
+  writeJson(response, 503, {
+    error: {
+      message: error instanceof Error ? error.message : String(error),
+      code: "backend_not_running",
+    },
+  })
+
+export const isApiRequestUrl = (requestUrl: string | undefined): boolean =>
+  requestUrl !== undefined && requestUrl.startsWith(apiPrefix)
+
+async function loadProxyModules(): Promise<ProxyModules> {
   const [Core, Persistence, SchemaModule, EffectRuntime, BackendEndpointModule, LocalBackend, Orb] = await Promise.all([
     import("@rika/core"),
     import("@rika/persistence"),
@@ -68,6 +112,12 @@ async function makeProxyResolver(): Promise<ProxyResolver> {
     import("@rika/cli/local-backend"),
     import("@rika/orb"),
   ])
+  return { Core, Persistence, SchemaModule, EffectRuntime, BackendEndpointModule, LocalBackend, Orb }
+}
+
+async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModules): Promise<ProxyResolver> {
+  const { Core, Persistence, SchemaModule, EffectRuntime, BackendEndpointModule, LocalBackend, Orb } =
+    await loadModules()
   const env = process.env
   const configLayer = Core.Config.layerFromValues(
     {

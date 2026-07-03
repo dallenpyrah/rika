@@ -9,6 +9,7 @@ Foldkit local web UI for observing and steering shared Rika threads during devel
 - `src/ui.ts` contains shadcn-style Foldkit primitives: small copyable helpers with CSS classes and explicit attributes.
 - `src/entry.ts` creates the Foldkit runtime, and `src/main.ts` reads browser/query/env flags.
 - `vite.config.ts` owns the development proxy from `/api/rika/*` to the current local backend record.
+- The FoldKit devtools MCP relay is enabled in development through `foldkit({ devToolsMcpPort: 9988 })`; keep it disabled for test runs.
 
 ## Sync rules
 
@@ -22,6 +23,7 @@ Foldkit local web UI for observing and steering shared Rika threads during devel
 - Use callable messages from `foldkit/message` and Effect Schema for message/model contracts.
 - Use `Command.define` for SDK calls and convert failures into typed app messages.
 - Use `Subscription.make` for long-lived streams keyed by model dependencies.
+- Keep `devTools: { Message: AppMessage }` wired in `src/entry.ts` so the FoldKit MCP can dispatch schema-checked messages.
 - Keep views as functions of the model. Do not introduce React, hooks, or component-local state.
 
 ## Testing and verification

@@ -13,3 +13,10 @@ config_file = "./agents/librarian.toml"
 [agents.herald]
 description = "Deep web-search subagent for finding current public information, official docs, announcements, and external references."
 config_file = "./agents/herald.toml"
+
+[mcp_servers.foldkit-devtools]
+command = "npx"
+args = [
+    "-y",
+    "@foldkit/devtools-mcp@0.13.0",
+]
