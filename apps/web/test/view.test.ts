@@ -1,6 +1,6 @@
 import { Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
 import { describe, test } from "bun:test"
-import { initialModel, update, type Model, type OrbTab } from "../src/app"
+import { initialModel, MountPierreDiff, RenderedPierreDiff, update, type Model, type OrbTab } from "../src/app"
 
 Object.assign(globalThis, {
   window: {
@@ -39,6 +39,30 @@ describe("web app view", () => {
       Scene.expect(Scene.role("tabpanel")).toContainText("Files arrive with #58"),
     )
   })
+
+  test("renders collapsed Pierre diff rows with an expansion control", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(diffModel([])),
+      Scene.expect(Scene.text("src/view-diff.ts")).toExist(),
+      Scene.expect(Scene.role("button", { name: "Show diff" })).toExist(),
+      Scene.click(Scene.role("button", { name: "Show diff" })),
+      Scene.expect(Scene.role("button", { name: "Hide diff" })).toExist(),
+      Scene.expect(Scene.selector('[data-pierre-diff-id="event-2:diff:0"]')).toExist(),
+      Scene.Mount.expectHas(MountPierreDiff),
+      Scene.Mount.resolve(MountPierreDiff, RenderedPierreDiff({ payload_id: "event-2:diff:0" })),
+    )
+  })
+
+  test("renders expanded Pierre diff rows with stable mount slots", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(diffModel(["event-2:diff:0"])),
+      Scene.expect(Scene.selector('[data-pierre-diff-id="event-2:diff:0"]')).toExist(),
+      Scene.Mount.expectHas(MountPierreDiff),
+      Scene.Mount.resolve(MountPierreDiff, RenderedPierreDiff({ payload_id: "event-2:diff:0" })),
+    )
+  })
 })
 
 const orbModel = (selected_orb_tab: OrbTab, activeIndex: number): Model => {
@@ -54,6 +78,17 @@ const orbModel = (selected_orb_tab: OrbTab, activeIndex: number): Model => {
     last_sequence: 1,
     subscription_after_sequence: 1,
     connection: "connected",
+  }
+  return model
+}
+
+const diffModel = (expanded_diff_ids: ReadonlyArray<string>): Model => {
+  const model: Model = {
+    ...orbModel("transcript", 0),
+    events: [toolCallCompleted(2, "edit", { diff: pierreDiff("src/view-diff.ts", 1, 1) })],
+    expanded_diff_ids,
+    last_sequence: 2,
+    subscription_after_sequence: 2,
   }
   return model
 }
@@ -103,4 +138,63 @@ const messageAdded = (sequence: number, role: RikaMessage.Role, text: string): E
       created_at: sequence,
     },
   },
+})
+
+const toolCallCompleted = (
+  sequence: number,
+  name: string,
+  output: NonNullable<Event.ToolCallCompleted["data"]["result"]["output"]>,
+): Event.ToolCallCompleted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: Ids.TurnId.make("turn-view"),
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "tool.call.completed",
+  data: {
+    result: {
+      id: Ids.ToolCallId.make(`tool-view-${sequence}`),
+      name,
+      status: "success",
+      output,
+    },
+  },
+})
+
+const pierreDiff = (name: string, additions: number, deletions: number) => ({
+  kind: "diff",
+  renderer: "@pierre/diffs",
+  collapsed: true,
+  file_diff: fileDiff(name, additions, deletions),
+})
+
+const fileDiff = (name: string, additions: number, deletions: number) => ({
+  name,
+  type: "change" as const,
+  splitLineCount: additions + deletions,
+  unifiedLineCount: additions + deletions,
+  isPartial: false,
+  deletionLines: Array.from({ length: deletions }, (_, index) => `before ${index}`),
+  additionLines: Array.from({ length: additions }, (_, index) => `after ${index}`),
+  hunks: [
+    {
+      collapsedBefore: 0,
+      additionStart: 1,
+      additionCount: additions,
+      additionLines: additions,
+      additionLineIndex: 0,
+      deletionStart: 1,
+      deletionCount: deletions,
+      deletionLines: deletions,
+      deletionLineIndex: 0,
+      hunkContent: [{ type: "change" as const, deletions, deletionLineIndex: 0, additions, additionLineIndex: 0 }],
+      splitLineStart: 0,
+      splitLineCount: additions + deletions,
+      unifiedLineStart: 0,
+      unifiedLineCount: additions + deletions,
+      noEOFCRDeletions: false,
+      noEOFCRAdditions: false,
+    },
+  ],
 })

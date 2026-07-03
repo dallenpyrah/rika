@@ -359,9 +359,14 @@ textarea {
   border-left: 3px solid #ef4444;
 }
 
+.event-row-diff {
+  border-left: 3px solid #38bdf8;
+}
+
 .event-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.55rem;
   color: #94a3b8;
   font-size: 0.75rem;
@@ -373,6 +378,47 @@ textarea {
 
 .event-body {
   white-space: pre-wrap;
+}
+
+.pierre-diff-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pierre-diff-summary .button {
+  width: auto;
+  min-height: 2rem;
+  border-radius: 0.625rem;
+  padding: 0.35rem 0.7rem;
+}
+
+.pierre-diff-file {
+  overflow-wrap: anywhere;
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8125rem;
+}
+
+.diff-stat {
+  font-weight: 800;
+}
+
+.diff-stat-add {
+  color: #86efac;
+}
+
+.diff-stat-delete {
+  color: #fca5a5;
+}
+
+.pierre-diff-mount {
+  overflow: auto;
+  max-width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.75rem;
+  background: #020617;
 }
 
 .composer {

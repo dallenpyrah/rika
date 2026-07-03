@@ -2,6 +2,7 @@ import { html, type Document, type Html } from "foldkit/html"
 import {
   CancelledKillOrb,
   ChangedDraft,
+  ClickedTogglePierreDiff,
   ClickedKillOrb,
   ClickedNewThread,
   ClickedPauseOrb,
@@ -9,6 +10,7 @@ import {
   ClickedThread,
   ConfirmedKillOrb,
   GotOrbTabsMessage,
+  MountPierreDiff,
   SubmittedDraft,
   contextUsage,
   eventRows,
@@ -162,7 +164,7 @@ const orbHeader = (model: Model): Html => {
 }
 
 const transcript = (model: Model): Html => {
-  const rows = eventRows(model.events)
+  const rows = eventRows(model.events, new Set(model.expanded_diff_ids))
   return Ui.card(
     [H.Class("transcript-card")],
     rows.length === 0
@@ -199,9 +201,12 @@ const orbTabPanel = (model: Model, tab: OrbTab): Html => {
 const downstreamPanel = (label: string): Html =>
   Ui.card([H.Class("placeholder-card")], [H.div([H.Class("empty-state")], [label])])
 
-const rowView = (row: TranscriptRow): Html =>
+const rowView = (row: TranscriptRow): Html => (row.kind === "pierre-diff" ? pierreDiffRowView(row) : textRowView(row))
+
+const textRowView = (row: Exclude<TranscriptRow, { readonly kind: "pierre-diff" }>): Html =>
   H.article(
     [
+      H.Key(row.id),
       H.Class(
         Ui.cn("event-row", row.kind === "message" && "event-row-message", row.kind === "error" && "event-row-error"),
       ),
@@ -209,6 +214,49 @@ const rowView = (row: TranscriptRow): Html =>
     [
       H.div([H.Class("event-meta")], [H.span([], [`#${row.sequence}`]), H.strong([], [row.title])]),
       H.p([H.Class("event-body")], [row.body]),
+    ],
+  )
+
+const pierreDiffRowView = (row: Extract<TranscriptRow, { readonly kind: "pierre-diff" }>): Html =>
+  H.article(
+    [H.Key(row.id), H.Class("event-row event-row-diff")],
+    [
+      H.div(
+        [H.Class("event-meta")],
+        [
+          H.span([], [`#${row.sequence}`]),
+          H.strong([], [row.title]),
+          H.span([H.Class("diff-stat diff-stat-add")], [`+${row.diff.additions}`]),
+          H.span([H.Class("diff-stat diff-stat-delete")], [`-${row.diff.deletions}`]),
+        ],
+      ),
+      H.div(
+        [H.Class("pierre-diff-summary")],
+        [
+          H.span([H.Class("pierre-diff-file")], [row.diff.file_name]),
+          Ui.button(
+            [H.Type("button"), H.OnClick(ClickedTogglePierreDiff({ payload_id: row.diff.payload_id }))],
+            [row.expanded ? "Hide diff" : "Show diff"],
+            "ghost",
+          ),
+        ],
+      ),
+      row.expanded
+        ? H.div(
+            [
+              H.Class("pierre-diff-mount"),
+              H.DataAttribute("pierre-diff-id", row.diff.payload_id),
+              H.OnMount(
+                MountPierreDiff({
+                  payload_id: row.diff.payload_id,
+                  file_diff: row.diff.file_diff,
+                  theme_type: "dark",
+                }),
+              ),
+            ],
+            [],
+          )
+        : Ui.empty,
     ],
   )
 

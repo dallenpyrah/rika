@@ -157,6 +157,64 @@ describe("web app state", () => {
     ])
   })
 
+  test("renders completed hashline edit Pierre payloads as structured diff rows", () => {
+    const payload = pierreDiff("src/app.ts", 2, 1)
+    const rows = eventRows([toolCallCompleted(5, "edit", { type: "hashline.edit", diff: payload })])
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.kind).toBe("pierre-diff")
+    expect(rows).not.toContainEqual({
+      id: "event-5",
+      sequence: 5,
+      kind: "tool",
+      title: "Tool: edit",
+      body: "success",
+    })
+
+    const row = rows[0]
+    if (row?.kind !== "pierre-diff") throw new Error("expected Pierre diff row")
+    expect(row.title).toBe("Tool: edit")
+    expect(row.expanded).toBe(false)
+    expect(row.diff).toMatchObject({
+      payload_id: "event-5:diff:0",
+      file_name: "src/app.ts",
+      additions: 2,
+      deletions: 1,
+    })
+    expect(row.diff.file_diff).toEqual(payload.file_diff)
+  })
+
+  test("renders nested artifact Pierre payloads in encounter order", () => {
+    const rows = eventRows([
+      artifactCreated(6, {
+        sections: [
+          { first: pierreDiff("src/first.ts", 1, 0) },
+          { nested: { second: pierreDiff("src/second.ts", 0, 2) } },
+        ],
+      }),
+    ])
+
+    expect(rows).toHaveLength(2)
+    expect(rows.map((row) => row.kind)).toEqual(["pierre-diff", "pierre-diff"])
+    expect(rows.map((row) => (row.kind === "pierre-diff" ? row.diff.file_name : row.title))).toEqual([
+      "src/first.ts",
+      "src/second.ts",
+    ])
+    expect(rows.map((row) => row.id)).toEqual(["event-6:diff:0", "event-6:diff:1"])
+  })
+
+  test("renders malformed Pierre payloads as a fallback row", () => {
+    expect(eventRows([toolCallCompleted(7, "edit", { diff: malformedPierreDiff("src/broken.ts") })])).toEqual([
+      {
+        id: "event-7:diff-unavailable:0",
+        sequence: 7,
+        kind: "tool",
+        title: "Tool: edit",
+        body: "src/broken.ts · diff unavailable",
+      },
+    ])
+  })
+
   test("computes context usage from summary and latest turn events", () => {
     const hidden = initialModel({ api_base_url: "/api/rika" })
     const fromSummary = {
@@ -342,4 +400,93 @@ const turnCompletedWithUsage = (sequence: number, inputTokens: number): Event.Tu
     model: "gpt-5.5",
     usage: { input_tokens: inputTokens, output_tokens: 100, total_tokens: inputTokens + 100 },
   },
+})
+
+const toolCallCompleted = (
+  sequence: number,
+  name: string,
+  output: NonNullable<Event.ToolCallCompleted["data"]["result"]["output"]>,
+): Event.ToolCallCompleted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: Ids.TurnId.make("turn-web"),
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "tool.call.completed",
+  data: {
+    result: {
+      id: Ids.ToolCallId.make(`tool-web-${sequence}`),
+      name,
+      status: "success",
+      output,
+    },
+  },
+})
+
+const artifactCreated = (
+  sequence: number,
+  content: Event.ArtifactCreated["data"]["artifact"]["content"],
+): Event.ArtifactCreated => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: Ids.TurnId.make("turn-web"),
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "artifact.created",
+  data: {
+    artifact: {
+      id: Ids.ArtifactId.make(`artifact-web-${sequence}`),
+      thread_id: threadId,
+      turn_id: Ids.TurnId.make("turn-web"),
+      kind: "patch",
+      title: "Patch bundle",
+      content,
+      created_at: sequence,
+    },
+  },
+})
+
+const pierreDiff = (name: string, additions: number, deletions: number) => ({
+  kind: "diff",
+  renderer: "@pierre/diffs",
+  collapsed: true,
+  file_diff: fileDiff(name, additions, deletions),
+})
+
+const malformedPierreDiff = (name: string) => ({
+  kind: "diff",
+  renderer: "@pierre/diffs",
+  file_diff: { name },
+})
+
+const fileDiff = (name: string, additions: number, deletions: number) => ({
+  name,
+  type: "change" as const,
+  splitLineCount: additions + deletions,
+  unifiedLineCount: additions + deletions,
+  isPartial: false,
+  deletionLines: Array.from({ length: deletions }, (_, index) => `before ${index}`),
+  additionLines: Array.from({ length: additions }, (_, index) => `after ${index}`),
+  hunks: [
+    {
+      collapsedBefore: 0,
+      additionStart: 1,
+      additionCount: additions,
+      additionLines: additions,
+      additionLineIndex: 0,
+      deletionStart: 1,
+      deletionCount: deletions,
+      deletionLines: deletions,
+      deletionLineIndex: 0,
+      hunkContent: [{ type: "change" as const, deletions, deletionLineIndex: 0, additions, additionLineIndex: 0 }],
+      splitLineStart: 0,
+      splitLineCount: additions + deletions,
+      unifiedLineStart: 0,
+      unifiedLineCount: additions + deletions,
+      noEOFCRDeletions: false,
+      noEOFCRAdditions: false,
+    },
+  ],
 })

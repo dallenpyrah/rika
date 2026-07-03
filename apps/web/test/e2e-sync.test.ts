@@ -88,7 +88,7 @@ describe("web local sync e2e", () => {
       expect(webModel.pending_turn).toBe(false)
       expect(
         eventRows(webModel.events)
-          .map((row) => row.body)
+          .map((row) => (row.kind === "pierre-diff" ? row.diff.file_name : row.body))
           .join("\n"),
       ).toContain("remote hello")
 

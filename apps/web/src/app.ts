@@ -3,9 +3,18 @@ import { Client } from "@rika/sdk"
 import * as ModelInfo from "@rika/llm/model-info"
 import * as Command from "foldkit/command"
 import { m } from "foldkit/message"
+import * as Mount from "foldkit/mount"
 import * as Subscription from "foldkit/subscription"
 import { Effect, Option, Schema as S, Stream } from "effect"
 import * as Tabs from "./components/ui/tabs-state"
+import {
+  asFileDiffMetadata,
+  collectPierreDiffPayloads,
+  mountPierreDiff,
+  payloadFileName,
+  toWebPierreDiff,
+  type WebPierreDiff,
+} from "./pierre-diff"
 
 export const Connection = S.Literals(["idle", "loading", "connected", "failed"])
 export type Connection = typeof Connection.Type
@@ -35,6 +44,7 @@ export const Model = S.Struct({
   selected_orb: S.optional(Remote.OrbSummary),
   selected_orb_tab: OrbTab,
   orb_tabs: Tabs.Model,
+  expanded_diff_ids: S.Array(S.String),
   confirm_kill_orb_id: S.optional(Ids.OrbId),
   backend: S.optional(Remote.BackendHealth),
   notice: S.optional(S.String),
@@ -47,12 +57,23 @@ export interface RuntimeConfig {
   readonly thread_id?: Ids.ThreadId
 }
 
-export interface TranscriptRow {
+export type TranscriptRow = TextTranscriptRow | PierreDiffTranscriptRow
+
+export interface TextTranscriptRow {
   readonly id: string
   readonly sequence: number
   readonly kind: "message" | "event" | "tool" | "error"
   readonly title: string
   readonly body: string
+}
+
+export interface PierreDiffTranscriptRow {
+  readonly id: string
+  readonly sequence: number
+  readonly kind: "pierre-diff"
+  readonly title: string
+  readonly diff: WebPierreDiff
+  readonly expanded: boolean
 }
 
 export type ContextUsageTone = "normal" | "warning" | "danger"
@@ -90,6 +111,9 @@ export const AcceptedTurn = m("AcceptedTurn", { response: Remote.StartTurnRespon
 export const FailedStartTurn = m("FailedStartTurn", { message: S.String })
 export const ReceivedThreadEvent = m("ReceivedThreadEvent", { event: Event.Event })
 export const ThreadSubscriptionFailed = m("ThreadSubscriptionFailed", { message: S.String })
+export const ClickedTogglePierreDiff = m("ClickedTogglePierreDiff", { payload_id: S.String })
+export const RenderedPierreDiff = m("RenderedPierreDiff", { payload_id: S.String })
+export const FailedRenderPierreDiff = m("FailedRenderPierreDiff", { payload_id: S.String, message: S.String })
 
 export const AppMessage = S.Union([
   LoadedBackendHealth,
@@ -118,10 +142,59 @@ export const AppMessage = S.Union([
   FailedStartTurn,
   ReceivedThreadEvent,
   ThreadSubscriptionFailed,
+  ClickedTogglePierreDiff,
+  RenderedPierreDiff,
+  FailedRenderPierreDiff,
 ]).pipe(S.toTaggedUnion("_tag"))
 export type AppMessage = typeof AppMessage.Type
 
 export type AppCommand = Command.Command<AppMessage>
+
+export const MountPierreDiff = Mount.define(
+  "MountPierreDiff",
+  { payload_id: S.String, file_diff: S.Unknown, theme_type: S.Literals(["light", "dark"]) },
+  RenderedPierreDiff,
+  FailedRenderPierreDiff,
+)(
+  ({ payload_id, file_diff, theme_type }) =>
+    (element) =>
+      Effect.gen(function* () {
+        if (!(element instanceof HTMLElement)) {
+          return FailedRenderPierreDiff({ payload_id, message: "diff mount target unavailable" })
+        }
+        const decoded = asFileDiffMetadata(file_diff)
+        if (decoded === undefined) {
+          return FailedRenderPierreDiff({ payload_id, message: "diff unavailable" })
+        }
+        const mounted = yield* Effect.acquireRelease(
+          Effect.try({
+            try: () => {
+              let renderError: string | undefined
+              const handle = mountPierreDiff({
+                container: element,
+                file_diff: decoded,
+                theme_type,
+                onRenderError: (message) => {
+                  renderError = message
+                },
+              })
+              return { handle, renderError }
+            },
+            catch: (cause: unknown) => cause,
+          }),
+          ({ handle }) => Effect.sync(() => handle.destroy()),
+        )
+        return mounted.renderError === undefined
+          ? RenderedPierreDiff({ payload_id })
+          : FailedRenderPierreDiff({ payload_id, message: mounted.renderError })
+      }).pipe(
+        Effect.catch((cause: unknown) =>
+          Effect.succeed(
+            FailedRenderPierreDiff({ payload_id, message: cause instanceof Error ? cause.message : String(cause) }),
+          ),
+        ),
+      ),
+)
 
 export const LoadBackendHealth = Command.define(
   "LoadBackendHealth",
@@ -258,6 +331,7 @@ export const initialModel = (config: RuntimeConfig): Model => ({
   subscription_after_sequence: 0,
   draft: "",
   pending_turn: false,
+  expanded_diff_ids: [],
   ...initialOrbTabs(),
   ...(config.thread_id === undefined ? {} : { selected_thread_id: config.thread_id }),
 })
@@ -301,6 +375,7 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
           selected_orb: undefined,
           ...initialOrbTabs(),
           confirm_kill_orb_id: undefined,
+          expanded_diff_ids: [],
           events: [],
           last_sequence: 0,
           subscription_after_sequence: 0,
@@ -354,6 +429,12 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return receivedEventModel(model, message.event)
     case "ThreadSubscriptionFailed":
       return [{ ...model, connection: "failed", notice: message.message }, []]
+    case "ClickedTogglePierreDiff":
+      return [{ ...model, expanded_diff_ids: toggleString(model.expanded_diff_ids, message.payload_id) }, []]
+    case "RenderedPierreDiff":
+      return [model, []]
+    case "FailedRenderPierreDiff":
+      return [{ ...model, notice: `${message.payload_id}: ${message.message}` }, []]
   }
   return [model, []]
 }
@@ -384,8 +465,11 @@ export const subscriptions = Subscription.make<Model, AppMessage>()((entry) => (
   ),
 }))
 
-export const eventRows = (events: ReadonlyArray<Event.Event>): ReadonlyArray<TranscriptRow> =>
-  events.map((event) => {
+export const eventRows = (
+  events: ReadonlyArray<Event.Event>,
+  expandedDiffIds: ReadonlySet<string> = new Set(),
+): ReadonlyArray<TranscriptRow> =>
+  events.flatMap((event) => {
     switch (event.type) {
       case "message.added":
         return {
@@ -408,13 +492,22 @@ export const eventRows = (events: ReadonlyArray<Event.Event>): ReadonlyArray<Tra
           body: "Running",
         }
       case "tool.call.completed":
-        return {
-          id: event.id,
-          sequence: event.sequence,
-          kind: event.data.result.status === "success" ? "tool" : "error",
-          title: `Tool: ${event.data.result.name}`,
-          body: event.data.result.status,
-        }
+        return (
+          diffRows({
+            eventId: event.id,
+            sequence: event.sequence,
+            title: `Tool: ${event.data.result.name}`,
+            fallbackKind: event.data.result.status === "success" ? "tool" : "error",
+            value: event.data.result.output,
+            expandedDiffIds,
+          }) ?? {
+            id: event.id,
+            sequence: event.sequence,
+            kind: event.data.result.status === "success" ? "tool" : "error",
+            title: `Tool: ${event.data.result.name}`,
+            body: event.data.result.status,
+          }
+        )
       case "turn.started":
         return { id: event.id, sequence: event.sequence, kind: "event", title: "Turn started", body: event.turn_id }
       case "turn.completed":
@@ -462,13 +555,22 @@ export const eventRows = (events: ReadonlyArray<Event.Event>): ReadonlyArray<Tra
           body: event.data.summary,
         }
       case "artifact.created":
-        return {
-          id: event.id,
-          sequence: event.sequence,
-          kind: "event",
-          title: "Artifact created",
-          body: event.data.artifact.title ?? event.data.artifact.kind,
-        }
+        return (
+          diffRows({
+            eventId: event.id,
+            sequence: event.sequence,
+            title: `Artifact: ${event.data.artifact.title ?? event.data.artifact.kind}`,
+            fallbackKind: "event",
+            value: event.data.artifact.content,
+            expandedDiffIds,
+          }) ?? {
+            id: event.id,
+            sequence: event.sequence,
+            kind: "event",
+            title: "Artifact created",
+            body: event.data.artifact.title ?? event.data.artifact.kind,
+          }
+        )
       case "thread.created":
         return {
           id: event.id,
@@ -534,6 +636,7 @@ const openThreadModel = (model: Model, threadId: Ids.ThreadId): readonly [Model,
     selected_orb: undefined,
     ...initialOrbTabs(),
     confirm_kill_orb_id: undefined,
+    expanded_diff_ids: [],
     events: [],
     last_sequence: 0,
     subscription_after_sequence: 0,
@@ -555,6 +658,7 @@ const createdThreadModel = (
     selected_orb: undefined,
     ...initialOrbTabs(),
     confirm_kill_orb_id: undefined,
+    expanded_diff_ids: [],
     events: [],
     last_sequence: 0,
     subscription_after_sequence: 0,
@@ -578,6 +682,7 @@ const openedThreadModel = (model: Model, record: Remote.ThreadRecord): readonly 
     selected_orb: undefined,
     ...initialOrbTabs(),
     confirm_kill_orb_id: undefined,
+    expanded_diff_ids: [],
     threads: newestFirst([
       record.summary,
       ...model.threads.filter((thread) => thread.thread_id !== record.summary.thread_id),
@@ -687,6 +792,46 @@ const initialOrbTabs = () => ({
   selected_orb_tab: "transcript" as const,
   orb_tabs: Tabs.init({ id: "orb-tabs" }),
 })
+
+const diffRows = (input: {
+  readonly eventId: string
+  readonly sequence: number
+  readonly title: string
+  readonly fallbackKind: TextTranscriptRow["kind"]
+  readonly value:
+    | Event.ToolCallCompleted["data"]["result"]["output"]
+    | Event.ArtifactCreated["data"]["artifact"]["content"]
+  readonly expandedDiffIds: ReadonlySet<string>
+}): ReadonlyArray<TranscriptRow> | undefined => {
+  const payloads = collectPierreDiffPayloads(input.value)
+  if (payloads.length === 0) return undefined
+  return payloads.map((payload, index) => {
+    const payloadId = `${input.eventId}:diff:${index}`
+    const diff = toWebPierreDiff(payload, payloadId)
+    if (diff === undefined) {
+      const unavailableId = `${input.eventId}:diff-unavailable:${index}`
+      const fileName = payloadFileName(payload)
+      return {
+        id: unavailableId,
+        sequence: input.sequence,
+        kind: input.fallbackKind,
+        title: input.title,
+        body: fileName === undefined ? "diff unavailable" : `${fileName} · diff unavailable`,
+      }
+    }
+    return {
+      id: payloadId,
+      sequence: input.sequence,
+      kind: "pierre-diff",
+      title: input.title,
+      diff,
+      expanded: input.expandedDiffIds.has(payloadId),
+    }
+  })
+}
+
+const toggleString = (values: ReadonlyArray<string>, value: string): ReadonlyArray<string> =>
+  values.includes(value) ? values.filter((item) => item !== value) : [...values, value]
 
 const isOrbTab = (value: string): value is OrbTab =>
   value === "transcript" || value === "files" || value === "changes" || value === "terminal"
