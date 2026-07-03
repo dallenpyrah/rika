@@ -251,7 +251,7 @@ describe("Rika protocol schemas", () => {
       version: 1,
       created_at: now,
       type: "turn.started",
-      data: { user_id: userId },
+      data: { user_id: userId, mode: "deep2" },
     }
     const message: Event.Event = {
       id: Ids.EventId.make("event_message_user"),

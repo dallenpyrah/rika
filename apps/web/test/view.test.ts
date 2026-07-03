@@ -104,6 +104,23 @@ describe("web app view", () => {
       Scene.Mount.resolve(MountPierreDiff, RenderedPierreDiff({ payload_id: "event-2:diff:0" })),
     )
   })
+
+  test("renders mode selection and shows Stop only for an active durable turn", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(activeTurnModel()),
+      Scene.expect(Scene.role("combobox", { name: "Mode" })).toExist(),
+      Scene.expect(Scene.text("deep2")).toExist(),
+      Scene.expect(Scene.role("button", { name: "Stop" })).toExist(),
+    )
+
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(terminalTurnModel()),
+      Scene.expect(Scene.role("combobox", { name: "Mode" })).toExist(),
+      Scene.expect(Scene.role("button", { name: "Stop" })).not.toExist(),
+    )
+  })
 })
 
 const orbModel = (selected_orb_tab: OrbTab, activeIndex: number): Model => {
@@ -132,6 +149,23 @@ const diffModel = (expanded_diff_ids: ReadonlyArray<string>): Model => {
     subscription_after_sequence: 2,
   }
   return model
+}
+
+const activeTurnModel = (): Model => ({
+  ...orbModel("transcript", 0),
+  events: [turnStarted(2, Ids.TurnId.make("turn-view-active"))],
+  last_sequence: 2,
+  subscription_after_sequence: 2,
+})
+
+const terminalTurnModel = (): Model => {
+  const turnId = Ids.TurnId.make("turn-view-terminal")
+  return {
+    ...orbModel("transcript", 0),
+    events: [turnStarted(2, turnId), turnFailed(3, turnId)],
+    last_sequence: 3,
+    subscription_after_sequence: 3,
+  }
 }
 
 const filesModel = (): Model => {
@@ -251,6 +285,28 @@ const toolCallCompleted = (
       output,
     },
   },
+})
+
+const turnStarted = (sequence: number, turnId: Ids.TurnId): Event.TurnStarted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "turn.started",
+  data: {},
+})
+
+const turnFailed = (sequence: number, turnId: Ids.TurnId): Event.TurnFailed => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "turn.failed",
+  data: { error: { kind: "cancelled", message: "cancelled" } },
 })
 
 const pierreDiff = (name: string, additions: number, deletions: number) => ({

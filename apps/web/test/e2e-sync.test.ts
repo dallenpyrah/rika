@@ -28,6 +28,8 @@ import { Effect, Fiber, Layer, ManagedRuntime, Stream } from "effect"
 import { HttpServer, OrbMirror, PresenceHub, RemoteControl } from "@rika/server"
 import {
   ChangedDraft,
+  ChangedDraftMode,
+  ClickedInterrupt,
   ClickedKillOrb,
   ClickedPauseOrb,
   ClickedResumeOrb,
@@ -207,9 +209,76 @@ describe("web local sync e2e", () => {
       await runtime.dispose()
     }
   })
+
+  test("mode selection round-trips through the durable turn.started event", async () => {
+    const runtime = ManagedRuntime.make(makeLayer())
+    const handle = await runtime.runPromise(HttpServer.serve({ host: "127.0.0.1", port: 0 }))
+    try {
+      const api = client(handle.url)
+      await Effect.runPromise(api.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      let webModel = await openWebModel(handle.url)
+
+      const webMessages = collectWebMessages(webModel)
+      ;[webModel] = update(webModel, ChangedDraft({ value: "use a deeper mode" }))
+      ;[webModel] = update(webModel, ChangedDraftMode({ value: "deep2" }))
+      const [submitted, commands] = update(webModel, SubmittedDraft())
+      webModel = await runCommands(submitted, commands)
+      const messages = await webMessages
+      for (const message of messages) {
+        ;[webModel] = update(webModel, message)
+      }
+
+      const started = webModel.events.find(isTurnStartedEvent)
+      expect(started?.data.mode).toBe("deep2")
+    } finally {
+      await Effect.runPromise(handle.close())
+      await runtime.dispose()
+    }
+  })
+
+  test("interrupt stops the active web turn and hides the Stop action after the terminal event", async () => {
+    const runtime = ManagedRuntime.make(makeLayer(Time.fixedLayer(now), slowProviderRegistryLayer()))
+    const handle = await runtime.runPromise(HttpServer.serve({ host: "127.0.0.1", port: 0 }))
+    try {
+      const api = client(handle.url)
+      await Effect.runPromise(api.createThread({ thread_id: threadId, workspace_id: workspaceId }))
+      let webModel = await openWebModel(handle.url)
+
+      const startedMessages = collectWebMessagesUntil(webModel, isTurnStartedMessage)
+      await Effect.runPromise(api.startTurn({ thread_id: threadId, workspace_id: workspaceId, content: "wait" }))
+      for (const message of await startedMessages) {
+        ;[webModel] = update(webModel, message)
+      }
+
+      const turnId = webModel.events.find(isTurnStartedEvent)?.turn_id
+      expect(turnId).toBeDefined()
+
+      const [interrupting, commands] = update(webModel, ClickedInterrupt())
+      expect(commands.map((command) => command.name)).toEqual(["InterruptTurn"])
+      const terminalMessages = collectWebMessages(interrupting)
+      webModel = await runCommands(interrupting, commands)
+      for (const message of await terminalMessages) {
+        ;[webModel] = update(webModel, message)
+      }
+
+      const failed = webModel.events.filter(isTurnFailedEvent).find((event) => event.turn_id === turnId)
+      const [, afterTerminalCommands] = update(webModel, ClickedInterrupt())
+      expect(failed?.data.error.kind).toBe("cancelled")
+      expect(afterTerminalCommands).toEqual([])
+    } finally {
+      await Effect.runPromise(handle.close())
+      await runtime.dispose()
+    }
+  })
 })
 
-const makeLayer = (timeLayer: Layer.Layer<Time.Service> = Time.fixedLayer(now)) => {
+const makeLayer = (
+  timeLayer: Layer.Layer<Time.Service> = Time.fixedLayer(now),
+  providerRegistryLayer: Layer.Layer<Provider.Registry> = Provider.fakeRegistryLayer([
+    { name: "anthropic", responses: ["remote hello", "web hello"] },
+    { name: "openai", responses: ["remote hello", "web hello"] },
+  ]),
+) => {
   const configLayer = Config.layerFromValues({
     workspace_root: "/workspace/rika-web-e2e",
     data_dir: "/workspace/rika-web-e2e/.rika",
@@ -246,15 +315,7 @@ const makeLayer = (timeLayer: Layer.Layer<Time.Service> = Time.fixedLayer(now)) 
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const llmLayer = Router.layer.pipe(
-    Layer.provideMerge(configLayer),
-    Layer.provideMerge(
-      Provider.fakeRegistryLayer([
-        { name: "anthropic", responses: ["remote hello", "web hello"] },
-        { name: "openai", responses: ["remote hello", "web hello"] },
-      ]),
-    ),
-  )
+  const llmLayer = Router.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(providerRegistryLayer))
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
     threadLayer,
@@ -369,19 +430,53 @@ const collectTurn = (sdk: Client.Interface, afterSequence: number) =>
   )
 
 const collectWebMessages = (model: Model) => {
+  return collectWebMessagesUntil(model, isTerminalTurnMessage)
+}
+
+const collectWebMessagesUntil = (model: Model, predicate: (message: AppMessage) => boolean) => {
   const threadEvents = subscriptions.threadEvents
   return Effect.runPromise(
-    threadEvents.dependenciesToStream(threadEvents.modelToDependencies(model)).pipe(
-      Stream.takeUntil((message) => isTerminalTurnMessage(message)),
-      Stream.runCollect,
-      Effect.timeout("5 seconds"),
-    ),
+    threadEvents
+      .dependenciesToStream(threadEvents.modelToDependencies(model))
+      .pipe(Stream.takeUntil(predicate), Stream.runCollect, Effect.timeout("5 seconds")),
   )
 }
+
+const isTurnStartedMessage = (message: AppMessage) =>
+  message._tag === "ReceivedThreadEvent" && message.event.type === "turn.started"
 
 const isTerminalTurnMessage = (message: AppMessage) =>
   message._tag === "ReceivedThreadEvent" &&
   (message.event.type === "turn.completed" || message.event.type === "turn.failed")
+
+type WebEvent = Model["events"][number]
+
+const isTurnStartedEvent = (event: WebEvent): event is Extract<WebEvent, { readonly type: "turn.started" }> =>
+  event.type === "turn.started"
+
+const isTurnFailedEvent = (event: WebEvent): event is Extract<WebEvent, { readonly type: "turn.failed" }> =>
+  event.type === "turn.failed"
+
+const slowProviderRegistryLayer = () =>
+  Provider.registryLayerFromProviders([slowProvider("anthropic"), slowProvider("openai")])
+
+const slowProvider = (name: Provider.ProviderName): Provider.Interface => {
+  const response = {
+    provider: name,
+    model: "slow-model",
+    content: "slow response",
+    finish_reason: "stop" as const,
+  }
+  return {
+    name,
+    complete: () => Effect.succeed(response),
+    completeStructured: () => Effect.die("slow provider structured completion is not used"),
+    stream: () =>
+      Stream.fromIterable<Provider.StreamEvent>([
+        { type: "response.started", provider: name, model: "slow-model" },
+      ]).pipe(Stream.concat(Stream.never)),
+  }
+}
 
 const waitFor = async (predicate: () => boolean) => {
   const deadline = Date.now() + 5_000

@@ -101,7 +101,9 @@ export const Model = S.Struct({
   last_sequence: S.Int,
   subscription_after_sequence: S.Int,
   draft: S.String,
+  draft_mode: S.optional(Remote.AgentMode),
   pending_turn: S.Boolean,
+  pending_interrupt_turn_id: S.optional(Ids.TurnId),
   selected_thread_id: S.optional(Ids.ThreadId),
   subscribed_thread_id: S.optional(Ids.ThreadId),
   selected_orb: S.optional(Remote.OrbSummary),
@@ -114,6 +116,7 @@ export const Model = S.Struct({
   backend: S.optional(Remote.BackendHealth),
   notice: S.optional(S.String),
   pending_submit: S.optional(S.String),
+  pending_submit_mode: S.optional(Remote.AgentMode),
 })
 export type Model = typeof Model.Type
 
@@ -178,9 +181,13 @@ export const FailedLoadOrbFile = m("FailedLoadOrbFile", { path: S.String, messag
 export const LoadedOrbChanges = m("LoadedOrbChanges", { response: Remote.OrbChangesResponse })
 export const FailedLoadOrbChanges = m("FailedLoadOrbChanges", { message: S.String })
 export const ChangedDraft = m("ChangedDraft", { value: S.String })
+export const ChangedDraftMode = m("ChangedDraftMode", { value: S.String })
 export const SubmittedDraft = m("SubmittedDraft")
 export const AcceptedTurn = m("AcceptedTurn", { response: Remote.StartTurnResponse })
 export const FailedStartTurn = m("FailedStartTurn", { message: S.String })
+export const ClickedInterrupt = m("ClickedInterrupt")
+export const InterruptedTurn = m("InterruptedTurn", { event: Event.TurnFailed })
+export const FailedInterruptTurn = m("FailedInterruptTurn", { message: S.String })
 export const ReceivedThreadEvent = m("ReceivedThreadEvent", { event: Event.Event })
 export const ThreadSubscriptionFailed = m("ThreadSubscriptionFailed", { message: S.String })
 export const ClickedTogglePierreDiff = m("ClickedTogglePierreDiff", { payload_id: S.String })
@@ -218,9 +225,13 @@ export const AppMessage = S.Union([
   LoadedOrbChanges,
   FailedLoadOrbChanges,
   ChangedDraft,
+  ChangedDraftMode,
   SubmittedDraft,
   AcceptedTurn,
   FailedStartTurn,
+  ClickedInterrupt,
+  InterruptedTurn,
+  FailedInterruptTurn,
   ReceivedThreadEvent,
   ThreadSubscriptionFailed,
   ClickedTogglePierreDiff,
@@ -487,15 +498,29 @@ export const KillSelectedOrb = Command.define(
 
 export const StartTurn = Command.define(
   "StartTurn",
-  { api_base_url: S.String, thread_id: Ids.ThreadId, content: S.String },
+  { api_base_url: S.String, thread_id: Ids.ThreadId, content: S.String, mode: S.optional(Remote.AgentMode) },
   AcceptedTurn,
   FailedStartTurn,
-)(({ api_base_url, thread_id, content }) =>
+)(({ api_base_url, thread_id, content, mode }) =>
   sdk(api_base_url)
-    .startTurn({ thread_id, content })
+    .startTurn({ thread_id, content, ...(mode === undefined ? {} : { mode }) })
     .pipe(
       Effect.map((response) => AcceptedTurn({ response })),
       Effect.catch((error) => Effect.succeed(FailedStartTurn({ message: error.message }))),
+    ),
+)
+
+export const InterruptTurn = Command.define(
+  "InterruptTurn",
+  { api_base_url: S.String, thread_id: Ids.ThreadId, turn_id: Ids.TurnId },
+  InterruptedTurn,
+  FailedInterruptTurn,
+)(({ api_base_url, thread_id, turn_id }) =>
+  sdk(api_base_url)
+    .interruptTurn({ thread_id, turn_id })
+    .pipe(
+      Effect.map((event) => InterruptedTurn({ event })),
+      Effect.catch((error) => Effect.succeed(FailedInterruptTurn({ message: error.message }))),
     ),
 )
 
@@ -553,6 +578,7 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
           ...initialOrbWorkspace(),
           confirm_kill_orb_id: undefined,
           expanded_diff_ids: [],
+          pending_interrupt_turn_id: undefined,
           events: [],
           last_sequence: 0,
           subscription_after_sequence: 0,
@@ -610,12 +636,20 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return [{ ...model, orb_changes: { state: "failed", message: message.message }, notice: message.message }, []]
     case "ChangedDraft":
       return [{ ...model, draft: message.value }, []]
+    case "ChangedDraftMode":
+      return [{ ...model, draft_mode: agentModeFromValue(message.value) }, []]
     case "SubmittedDraft":
       return submittedDraftModel(model)
     case "AcceptedTurn":
       return [model, []]
     case "FailedStartTurn":
       return [{ ...model, pending_turn: false, notice: message.message }, []]
+    case "ClickedInterrupt":
+      return interruptTurnModel(model)
+    case "InterruptedTurn":
+      return [model, []]
+    case "FailedInterruptTurn":
+      return [{ ...model, pending_interrupt_turn_id: undefined, notice: message.message }, []]
     case "ReceivedThreadEvent":
       return receivedEventModel(model, message.event)
     case "ThreadSubscriptionFailed":
@@ -800,6 +834,17 @@ export const eventRows = (
     return unreachableEventRow(event)
   })
 
+export const activeTurnId = (events: ReadonlyArray<Event.Event>): Ids.TurnId | undefined => {
+  let active: Ids.TurnId | undefined
+  for (const event of events) {
+    if (event.type === "turn.started") active = event.turn_id
+    if ((event.type === "turn.completed" || event.type === "turn.failed") && event.turn_id === active) {
+      active = undefined
+    }
+  }
+  return active
+}
+
 export const contextUsage = (model: Model): ContextUsage | undefined => {
   const latest = model.events.findLast(
     (event): event is Event.TurnCompleted =>
@@ -835,6 +880,7 @@ const openThreadModel = (model: Model, threadId: Ids.ThreadId): readonly [Model,
     ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
+    pending_interrupt_turn_id: undefined,
     events: [],
     last_sequence: 0,
     subscription_after_sequence: 0,
@@ -857,6 +903,7 @@ const createdThreadModel = (
     ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
+    pending_interrupt_turn_id: undefined,
     events: [],
     last_sequence: 0,
     subscription_after_sequence: 0,
@@ -864,10 +911,13 @@ const createdThreadModel = (
     notice: undefined,
   }
   const content = model.pending_submit
-  if (content === undefined || content.length === 0) return [{ ...next, pending_submit: undefined }, []]
+  const mode = model.pending_submit_mode
+  if (content === undefined || content.length === 0) {
+    return [{ ...next, pending_submit: undefined, pending_submit_mode: undefined }, []]
+  }
   return [
-    { ...next, pending_turn: true, pending_submit: undefined },
-    [StartTurn({ api_base_url: model.api_base_url, thread_id: summary.thread_id, content })],
+    { ...next, pending_turn: true, pending_submit: undefined, pending_submit_mode: undefined },
+    [StartTurn({ api_base_url: model.api_base_url, thread_id: summary.thread_id, content, mode })],
   ]
 }
 
@@ -881,6 +931,7 @@ const openedThreadModel = (model: Model, record: Remote.ThreadRecord): readonly 
     ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
+    pending_interrupt_turn_id: undefined,
     threads: newestFirst([
       record.summary,
       ...model.threads.filter((thread) => thread.thread_id !== record.summary.thread_id),
@@ -902,15 +953,42 @@ const openedThreadModel = (model: Model, record: Remote.ThreadRecord): readonly 
 const submittedDraftModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
   const content = model.draft.trim()
   if (content.length === 0) return [model, []]
+  if (activeTurnId(model.events) !== undefined) return [model, []]
   if (model.selected_thread_id === undefined) {
     return [
-      { ...model, draft: "", pending_turn: true, pending_submit: content, connection: "loading", notice: undefined },
+      {
+        ...model,
+        draft: "",
+        pending_turn: true,
+        pending_submit: content,
+        pending_submit_mode: model.draft_mode,
+        connection: "loading",
+        notice: undefined,
+      },
       [CreateThread({ api_base_url: model.api_base_url })],
     ]
   }
   return [
     { ...model, draft: "", pending_turn: true, notice: undefined },
-    [StartTurn({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, content })],
+    [
+      StartTurn({
+        api_base_url: model.api_base_url,
+        thread_id: model.selected_thread_id,
+        content,
+        mode: model.draft_mode,
+      }),
+    ],
+  ]
+}
+
+const interruptTurnModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_thread_id === undefined) return [model, []]
+  const turnId = activeTurnId(model.events)
+  if (turnId === undefined) return [model, []]
+  if (model.pending_interrupt_turn_id === turnId) return [model, []]
+  return [
+    { ...model, pending_interrupt_turn_id: turnId, notice: undefined },
+    [InterruptTurn({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, turn_id: turnId })],
   ]
 }
 
@@ -936,6 +1014,9 @@ const orbTabsModel = (model: Model, message: Tabs.Message): readonly [Model, Rea
 const receivedEventModel = (model: Model, event: Event.Event): readonly [Model, ReadonlyArray<AppCommand>] => {
   if (model.subscribed_thread_id === undefined || event.thread_id !== model.subscribed_thread_id) return [model, []]
   if (event.sequence <= model.last_sequence) return [model, []]
+  const terminalForPendingInterrupt =
+    (event.type === "turn.completed" || event.type === "turn.failed") &&
+    event.turn_id === model.pending_interrupt_turn_id
   return [
     {
       ...model,
@@ -943,6 +1024,7 @@ const receivedEventModel = (model: Model, event: Event.Event): readonly [Model, 
       last_sequence: event.sequence,
       connection: "connected",
       pending_turn: event.type === "turn.completed" || event.type === "turn.failed" ? false : model.pending_turn,
+      pending_interrupt_turn_id: terminalForPendingInterrupt ? undefined : model.pending_interrupt_turn_id,
     },
     [],
   ]
@@ -1261,6 +1343,11 @@ const diffRows = (input: {
 
 const toggleString = (values: ReadonlyArray<string>, value: string): ReadonlyArray<string> =>
   values.includes(value) ? values.filter((item) => item !== value) : [...values, value]
+
+const agentModeFromValue = (value: string): Remote.AgentMode | undefined =>
+  value === "rush" || value === "smart" || value === "deep1" || value === "deep2" || value === "deep3"
+    ? value
+    : undefined
 
 const isOrbTab = (value: string): value is OrbTab =>
   value === "transcript" || value === "files" || value === "changes" || value === "terminal"

@@ -1,7 +1,10 @@
 import { html, type Document, type Html } from "foldkit/html"
 import {
+  activeTurnId,
   CancelledKillOrb,
   ChangedDraft,
+  ChangedDraftMode,
+  ClickedInterrupt,
   ClickedTogglePierreDiff,
   ClickedKillOrb,
   ClickedNewThread,
@@ -26,6 +29,14 @@ import * as Ui from "./ui"
 
 const H = html<AppMessage>()
 const OrbTabsView = Ui.Tabs.create<OrbTab>()
+const modeOptions: ReadonlyArray<Ui.SelectOption> = [
+  { value: "", label: "Default" },
+  { value: "rush", label: "rush" },
+  { value: "smart", label: "smart" },
+  { value: "deep1", label: "deep1" },
+  { value: "deep2", label: "deep2" },
+  { value: "deep3", label: "deep3" },
+]
 
 export const view = (model: Model): Document => ({
   title: model.selected_thread_id === undefined ? "Rika" : `Rika · ${shortId(model.selected_thread_id)}`,
@@ -376,8 +387,9 @@ const pierreDiffRowView = (row: Extract<TranscriptRow, { readonly kind: "pierre-
     ],
   )
 
-const composer = (model: Model): Html =>
-  H.form(
+const composer = (model: Model): Html => {
+  const active = activeTurnId(model.events)
+  return H.form(
     [H.Class("composer"), H.OnSubmit(SubmittedDraft())],
     [
       Ui.textarea({
@@ -395,14 +407,42 @@ const composer = (model: Model): Html =>
             [H.Class("muted")],
             [model.pending_turn ? "Waiting for the shared event stream" : "Rendered only from durable thread events"],
           ),
-          Ui.button(
-            [H.Type("submit"), H.Disabled(model.draft.trim().length === 0 || model.pending_turn)],
-            [model.pending_turn ? "Running" : "Send"],
+          H.div(
+            [H.Class("composer-controls")],
+            [
+              Ui.select({
+                id: "turn-mode",
+                value: model.draft_mode ?? "",
+                options: modeOptions,
+                onChange: (value) => ChangedDraftMode({ value }),
+                attributes: [H.AriaLabel("Mode")],
+                class: "mode-select",
+              }),
+              active === undefined
+                ? Ui.empty
+                : Ui.button(
+                    [
+                      H.Type("button"),
+                      H.Disabled(model.pending_interrupt_turn_id === active),
+                      H.OnClick(ClickedInterrupt()),
+                    ],
+                    ["Stop"],
+                    "danger",
+                  ),
+              Ui.button(
+                [
+                  H.Type("submit"),
+                  H.Disabled(model.draft.trim().length === 0 || model.pending_turn || active !== undefined),
+                ],
+                [model.pending_turn || active !== undefined ? "Running" : "Send"],
+              ),
+            ],
           ),
         ],
       ),
     ],
   )
+}
 
 const activeTitle = (model: Model) => {
   const thread = model.threads.find((item) => item.thread_id === model.selected_thread_id)

@@ -2,7 +2,9 @@ import { Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
 import { describe, expect, test } from "bun:test"
 import {
   ChangedDraft,
+  ChangedDraftMode,
   CancelledKillOrb,
+  ClickedInterrupt,
   ClickedThread,
   ClickedKillOrb,
   ClickedNewThread,
@@ -261,6 +263,67 @@ describe("web app state", () => {
     expect(next.draft).toBe("")
     expect(next.pending_turn).toBe(true)
     expect(commands.map((command) => command.name)).toEqual(["StartTurn"])
+  })
+
+  test("submits the selected mode with the next turn without changing the default backend mode", () => {
+    const [opened] = update(
+      initialModel({ api_base_url: "/api/rika" }),
+      OpenedThread({ record: { summary: summary(threadId), events: [] } }),
+    )
+    const [drafted] = update(opened, ChangedDraft({ value: "run deep" }))
+    const [selectedMode] = update(drafted, ChangedDraftMode({ value: "deep2" }))
+    const [next, commands] = update(selectedMode, SubmittedDraft())
+
+    expect(initialModel({ api_base_url: "/api/rika" }).draft_mode).toBeUndefined()
+    expect(selectedMode.draft_mode).toBe("deep2")
+    expect(next.draft).toBe("")
+    expect(commands.map((command) => command.name)).toEqual(["StartTurn"])
+    expect(commands[0]?.args).toEqual({
+      api_base_url: "/api/rika",
+      thread_id: threadId,
+      content: "run deep",
+      mode: "deep2",
+    })
+  })
+
+  test("interrupts only the active durable turn", () => {
+    const turnId = Ids.TurnId.make("turn-web-active")
+    const started = turnStarted(4, turnId)
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      subscribed_thread_id: threadId,
+      events: [started],
+      last_sequence: 4,
+      subscription_after_sequence: 4,
+    }
+
+    const [interrupting, commands] = update(model, ClickedInterrupt())
+    const [terminal] = update(interrupting, ReceivedThreadEvent({ event: turnFailed(5, turnId) }))
+    const [afterTerminal, terminalCommands] = update(terminal, ClickedInterrupt())
+
+    expect(commands.map((command) => command.name)).toEqual(["InterruptTurn"])
+    expect(commands[0]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, turn_id: turnId })
+    expect(afterTerminal.events.at(-1)?.type).toBe("turn.failed")
+    expect(terminalCommands).toEqual([])
+  })
+
+  test("does not send duplicate interrupts while the terminal event is still pending", () => {
+    const turnId = Ids.TurnId.make("turn-web-active")
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      subscribed_thread_id: threadId,
+      events: [turnStarted(4, turnId)],
+      last_sequence: 4,
+      subscription_after_sequence: 4,
+    }
+
+    const [interrupting, firstCommands] = update(model, ClickedInterrupt())
+    const [, secondCommands] = update(interrupting, ClickedInterrupt())
+
+    expect(firstCommands.map((command) => command.name)).toEqual(["InterruptTurn"])
+    expect(secondCommands).toEqual([])
   })
 
   test("applies live events once by sequence", () => {
@@ -602,6 +665,28 @@ const artifactCreated = (
       created_at: sequence,
     },
   },
+})
+
+const turnStarted = (sequence: number, turnId: Ids.TurnId): Event.TurnStarted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "turn.started",
+  data: {},
+})
+
+const turnFailed = (sequence: number, turnId: Ids.TurnId): Event.TurnFailed => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "turn.failed",
+  data: { error: { kind: "cancelled", message: "cancelled" } },
 })
 
 const pierreDiff = (name: string, additions: number, deletions: number) => ({

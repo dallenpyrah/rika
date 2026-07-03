@@ -34,12 +34,18 @@ export const ThreadCreated = Schema.Struct({
 }).annotate({ identifier: "Rika.Event.ThreadCreated" })
 
 export interface TurnStarted extends Schema.Schema.Type<typeof TurnStarted> {}
+export const TurnMode = Schema.Literals(["rush", "smart", "deep1", "deep2", "deep3"]).annotate({
+  identifier: "Rika.Event.TurnMode",
+})
+export type TurnMode = typeof TurnMode.Type
+
 export const TurnStarted = Schema.Struct({
   ...fields,
   turn_id: TurnId,
   type: Schema.Literal("turn.started"),
   data: Schema.Struct({
     user_id: Schema.optional(UserId),
+    mode: Schema.optional(TurnMode),
     tool_access: Schema.optional(TurnToolAccess),
   }),
 }).annotate({ identifier: "Rika.Event.TurnStarted" })

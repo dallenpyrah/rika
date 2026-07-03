@@ -1167,6 +1167,7 @@ const makeTurnStarted = (dependencies: Dependencies, input: RunTurnInput, turnId
       type: "turn.started",
       data: {
         ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+        ...(input.mode === undefined ? {} : { mode: input.mode }),
         ...ToolAccess.metadata(input.tool_access),
       },
     }
