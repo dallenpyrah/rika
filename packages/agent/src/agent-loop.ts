@@ -110,8 +110,7 @@ type Emit = (event: Event.Event) => Effect.Effect<void, RunError>
 
 const MAX_TOOL_ITERATIONS = 25
 const MAX_EMPTY_ANSWER_RETRIES = 2
-const MODEL_STREAM_BATCH_SIZE = 64
-const MODEL_STREAM_BATCH_WINDOW = "16 millis"
+const MODEL_STREAM_FLUSH_TEXT_LENGTH = 64
 
 interface ModelInput {
   readonly messages: ReadonlyArray<Provider.Message>
@@ -644,6 +643,7 @@ const streamModelResponse = (
         if (pendingKind !== undefined && pendingKind !== kind) yield* flushPending()
         pendingKind = kind
         pendingText = `${pendingText}${text}`
+        if (pendingText.length >= MODEL_STREAM_FLUSH_TEXT_LENGTH) yield* flushPending()
       })
 
     const bufferToolInputDelta = (toolCallId: Ids.ToolCallId, text: string) =>
@@ -655,6 +655,7 @@ const streamModelResponse = (
         pendingKind = "toolInput"
         pendingToolCallId = toolCallId
         pendingText = `${pendingText}${text}`
+        if (pendingText.length >= MODEL_STREAM_FLUSH_TEXT_LENGTH) yield* flushPending()
       })
 
     const processStreamEvent = (streamEvent: Provider.StreamEvent) =>
@@ -741,14 +742,10 @@ const streamModelResponse = (
       })
 
     yield* dependencies.router.stream(request).pipe(
-      Stream.groupedWithin(MODEL_STREAM_BATCH_SIZE, MODEL_STREAM_BATCH_WINDOW),
-      Stream.runForEach((streamEvents) =>
-        Effect.gen(function* () {
-          for (const streamEvent of streamEvents) yield* processStreamEvent(streamEvent)
-          yield* flushPending()
-        }),
-      ),
+      Stream.runForEach(processStreamEvent),
+      Effect.onError(() => flushPending().pipe(Effect.ignore)),
     )
+    yield* flushPending()
 
     if (completed === undefined) {
       return yield* new AgentLoopError({

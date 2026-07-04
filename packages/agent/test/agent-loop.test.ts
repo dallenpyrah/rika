@@ -1744,6 +1744,134 @@ describe("AgentLoop", () => {
     expect(appended.map((entry) => dataField(entry, "event_type"))).toContain("turn.failed")
   })
 
+  test("flushes buffered model deltas before terminal stream failures", async () => {
+    const failure = AiError.make({
+      module: "LanguageModel",
+      method: "streamText",
+      reason: new AiError.AuthenticationError({ kind: "InvalidKey" }),
+    })
+    const partial = "partial"
+    const thread = Ids.ThreadId.make("thread_agent_model_fail_partial")
+    const providerLayer = Layer.succeed(
+      Provider.Service,
+      providerServiceOf({
+        name: "openai",
+        complete: () => Effect.fail(failure),
+        stream: (request: Provider.GenerateRequest) =>
+          Stream.fromIterable<Provider.StreamEvent>([
+            {
+              type: "response.started",
+              provider: request.provider,
+              model: request.model,
+            },
+            {
+              type: "content.delta",
+              text: partial,
+            },
+          ]).pipe(Stream.concat(Stream.fail(failure))),
+      }),
+    )
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, registryFromProviderLayer(providerLayer))
+
+    const events = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const collected = yield* AgentLoop.streamTurn({
+          thread_id: thread,
+          workspace_id: workspaceId,
+          content: "trigger a partial model failure",
+          mode: "rush",
+        }).pipe(Stream.runCollect)
+        return Array.from(collected)
+      }).pipe(Effect.provide(layer)),
+    )
+
+    const chunkIndex = events.findIndex((event) => event.type === "model.stream.chunk")
+    const failedIndex = events.findIndex((event) => event.type === "turn.failed")
+    const chunk = events[chunkIndex]
+    expect(chunkIndex).toBeGreaterThan(-1)
+    expect(failedIndex).toBeGreaterThan(chunkIndex)
+    expect(chunk).toMatchObject({
+      type: "model.stream.chunk",
+      data: { text: partial },
+    })
+  })
+
+  test("flushes buffered stream deltas before missing completion failures", async () => {
+    const partial = "partial"
+    const input = "input"
+    const toolCallId = "call_missing_completion_input"
+    const thread = Ids.ThreadId.make("thread_agent_model_missing_completion_partial")
+    const providerLayer = Layer.succeed(
+      Provider.Service,
+      providerServiceOf({
+        name: "openai",
+        complete: () =>
+          Effect.fail(
+            AiError.make({
+              module: "LanguageModel",
+              method: "streamText",
+              reason: new AiError.AuthenticationError({ kind: "InvalidKey" }),
+            }),
+          ),
+        stream: (request: Provider.GenerateRequest) =>
+          Stream.fromIterable<Provider.StreamEvent>([
+            {
+              type: "response.started",
+              provider: request.provider,
+              model: request.model,
+            },
+            {
+              type: "content.delta",
+              text: partial,
+            },
+            {
+              type: "tool.input.started",
+              id: toolCallId,
+              name: "write",
+            },
+            {
+              type: "tool.input.delta",
+              id: toolCallId,
+              text: input,
+            },
+          ]),
+      }),
+    )
+    const layer = makeLayer([], defaultToolLayer, SkillRegistry.emptyLayer, registryFromProviderLayer(providerLayer))
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const exit = yield* AgentLoop.streamTurn({
+          thread_id: thread,
+          workspace_id: workspaceId,
+          content: "trigger missing completion after partial stream",
+          mode: "rush",
+        }).pipe(Stream.runCollect, Effect.exit)
+        const events = yield* ThreadEventLog.readThread({ thread_id: thread })
+        return { exit, events }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.exit._tag).toBe("Failure")
+    const events = result.events
+    const chunkIndex = events.findIndex((event) => event.type === "model.stream.chunk")
+    const inputIndex = events.findIndex((event) => event.type === "tool.call.input.delta")
+    const failedIndex = events.findIndex((event) => event.type === "turn.failed")
+    expect(chunkIndex).toBeGreaterThan(-1)
+    expect(inputIndex).toBeGreaterThan(chunkIndex)
+    expect(failedIndex).toBeGreaterThan(inputIndex)
+    expect(events[chunkIndex]).toMatchObject({
+      type: "model.stream.chunk",
+      data: { text: partial },
+    })
+    expect(events[inputIndex]).toMatchObject({
+      type: "tool.call.input.delta",
+      data: { text: input },
+    })
+  })
+
   test("records provider defects as terminal turn failures", async () => {
     const defectThread = Ids.ThreadId.make("thread_agent_model_defect")
     const providerLayer = Layer.succeed(
