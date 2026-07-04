@@ -430,6 +430,17 @@ describe("CLI args", () => {
     expect(short).toEqual({ type: "help", topic: "threads-search" })
   })
 
+  test("parses semantic thread search", async () => {
+    const command = await Effect.runPromise(Args.parse(["threads", "search", "--semantic", "prior fix"]))
+
+    expect(command).toEqual({
+      type: "threads",
+      action: "search",
+      query: "prior fix",
+      semantic: true,
+    })
+  })
+
   test("parses project commands", async () => {
     const create = await Effect.runPromise(
       Args.parse([

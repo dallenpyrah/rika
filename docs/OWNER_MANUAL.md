@@ -43,6 +43,7 @@ Recognized keys:
 | `compaction.prune`        | `RIKA_COMPACTION_PRUNE`         | unset                    |
 | `compaction.pruneProtect` | `RIKA_COMPACTION_PRUNE_PROTECT` | unset                    |
 | `compaction.pruneMinimum` | `RIKA_COMPACTION_PRUNE_MINIMUM` | unset                    |
+| `memory.autoContext`      | `RIKA_MEMORY_AUTO_CONTEXT`      | `false`                  |
 | `keymap`                  | none                            | `{}`                     |
 | `telemetry.enabled`       | `RIKA_TELEMETRY`                | `true`                   |
 | `telemetry.endpoint`      | `RIKA_TELEMETRY_ENDPOINT`       | `http://127.0.0.1:27686` |
@@ -63,6 +64,8 @@ Malformed settings files produce doctor/runtime warnings where surfaced and fall
 ```
 
 Use `rika config list` to print the effective non-secret configuration with the source for each scalar value. Use `rika config keymap` to print keymap entries with `id`, `chord`, `description`, and `source`. Use `rika config edit` for user settings and `rika config edit --workspace` for workspace settings. Unknown keys and wrong value types produce warnings after the editor exits, but do not block saving. Unknown keymap action ids and unparsable keymap chords produce a startup warning in the TUI status line, and the invalid binding is ignored.
+
+Set `memory.autoContext` to `true` to let resolved context include up to three high-similarity past thread references from the same workspace. The default is `false`; unavailable embeddings produce no automatic memory entries. Use `rika threads search --semantic "<query>"` to search indexed thread memory manually. If embeddings are unavailable, the CLI prints a notice and falls back to lexical thread search.
 
 ## Orb template
 

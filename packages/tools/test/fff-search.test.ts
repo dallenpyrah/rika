@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { PermissionPolicy, SubagentRuntime, ToolExecutor } from "@rika/agent"
+import { PermissionPolicy, SubagentRuntime, ThreadMemory, ToolExecutor } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { ArtifactStore } from "@rika/persistence"
 import { PluginHost } from "@rika/plugin"
@@ -53,6 +53,7 @@ const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolEx
     Layer.provideMerge(AstGrepOutline.fakeLayer(outlineRunner)),
     Layer.provideMerge(HashlineFile.layer),
     Layer.provideMerge(SpecialtyTools.fakeLayer()),
+    Layer.provideMerge(ThreadMemory.fakeLayer()),
     Layer.provideMerge(ArtifactStore.fakeLayer()),
     Layer.provideMerge(IdGenerator.sequenceLayer(1)),
     Layer.provideMerge(Time.layer),
@@ -155,6 +156,7 @@ describe("FffSearch", () => {
       "oracle",
       "librarian",
       "painter",
+      "thread_memory",
       "semantic_search",
       "semantic_search_status",
       "fffind",

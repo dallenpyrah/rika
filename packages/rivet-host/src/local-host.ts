@@ -4,18 +4,20 @@ import {
   SkillRegistry,
   SkillToolProvider,
   SubagentRuntime,
+  ThreadMemory,
   ThreadService,
   ToolExecutor,
   WorkspaceAccess,
 } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
-import { Live, Router } from "@rika/llm"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Settings, Time } from "@rika/core"
+import { Embeddings, Live, Router } from "@rika/llm"
 import {
   ArtifactStore,
   Database,
   McpApprovalStore,
   Migration,
   ThreadEventLog,
+  ThreadMemoryStore,
   ThreadProjection,
   WorkspaceStore,
 } from "@rika/persistence"
@@ -49,11 +51,14 @@ type ServiceLayerOutput =
   | PluginHost.Service
   | Router.Service
   | SecretRedactor.Service
+  | Settings.Service
   | SkillRegistry.Service
   | SkillToolProvider.Service
   | SpecialtyTools.Service
   | SubagentRuntime.Service
   | ThreadEventLog.Service
+  | ThreadMemory.Service
+  | ThreadMemoryStore.Service
   | ThreadProjection.Service
   | ThreadService.Service
   | Time.Service
@@ -77,6 +82,7 @@ export const serviceLayerFromEnv = (
 ): Layer.Layer<ServiceLayerOutput, ServiceLayerError> => {
   const configLayer = Config.layerFromEnv(env, cwd)
   const redactorLayer = SecretRedactor.layerFromEnv(env)
+  const configuredSettingsLayer = Settings.layerFromEnv(env, cwd)
   const configuredDatabaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const configuredArtifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(configuredDatabaseLayer))
   const configuredMcpApprovalLayer = McpApprovalStore.layer.pipe(
@@ -84,7 +90,11 @@ export const serviceLayerFromEnv = (
     Layer.provideMerge(configuredTimeLayer),
   )
   const configuredWorkspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(configuredDatabaseLayer))
+  const configuredMemoryStoreLayer = ThreadMemoryStore.layer.pipe(Layer.provideMerge(configuredDatabaseLayer))
   const configuredLlmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const configuredEmbeddingsLayer = Embeddings.layer(
+    Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
+  )
   const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const configuredDiagnosticsLayer = Diagnostics.layer.pipe(
     Layer.provideMerge(configLayer),
@@ -101,7 +111,9 @@ export const serviceLayerFromEnv = (
     configuredMcpApprovalLayer,
     Migration.layer,
     redactorLayer,
+    configuredSettingsLayer,
     ThreadEventLog.layer.pipe(Layer.provideMerge(redactorLayer)),
+    configuredMemoryStoreLayer,
     ThreadProjection.layer,
     configuredWorkspaceStoreLayer,
     configuredTimeLayer,
@@ -110,7 +122,17 @@ export const serviceLayerFromEnv = (
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const configuredWorkspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const configuredContextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+  const configuredThreadMemoryLayer = ThreadMemory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(configuredEmbeddingsLayer),
+    Layer.provideMerge(configuredTimeLayer),
+  )
+  const configuredContextResolverLayer = ContextResolver.layer.pipe(
+    Layer.provide(storageAndThreadLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(configuredEmbeddingsLayer),
+  )
   const configuredSpecialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(configuredLlmLayer),
@@ -118,6 +140,7 @@ export const serviceLayerFromEnv = (
   const configuredSubagentToolLayer = BuiltInTools.subagentToolExecutorLayer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(configuredThreadMemoryLayer),
     Layer.provideMerge(configuredPluginLayer),
     Layer.provideMerge(configuredSpecialtyToolLayer),
   )
@@ -128,6 +151,7 @@ export const serviceLayerFromEnv = (
   )
   const configuredToolLayer = BuiltInTools.toolExecutorLayer.pipe(
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(configuredThreadMemoryLayer),
     Layer.provideMerge(configuredPluginLayer),
     Layer.provideMerge(configuredSpecialtyToolLayer),
     Layer.provideMerge(configuredSubagentLayer),

@@ -1,16 +1,22 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { Config } from "@rika/core"
+import { Config, Settings } from "@rika/core"
+import { Embeddings } from "@rika/llm"
+import { ThreadMemoryStore } from "@rika/persistence"
 import { Common, Event, Ide, Ids } from "@rika/schema"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as ThreadService from "./thread-service"
+import * as WorkspaceIdentity from "./workspace-identity"
 
 const defaultMaxContentChars = 24_000
 const maxEntries = 80
 const maxMentionedFiles = 20
 const maxFileChars = 12_000
 const maxImageBytes = 1_000_000
+const autoMemoryLimit = 3
+const autoMemoryCandidateLimit = 10
+const autoMemoryThreshold = 0.75
 
 export interface ResolveInput extends Schema.Schema.Type<typeof ResolveInput> {}
 export const ResolveInput = Schema.Struct({
@@ -56,13 +62,26 @@ interface DirectoryEntry {
   readonly isFile: boolean
 }
 
+interface MemoryDependencies {
+  readonly settings?: Settings.Interface
+  readonly embeddings?: Embeddings.Interface
+  readonly memoryStore?: ThreadMemoryStore.Interface
+}
+
 export const layer: Layer.Layer<Service, never, Config.Service | ThreadService.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
     const threadService = yield* ThreadService.Service
+    const settings = Option.getOrUndefined(yield* Effect.serviceOption(Settings.Service))
+    const embeddings = Option.getOrUndefined(yield* Effect.serviceOption(Embeddings.Service))
+    const memoryStore = Option.getOrUndefined(yield* Effect.serviceOption(ThreadMemoryStore.Service))
     const values = yield* config.get
-    return makeService(resolve(values.workspace_root), nodeFileSystem, threadService)
+    return makeService(resolve(values.workspace_root), nodeFileSystem, threadService, {
+      ...(settings === undefined ? {} : { settings }),
+      ...(embeddings === undefined ? {} : { embeddings }),
+      ...(memoryStore === undefined ? {} : { memoryStore }),
+    })
   }),
 )
 
@@ -88,6 +107,7 @@ const makeService = (
   workspaceRoot: string,
   fileSystem: FileSystemAdapter,
   threadService: ThreadService.Interface,
+  memory: MemoryDependencies = {},
 ): Interface =>
   Service.of({
     resolve: Effect.fn("ContextResolver.resolve")(function* (input: ResolveInput) {
@@ -107,8 +127,12 @@ const makeService = (
         threadService,
         input.content,
       )
+      const memoryEntries = yield* resolveAutoMemoryEntries(workspaceRoot, threadService, memory, input)
       const ideEntries = input.ide_context === undefined ? [] : ideContextEntries(input.ide_context)
-      const entries = dedupeEntries([...guidanceEntries, ...mentionEntries, ...ideEntries]).slice(0, maxEntries)
+      const entries = dedupeEntries([...guidanceEntries, ...mentionEntries, ...memoryEntries, ...ideEntries]).slice(
+        0,
+        maxEntries,
+      )
       const rendered = renderEntries(entries, maxContentChars)
       return {
         entries,
@@ -418,6 +442,62 @@ const resolveMentionEntries = (
 
     return entries
   })
+
+const resolveAutoMemoryEntries = (
+  workspaceRoot: string,
+  threadService: ThreadService.Interface,
+  memory: MemoryDependencies,
+  input: ResolveInput,
+): Effect.Effect<ReadonlyArray<Event.ContextEntry>, ContextResolverError> =>
+  Effect.gen(function* () {
+    if (memory.settings === undefined || memory.embeddings === undefined || memory.memoryStore === undefined) return []
+    const snapshot = yield* memory.settings.snapshot
+    if (!snapshot.values.memory.autoContext) return []
+    const vector = yield* memory.embeddings.embed([input.content]).pipe(
+      Effect.map((vectors) => vectors[0]),
+      Effect.catchTag("EmbeddingsUnavailable", () => Effect.succeed(undefined)),
+      Effect.mapError((error) => contextError("autoMemory", error)),
+    )
+    if (vector === undefined) return []
+    const workspaceId = yield* workspaceIdForThread(workspaceRoot, threadService, input.thread_id)
+    const results = yield* memory.memoryStore
+      .search(vector, {
+        workspace_id: workspaceId,
+        exclude_thread_id: input.thread_id,
+        limit: autoMemoryCandidateLimit,
+      })
+      .pipe(Effect.mapError((error) => contextError("autoMemory", error)))
+    const selected = results.filter((result) => result.score >= autoMemoryThreshold).slice(0, autoMemoryLimit)
+    return yield* Effect.forEach(selected, (result) =>
+      threadService.reference({ thread_id: result.chunk.thread_id, query: input.content, max_chars: 2_000 }).pipe(
+        Effect.map(
+          (reference): Event.ContextEntry => ({
+            kind: "thread-reference",
+            source: "thread-memory",
+            reason: "similar past thread memory",
+            trusted: false,
+            thread_reference: result.chunk.thread_id,
+            content: reference.rendered,
+            metadata: {
+              score: result.score,
+              turn_id: result.chunk.turn_id,
+            },
+          }),
+        ),
+        Effect.catch(() => Effect.succeed(undefined)),
+      ),
+    ).pipe(Effect.map((entries) => entries.filter((entry): entry is Event.ContextEntry => entry !== undefined)))
+  })
+
+const workspaceIdForThread = (
+  workspaceRoot: string,
+  threadService: ThreadService.Interface,
+  threadId: Ids.ThreadId,
+): Effect.Effect<Ids.WorkspaceId> =>
+  threadService.preview({ thread_id: threadId, limit: 1 }).pipe(
+    Effect.map((record) => record.summary.workspace_id),
+    Effect.catch(() => Effect.succeed(WorkspaceIdentity.resolveWorkspaceId({ workspace_root: workspaceRoot }))),
+  )
 
 const ideContextEntries = (context: Ide.ContextSnapshot): ReadonlyArray<Event.ContextEntry> => {
   const entries: Array<Event.ContextEntry> = []
@@ -734,4 +814,10 @@ const fileError = (operation: string, path: string, cause: unknown) =>
     message: `${operation} failed for ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
     operation,
     path,
+  })
+
+const contextError = (operation: string, cause: unknown) =>
+  new ContextResolverError({
+    message: cause instanceof Error ? cause.message : String(cause),
+    operation,
   })

@@ -27,6 +27,7 @@ export const SettingKey = Schema.Literals([
   "compaction.prune",
   "compaction.pruneProtect",
   "compaction.pruneMinimum",
+  "memory.autoContext",
   "telemetry.enabled",
   "telemetry.endpoint",
 ]).annotate({
@@ -45,6 +46,7 @@ export const settingKeys: ReadonlyArray<SettingKey> = [
   "compaction.prune",
   "compaction.pruneProtect",
   "compaction.pruneMinimum",
+  "memory.autoContext",
   "telemetry.enabled",
   "telemetry.endpoint",
 ]
@@ -62,6 +64,7 @@ export const envNameByKey: Record<SettingKey, string> = {
   "compaction.prune": "RIKA_COMPACTION_PRUNE",
   "compaction.pruneProtect": "RIKA_COMPACTION_PRUNE_PROTECT",
   "compaction.pruneMinimum": "RIKA_COMPACTION_PRUNE_MINIMUM",
+  "memory.autoContext": "RIKA_MEMORY_AUTO_CONTEXT",
   "telemetry.enabled": "RIKA_TELEMETRY",
   "telemetry.endpoint": "RIKA_TELEMETRY_ENDPOINT",
 }
@@ -98,6 +101,9 @@ export interface Values {
     readonly prune?: boolean
     readonly pruneProtect?: number
     readonly pruneMinimum?: number
+  }
+  readonly memory: {
+    readonly autoContext: boolean
   }
   readonly keymap: KeymapEntries
   readonly telemetry: {
@@ -161,6 +167,9 @@ export const defaultValues = (): Values => ({
     default: defaultMode,
   },
   compaction: {},
+  memory: {
+    autoContext: false,
+  },
   keymap: {},
   telemetry: {
     enabled: true,
@@ -306,6 +315,7 @@ const resolve = (env: Record<string, string | undefined>, loaded: LoadedSettings
     env.RIKA_COMPACTION_PRUNE_MINIMUM,
     loaded,
   )
+  const memoryAutoContext = resolveBoolean("memory.autoContext", env.RIKA_MEMORY_AUTO_CONTEXT, loaded, false)
   const telemetryEnabled = resolveTelemetryBoolean("telemetry.enabled", env.RIKA_TELEMETRY, loaded, true)
   const telemetryEndpoint = resolveString(
     "telemetry.endpoint",
@@ -335,6 +345,9 @@ const resolve = (env: Record<string, string | undefined>, loaded: LoadedSettings
         ...(compactionPruneProtect.value === undefined ? {} : { pruneProtect: compactionPruneProtect.value }),
         ...(compactionPruneMinimum.value === undefined ? {} : { pruneMinimum: compactionPruneMinimum.value }),
       },
+      memory: {
+        autoContext: memoryAutoContext.value,
+      },
       keymap: keymap.values,
       telemetry: {
         enabled: telemetryEnabled.value,
@@ -352,6 +365,7 @@ const resolve = (env: Record<string, string | undefined>, loaded: LoadedSettings
       "compaction.prune": compactionPrune.source,
       "compaction.pruneProtect": compactionPruneProtect.source,
       "compaction.pruneMinimum": compactionPruneMinimum.source,
+      "memory.autoContext": memoryAutoContext.source,
       "telemetry.enabled": telemetryEnabled.source,
       "telemetry.endpoint": telemetryEndpoint.source,
     },
@@ -447,6 +461,21 @@ const resolveBooleanOption = (
   return { value: undefined, source: "default" }
 }
 
+const resolveBoolean = (
+  key: SettingKey,
+  envValue: string | undefined,
+  loaded: LoadedSettings,
+  fallback: boolean,
+): ResolvedValue<boolean> => {
+  const envBoolean = validStrictBooleanFromEnv(envValue)
+  if (envBoolean !== undefined) return { value: envBoolean, source: "env" }
+  const workspace = validBooleanSetting(loaded.workspace[key])
+  if (workspace !== undefined) return { value: workspace, source: "workspace" }
+  const user = validBooleanSetting(loaded.user[key])
+  if (user !== undefined) return { value: user, source: "user" }
+  return { value: fallback, source: "default" }
+}
+
 const resolveTelemetryBoolean = (
   key: SettingKey,
   envValue: string | undefined,
@@ -485,7 +514,12 @@ const validateSettingValue = (key: SettingKey, value: unknown): ValidationResult
       ? { valid: false, message: `Setting ${key} must be one of ${modes.join(", ")}.` }
       : { valid: true, value: mode }
   }
-  if (key === "compaction.auto" || key === "compaction.prune" || key === "telemetry.enabled") {
+  if (
+    key === "compaction.auto" ||
+    key === "compaction.prune" ||
+    key === "memory.autoContext" ||
+    key === "telemetry.enabled"
+  ) {
     const boolean = validBooleanSetting(value)
     return boolean === undefined
       ? { valid: false, message: `Setting ${key} must be a boolean.` }
@@ -538,6 +572,7 @@ const valueForKey = (values: Values, key: SettingKey): SettingValue => {
   if (key === "compaction.prune") return values.compaction.prune ?? null
   if (key === "compaction.pruneProtect") return values.compaction.pruneProtect ?? null
   if (key === "compaction.pruneMinimum") return values.compaction.pruneMinimum ?? null
+  if (key === "memory.autoContext") return values.memory.autoContext
   if (key === "telemetry.enabled") return values.telemetry.enabled
   return values.telemetry.endpoint
 }

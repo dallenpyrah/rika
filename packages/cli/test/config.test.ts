@@ -159,6 +159,7 @@ describe("CLI config commands", () => {
             value: null,
             source: "default",
           },
+          { key: "memory.autoContext", env: "RIKA_MEMORY_AUTO_CONTEXT", value: false, source: "default" },
           { key: "telemetry.enabled", env: "RIKA_TELEMETRY", value: false, source: "workspace" },
           { key: "telemetry.endpoint", env: "RIKA_TELEMETRY_ENDPOINT", value: "http://env-otel.test", source: "env" },
         ],

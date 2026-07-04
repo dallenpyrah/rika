@@ -9,6 +9,7 @@ import {
   SkillRegistry,
   SkillToolProvider,
   SubagentRuntime,
+  ThreadMemory,
   ThreadMemoryIndexer,
   ThreadService,
   ToolExecutor,
@@ -449,6 +450,13 @@ export const liveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const threadMemoryLayer = ThreadMemory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -456,6 +464,7 @@ export const liveLayer = (
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
   )
@@ -466,6 +475,7 @@ export const liveLayer = (
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
@@ -475,9 +485,12 @@ export const liveLayer = (
     Layer.provideMerge(migratedStorageLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+  const contextResolverLayer = ContextResolver.layer.pipe(
+    Layer.provide(storageAndThreadLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(embeddingsLayer),
+  )
   const baseLayer = Layer.mergeAll(
     Output.layer,
     Input.layer,
@@ -624,6 +637,13 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const threadMemoryLayer = ThreadMemory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -631,6 +651,7 @@ const interactiveLiveLayerFromTui = (
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
   )
@@ -641,6 +662,7 @@ const interactiveLiveLayerFromTui = (
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
@@ -656,8 +678,12 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(checkLayer),
     Layer.provideMerge(subagentLayer),
   )
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+  const contextResolverLayer = ContextResolver.layer.pipe(
+    Layer.provide(storageAndThreadLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(settingsLayer),
+  )
   const threadLiveLayer = ThreadLive.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const baseLayer = Layer.mergeAll(
     Adapter.layer,
@@ -1252,6 +1278,12 @@ export const threadsLiveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const threadMemoryLayer = ThreadMemory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1260,6 +1292,7 @@ export const threadsLiveLayer = (
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
   )
@@ -1270,6 +1303,7 @@ export const threadsLiveLayer = (
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
@@ -1279,7 +1313,12 @@ export const threadsLiveLayer = (
     Layer.provideMerge(migratedStorageLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
-  const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+  const contextResolverLayer = ContextResolver.layer.pipe(
+    Layer.provide(storageAndThreadLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(settingsLayer),
+  )
   const managerLayer = OrbManager.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(sandboxLayer),
@@ -1405,6 +1444,7 @@ export const threadsLiveLayer = (
     Layer.provideMerge(Output.layer),
     Layer.provideMerge(Input.layer),
     Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(embeddingsLayer),
     Layer.provide(remoteClientLayer),
   )
   const commandLayer =
@@ -1586,6 +1626,7 @@ export const reviewLiveLayer = (
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const memoryStoreLayer = ThreadMemoryStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
     Output.layer,
@@ -1595,9 +1636,22 @@ export const reviewLiveLayer = (
     IdGenerator.layer,
     artifactLayer,
     mcpApprovalLayer,
+    memoryStoreLayer,
+    ThreadEventLog.layer,
+    ThreadProjection.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const embeddingsLayer = Embeddings.layer(
+    Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
+  )
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const threadMemoryLayer = ThreadMemory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1608,6 +1662,7 @@ export const reviewLiveLayer = (
   ).pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
   )
@@ -1752,6 +1807,13 @@ export const serverLiveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
+  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const threadMemoryLayer = ThreadMemory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(storageAndThreadLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(timeLayer),
+  )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -1759,6 +1821,7 @@ export const serverLiveLayer = (
   const subagentToolLayer = BuiltInTools.subagentToolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
   )
@@ -1769,6 +1832,7 @@ export const serverLiveLayer = (
   )
   const toolLayer = BuiltInTools.toolExecutorLayerFromPermissionConfig(permissionConfig).pipe(
     Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
@@ -1778,9 +1842,13 @@ export const serverLiveLayer = (
     Layer.provideMerge(migratedStorageLayer),
   )
   const skillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const contextResolverLayer = ContextResolver.layer.pipe(Layer.provide(storageAndThreadLayer))
+  const contextResolverLayer = ContextResolver.layer.pipe(
+    Layer.provide(storageAndThreadLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(settingsLayer),
+  )
   const baseLayer = Layer.mergeAll(
     Output.layer,
     migratedStorageLayer,

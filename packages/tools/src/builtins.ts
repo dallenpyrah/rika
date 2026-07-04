@@ -3,6 +3,7 @@ import {
   SkillRegistry,
   SkillToolProvider,
   SubagentRuntime,
+  ThreadMemory,
   ToolAccess,
   ToolExecutor,
   ToolRegistry,
@@ -70,6 +71,7 @@ interface StandardDefinitionInput {
   readonly pluginDefinitions: ReadonlyArray<ToolRegistry.Definition>
   readonly semanticSearch: SemanticSearch.Interface
   readonly specialtyTools: SpecialtyTools.Interface
+  readonly threadMemory: ThreadMemory.Interface
   readonly subagentRuntime?: SubagentRuntime.Interface
 }
 
@@ -79,6 +81,7 @@ const standardDefinitions = (input: StandardDefinitionInput): ReadonlyArray<Tool
   ...SpecialtyTools.toolDefinitions(input.specialtyTools),
   ...input.pluginDefinitions,
   ...input.mcpDefinitions,
+  ...ThreadMemory.toolDefinitions(input.threadMemory),
   ...SemanticSearch.toolDefinitions(input.semanticSearch),
   ...FffSearch.toolDefinitions(input.fffSearch),
   ...AstGrepOutline.toolDefinitions(input.astGrepOutline),
@@ -96,6 +99,7 @@ export const registryLayerFromServices: Layer.Layer<
   | PluginHost.Service
   | SemanticSearch.Service
   | SpecialtyTools.Service
+  | ThreadMemory.Service
   | SubagentRuntime.Service
 > = Layer.effect(
   ToolRegistry.Service,
@@ -108,6 +112,7 @@ export const registryLayerFromServices: Layer.Layer<
     const mcpDefinitions = yield* McpClient.toolDefinitions()
     const semanticSearch = yield* SemanticSearch.Service
     const specialtyTools = yield* SpecialtyTools.Service
+    const threadMemory = yield* ThreadMemory.Service
     const subagentRuntime = yield* SubagentRuntime.Service
     const pluginDefinitions = yield* PluginHost.toolDefinitions()
     const definitions = standardDefinitions({
@@ -119,6 +124,7 @@ export const registryLayerFromServices: Layer.Layer<
       pluginDefinitions,
       semanticSearch,
       specialtyTools,
+      threadMemory,
       subagentRuntime,
     })
 
@@ -137,6 +143,7 @@ export const fullSubagentRegistryLayerFromServices: Layer.Layer<
   | PluginHost.Service
   | SemanticSearch.Service
   | SpecialtyTools.Service
+  | ThreadMemory.Service
 > = Layer.effect(
   ToolRegistry.Service,
   Effect.gen(function* () {
@@ -148,6 +155,7 @@ export const fullSubagentRegistryLayerFromServices: Layer.Layer<
     const mcpDefinitions = yield* McpClient.toolDefinitions()
     const semanticSearch = yield* SemanticSearch.Service
     const specialtyTools = yield* SpecialtyTools.Service
+    const threadMemory = yield* ThreadMemory.Service
     const pluginDefinitions = yield* PluginHost.toolDefinitions()
     const definitions = standardDefinitions({
       workspaceRoot: values.workspace_root,
@@ -158,6 +166,7 @@ export const fullSubagentRegistryLayerFromServices: Layer.Layer<
       pluginDefinitions,
       semanticSearch,
       specialtyTools,
+      threadMemory,
     }).filter((definition) => definition.tool.name !== "task")
 
     return yield* ToolRegistry.Service.pipe(Effect.provide(ToolRegistry.layerFromDefinitions(definitions)))
@@ -167,7 +176,12 @@ export const fullSubagentRegistryLayerFromServices: Layer.Layer<
 export const readOnlyRegistryLayerFromServices: Layer.Layer<
   ToolRegistry.Service,
   never,
-  AstGrepOutline.Service | Config.Service | FffSearch.Service | HashlineFile.Service | SemanticSearch.Service
+  | AstGrepOutline.Service
+  | Config.Service
+  | FffSearch.Service
+  | HashlineFile.Service
+  | SemanticSearch.Service
+  | ThreadMemory.Service
 > = Layer.effect(
   ToolRegistry.Service,
   Effect.gen(function* () {
@@ -175,7 +189,9 @@ export const readOnlyRegistryLayerFromServices: Layer.Layer<
     const fffSearch = yield* FffSearch.Service
     const hashlineFile = yield* HashlineFile.Service
     const semanticSearch = yield* SemanticSearch.Service
+    const threadMemory = yield* ThreadMemory.Service
     const definitions = [
+      ...ThreadMemory.toolDefinitions(threadMemory),
       ...SemanticSearch.toolDefinitions(semanticSearch),
       ...FffSearch.toolDefinitions(fffSearch),
       ...AstGrepOutline.toolDefinitions(astGrepOutline),
@@ -189,7 +205,12 @@ export const readOnlyRegistryLayerFromServices: Layer.Layer<
 export const subagentRegistryLayerFromServices: Layer.Layer<
   ToolRegistry.Service,
   never,
-  AstGrepOutline.Service | Config.Service | FffSearch.Service | HashlineFile.Service | SemanticSearch.Service
+  | AstGrepOutline.Service
+  | Config.Service
+  | FffSearch.Service
+  | HashlineFile.Service
+  | SemanticSearch.Service
+  | ThreadMemory.Service
 > = Layer.effect(
   ToolRegistry.Service,
   Effect.gen(function* () {
@@ -199,8 +220,10 @@ export const subagentRegistryLayerFromServices: Layer.Layer<
     const fffSearch = yield* FffSearch.Service
     const hashlineFile = yield* HashlineFile.Service
     const semanticSearch = yield* SemanticSearch.Service
+    const threadMemory = yield* ThreadMemory.Service
     const definitions = [
       ...ToolRegistry.shellDefinitions(values.workspace_root),
+      ...ThreadMemory.toolDefinitions(threadMemory),
       ...SemanticSearch.toolDefinitions(semanticSearch),
       ...FffSearch.toolDefinitions(fffSearch),
       ...AstGrepOutline.toolDefinitions(astGrepOutline),
@@ -214,7 +237,12 @@ export const subagentRegistryLayerFromServices: Layer.Layer<
 export const registryLayer: Layer.Layer<
   ToolRegistry.Service,
   FffSearch.FffSearchError | McpClient.RunError,
-  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service | SubagentRuntime.Service
+  | Config.Service
+  | McpApprovalStore.Service
+  | PluginHost.Service
+  | SpecialtyTools.Service
+  | SubagentRuntime.Service
+  | ThreadMemory.Service
 > = registryLayerFromServices.pipe(
   Layer.provideMerge(SemanticSearch.layer),
   Layer.provideMerge(FffSearch.layer),
@@ -223,26 +251,32 @@ export const registryLayer: Layer.Layer<
   Layer.provideMerge(McpClient.layer),
 )
 
-export const readOnlyRegistryLayer: Layer.Layer<ToolRegistry.Service, FffSearch.FffSearchError, Config.Service> =
-  readOnlyRegistryLayerFromServices.pipe(
-    Layer.provideMerge(SemanticSearch.layer),
-    Layer.provideMerge(FffSearch.layer),
-    Layer.provideMerge(AstGrepOutline.layer),
-    Layer.provideMerge(HashlineFile.layer),
-  )
+export const readOnlyRegistryLayer: Layer.Layer<
+  ToolRegistry.Service,
+  FffSearch.FffSearchError,
+  Config.Service | ThreadMemory.Service
+> = readOnlyRegistryLayerFromServices.pipe(
+  Layer.provideMerge(SemanticSearch.layer),
+  Layer.provideMerge(FffSearch.layer),
+  Layer.provideMerge(AstGrepOutline.layer),
+  Layer.provideMerge(HashlineFile.layer),
+)
 
-export const subagentRegistryLayer: Layer.Layer<ToolRegistry.Service, FffSearch.FffSearchError, Config.Service> =
-  subagentRegistryLayerFromServices.pipe(
-    Layer.provideMerge(SemanticSearch.layer),
-    Layer.provideMerge(FffSearch.layer),
-    Layer.provideMerge(AstGrepOutline.layer),
-    Layer.provideMerge(HashlineFile.layer),
-  )
+export const subagentRegistryLayer: Layer.Layer<
+  ToolRegistry.Service,
+  FffSearch.FffSearchError,
+  Config.Service | ThreadMemory.Service
+> = subagentRegistryLayerFromServices.pipe(
+  Layer.provideMerge(SemanticSearch.layer),
+  Layer.provideMerge(FffSearch.layer),
+  Layer.provideMerge(AstGrepOutline.layer),
+  Layer.provideMerge(HashlineFile.layer),
+)
 
 export const fullSubagentRegistryLayer: Layer.Layer<
   ToolRegistry.Service,
   FffSearch.FffSearchError | McpClient.RunError,
-  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service
+  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service | ThreadMemory.Service
 > = fullSubagentRegistryLayerFromServices.pipe(
   Layer.provideMerge(SemanticSearch.layer),
   Layer.provideMerge(FffSearch.layer),
@@ -254,7 +288,7 @@ export const fullSubagentRegistryLayer: Layer.Layer<
 export const configuredSubagentRegistryLayer: Layer.Layer<
   ToolRegistry.Service,
   FffSearch.FffSearchError | McpClient.RunError,
-  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service
+  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service | ThreadMemory.Service
 > = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -268,7 +302,12 @@ export const toolExecutorLayerFromPermissionConfig = (
 ): Layer.Layer<
   ToolExecutor.Service,
   FffSearch.FffSearchError | McpClient.RunError,
-  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service | SubagentRuntime.Service
+  | Config.Service
+  | McpApprovalStore.Service
+  | PluginHost.Service
+  | SpecialtyTools.Service
+  | SubagentRuntime.Service
+  | ThreadMemory.Service
 > =>
   PluginHost.toolResultExecutorLayer.pipe(
     Layer.provideMerge(
@@ -283,7 +322,7 @@ export const toolExecutorLayer = toolExecutorLayerFromPermissionConfig()
 
 export const readOnlyToolExecutorLayerFromPermissionConfig = (
   permissionConfig: PermissionPolicy.PermissionConfig = PermissionPolicy.defaultConfig,
-): Layer.Layer<ToolExecutor.ReadOnlyService, FffSearch.FffSearchError, Config.Service> =>
+): Layer.Layer<ToolExecutor.ReadOnlyService, FffSearch.FffSearchError, Config.Service | ThreadMemory.Service> =>
   ToolExecutor.readOnlyLayer.pipe(
     Layer.provideMerge(readOnlyRegistryLayer),
     Layer.provideMerge(PermissionPolicy.layerFromConfig(permissionConfig)),
@@ -296,7 +335,7 @@ export const subagentToolExecutorLayerFromPermissionConfig = (
 ): Layer.Layer<
   ToolExecutor.SubagentService,
   FffSearch.FffSearchError | McpClient.RunError,
-  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service
+  Config.Service | McpApprovalStore.Service | PluginHost.Service | SpecialtyTools.Service | ThreadMemory.Service
 > =>
   ToolExecutor.subagentLayer.pipe(
     Layer.provideMerge(configuredSubagentRegistryLayer),

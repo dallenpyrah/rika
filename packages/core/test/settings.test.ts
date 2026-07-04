@@ -62,6 +62,9 @@ describe("Settings", () => {
           default: "smart",
         },
         compaction: {},
+        memory: {
+          autoContext: false,
+        },
         keymap: {},
         telemetry: {
           enabled: true,
@@ -74,6 +77,7 @@ describe("Settings", () => {
         "project.default": "workspace",
         "user.name": "env",
         "mode.default": "default",
+        "memory.autoContext": "default",
         "telemetry.enabled": "default",
         "telemetry.endpoint": "default",
       })
@@ -111,6 +115,9 @@ describe("Settings", () => {
           default: "smart",
         },
         compaction: {},
+        memory: {
+          autoContext: false,
+        },
         keymap: {},
         telemetry: {
           enabled: true,
@@ -121,6 +128,7 @@ describe("Settings", () => {
         "orb.template": "default",
         "orb.idleTimeoutSeconds": "default",
         "mode.default": "default",
+        "memory.autoContext": "default",
         "telemetry.enabled": "default",
         "telemetry.endpoint": "default",
       })
@@ -147,6 +155,7 @@ describe("Settings", () => {
         "mode.default": "deep1",
         "compaction.auto": true,
         "compaction.reserved": 1_000,
+        "memory.autoContext": false,
         "telemetry.endpoint": "http://user-otel.test",
       }),
     )
@@ -156,6 +165,7 @@ describe("Settings", () => {
         "mode.default": "deep2",
         "compaction.reserved": 2_000,
         "compaction.prune": false,
+        "memory.autoContext": true,
         "telemetry.enabled": false,
       }),
     )
@@ -168,6 +178,7 @@ describe("Settings", () => {
               {
                 HOME: home,
                 RIKA_MODE: "rush",
+                RIKA_MEMORY_AUTO_CONTEXT: "false",
                 RIKA_TELEMETRY_ENDPOINT: "http://env-otel.test/",
               },
               workspace,
@@ -183,6 +194,9 @@ describe("Settings", () => {
           reserved: 2_000,
           prune: false,
         },
+        memory: {
+          autoContext: false,
+        },
         keymap: {},
         telemetry: {
           enabled: false,
@@ -194,6 +208,7 @@ describe("Settings", () => {
         "compaction.auto": "user",
         "compaction.reserved": "workspace",
         "compaction.prune": "workspace",
+        "memory.autoContext": "env",
         "telemetry.enabled": "workspace",
         "telemetry.endpoint": "env",
       })
@@ -214,6 +229,7 @@ describe("Settings", () => {
       JSON.stringify({
         "mode.default": "invalid-mode",
         "telemetry.enabled": "sometimes",
+        "memory.autoContext": "sometimes",
         "compaction.reserved": -1,
         "orb.template": "kept-template",
         mcpServers: {},
@@ -235,6 +251,7 @@ describe("Settings", () => {
         expect.arrayContaining([
           expect.objectContaining({ path: workspaceSettings, source: "workspace", key: "mode.default" }),
           expect.objectContaining({ path: workspaceSettings, source: "workspace", key: "telemetry.enabled" }),
+          expect.objectContaining({ path: workspaceSettings, source: "workspace", key: "memory.autoContext" }),
           expect.objectContaining({ path: workspaceSettings, source: "workspace", key: "compaction.reserved" }),
           expect.objectContaining({ path: workspaceSettings, source: "workspace", key: "unknown.key" }),
         ]),

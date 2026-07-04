@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { ThreadService, TournamentService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
-import { Database, Migration, OrbStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Embeddings } from "@rika/llm"
+import { Database, Migration, OrbStore, ThreadEventLog, ThreadMemoryStore, ThreadProjection } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, Schema } from "effect"
@@ -24,13 +25,16 @@ const makeLayer = (
   output: Output.MemoryOutput,
   tournamentLayer: Layer.Layer<TournamentService.Service> = fakeTournamentLayer([]),
   stdin = "",
+  embeddingsLayer: Layer.Layer<Embeddings.Service> = vectorEmbeddingsLayer([1, 0]),
 ) => {
+  const databaseLayer = Database.memoryLayer
   const baseServices = Layer.mergeAll(
     configLayer,
     Output.memoryLayer(output),
-    Database.memoryLayer,
+    databaseLayer,
     Migration.layer,
     ThreadEventLog.layer,
+    ThreadMemoryStore.layer.pipe(Layer.provideMerge(databaseLayer)),
     ThreadProjection.layer,
     Time.fixedLayer(now),
     IdGenerator.sequenceLayer(1),
@@ -40,7 +44,11 @@ const makeLayer = (
 
   return Threads.layer
     .pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
-    .pipe(Layer.provideMerge(Input.memoryLayer(stdin, false)), Layer.provideMerge(tournamentLayer))
+    .pipe(
+      Layer.provideMerge(Input.memoryLayer(stdin, false)),
+      Layer.provideMerge(tournamentLayer),
+      Layer.provideMerge(embeddingsLayer),
+    )
 }
 
 describe("CLI thread commands", () => {
@@ -62,6 +70,66 @@ describe("CLI thread commands", () => {
     )
     expect(results[0]?.summary.thread_id).toBe(threadId)
     expect(results[0]?.matched.join("\n")).toContain("CLI thread command")
+  })
+
+  test("prints semantic thread search results ranked by score", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedThread()
+        yield* ThreadMemoryStore.put(
+          memoryChunk("chunk_cli_threads_memory", threadId, turnId, "CLI semantic digest", [1, 0]),
+        )
+        yield* ThreadMemoryStore.put(
+          memoryChunk(
+            "chunk_cli_threads_other",
+            Ids.ThreadId.make("thread_cli_threads_other"),
+            Ids.TurnId.make("turn_cli_threads_other"),
+            "Other digest",
+            [0, 1],
+          ),
+        )
+        return yield* Threads.executeCommand({
+          type: "threads",
+          action: "search",
+          query: "semantic digest",
+          semantic: true,
+        })
+      }).pipe(Effect.provide(makeLayer(output))),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(output.stderr).toEqual([])
+    const parsed = JSON.parse(output.stdout[0] ?? "[]")
+    const first = Array.isArray(parsed) ? parsed[0] : undefined
+    expect(readSummaryThreadId(first)).toBe(threadId)
+    expect(readScore(first)).toBe(1)
+  })
+
+  test("falls back to lexical thread search with a notice when semantic embeddings are unavailable", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedThread()
+        return yield* Threads.executeCommand({
+          type: "threads",
+          action: "search",
+          query: "cli",
+          semantic: true,
+        })
+      }).pipe(
+        Effect.provide(makeLayer(output, fakeTournamentLayer([]), "", Embeddings.layer(Embeddings.optionsFromEnv({})))),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(output.stderr[0]).toContain("Semantic thread search unavailable")
+    const results = Schema.decodeUnknownSync(Schema.Array(ThreadService.SearchResult))(
+      JSON.parse(output.stdout[0] ?? "[]"),
+    )
+    expect(results[0]?.summary.thread_id).toBe(threadId)
   })
 
   test("prints context usage in thread lists", async () => {
@@ -268,10 +336,52 @@ const seedForkableThread = () =>
     }
   })
 
+const memoryChunk = (
+  id: string,
+  thread_id: Ids.ThreadId,
+  turn_id: Ids.TurnId,
+  text: string,
+  embedding: ReadonlyArray<number>,
+): ThreadMemoryStore.ThreadMemoryChunk => ({
+  id: Ids.ThreadMemoryChunkId.make(id),
+  thread_id,
+  turn_id,
+  workspace_id: workspaceId,
+  text,
+  embedding: new Float32Array(embedding),
+  created_at: now,
+})
+
+const vectorEmbeddingsLayer = (vector: ReadonlyArray<number>) =>
+  Layer.succeed(
+    Embeddings.Service,
+    Embeddings.Service.of({
+      dimensions: vector.length,
+      availability: Effect.succeed({ available: true, model: "cli-thread-test", dimensions: vector.length }),
+      embed: Effect.fn("Embeddings.embed.cliThreadTest")(function* (texts: ReadonlyArray<string>) {
+        return texts.map(() => new Float32Array(vector))
+      }),
+    }),
+  )
+
 const readOrbStatus = (value: unknown) => {
   if (typeof value !== "object" || value === null) return undefined
   const status = Object.getOwnPropertyDescriptor(value, "orb_status")?.value
   return typeof status === "string" ? status : undefined
+}
+
+const readSummaryThreadId = (value: unknown) => {
+  if (typeof value !== "object" || value === null) return undefined
+  const summary = Object.getOwnPropertyDescriptor(value, "summary")?.value
+  if (typeof summary !== "object" || summary === null) return undefined
+  const summaryThreadId = Object.getOwnPropertyDescriptor(summary, "thread_id")?.value
+  return typeof summaryThreadId === "string" ? summaryThreadId : undefined
+}
+
+const readScore = (value: unknown) => {
+  if (typeof value !== "object" || value === null) return undefined
+  const score = Object.getOwnPropertyDescriptor(value, "score")?.value
+  return typeof score === "number" ? score : undefined
 }
 
 const emptyClient = (): Client.Interface => ({

@@ -57,6 +57,7 @@ export const ThreadCommand = Schema.Struct({
   rubric: Schema.optional(Schema.String),
   include_archived: Schema.optional(Schema.Boolean),
   limit: Schema.optional(Schema.Int),
+  semantic: Schema.optional(Schema.Boolean),
 }).annotate({ identifier: "Rika.Cli.Args.ThreadCommand" })
 
 export const ProjectAction = Schema.Literals(["create", "list", "show", "set-env", "set-secret"]).annotate({
@@ -308,7 +309,7 @@ export const usage = [
   "  rika version",
   "  rika interactive [options]",
   "  rika threads list [--include-archived] [--limit <n>]",
-  "  rika threads search [--include-archived] [--limit <n>] <query>",
+  "  rika threads search [--semantic] [--include-archived] [--limit <n>] <query>",
   "  rika threads archive <thread-id>",
   "  rika threads unarchive <thread-id>",
   "  rika threads visibility <thread-id> <private|workspace|unlisted>",
@@ -452,6 +453,7 @@ const threadListConfig = {
 
 const threadSearchConfig = {
   ...threadListConfig,
+  semantic: Flag.boolean("semantic").pipe(Flag.withDescription("Use semantic thread memory search")),
   query: Argument.string("query").pipe(Argument.variadic({ min: 1 }), Argument.withDescription("Search terms")),
 }
 
@@ -671,6 +673,7 @@ interface ThreadListInput {
 }
 
 interface ThreadSearchInput extends ThreadListInput {
+  readonly semantic: boolean
   readonly query: ReadonlyArray<string>
 }
 
@@ -1340,6 +1343,7 @@ const toThreadSearchCommand = (input: ThreadSearchInput): ThreadCommand => {
     type: "threads",
     action: "search",
     query: input.query.join(" ").trim(),
+    ...(input.semantic ? { semantic: true } : {}),
     ...(input.includeArchived ? { include_archived: true } : {}),
     ...(limit === undefined ? {} : { limit }),
   }

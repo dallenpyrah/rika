@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { PermissionPolicy, SkillRegistry, SkillToolProvider, SubagentRuntime, ToolExecutor } from "@rika/agent"
+import {
+  PermissionPolicy,
+  SkillRegistry,
+  SkillToolProvider,
+  SubagentRuntime,
+  ThreadMemory,
+  ToolExecutor,
+} from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { ArtifactStore, McpApprovalStore } from "@rika/persistence"
@@ -159,6 +166,7 @@ const subagentToolLayer = (workspaceRoot: string, subagentTools?: Config.Subagen
     Layer.provideMerge(PluginHost.emptyLayer),
     Layer.provideMerge(SpecialtyTools.fakeLayer()),
     Layer.provideMerge(ArtifactStore.fakeLayer()),
+    Layer.provideMerge(ThreadMemory.fakeLayer()),
     Layer.provideMerge(McpApprovalStore.fakeLayer()),
     Layer.provideMerge(McpClient.emptyLayer),
     Layer.provideMerge(IdGenerator.sequenceLayer(10)),

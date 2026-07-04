@@ -529,6 +529,8 @@ Options:
 
   -n, --limit <number>
       Maximum number of threads to return
+  --semantic
+      Use semantic thread memory search
   --offset <number>
       Number of results to skip (for pagination)
   --json

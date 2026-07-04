@@ -8,6 +8,7 @@ export type TurnToolAccess = Tool.TurnToolAccess
 export const defaultTurnToolAccess: TurnToolAccess = "full"
 
 export const readOnlyToolNames = [
+  "thread_memory",
   "semantic_search",
   "semantic_search_status",
   "fffind",

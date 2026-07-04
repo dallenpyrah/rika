@@ -1,5 +1,7 @@
 import { ThreadService, TournamentService } from "@rika/agent"
+import { Embeddings } from "@rika/llm"
 import { OrbStore } from "@rika/persistence"
+import { ThreadMemoryStore } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as Args from "./args"
@@ -16,6 +18,9 @@ export type RunError =
   | ThreadService.Error
   | TournamentService.RunError
   | OrbStore.OrbStoreError
+  | ThreadMemoryStore.ThreadMemoryStoreError
+  | Embeddings.EmbeddingsProviderError
+  | Embeddings.EmbeddingsValidationError
   | Client.SdkError
   | Input.InputError
   | ThreadsError
@@ -39,6 +44,8 @@ export const layer = Layer.effect(
     const tournament = yield* Effect.serviceOption(TournamentService.Service)
     const orbs = yield* OrbStore.Service
     const remoteClient = yield* Effect.serviceOption(RemoteClient)
+    const embeddings = Option.getOrUndefined(yield* Effect.serviceOption(Embeddings.Service))
+    const memoryStore = Option.getOrUndefined(yield* Effect.serviceOption(ThreadMemoryStore.Service))
 
     return Service.of({
       executeCommand: Effect.fn("Cli.Threads.executeCommand")(function* (command: Args.ThreadCommand) {
@@ -50,6 +57,19 @@ export const layer = Layer.effect(
             return 0
           }
           case "search": {
+            if (command.semantic === true) {
+              const semantic = yield* semanticSearch({
+                command,
+                output,
+                threads,
+                ...(embeddings === undefined ? {} : { embeddings }),
+                ...(memoryStore === undefined ? {} : { memoryStore }),
+              })
+              if (semantic !== undefined) {
+                yield* output.stdout(formatJson(semantic))
+                return 0
+              }
+            }
             const results = yield* threads.search(searchInput(command))
             yield* output.stdout(formatJson(results))
             return 0
@@ -170,6 +190,68 @@ const searchInput = (command: Args.ThreadCommand): ThreadService.SearchInput => 
   ...(command.include_archived === undefined ? {} : { include_archived: command.include_archived }),
   ...(command.limit === undefined ? {} : { limit: command.limit }),
 })
+
+interface SemanticSearchInput {
+  readonly command: Args.ThreadCommand
+  readonly output: Output.Interface
+  readonly threads: ThreadService.Interface
+  readonly embeddings?: Embeddings.Interface
+  readonly memoryStore?: ThreadMemoryStore.Interface
+}
+
+interface SemanticSearchResult {
+  readonly summary: ThreadService.ThreadSummary
+  readonly score: number
+  readonly matched: ReadonlyArray<string>
+}
+
+const semanticSearch = (
+  input: SemanticSearchInput,
+): Effect.Effect<ReadonlyArray<SemanticSearchResult> | undefined, RunError> =>
+  Effect.gen(function* () {
+    if (input.embeddings === undefined || input.memoryStore === undefined) {
+      yield* input.output.stderr(
+        "Semantic thread search unavailable: embeddings are not configured; using lexical search",
+      )
+      return undefined
+    }
+    const query = input.command.query?.trim() ?? ""
+    const embedded = yield* input.embeddings.embed([query]).pipe(
+      Effect.map((vectors) => vectors[0]),
+      Effect.map((vector) =>
+        vector === undefined
+          ? { _tag: "unavailable" as const, reason: "embedding provider returned no vector" }
+          : { _tag: "available" as const, vector },
+      ),
+      Effect.catchTag("EmbeddingsUnavailable", (error) =>
+        Effect.succeed({ _tag: "unavailable" as const, reason: error.message }),
+      ),
+    )
+    if (embedded._tag === "unavailable") {
+      yield* input.output.stderr(`Semantic thread search unavailable: ${embedded.reason}; using lexical search`)
+      return undefined
+    }
+    const rows = yield* input.memoryStore.search(embedded.vector, {
+      limit: input.command.limit ?? 20,
+    })
+    const seen = new Set<string>()
+    const results: Array<SemanticSearchResult> = []
+    for (const row of rows) {
+      if (seen.has(row.chunk.thread_id)) continue
+      const record = yield* input.threads
+        .preview({ thread_id: row.chunk.thread_id, limit: 1 })
+        .pipe(Effect.catch(() => Effect.succeed(undefined)))
+      if (record === undefined) continue
+      if (input.command.include_archived !== true && record.summary.archived) continue
+      seen.add(row.chunk.thread_id)
+      results.push({
+        summary: record.summary,
+        score: row.score,
+        matched: [row.chunk.text.slice(0, 160)],
+      })
+    }
+    return results
+  })
 
 const tournamentMessage = (input: Input.Interface, command: Args.ThreadCommand) =>
   command.message === undefined
