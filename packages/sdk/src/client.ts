@@ -373,10 +373,11 @@ export const fetchTransport = (input: FetchTransportInput): Transport => {
     ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
     requestJson: (request) =>
       Effect.tryPromise({
-        try: async () => {
-          const response = await fetchImpl(`${baseUrl}${request.path}`, fetchInit(request, input.token))
-          const body = await readJson(response)
-          if (!response.ok) throw apiError(body, "requestJson", response.status)
+        try: async (signal) => {
+          const response = await fetchImpl(`${baseUrl}${request.path}`, fetchInit(request, input.token, signal))
+          const status = response.status
+          const body = await readResponseJson(response, "requestJson", status)
+          if (!response.ok) throw apiError(body, "requestJson", status)
           return body
         },
         catch: (cause) => toSdkError(cause, "requestJson"),
@@ -384,9 +385,10 @@ export const fetchTransport = (input: FetchTransportInput): Transport => {
     streamJson: (request) =>
       Stream.unwrap(
         Effect.tryPromise({
-          try: async () => {
-            const response = await fetchImpl(`${baseUrl}${request.path}`, fetchInit(request, input.token))
-            if (!response.ok) throw apiError(await readJson(response), "streamJson", response.status)
+          try: async (signal) => {
+            const response = await fetchImpl(`${baseUrl}${request.path}`, fetchInit(request, input.token, signal))
+            const status = response.status
+            if (!response.ok) throw apiError(await readResponseJson(response, "streamJson", status), "streamJson", status)
             if (response.body === null) {
               throw new SdkError({
                 message: "Rika API stream response did not include a body",
@@ -463,16 +465,26 @@ const isPresenceFrame = (frame: Remote.StreamFrame): frame is Remote.PresenceFra
 const isApiErrorBody = (value: unknown): value is Remote.ApiError =>
   Schema.decodeUnknownOption(Remote.ApiError)(value)._tag === "Some"
 
-const fetchInit = (request: RequestInput, token: string | undefined): RequestInit => ({
+const fetchInit = (request: RequestInput, token: string | undefined, signal: AbortSignal): RequestInit => ({
   method: request.method,
   headers: {
     ...(request.body === undefined ? {} : { "content-type": "application/json" }),
     ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
   },
+  signal,
   ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
 })
 
 const readJson = async (response: Response) => parseJson(await response.text())
+
+const readResponseJson = async (response: Response, operation: string, status: number) => {
+  try {
+    return await readJson(response)
+  } catch (cause) {
+    if (!response.ok) throw apiError(null, operation, status)
+    throw cause
+  }
+}
 
 const parseJson = (text: string) => {
   if (text.trim().length === 0) return null

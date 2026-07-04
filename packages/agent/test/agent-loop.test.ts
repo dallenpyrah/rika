@@ -2071,19 +2071,6 @@ describe("AgentLoop", () => {
       data: { text: "thinking about it", provider: "openai", model: "gpt-5.5" },
     })
   })
-
-  test("queues follow-up turns through the service boundary without module-level state", async () => {
-    const layer = makeLayer(["queued later"])
-
-    const queued = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* Migration.migrate()
-        return yield* AgentLoop.queueTurn({ thread_id: threadId, workspace_id: workspaceId, content: "next" })
-      }).pipe(Effect.provide(layer)),
-    )
-
-    expect(queued).toEqual({ thread_id: threadId, position: 1 })
-  })
 })
 
 const fakeResponse = (request: Provider.GenerateRequest, content: string): Provider.GenerateResponse => ({

@@ -27,7 +27,7 @@ import {
 } from "@rika/persistence"
 import { Client } from "@rika/sdk"
 import { Artifact, Codec, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
-import { Effect, Fiber, Layer, ManagedRuntime, Schema, Stream } from "effect"
+import { Deferred, Effect, Fiber, Layer, ManagedRuntime, Schema, Stream } from "effect"
 import { HttpServer, OrbMirror, PresenceHub, RemoteControl } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_remote_contract")
@@ -103,6 +103,8 @@ const makeLayer = (
     readonly dataDir?: string
     readonly agentLayer?: Layer.Layer<AgentLoop.Service>
     readonly compactionLayer?: Layer.Layer<CompactionService.Service>
+    readonly providerResponses?: ReadonlyArray<Provider.FakeResponse>
+    readonly toolLayer?: Layer.Layer<ToolExecutor.Service>
   } = {},
 ) => {
   const runtimeConfigLayer = options.dataDir === undefined ? configLayer : configLayerForDataDir(options.dataDir)
@@ -135,11 +137,12 @@ const makeLayer = (
     Layer.provideMerge(runtimeConfigLayer),
     Layer.provideMerge(
       Provider.fakeRegistryLayer([
-        { name: "anthropic", responses: ["remote hello"] },
-        { name: "openai", responses: ["remote hello"] },
+        { name: "anthropic", responses: options.providerResponses ?? ["remote hello"] },
+        { name: "openai", responses: options.providerResponses ?? ["remote hello"] },
       ]),
     ),
   )
+  const toolLayer = options.toolLayer ?? ToolExecutor.fakeLayer({})
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
     projectStoreLayer,
@@ -147,7 +150,7 @@ const makeLayer = (
     workspaceAccessLayer,
     contextLayer,
     SkillRegistry.emptyLayer,
-    ToolExecutor.fakeLayer({}),
+    toolLayer,
     Diagnostics.memoryLayer([]),
     llmLayer,
     IdeBridge.layer,
@@ -215,7 +218,6 @@ const blockingAgentLoopLayer = (): Layer.Layer<AgentLoop.Service> =>
       runTurn: () => Effect.never,
       streamTurn: () => Stream.never,
       cancelTurn: () => Effect.never,
-      queueTurn: () => Effect.never,
     }),
   )
 
@@ -239,7 +241,6 @@ const capturingAgentLoopLayer = (inputs: Array<AgentLoop.RunTurnInput>): Layer.L
           } satisfies Event.TurnCompleted
         }),
       cancelTurn: () => Effect.never,
-      queueTurn: () => Effect.never,
     }),
   )
 
@@ -448,17 +449,27 @@ describe("remote control API and SDK", () => {
     expect(streamed.at(-1)).toMatchObject({ type: "turn.completed" })
 
     const turnId = streamed.find((event) => event.type === "turn.started")?.turn_id
-    expect(turnId).toBeDefined()
-    const interrupted = await Effect.runPromise(
-      client.interruptTurn({ thread_id: threadId, turn_id: turnId ?? Ids.TurnId.make("missing"), reason: "SDK test" }),
-    )
-    expect(interrupted).toMatchObject({ type: "turn.failed", data: { error: { kind: "cancelled" } } })
+    if (turnId === undefined) throw new Error("Missing streamed turn id")
 
-    const opened = await Effect.runPromise(client.openThread(threadId))
-    expect(opened.events.map((event) => event.type)).toContain("turn.failed")
     const preview = await Effect.runPromise(client.previewThread(threadId, { limit: 2 }))
     expect(preview.summary.thread_id).toBe(threadId)
-    expect(preview.events.map((event) => event.type)).toEqual(["turn.completed", "turn.failed"])
+    expect(preview.events.map((event) => event.type)).toEqual(["message.added", "turn.completed"])
+
+    const completedInterruptError = await Effect.runPromise(
+      client.interruptTurn({ thread_id: threadId, turn_id: turnId, reason: "already completed" }).pipe(Effect.flip),
+    )
+    const previewAfterCompletedInterrupt = await Effect.runPromise(client.previewThread(threadId, { limit: 2 }))
+    expect(completedInterruptError).toBeInstanceOf(Client.SdkError)
+    expect(completedInterruptError).toMatchObject({
+      message: `Cannot cancel completed turn ${turnId}`,
+      operation: "requestJson",
+      status: 500,
+    })
+    expect(previewAfterCompletedInterrupt.events.map((event) => event.type)).toEqual([
+      "message.added",
+      "turn.completed",
+    ])
+
     const metadataEvents = Effect.runPromise(
       client
         .subscribeThreadEvents({ thread_id: threadId, after_sequence: preview.events.at(-1)?.sequence })
@@ -511,6 +522,228 @@ describe("remote control API and SDK", () => {
 
     expect(captured).toHaveLength(1)
     expect(captured[0]).toMatchObject({ tool_access: "read-only", content: "audit only" })
+  })
+
+  test("interrupting an active turn stops in-flight work and releases the thread", async () => {
+    const interruptThreadId = Ids.ThreadId.make("thread_remote_interrupt_stops_work")
+    const toolStarted = Effect.runSync(Deferred.make<void>())
+    const releaseTool = Effect.runSync(Deferred.make<void>())
+    const sideEffectDone = Effect.runSync(Deferred.make<void>())
+    let sideEffectRan = false
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), {
+        providerResponses: [
+          {
+            type: "tool-call",
+            id: "call_remote_interrupt_delayed",
+            name: "delayed_side_effect",
+            input: {},
+          },
+          "accepted after interrupt",
+        ],
+        toolLayer: ToolExecutor.fakeLayer({
+          delayed_side_effect: () =>
+            Deferred.succeed(toolStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseTool)),
+              Effect.andThen(
+                Effect.sync(() => {
+                  sideEffectRan = true
+                }),
+              ),
+              Effect.andThen(Deferred.succeed(sideEffectDone, undefined)),
+              Effect.as({ ok: true }),
+            ),
+        }),
+      }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: interruptThreadId, workspace_id: workspaceId }))
+      const accepted = await Effect.runPromise(
+        client.startTurn({
+          thread_id: interruptThreadId,
+          workspace_id: workspaceId,
+          content: "run a delayed side effect",
+          mode: "smart",
+        }),
+      )
+      const started = await runtime.runPromise(Deferred.await(toolStarted).pipe(Effect.timeoutOption("1 second")))
+      const beforeInterrupt = await runtime.runPromise(
+        ThreadEventLog.readThread({ thread_id: interruptThreadId }),
+      )
+      const startedTurn = beforeInterrupt.find(
+        (event): event is Event.TurnStarted => event.type === "turn.started",
+      )
+      if (startedTurn === undefined) throw new Error("Missing started turn")
+
+      const interrupted = await Effect.runPromise(
+        client.interruptTurn({
+          thread_id: interruptThreadId,
+          turn_id: startedTurn.turn_id,
+          reason: "test interrupt",
+        }),
+      )
+      const acceptedAfterInterrupt = await Effect.runPromise(
+        client.startTurn({
+          thread_id: interruptThreadId,
+          workspace_id: workspaceId,
+          content: "accepted after interrupt",
+          mode: "smart",
+        }),
+      )
+      await runtime.runPromise(
+        Deferred.succeed(releaseTool, undefined).pipe(
+          Effect.andThen(Effect.yieldNow),
+          Effect.andThen(Effect.yieldNow),
+          Effect.andThen(Effect.yieldNow),
+        ),
+      )
+      const sideEffectObserved = await runtime.runPromise(
+        Deferred.await(sideEffectDone).pipe(Effect.timeoutOption("20 millis")),
+      )
+      const events = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: interruptThreadId }))
+      const originalTerminalEvents = events.filter(
+        (event): event is Event.TurnCompleted | Event.TurnFailed =>
+          event.turn_id === startedTurn.turn_id && (event.type === "turn.completed" || event.type === "turn.failed"),
+      )
+
+      expect(accepted).toEqual({ thread_id: interruptThreadId, accepted: true })
+      expect(started._tag).toBe("Some")
+      expect(interrupted).toMatchObject({
+        type: "turn.failed",
+        turn_id: startedTurn.turn_id,
+        data: { error: { kind: "cancelled" } },
+      })
+      expect(acceptedAfterInterrupt).toEqual({ thread_id: interruptThreadId, accepted: true })
+      expect(sideEffectRan).toBe(false)
+      expect(sideEffectObserved._tag).toBe("None")
+      expect(originalTerminalEvents.map((event) => event.type)).toEqual(["turn.failed"])
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  test("interrupting a stale turn id does not stop the active turn", async () => {
+    const staleInterruptThreadId = Ids.ThreadId.make("thread_remote_stale_interrupt")
+    const toolStarted = Effect.runSync(Deferred.make<void>())
+    const releaseTool = Effect.runSync(Deferred.make<void>())
+    const sideEffectDone = Effect.runSync(Deferred.make<void>())
+    let sideEffectRan = false
+    const runtime = ManagedRuntime.make(
+      makeLayer(defaultContextLayer, fakeOrbManagerLayer(), fakeOrbMirrorLayer(), {
+        providerResponses: [
+          "first turn complete",
+          {
+            type: "tool-call",
+            id: "call_remote_stale_interrupt_delayed",
+            name: "delayed_side_effect",
+            input: {},
+          },
+          "cleanup after stale interrupt",
+        ],
+        toolLayer: ToolExecutor.fakeLayer({
+          delayed_side_effect: () =>
+            Deferred.succeed(toolStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseTool)),
+              Effect.andThen(
+                Effect.sync(() => {
+                  sideEffectRan = true
+                }),
+              ),
+              Effect.andThen(Deferred.succeed(sideEffectDone, undefined)),
+              Effect.as({ ok: true }),
+            ),
+        }),
+      }),
+    )
+    const client = makeClient((request) => runtime.runPromise(HttpServer.handle(request)))
+
+    try {
+      await Effect.runPromise(client.createThread({ thread_id: staleInterruptThreadId, workspace_id: workspaceId }))
+      const firstStream = Effect.runPromise(
+        client.subscribeThreadEvents({ thread_id: staleInterruptThreadId }).pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed" || event.type === "turn.failed"),
+          Stream.runCollect,
+        ),
+      )
+      await Effect.runPromise(
+        client.startTurn({
+          thread_id: staleInterruptThreadId,
+          workspace_id: workspaceId,
+          content: "first turn",
+          mode: "smart",
+        }),
+      )
+      const firstEvents = await firstStream
+      const staleTurn = firstEvents.find((event): event is Event.TurnStarted => event.type === "turn.started")
+      if (staleTurn === undefined) throw new Error("Missing first started turn")
+
+      await Effect.runPromise(
+        client.startTurn({
+          thread_id: staleInterruptThreadId,
+          workspace_id: workspaceId,
+          content: "second turn",
+          mode: "smart",
+        }),
+      )
+      const started = await runtime.runPromise(Deferred.await(toolStarted).pipe(Effect.timeoutOption("1 second")))
+      const beforeStaleInterrupt = await runtime.runPromise(
+        ThreadEventLog.readThread({ thread_id: staleInterruptThreadId }),
+      )
+      const activeTurn = beforeStaleInterrupt.findLast(
+        (event): event is Event.TurnStarted => event.type === "turn.started",
+      )
+      if (activeTurn === undefined) throw new Error("Missing active started turn")
+
+      const staleError = await Effect.runPromise(
+        client
+          .interruptTurn({
+            thread_id: staleInterruptThreadId,
+            turn_id: staleTurn.turn_id,
+            reason: "stale interrupt",
+          })
+          .pipe(Effect.flip),
+      )
+      const afterStaleInterrupt = await runtime.runPromise(
+        ThreadEventLog.readThread({ thread_id: staleInterruptThreadId }),
+      )
+      const activeTerminalAfterStale = afterStaleInterrupt.filter(
+        (event): event is Event.TurnCompleted | Event.TurnFailed =>
+          event.turn_id === activeTurn.turn_id && (event.type === "turn.completed" || event.type === "turn.failed"),
+      )
+      const cleanup = await Effect.runPromise(
+        client.interruptTurn({
+          thread_id: staleInterruptThreadId,
+          turn_id: activeTurn.turn_id,
+          reason: "cleanup",
+        }),
+      )
+      await runtime.runPromise(
+        Deferred.succeed(releaseTool, undefined).pipe(
+          Effect.andThen(Effect.yieldNow),
+          Effect.andThen(Effect.yieldNow),
+          Effect.andThen(Effect.yieldNow),
+        ),
+      )
+      const sideEffectObserved = await runtime.runPromise(
+        Deferred.await(sideEffectDone).pipe(Effect.timeoutOption("20 millis")),
+      )
+
+      expect(started._tag).toBe("Some")
+      expect(staleError).toBeInstanceOf(Client.SdkError)
+      expect(staleError.status).toBe(409)
+      expect(activeTerminalAfterStale).toHaveLength(0)
+      expect(cleanup).toMatchObject({
+        type: "turn.failed",
+        turn_id: activeTurn.turn_id,
+        data: { error: { kind: "cancelled" } },
+      })
+      expect(sideEffectRan).toBe(false)
+      expect(sideEffectObserved._tag).toBe("None")
+    } finally {
+      await runtime.dispose()
+    }
   })
 
   test("uses project identity when remote requests omit workspace id", async () => {

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
-import { Effect, Stream } from "effect"
+import { Effect, Fiber, Stream } from "effect"
+import { TestClock } from "effect/testing"
 import { LifecycleHooks } from "../src/index"
 
 const tempRoot = () => mkdtemp(join(tmpdir(), "rika-hooks-"))
@@ -81,6 +82,95 @@ describe("LifecycleHooks", () => {
         Array.from({ length: 50 }, (_, index) => `line-${index + 6}`),
       )
     } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("runSetup timeout uses Clock and kills the hook process", async () => {
+    const root = await tempRoot()
+    const pidPath = join(root, "setup.pid")
+    const markerPath = join(root, "late.marker")
+    let pid: number | undefined
+    try {
+      await writeHook(
+        root,
+        "setup",
+        [
+          "#!/usr/bin/env bun",
+          `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid))`,
+          "await Bun.sleep(200)",
+          `await Bun.write(${JSON.stringify(markerPath)}, "late")`,
+          "",
+        ].join("\n"),
+      )
+
+      const result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fiber = yield* LifecycleHooks.runSetup(root).pipe(
+              Stream.runCollect,
+              Effect.flip,
+              Effect.forkScoped({ startImmediately: true }),
+            )
+            pid = Number(yield* Effect.promise(() => waitForText(pidPath)))
+            yield* TestClock.adjust("1 second")
+            const error = yield* Fiber.join(fiber)
+            return error
+          }),
+        ).pipe(
+          Effect.provide(LifecycleHooks.layerWithOptions({ setupTimeout: "1 second" })),
+          Effect.provide(TestClock.layer()),
+        ),
+      )
+
+      await Bun.sleep(250)
+
+      expect(result.hook).toBe("setup")
+      expect(result.message).toContain("timed out")
+      expect(await pathExists(markerPath)).toBe(false)
+      expect(processAlive(pid)).toBe(false)
+    } finally {
+      killProcess(pid)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("interrupting runSetup kills the hook process", async () => {
+    const root = await tempRoot()
+    const pidPath = join(root, "setup.pid")
+    const markerPath = join(root, "late.marker")
+    let pid: number | undefined
+    try {
+      await writeHook(
+        root,
+        "setup",
+        [
+          "#!/usr/bin/env bun",
+          `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid))`,
+          "await Bun.sleep(200)",
+          `await Bun.write(${JSON.stringify(markerPath)}, "late")`,
+          "",
+        ].join("\n"),
+      )
+
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fiber = yield* LifecycleHooks.runSetup(root).pipe(
+              Stream.runCollect,
+              Effect.forkScoped({ startImmediately: true }),
+            )
+            pid = Number(yield* Effect.promise(() => waitForText(pidPath)))
+            yield* Fiber.interrupt(fiber)
+          }),
+        ).pipe(Effect.provide(LifecycleHooks.layer)),
+      )
+      await Bun.sleep(250)
+
+      expect(await pathExists(markerPath)).toBe(false)
+      expect(processAlive(pid)).toBe(false)
+    } finally {
+      killProcess(pid)
       await rm(root, { recursive: true, force: true })
     }
   })
@@ -242,4 +332,30 @@ const waitForText = async (path: string) => {
 
 const relativeFromCwd = (path: string) => {
   return relative(process.cwd(), path)
+}
+
+const pathExists = async (path: string) => {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const processAlive = (pid: number | undefined) => {
+  if (pid === undefined) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const killProcess = (pid: number | undefined) => {
+  if (pid === undefined) return
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch {}
 }

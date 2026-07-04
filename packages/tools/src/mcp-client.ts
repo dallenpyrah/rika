@@ -1,7 +1,7 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client"
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio"
 import { ToolRegistry } from "@rika/agent"
-import { Config } from "@rika/core"
+import { Config, SecretRedactor } from "@rika/core"
 import { Database, McpApprovalStore } from "@rika/persistence"
 import { Common, Mcp } from "@rika/schema"
 import type { Call } from "@rika/schema/tool"
@@ -135,6 +135,42 @@ export interface ConfiguredServer {
   readonly fingerprint: string
 }
 
+export type PlaceholderResolution =
+  | {
+      readonly _tag: "resolved"
+      readonly config: ServerConfig
+      readonly entries: ReadonlyArray<SecretRedactor.Entry>
+    }
+  | { readonly _tag: "missing"; readonly variables: ReadonlyArray<string> }
+
+export const resolveServerConfigPlaceholders = (
+  config: ServerConfig,
+  env: Record<string, string | undefined>,
+): PlaceholderResolution => {
+  const missing = new Set<string>()
+  const entries = new Map<string, SecretRedactor.Entry>()
+  const substitute = (value: string) => resolvePlaceholderString(value, env, missing, entries)
+  const resolved =
+    "command" in config
+      ? {
+          command: substitute(config.command),
+          ...(config.args === undefined ? {} : { args: config.args.map(substitute) }),
+          ...(config.env === undefined ? {} : { env: resolveStringRecord(config.env, substitute) }),
+          ...(config.cwd === undefined ? {} : { cwd: substitute(config.cwd) }),
+          ...(config.includeTools === undefined ? {} : { includeTools: [...config.includeTools] }),
+          ...(config.excludeTools === undefined ? {} : { excludeTools: [...config.excludeTools] }),
+        }
+      : {
+          url: substitute(config.url),
+          ...(config.headers === undefined ? {} : { headers: resolveStringRecord(config.headers, substitute) }),
+          ...(config.includeTools === undefined ? {} : { includeTools: [...config.includeTools] }),
+          ...(config.excludeTools === undefined ? {} : { excludeTools: [...config.excludeTools] }),
+        }
+  return missing.size === 0
+    ? { _tag: "resolved", config: resolved, entries: [...entries.values()] }
+    : { _tag: "missing", variables: [...missing].toSorted() }
+}
+
 export const layerFromSources = (sources: ReadonlyArray<SettingsSource>, connector: Connector) =>
   layerWith(() => Effect.succeed(sources), connector)
 
@@ -257,6 +293,9 @@ export const serverConfigKind = (config: ServerConfig): ServerKind => serverKind
 export const fingerprintServerConfig = (config: ServerConfig, defaultCwd: string): string =>
   fingerprintServer(config, defaultCwd)
 
+export const invalidWorkspaceCommandLaunchFields = (server: ConfiguredServer): ReadonlyArray<string> =>
+  workspaceCommandLaunchPlaceholderFields(server)
+
 const layerWith = (loadSettings: SettingsLoader, connector: Connector) =>
   Layer.effect(
     Service,
@@ -349,6 +388,7 @@ const summarizeServer = (server: ConfiguredServer, approvals: McpApprovalStore.I
     const kind = serverKind(server.config)
     const approved =
       kind === "command" && server.source === "workspace" ? yield* approvals.isApproved(approvalInput(server)) : true
+    if (approved) yield* ensureWorkspaceCommandLaunchIdentity(server)
     return {
       name: server.name,
       source: server.source,
@@ -383,13 +423,20 @@ const approveConfiguredServer = (
         server_name: serverName,
       })
     }
+    yield* ensureWorkspaceCommandLaunchIdentity(server)
     return yield* approvals.approve(approvalInput(server)).pipe(Effect.mapError((error) => error as RunError))
   })
 
 const isRunnable = (server: ConfiguredServer, approvals: McpApprovalStore.Interface) =>
-  server.source === "workspace" && serverKind(server.config) === "command"
-    ? approvals.isApproved(approvalInput(server)).pipe(Effect.mapError((error) => error as RunError))
-    : Effect.succeed(true)
+  Effect.gen(function* () {
+    if (server.source !== "workspace" || serverKind(server.config) !== "command") return true
+    const approved = yield* approvals
+      .isApproved(approvalInput(server))
+      .pipe(Effect.mapError((error) => error as RunError))
+    if (!approved) return false
+    yield* ensureWorkspaceCommandLaunchIdentity(server)
+    return true
+  })
 
 const checkServer = (
   server: ConfiguredServer,
@@ -506,7 +553,34 @@ const withConnection = <A>(
   connector: Connector,
   server: ConfiguredServer,
   use: (connection: Connection) => Effect.Effect<A, McpClientError>,
-) => Effect.acquireUseRelease(connector(server), use, (connection) => connection.close.pipe(Effect.ignore))
+) =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveConfiguredServer(server)
+    yield* registerResolvedSecrets(resolved.entries)
+    return yield* Effect.acquireUseRelease(connector(resolved.server), use, (connection) =>
+      connection.close.pipe(Effect.ignore),
+    )
+  })
+
+const resolveConfiguredServer = (server: ConfiguredServer) =>
+  Effect.gen(function* () {
+    const resolved = resolveServerConfigPlaceholders(server.config, process.env)
+    if (resolved._tag === "missing") {
+      return yield* new McpClientError({
+        message: `MCP server ${server.name} references missing environment variables: ${resolved.variables.join(", ")}`,
+        operation: "resolveEnv",
+        server_name: server.name,
+        details: { variables: [...resolved.variables] },
+      })
+    }
+    return { server: { ...server, config: resolved.config }, entries: resolved.entries }
+  })
+
+const registerResolvedSecrets = (entries: ReadonlyArray<SecretRedactor.Entry>) =>
+  Effect.gen(function* () {
+    const redactor = Option.getOrUndefined(yield* Effect.serviceOption(SecretRedactor.Service))
+    if (redactor !== undefined) yield* redactor.register(entries)
+  })
 
 const liveConnector: Connector = (server) =>
   Effect.tryPromise({
@@ -656,6 +730,30 @@ const approvalInput = (server: ConfiguredServer): McpApprovalStore.ApprovalInput
 const serverKind = (config: ServerConfig): ServerKind => (isCommandServerConfig(config) ? "command" : "remote")
 const isCommandServerConfig = (config: ServerConfig): config is CommandServerConfig => "command" in config
 
+const ensureWorkspaceCommandLaunchIdentity = (server: ConfiguredServer): Effect.Effect<void, McpClientError> => {
+  const fields = workspaceCommandLaunchPlaceholderFields(server)
+  if (fields.length === 0) return Effect.void
+  return new McpClientError({
+    message: `Workspace MCP server ${server.name} cannot use environment placeholders in command, args, or cwd`,
+    operation: "validateLaunchIdentity",
+    server_name: server.name,
+    details: { fields: [...fields] },
+  })
+}
+
+const workspaceCommandLaunchPlaceholderFields = (server: ConfiguredServer): ReadonlyArray<string> => {
+  if (server.source !== "workspace" || !isCommandServerConfig(server.config)) return []
+  const fields: Array<string> = []
+  if (hasPlaceholder(server.config.command)) fields.push("command")
+  server.config.args?.forEach((arg, index) => {
+    if (hasPlaceholder(arg)) fields.push(`args.${index}`)
+  })
+  if (server.config.cwd !== undefined && hasPlaceholder(server.config.cwd)) fields.push("cwd")
+  return fields
+}
+
+const hasPlaceholder = (value: string) => placeholderPattern.test(value)
+
 const rikaToolName = (serverName: string, toolName: string) => `mcp.${serverName}.${toolName}`
 
 const toolAllowed = (config: ServerConfig, name: string) => {
@@ -703,6 +801,30 @@ const stableJson = (value: unknown): string => {
   }
   return JSON.stringify(value)
 }
+
+const resolvePlaceholderString = (
+  value: string,
+  env: Record<string, string | undefined>,
+  missing: Set<string>,
+  entries: Map<string, SecretRedactor.Entry>,
+) =>
+  value.replaceAll(placeholderReplacePattern, (match, variable: string) => {
+    const resolved = env[variable]
+    if (resolved === undefined) {
+      missing.add(variable)
+      return match
+    }
+    entries.set(`${variable}\u0000${resolved}`, { label: variable, value: resolved })
+    return resolved
+  })
+
+const placeholderPattern = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/
+const placeholderReplacePattern = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+
+const resolveStringRecord = (
+  record: Readonly<Record<string, string>>,
+  substitute: (value: string) => string,
+): Record<string, string> => Object.fromEntries(Object.entries(record).map(([key, value]) => [key, substitute(value)]))
 
 const toClientError = (cause: unknown, operation: string, serverName: string, toolName?: string) => {
   if (cause instanceof McpClientError) return cause

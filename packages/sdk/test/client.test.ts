@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Artifact, Codec, Common, Event, Ide, Ids, Remote } from "@rika/schema"
-import { Effect, Schema, Stream } from "effect"
+import { Deferred, Effect, Fiber, Schema, Stream } from "effect"
 import { Client } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_sdk_client")
@@ -545,6 +545,56 @@ describe("SDK client", () => {
 
     expect(authorization).toBe("Bearer secret")
     expect(error).toMatchObject({ message: "Unauthorized", operation: "requestJson", status: 401 })
+  })
+
+  test("fetch transport aborts requestJson when the fiber is interrupted", async () => {
+    const started = Effect.runSync(Deferred.make<void>())
+    let signal: AbortSignal | undefined
+    let aborted = false
+    const client = Client.make(
+      Client.fetchTransport({
+        base_url: "http://rika.test",
+        fetch: (_input, init) => {
+          signal = init?.signal ?? undefined
+          signal?.addEventListener("abort", () => {
+            aborted = true
+          })
+          Effect.runSync(Deferred.succeed(started, undefined))
+          return new Promise<Response>(() => {})
+        },
+      }),
+    )
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fiber = yield* client.listThreads().pipe(Effect.forkScoped({ startImmediately: true }))
+          yield* Deferred.await(started).pipe(Effect.timeout("1 second"))
+          yield* Fiber.interrupt(fiber)
+        }),
+      ),
+    )
+
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal?.aborted).toBe(true)
+    expect(aborted).toBe(true)
+  })
+
+  test("fetch transport preserves HTTP status when an error body is not JSON", async () => {
+    const client = Client.make(
+      Client.fetchTransport({
+        base_url: "http://rika.test",
+        fetch: async () => new Response("<html>proxy conflict</html>", { status: 409 }),
+      }),
+    )
+
+    const error = await Effect.runPromise(client.listThreads().pipe(Effect.flip))
+
+    expect(error).toMatchObject({
+      message: "Rika API request failed with status 409",
+      operation: "requestJson",
+      status: 409,
+    })
   })
 
   test("turn submission preserves server API errors as SDK errors", async () => {

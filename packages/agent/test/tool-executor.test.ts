@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import { access, mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Config } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Fiber, Layer, Schema } from "effect"
+import { TestClock } from "effect/testing"
 import { Tool as AiTool } from "effect/unstable/ai"
 import { PermissionPolicy, ToolExecutor, ToolRegistry } from "../src/index"
 
@@ -293,4 +297,120 @@ describe("shell_command tool", () => {
       error: { kind: "tool", code: "shell_command", retryable: true, details: { timed_out: true } },
     })
   })
+
+  test("timeout uses Clock and kills the shell process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-shell-timeout-"))
+    const pidPath = join(root, "child.pid")
+    const markerPath = join(root, "late.marker")
+    let pid: number | undefined
+
+    try {
+      const command = bunEval([
+        `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid))`,
+        "await Bun.sleep(200)",
+        `await Bun.write(${JSON.stringify(markerPath)}, "late")`,
+      ])
+
+      const result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fiber = yield* ToolExecutor.execute(
+              call("shell_command", { command, timeout_ms: 1000, max_output_bytes: 1000 }),
+            ).pipe(Effect.forkScoped({ startImmediately: true }))
+            pid = Number(yield* Effect.promise(() => waitForText(pidPath)))
+            yield* TestClock.adjust("1 second")
+            return yield* Fiber.join(fiber)
+          }),
+        ).pipe(Effect.provide(layer), Effect.provide(TestClock.layer())),
+      )
+
+      await Bun.sleep(250)
+
+      expect(result).toMatchObject({
+        name: "shell_command",
+        status: "error",
+        error: { kind: "tool", code: "shell_command", retryable: true, details: { timed_out: true } },
+      })
+      expect(await pathExists(markerPath)).toBe(false)
+      expect(processAlive(pid)).toBe(false)
+    } finally {
+      killProcess(pid)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("interrupting shell execution kills the shell process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-shell-interrupt-"))
+    const pidPath = join(root, "child.pid")
+    const markerPath = join(root, "late.marker")
+    let pid: number | undefined
+
+    try {
+      const command = bunEval([
+        `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid))`,
+        "await Bun.sleep(200)",
+        `await Bun.write(${JSON.stringify(markerPath)}, "late")`,
+      ])
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fiber = yield* ToolExecutor.execute(call("shell_command", { command, timeout_ms: 5000 })).pipe(
+              Effect.forkScoped({ startImmediately: true }),
+            )
+            pid = Number(yield* Effect.promise(() => waitForText(pidPath)))
+            yield* Fiber.interrupt(fiber)
+          }),
+        ).pipe(Effect.provide(layer)),
+      )
+      await Bun.sleep(250)
+
+      expect(await pathExists(markerPath)).toBe(false)
+      expect(processAlive(pid)).toBe(false)
+    } finally {
+      killProcess(pid)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
+
+const bunEval = (lines: ReadonlyArray<string>) => `bun -e ${JSON.stringify(lines.join(";"))}`
+
+const waitForText = async (path: string) => {
+  const deadline = Date.now() + 1_000
+  let lastError: unknown
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, "utf8")
+    } catch (error) {
+      lastError = error
+      await Bun.sleep(10)
+    }
+  }
+  throw lastError
+}
+
+const pathExists = async (path: string) => {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const processAlive = (pid: number | undefined) => {
+  if (pid === undefined) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const killProcess = (pid: number | undefined) => {
+  if (pid === undefined) return
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch {}
+}

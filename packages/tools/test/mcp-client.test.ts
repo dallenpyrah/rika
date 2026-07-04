@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { PermissionPolicy, ToolExecutor, ToolRegistry } from "@rika/agent"
-import { Config } from "@rika/core"
+import { Config, SecretRedactor } from "@rika/core"
 import { Database, McpApprovalStore } from "@rika/persistence"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Deferred, Effect, Fiber, Layer } from "effect"
@@ -66,6 +66,16 @@ const layer = (
   connector: McpClient.Connector,
   approvals = McpApprovalStore.fakeLayer(),
 ) => McpClient.layerFromSources(sources, connector).pipe(Layer.provideMerge(configLayer), Layer.provideMerge(approvals))
+
+const expectLaunchIdentityFailure = (result: { readonly _tag: string }) => {
+  expect(result._tag).toBe("Failure")
+  if (result._tag !== "Failure") throw new Error("expected launch identity failure")
+  const failure = "failure" in result ? result.failure : undefined
+  expect(failure).toBeInstanceOf(McpClient.McpClientError)
+  if (!(failure instanceof McpClient.McpClientError)) throw new Error("expected McpClientError")
+  expect(failure.operation).toBe("validateLaunchIdentity")
+  expect(failure.details).toEqual({ fields: ["command", "args.0", "cwd"] })
+}
 
 describe("McpClient", () => {
   test("requires approval before workspace command servers execute", async () => {
@@ -209,6 +219,40 @@ describe("McpClient", () => {
     expect(calls).toEqual(["connect:deployer", "cwd:/repo/.agents/skills/a", "list:deployer", "close:deployer"])
   })
 
+  test("workspace command launch identity placeholders fail closed even with an existing approval", async () => {
+    const config = {
+      command: "${MCP_CMD}",
+      args: ["${MCP_ARG}"],
+      cwd: "${MCP_CWD}",
+      env: { API_TOKEN: "${MCP_VALUE}" },
+    }
+    const source = workspaceSource({ local: config })
+    const calls: Array<string> = []
+    const runtime = layer(
+      [],
+      fakeConnector({ local: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } }, calls),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* McpApprovalStore.approve({
+          workspace_root: "/repo",
+          server_name: "local",
+          fingerprint: McpClient.fingerprintServerConfig(config, "/repo"),
+        })
+        const approve = yield* Effect.result(McpClient.approveForSources("local", [source]))
+        const servers = yield* Effect.result(McpClient.serversForSources([source]))
+        const definitions = yield* Effect.result(McpClient.toolDefinitionsForSources([source]))
+        return { approve, servers, definitions }
+      }).pipe(Effect.provide(runtime)),
+    )
+
+    expectLaunchIdentityFailure(result.approve)
+    expectLaunchIdentityFailure(result.servers)
+    expectLaunchIdentityFailure(result.definitions)
+    expect(calls).toEqual([])
+  })
+
   test("filters tools before they reach the model context", async () => {
     const runtime = layer(
       [
@@ -285,6 +329,60 @@ describe("McpClient", () => {
     expect(result.status).toBe("error")
     expect(result.error?.kind).toBe("permission")
     expect(calls).toEqual(["connect:remote", "list:remote", "close:remote"])
+  })
+
+  test("resolves placeholders at connection time and registers non-suffix values for redaction", async () => {
+    const previousHost = process.env.REMOTE_HOST
+    const previousValue = process.env.REMOTE_VALUE
+    process.env.REMOTE_HOST = "remote.example"
+    process.env.REMOTE_VALUE = "remote-token-secret"
+    const seen: Array<McpClient.ServerConfig> = []
+    const calls: Array<string> = []
+    const runtime = Layer.mergeAll(
+      layer(
+        [
+          userSource({
+            remote: {
+              url: "https://${REMOTE_HOST}/mcp",
+              headers: { authorization: "Bearer ${REMOTE_VALUE}" },
+            },
+          }),
+        ],
+        (server) => {
+          seen.push(server.config)
+          return fakeConnector(
+            { remote: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } },
+            calls,
+          )(server)
+        },
+      ),
+      SecretRedactor.layer,
+    )
+
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const definitions = yield* McpClient.toolDefinitions()
+          const redacted = yield* SecretRedactor.redact("token remote-token-secret")
+          return { definitions, redacted }
+        }).pipe(Effect.provide(runtime)),
+      )
+
+      expect(result.definitions.map((definition) => definition.tool.name)).toEqual(["mcp.remote.echo"])
+      expect(seen).toEqual([
+        {
+          url: "https://remote.example/mcp",
+          headers: { authorization: "Bearer remote-token-secret" },
+        },
+      ])
+      expect(result.redacted).toBe("token [REDACTED:REMOTE_VALUE]")
+      expect(calls).toEqual(["connect:remote", "list:remote", "close:remote"])
+    } finally {
+      if (previousHost === undefined) delete process.env.REMOTE_HOST
+      else process.env.REMOTE_HOST = previousHost
+      if (previousValue === undefined) delete process.env.REMOTE_VALUE
+      else process.env.REMOTE_VALUE = previousValue
+    }
   })
 
   test("maps MCP tool success and errors through normal ToolExecutor results", async () => {

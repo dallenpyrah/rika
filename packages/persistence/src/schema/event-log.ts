@@ -194,7 +194,9 @@ export const orbs = sqliteTable(
     last_active_at: integer().notNull(),
   },
   (table) => [
-    uniqueIndex("orbs_thread_idx").on(table.thread_id),
+    uniqueIndex("orbs_thread_idx")
+      .on(table.thread_id)
+      .where(sql`${table.status} in ('provisioning', 'running', 'paused')`),
     index("orbs_project_idx").on(table.project_id),
     index("orbs_status_idx").on(table.status),
   ],

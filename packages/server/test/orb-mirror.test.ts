@@ -651,7 +651,6 @@ const makeRemoteControlLiveLayer = () => {
       runTurn: () => Effect.never,
       streamTurn: () => Stream.never,
       cancelTurn: () => Effect.never,
-      queueTurn: () => Effect.never,
     }),
   )
   const remoteLayer = RemoteControl.layerWithLive.pipe(
@@ -664,6 +663,7 @@ const makeRemoteControlLiveLayer = () => {
     Layer.provideMerge(IdeBridge.layer),
     Layer.provideMerge(liveLayer),
     Layer.provideMerge(presenceLayer),
+    Layer.provideMerge(Diagnostics.memoryLayer([])),
     Layer.provideMerge(remoteOrbManagerLayer()),
     Layer.provideMerge(remoteOrbMirrorLayer()),
   )

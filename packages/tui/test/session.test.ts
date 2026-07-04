@@ -30,9 +30,6 @@ const fakeAgentLayer = (turns: Array<AgentLoop.RunTurnInput>) =>
       cancelTurn: Effect.fn("Tui.Session.test.cancelTurn")(function* (input: AgentLoop.CancelTurnInput) {
         return turnFailed(input.thread_id, input.turn_id, 1)
       }),
-      queueTurn: Effect.fn("Tui.Session.test.queueTurn")(function* (input: AgentLoop.RunTurnInput) {
-        return { thread_id: input.thread_id, position: 1 }
-      }),
     }),
   )
 
