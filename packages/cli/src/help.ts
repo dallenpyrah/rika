@@ -996,6 +996,12 @@ Commands:
     show        Show project details
     set-env     Set a project environment variable
     set-secret  Set a project secret from stdin
+  orb           Manage local orbs
+    list        List local orbs
+    usage       Print orb running-minute usage
+    tournament  Run a judged tournament across provisioned orbs
+    kill        Kill an orb by thread
+    shell       Open an orb shell
   usage         Show your current Amp usage and credit balance
   update        [alias: up] Update Amp CLI
 

@@ -257,6 +257,17 @@ rika sync thread_123
 
 The command writes to `<workspace>/.rika/worktrees/<thread-id>` on branch `rika/orb/<thread-id>`, verifies the orb base commit exists locally, resets the worktree to that base, cleans stale untracked files, and applies the orb's binary diff. Empty orb diffs print `no changes yet`.
 
+## Orb tournament
+
+Run the same task in two to four fresh orbs, judge the resulting diffs, and optionally sync the winner:
+
+```bash
+rika orb tournament "implement the fix" -n 3 --project demo --modes smart,deep2,deep3 --rubric "prefer tested diffs"
+rika orb tournament "implement the fix" -n 2 --project demo --sync-winner --yes
+```
+
+The command requires an explicit `-n`/`--branches` value and asks for confirmation before provisioning sandboxes unless `--yes` is present. Failed turns and empty diffs are excluded from judging; if fewer than two candidates survive, the command reports each outcome, cleans up provisioned orbs, and exits non-zero. Winners receive an `Orb tournament verdict` artifact. Losing orbs are killed after their final diffs are stored unless `--keep-losers` is present.
+
 ## Orb usage
 
 Inspect orb running-minute visibility:

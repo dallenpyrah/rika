@@ -54,6 +54,7 @@ import * as Memory from "./memory"
 import * as Orb from "./orb"
 import * as OrbExecute from "./orb-execute"
 import * as OrbShell from "./orb-shell"
+import * as OrbTournament from "./orb-tournament"
 import * as Output from "./output"
 import * as Project from "./project"
 import * as Review from "./review"
@@ -215,6 +216,7 @@ type RuntimeError =
   | Orb.OrbError
   | OrbExecute.OrbExecuteError
   | OrbShell.OrbShellError
+  | OrbTournament.OrbTournamentError
   | OrbStore.OrbStoreError
   | PluginHost.RunError
   | Project.ProjectError
@@ -271,6 +273,7 @@ const formatRuntimeError = (error: RuntimeError) => {
   if (error instanceof Orb.OrbError) return Orb.formatError(error)
   if (error instanceof OrbExecute.OrbExecuteError) return OrbExecute.formatError(error)
   if (error instanceof OrbShell.OrbShellError) return `Rika failed: ${error.message}`
+  if (error instanceof OrbTournament.OrbTournamentError) return OrbTournament.formatError(error)
   if (error instanceof OrbManager.OrbProvisionError) return `Rika failed: ${error.message}`
   if (error instanceof OrbStore.OrbStoreError) return `Rika failed: ${error.message}`
   if (error instanceof Review.ReviewError) return Review.formatError(error)
@@ -1477,12 +1480,27 @@ export const orbLiveLayer = (
     Layer.provideMerge(activityLayer),
     Layer.provideMerge(OrbShell.systemLayer),
   )
+  const syncLayer = Sync.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(resolverLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const judgeLayer = JudgeService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(IdGenerator.layer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(llmLayer),
+  )
+  const tournamentLayer = OrbTournament.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(managerLayer),
+    Layer.provideMerge(judgeLayer),
+    Layer.provideMerge(syncLayer),
+  )
 
   return Orb.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(mirrorLayer),
     Layer.provideMerge(shellLayer),
+    Layer.provideMerge(tournamentLayer),
   )
 }
 
@@ -2021,6 +2039,7 @@ export type OrbLayerOutput =
   | OrbMirror.Service
   | OrbShell.Service
   | OrbShell.System
+  | OrbTournament.Service
   | OrbStore.Service
   | Output.Service
   | ProjectStore.Service

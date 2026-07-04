@@ -116,7 +116,7 @@ export const ConfigCommand = Schema.Struct({
   workspace: Schema.optional(Schema.Boolean),
 }).annotate({ identifier: "Rika.Cli.Args.ConfigCommand" })
 
-export const OrbAction = Schema.Literals(["list", "kill", "shell", "usage"]).annotate({
+export const OrbAction = Schema.Literals(["list", "kill", "shell", "usage", "tournament"]).annotate({
   identifier: "Rika.Cli.Args.OrbAction",
 })
 export type OrbAction = typeof OrbAction.Type
@@ -129,6 +129,13 @@ export const OrbCommand = Schema.Struct({
   force: Schema.optional(Schema.Boolean),
   project_name: Schema.optional(Schema.String),
   since: Schema.optional(Common.TimestampMillis),
+  task: Schema.optional(Schema.String),
+  branch_count: Schema.optional(Schema.Int),
+  modes: Schema.optional(Schema.Array(Config.Mode)),
+  rubric: Schema.optional(Schema.String),
+  sync_winner: Schema.optional(Schema.Boolean),
+  keep_losers: Schema.optional(Schema.Boolean),
+  yes: Schema.optional(Schema.Boolean),
 }).annotate({ identifier: "Rika.Cli.Args.OrbCommand" })
 
 export interface VersionCommand extends Schema.Schema.Type<typeof VersionCommand> {}
@@ -323,6 +330,7 @@ export const usage = [
   "  rika config edit [--workspace]",
   "  rika orb list",
   "  rika orb usage [--project <name>] [--since <iso-date>]",
+  "  rika orb tournament <task> -n <2..4> [--project <name>] [--modes smart,deep2,deep3] [--rubric <text>] [--sync-winner]",
   "  rika orb kill <thread-id> [--force]",
   "  rika orb shell <thread-id>",
   "  rika review [--staged] [--base <ref>] [--workspace <path>] [--ephemeral] [paths...]",
@@ -576,6 +584,17 @@ const orbUsageConfig = {
   since: Flag.string("since").pipe(Flag.optional, Flag.withDescription("ISO date lower bound")),
 }
 
+const orbTournamentConfig = {
+  task: Argument.string("task").pipe(Argument.withDescription("Task to run in each orb")),
+  branchCount: Flag.integer("branches").pipe(Flag.withAlias("n"), Flag.withDescription("Number of orb candidates")),
+  project: Flag.string("project").pipe(Flag.optional, Flag.withDescription("Project name")),
+  modes: Flag.string("modes").pipe(Flag.optional, Flag.withDescription("Comma-separated candidate modes")),
+  rubric: Flag.string("rubric").pipe(Flag.optional, Flag.withDescription("Additional judging rubric")),
+  syncWinner: Flag.boolean("sync-winner").pipe(Flag.withDescription("Sync the winning diff into a local worktree")),
+  keepLosers: Flag.boolean("keep-losers").pipe(Flag.withDescription("Pause losers instead of killing them")),
+  yes: Flag.boolean("yes").pipe(Flag.withDescription("Skip provisioning confirmation")),
+}
+
 const ideServerConfig = {
   server: Flag.string("server").pipe(Flag.optional, Flag.withDescription("Remote-control server URL")),
   token: Flag.string("token").pipe(Flag.optional, Flag.withDescription("Bearer token for the remote-control server")),
@@ -755,6 +774,17 @@ interface OrbShellInput {
 interface OrbUsageInput {
   readonly project: Option.Option<string>
   readonly since: Option.Option<string>
+}
+
+interface OrbTournamentInput {
+  readonly task: string
+  readonly branchCount: number
+  readonly project: Option.Option<string>
+  readonly modes: Option.Option<string>
+  readonly rubric: Option.Option<string>
+  readonly syncWinner: boolean
+  readonly keepLosers: boolean
+  readonly yes: boolean
 }
 
 interface IdeServerInput {
@@ -1092,12 +1122,21 @@ const makeOrbCommand = (parsedRef: Ref.Ref<Option.Option<Command>>, rejectedRef:
     return Ref.set(parsedRef, Option.some(parsed))
   }).pipe(CliCommand.withDescription("Print orb running-minute usage"), CliCommand.withShortDescription("Orb usage"))
 
+  const tournament = CliCommand.make("tournament", orbTournamentConfig, (input: OrbTournamentInput) => {
+    const parsed = toOrbTournamentCommand(input)
+    if (parsed instanceof ArgsError) return Ref.set(rejectedRef, Option.some(parsed))
+    return Ref.set(parsedRef, Option.some(parsed))
+  }).pipe(
+    CliCommand.withDescription("Run a judged tournament across provisioned orbs"),
+    CliCommand.withShortDescription("Run orb tournament"),
+  )
+
   return CliCommand.make("orb", {}, () =>
     Ref.set(rejectedRef, Option.some(new ArgsError({ message: "Expected an orb subcommand", exit_code: 2, usage }))),
   ).pipe(
     CliCommand.withDescription("Manage local orbs"),
     CliCommand.withShortDescription("Manage orbs"),
-    CliCommand.withSubcommands([list, kill, shell, usageCommand]),
+    CliCommand.withSubcommands([list, kill, shell, usageCommand, tournament]),
   )
 }
 
@@ -1765,6 +1804,25 @@ const toOrbUsageCommand = (input: OrbUsageInput): OrbCommand | ArgsError => {
     action: "usage",
     ...(projectName === undefined ? {} : { project_name: projectName }),
     ...(since === undefined ? {} : { since: Common.TimestampMillis.make(since) }),
+  }
+}
+
+const toOrbTournamentCommand = (input: OrbTournamentInput): OrbCommand | ArgsError => {
+  const modes = parseModeList(Option.getOrUndefined(input.modes))
+  if (modes instanceof ArgsError) return modes
+  const projectName = Option.getOrUndefined(input.project)
+  const rubric = Option.getOrUndefined(input.rubric)
+  return {
+    type: "orb",
+    action: "tournament",
+    task: input.task,
+    branch_count: input.branchCount,
+    ...(projectName === undefined ? {} : { project_name: projectName }),
+    ...(modes === undefined ? {} : { modes }),
+    ...(rubric === undefined ? {} : { rubric }),
+    sync_winner: input.syncWinner,
+    keep_losers: input.keepLosers,
+    yes: input.yes,
   }
 }
 

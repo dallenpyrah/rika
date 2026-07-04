@@ -7,6 +7,7 @@ import { OrbMirror } from "@rika/server"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
 import * as Args from "./args"
 import * as Input from "./input"
+import * as OrbTournament from "./orb-tournament"
 import * as OrbShell from "./orb-shell"
 import * as Output from "./output"
 
@@ -21,6 +22,7 @@ export type RunError =
   | Input.InputError
   | OrbError
   | OrbShell.RunError
+  | OrbTournament.RunError
   | OrbManager.OrbProvisionError
   | OrbMirror.RunError
   | OrbStore.OrbStoreError
@@ -44,6 +46,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
       const orbManager = yield* OrbManager.Service
       const orbMirror = yield* OrbMirror.Service
       const orbShell = yield* Effect.serviceOption(OrbShell.Service)
+      const orbTournament = yield* Effect.serviceOption(OrbTournament.Service)
       const idGenerator = yield* IdGenerator.Service
       const time = yield* Time.Service
 
@@ -129,6 +132,35 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
               yield* Effect.forEach(rows, (row) => output.stdout(formatUsageRow(row)), { discard: true })
               yield* output.stdout(`TOTAL\t\t${formatMinutes(totalMinutes)}\t${totalIntervals}`)
               return 0
+            }
+            case "tournament": {
+              const branchCount = command.branch_count
+              if (branchCount === undefined) {
+                return yield* new OrbError({ message: "Orb tournament requires --branches", exit_code: 2 })
+              }
+              if (command.yes !== true) {
+                yield* output.stderr(`about to provision ${branchCount} sandboxes`)
+                const tty = yield* input.isTty
+                if (!tty) {
+                  yield* output.stderr("aborted")
+                  return 1
+                }
+                yield* output.stderr("Continue? [y/N]")
+                const line = yield* Stream.runHead(input.lines).pipe(
+                  Effect.mapError((error) => new OrbError({ message: error.message, exit_code: 1 })),
+                )
+                const answer = Option.getOrElse(line, () => "")
+                  .trim()
+                  .toLowerCase()
+                if (answer !== "y" && answer !== "yes") {
+                  yield* output.stderr("aborted")
+                  return 1
+                }
+              }
+              if (Option.isNone(orbTournament)) {
+                return yield* new OrbError({ message: "Orb tournament service is unavailable", exit_code: 1 })
+              }
+              return yield* orbTournament.value.executeCommand(command)
             }
             case "kill": {
               const threadId = yield* requireThreadId(command)

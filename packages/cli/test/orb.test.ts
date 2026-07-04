@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test"
+import { JudgeService } from "@rika/agent"
 import { Config, IdGenerator, Time } from "@rika/core"
 import { OrbManager } from "@rika/orb"
 import { ArtifactStore, Database, Migration, OrbStore, ProjectStore } from "@rika/persistence"
 import { Client } from "@rika/sdk"
-import { Artifact, Common, Ids, Orb, Remote } from "@rika/schema"
+import { Artifact, Codec, Common, Event, Ids, Message, Orb, Remote } from "@rika/schema"
 import { OrbMirror } from "@rika/server"
-import { Effect, Layer, Option, Stream } from "effect"
-import { Input, Orb as CliOrb, OrbShell, Output } from "../src/index"
+import { Effect, Layer, Option, Schema, Stream } from "effect"
+import { Input, Orb as CliOrb, OrbShell, OrbTournament, Output, Sync } from "../src/index"
 
 const threadId = Ids.ThreadId.make("thread_cli_orb")
 const projectId = Ids.ProjectId.make("project_cli_orb")
@@ -74,6 +75,411 @@ describe("CLI orb commands", () => {
     ])
   })
 
+  test("tournament without yes aborts before provisioning in non-tty input", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+    const exitCode = await Effect.runPromise(
+      CliOrb.executeCommand({
+        type: "orb",
+        action: "tournament",
+        task: "ship it",
+        branch_count: 3,
+        sync_winner: false,
+        keep_losers: false,
+        yes: false,
+      }).pipe(Effect.provide(makeLayer({ output, calls, inputIsTty: false }))),
+    )
+
+    expect(exitCode).toBe(1)
+    expect(calls).toEqual([])
+    expect(output.stdout).toEqual([])
+    expect(output.stderr).toEqual(["about to provision 3 sandboxes", "aborted"])
+  })
+
+  test("tournament with yes judges orb diffs and cleans up losers", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+    const judgeInputs: Array<JudgeService.CompareInput> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ProjectStore.create({
+          name: "demo",
+          repo_origin: "https://github.com/example/rika.git",
+        })
+        const exitCode = yield* CliOrb.executeCommand({
+          type: "orb",
+          action: "tournament",
+          task: "ship it",
+          branch_count: 3,
+          project_name: "demo",
+          modes: ["smart", "deep2", "deep3"],
+          rubric: "prefer tested diffs",
+          sync_winner: true,
+          keep_losers: false,
+          yes: true,
+        })
+        const records = yield* OrbStore.list()
+        const winner = records.find((record) => record.status === "running")
+        const artifacts =
+          winner === undefined ? [] : yield* ArtifactStore.list({ thread_id: winner.thread_id, kind: "verdict" })
+        const finalDiffArtifacts = yield* Effect.forEach(records, (record) =>
+          ArtifactStore.list({ thread_id: record.thread_id, kind: "orb-final-diff" }),
+        )
+        return { exitCode, records, artifacts, finalDiffArtifacts: finalDiffArtifacts.flat() }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            calls,
+            judgeInputs,
+            tournamentDiffs: [
+              {
+                base_commit: "abc123",
+                head_commit: "aaa111",
+                diff: "diff --git a/a.txt b/a.txt\n+candidate one\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "bbb222",
+                diff: "diff --git a/b.txt b/b.txt\n+candidate two\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "ccc333",
+                diff: "diff --git a/c.txt b/c.txt\n+candidate three\n",
+                dirty: true,
+              },
+            ],
+            tournamentSummaries: ["summary one", "summary two", "summary three"],
+          }),
+        ),
+      ),
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(judgeInputs).toHaveLength(1)
+    expect(judgeInputs[0]).toMatchObject({
+      task: "ship it",
+      content_kind: "diff",
+      rubric: "prefer tested diffs",
+    })
+    expect(judgeInputs[0]?.candidates).toHaveLength(3)
+    expect(judgeInputs[0]?.candidates[1]?.content).toContain("diff --git a/b.txt b/b.txt")
+    expect(judgeInputs[0]?.candidates[1]?.content).toContain("## Candidate summary\nsummary two")
+    expect(calls.filter((call) => call.startsWith("provision:"))).toHaveLength(3)
+    expect(calls.filter((call) => call.startsWith("kill:"))).toHaveLength(2)
+    expect(calls.filter((call) => call.startsWith("sync:"))).toHaveLength(1)
+    expect(result.records.filter((record) => record.status === "killed")).toHaveLength(2)
+    expect(result.artifacts).toHaveLength(1)
+    expect(result.artifacts[0]?.metadata).toMatchObject({ winner_id: "orb-2", candidate_count: 3 })
+    expect(result.finalDiffArtifacts).toHaveLength(2)
+    expect(
+      result.finalDiffArtifacts
+        .map((artifact) => Schema.decodeUnknownSync(Remote.OrbChangesResponse)(artifact.content).diff)
+        .toSorted(),
+    ).toEqual(["diff --git a/a.txt b/a.txt\n+candidate one\n", "diff --git a/c.txt b/c.txt\n+candidate three\n"])
+    expect(output.stderr).toContain("[orb 2/3] turn running...")
+    expect(output.stdout[0]).toBe("Rank\tThread\tMode\tScore\tChanged Files\tStrengths")
+    expect(output.stdout.at(-1)).toContain(".rika/worktrees/")
+  })
+
+  test("tournament cleans up losers when winner sync exits non-zero", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ProjectStore.create({
+          name: "demo",
+          repo_origin: "https://github.com/example/rika.git",
+        })
+        const exitCode = yield* CliOrb.executeCommand({
+          type: "orb",
+          action: "tournament",
+          task: "ship it",
+          branch_count: 2,
+          project_name: "demo",
+          sync_winner: true,
+          keep_losers: false,
+          yes: true,
+        })
+        const records = yield* OrbStore.list()
+        const finalDiffArtifacts = yield* Effect.forEach(records, (record) =>
+          ArtifactStore.list({ thread_id: record.thread_id, kind: "orb-final-diff" }),
+        )
+        return { exitCode, records, finalDiffArtifacts: finalDiffArtifacts.flat() }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            calls,
+            syncExitCode: 7,
+            tournamentDiffs: [
+              {
+                base_commit: "abc123",
+                head_commit: "aaa111",
+                diff: "diff --git a/a.txt b/a.txt\n+candidate one\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "bbb222",
+                diff: "diff --git a/b.txt b/b.txt\n+candidate two\n",
+                dirty: true,
+              },
+            ],
+            tournamentSummaries: ["summary one", "summary two"],
+          }),
+        ),
+      ),
+    )
+
+    expect(result.exitCode).toBe(7)
+    expect(result.records.filter((record) => record.status === "killed")).toHaveLength(1)
+    expect(result.finalDiffArtifacts).toHaveLength(1)
+    expect(calls.filter((call) => call.startsWith("kill:"))).toHaveLength(1)
+    expect(calls.filter((call) => call.startsWith("sync:"))).toHaveLength(1)
+  })
+
+  test("tournament preserves the winner when sync fails through the error channel", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ProjectStore.create({
+          name: "demo",
+          repo_origin: "https://github.com/example/rika.git",
+        })
+        const exit = yield* Effect.result(
+          CliOrb.executeCommand({
+            type: "orb",
+            action: "tournament",
+            task: "ship it",
+            branch_count: 2,
+            project_name: "demo",
+            sync_winner: true,
+            keep_losers: false,
+            yes: true,
+          }),
+        )
+        const records = yield* OrbStore.list()
+        const finalDiffArtifacts = yield* Effect.forEach(records, (record) =>
+          ArtifactStore.list({ thread_id: record.thread_id, kind: "orb-final-diff" }),
+        )
+        return { exit, records, finalDiffArtifacts: finalDiffArtifacts.flat() }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            calls,
+            syncFails: true,
+            tournamentDiffs: [
+              {
+                base_commit: "abc123",
+                head_commit: "aaa111",
+                diff: "diff --git a/a.txt b/a.txt\n+candidate one\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "bbb222",
+                diff: "diff --git a/b.txt b/b.txt\n+candidate two\n",
+                dirty: true,
+              },
+            ],
+            tournamentSummaries: ["summary one", "summary two"],
+          }),
+        ),
+      ),
+    )
+
+    expect(result.exit._tag).toBe("Failure")
+    expect(result.records.filter((record) => record.status === "running")).toHaveLength(1)
+    expect(result.records.filter((record) => record.status === "killed")).toHaveLength(1)
+    expect(result.finalDiffArtifacts).toHaveLength(1)
+    expect(calls.filter((call) => call.startsWith("kill:"))).toHaveLength(1)
+    expect(calls.filter((call) => call.startsWith("sync:"))).toHaveLength(1)
+  })
+
+  test("tournament cleans up provisioned orbs when judging fails", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+
+    const result = await Effect.runPromiseExit(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ProjectStore.create({
+          name: "demo",
+          repo_origin: "https://github.com/example/rika.git",
+        })
+        yield* CliOrb.executeCommand({
+          type: "orb",
+          action: "tournament",
+          task: "ship it",
+          branch_count: 2,
+          project_name: "demo",
+          sync_winner: false,
+          keep_losers: false,
+          yes: true,
+        })
+        return yield* OrbStore.list()
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            calls,
+            judgeFails: true,
+            tournamentDiffs: [
+              {
+                base_commit: "abc123",
+                head_commit: "aaa111",
+                diff: "diff --git a/a.txt b/a.txt\n+candidate one\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "bbb222",
+                diff: "diff --git a/b.txt b/b.txt\n+candidate two\n",
+                dirty: true,
+              },
+            ],
+            tournamentSummaries: ["summary one", "summary two"],
+          }),
+        ),
+      ),
+    )
+
+    expect(result._tag).toBe("Failure")
+    expect(calls.filter((call) => call.startsWith("kill:"))).toHaveLength(2)
+    expect(calls.filter((call) => call === "artifact.put")).toHaveLength(2)
+    expect(calls.filter((call) => call.startsWith("sync:"))).toHaveLength(0)
+  })
+
+  test("tournament preserves the selected winner when loser cleanup fails", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ProjectStore.create({
+          name: "demo",
+          repo_origin: "https://github.com/example/rika.git",
+        })
+        const exit = yield* Effect.result(
+          CliOrb.executeCommand({
+            type: "orb",
+            action: "tournament",
+            task: "ship it",
+            branch_count: 2,
+            project_name: "demo",
+            sync_winner: false,
+            keep_losers: false,
+            yes: true,
+          }),
+        )
+        const records = yield* OrbStore.list()
+        return { exit, records }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            calls,
+            judgeWinnerIndex: 0,
+            killFailsOnCall: 1,
+            tournamentDiffs: [
+              {
+                base_commit: "abc123",
+                head_commit: "aaa111",
+                diff: "diff --git a/a.txt b/a.txt\n+candidate one\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "bbb222",
+                diff: "diff --git a/b.txt b/b.txt\n+candidate two\n",
+                dirty: true,
+              },
+            ],
+            tournamentSummaries: ["summary one", "summary two"],
+          }),
+        ),
+      ),
+    )
+
+    expect(result.exit._tag).toBe("Failure")
+    expect(result.records.filter((record) => record.status === "running")).toHaveLength(1)
+  })
+
+  test("tournament excludes failed candidates from judging", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+    const judgeInputs: Array<JudgeService.CompareInput> = []
+
+    const exitCode = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* ProjectStore.create({
+          name: "demo",
+          repo_origin: "https://github.com/example/rika.git",
+        })
+        return yield* CliOrb.executeCommand({
+          type: "orb",
+          action: "tournament",
+          task: "ship it",
+          branch_count: 3,
+          project_name: "demo",
+          sync_winner: false,
+          keep_losers: false,
+          yes: true,
+        })
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            output,
+            calls,
+            judgeInputs,
+            tournamentFailedOrdinals: new Set([2]),
+            tournamentDiffs: [
+              {
+                base_commit: "abc123",
+                head_commit: "aaa111",
+                diff: "diff --git a/a.txt b/a.txt\n+candidate one\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "bbb222",
+                diff: "diff --git a/b.txt b/b.txt\n+candidate two\n",
+                dirty: true,
+              },
+              {
+                base_commit: "abc123",
+                head_commit: "ccc333",
+                diff: "diff --git a/c.txt b/c.txt\n+candidate three\n",
+                dirty: true,
+              },
+            ],
+            tournamentSummaries: ["summary one", "summary two", "summary three"],
+          }),
+        ),
+      ),
+    )
+
+    expect(exitCode).toBe(0)
+    expect(judgeInputs[0]?.candidates).toHaveLength(2)
+    expect(judgeInputs[0]?.candidates.map((candidate) => candidate.content).join("\n")).not.toContain("candidate two")
+    expect(calls).not.toContain("changes:2")
+    expect(calls.filter((call) => call.startsWith("kill:"))).toHaveLength(2)
+  })
+
   test("kill with force flushes, stores a final diff artifact, then kills", async () => {
     const output: Output.MemoryOutput = { stdout: [], stderr: [] }
     const calls: Array<string> = []
@@ -94,7 +500,7 @@ describe("CLI orb commands", () => {
     )
 
     expect(result.exitCode).toBe(0)
-    expect(calls).toEqual(["flush", "changes", "artifact.put", "kill"])
+    expect(calls).toEqual(["flush", "changes", "artifact.put", `kill:${orbId}`])
     expect(result.stored?.status).toBe("killed")
     expect(output.stderr).toEqual([])
     expect(result.artifacts).toHaveLength(1)
@@ -153,7 +559,7 @@ describe("CLI orb commands", () => {
     )
 
     expect(result.exitCode).toBe(0)
-    expect(calls).toEqual(["flush", "kill"])
+    expect(calls).toEqual(["flush", `kill:${orbId}`])
     expect(result.stored?.status).toBe("killed")
     expect(result.artifacts).toEqual([])
     expect(output.stderr[0]).toContain("warning: skipped final orb diff")
@@ -244,7 +650,7 @@ describe("CLI orb commands", () => {
     if (result.exit._tag === "Failure") {
       expect(result.exit.failure).toBeInstanceOf(OrbManager.OrbProvisionError)
     }
-    expect(calls).toEqual(["flush", "changes", "artifact.put", "kill"])
+    expect(calls).toEqual(["flush", "changes", "artifact.put", `kill:${orbId}`])
     expect(result.stored?.status).toBe("running")
     expect(result.artifacts).toHaveLength(1)
   })
@@ -278,8 +684,22 @@ const makeLayer = (input: {
   readonly killFails?: boolean
   readonly shellThreads?: Array<Ids.ThreadId>
   readonly times?: ReadonlyArray<Common.TimestampMillis>
+  readonly inputIsTty?: boolean
+  readonly judgeInputs?: Array<JudgeService.CompareInput>
+  readonly tournamentDiffs?: ReadonlyArray<Remote.OrbChangesResponse>
+  readonly tournamentSummaries?: ReadonlyArray<string>
+  readonly tournamentFailedOrdinals?: ReadonlySet<number>
+  readonly syncExitCode?: number
+  readonly judgeFails?: boolean
+  readonly syncFails?: boolean
+  readonly judgeWinnerIndex?: number
+  readonly killFailsOnCall?: number
 }) => {
   const calls = input.calls ?? []
+  const tournamentState = {
+    threadByIndex: new Map<number, Ids.ThreadId>(),
+    modeByIndex: new Map<number, string>(),
+  }
   const configLayer = Config.layerFromValues({
     workspace_root: "/workspace/rika-cli-orb-test",
     data_dir: "/workspace/rika-cli-orb-test/.rika",
@@ -305,27 +725,47 @@ const makeLayer = (input: {
     projectLayer,
     OrbStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer), Layer.provideMerge(idLayer)),
   )
-  const clientFactory: CliOrb.ClientFactory = () =>
-    Client.make({
-      requestJson: () =>
-        Effect.sync(() => {
-          calls.push("changes")
-        }).pipe(
-          Effect.andThen(
-            input.changesFails === true
-              ? Effect.fail(
-                  new Client.SdkError({ message: "orb changes failed", operation: "requestJson", status: 500 }),
-                )
-              : Effect.succeed(finalDiff),
-          ),
-        ),
-      streamJson: () => Stream.empty,
-    })
+  const clientFactory: CliOrb.ClientFactory = (endpointUrl) =>
+    input.tournamentDiffs === undefined
+      ? Client.make({
+          requestJson: () =>
+            Effect.sync(() => {
+              calls.push("changes")
+            }).pipe(
+              Effect.andThen(
+                input.changesFails === true
+                  ? Effect.fail(
+                      new Client.SdkError({ message: "orb changes failed", operation: "requestJson", status: 500 }),
+                    )
+                  : Effect.succeed(finalDiff),
+              ),
+            ),
+          streamJson: () => Stream.empty,
+        })
+      : tournamentClient(
+          endpointUrl,
+          input.tournamentDiffs,
+          input.tournamentSummaries ?? [],
+          input.tournamentFailedOrdinals ?? new Set(),
+          calls,
+          tournamentState,
+        )
 
   const outputLayer = Output.memoryLayer(input.output)
-  const inputLayer = Input.memoryLayer(input.input ?? "", true)
-  const managerLayer = orbManagerLayer(calls, input.killFails === true).pipe(Layer.provideMerge(storageLayer))
+  const inputLayer = Input.memoryLayer(input.input ?? "", input.inputIsTty ?? true)
+  const managerLayer = orbManagerLayer(calls, input.killFails === true, input.killFailsOnCall).pipe(
+    Layer.provideMerge(storageLayer),
+  )
   const mirrorLayer = orbMirrorLayer(calls, input.flushFails === true)
+  const judgeLayer = fakeJudgeLayer(input.judgeInputs ?? [], input.judgeFails === true, input.judgeWinnerIndex)
+  const syncLayer = fakeSyncLayer(calls, input.output, input.syncExitCode ?? 0, input.syncFails === true)
+  const tournamentLayer = OrbTournament.layerWithClientFactory(clientFactory).pipe(
+    Layer.provideMerge(storageLayer),
+    Layer.provideMerge(outputLayer),
+    Layer.provideMerge(managerLayer),
+    Layer.provideMerge(judgeLayer),
+    Layer.provideMerge(syncLayer),
+  )
   const shellLayer = OrbShell.testLayer({
     shell: (id) =>
       Effect.sync(() => {
@@ -339,10 +779,222 @@ const makeLayer = (input: {
     Layer.provideMerge(inputLayer),
     Layer.provideMerge(managerLayer),
     Layer.provideMerge(mirrorLayer),
+    Layer.provideMerge(judgeLayer),
+    Layer.provideMerge(syncLayer),
+    Layer.provideMerge(tournamentLayer),
     Layer.provideMerge(shellLayer),
   )
-  return Layer.mergeAll(storageLayer, outputLayer, inputLayer, managerLayer, mirrorLayer, shellLayer, commandLayer)
+  return Layer.mergeAll(
+    storageLayer,
+    outputLayer,
+    inputLayer,
+    managerLayer,
+    mirrorLayer,
+    judgeLayer,
+    syncLayer,
+    tournamentLayer,
+    shellLayer,
+    commandLayer,
+  )
 }
+
+const ThreadCreateBody = Schema.Struct({
+  thread_id: Schema.optional(Ids.ThreadId),
+  project_id: Schema.optional(Ids.ProjectId),
+})
+
+const TurnStartBody = Schema.Struct({
+  thread_id: Ids.ThreadId,
+  mode: Schema.optional(Schema.String),
+})
+
+const tournamentClient = (
+  endpointUrl: string,
+  diffs: ReadonlyArray<Remote.OrbChangesResponse>,
+  summaries: ReadonlyArray<string>,
+  failedOrdinals: ReadonlySet<number>,
+  calls: Array<string>,
+  state: {
+    readonly threadByIndex: Map<number, Ids.ThreadId>
+    readonly modeByIndex: Map<number, string>
+  },
+): Client.Interface => {
+  const index = endpointIndex(endpointUrl)
+  return Client.make({
+    requestJson: (request) =>
+      Effect.sync(() => {
+        if (request.path === "/v1/threads") {
+          calls.push(`thread:${index}`)
+          const body = Schema.decodeUnknownSync(ThreadCreateBody)(request.body)
+          const candidateThreadId = body.thread_id ?? Ids.ThreadId.make(`thread_orb_tournament_${index}`)
+          state.threadByIndex.set(index, candidateThreadId)
+          return threadSummary(candidateThreadId, body.project_id ?? projectId)
+        }
+        if (request.path === "/v1/turns") {
+          const body = Schema.decodeUnknownSync(TurnStartBody)(request.body)
+          calls.push(`turn:${index}:${body.mode ?? "smart"}`)
+          state.threadByIndex.set(index, body.thread_id)
+          state.modeByIndex.set(index, body.mode ?? "smart")
+          return { thread_id: body.thread_id, accepted: true }
+        }
+        if (request.path === "/v1/orb/changes") {
+          calls.push(`changes:${index}`)
+          return diffs[index - 1] ?? diffs[0] ?? finalDiff
+        }
+        throw new Error(`unexpected request ${request.path}`)
+      }).pipe(Effect.mapError((cause) => new Client.SdkError({ message: String(cause), operation: "requestJson" }))),
+    streamJson: () => {
+      calls.push(`stream:${index}`)
+      const candidateThreadId = state.threadByIndex.get(index) ?? Ids.ThreadId.make(`thread_orb_tournament_${index}`)
+      const turnId = Ids.TurnId.make(`turn_orb_tournament_${index}`)
+      const terminal = failedOrdinals.has(index)
+        ? turnFailed(candidateThreadId, turnId, 3, "remote failed")
+        : turnCompleted(candidateThreadId, turnId, 3)
+      return Stream.fromIterable(
+        [
+          turnStarted(candidateThreadId, turnId, 1),
+          messageAdded(candidateThreadId, turnId, 2, summaries[index - 1] ?? ""),
+          terminal,
+        ].map((event) => Codec.encode(Event.Event)(event)),
+      )
+    },
+  })
+}
+
+const endpointIndex = (endpointUrl: string) => {
+  const match = /orb-(\d+)\.cli\.test/.exec(endpointUrl)
+  return match === null ? 1 : Number(match[1])
+}
+
+const threadSummary = (summaryThreadId: Ids.ThreadId, summaryProjectId: Ids.ProjectId): Remote.ThreadSummary => ({
+  thread_id: summaryThreadId,
+  workspace_id: Ids.WorkspaceId.make(`project:${summaryProjectId}`),
+  diff: { additions: 0, modifications: 0, deletions: 0 },
+  archived: false,
+  visibility: "private",
+  created_at: now,
+  updated_at: now,
+})
+
+const turnStarted = (eventThreadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnStarted => ({
+  id: Ids.EventId.make(`event_${eventThreadId}_${sequence}`),
+  thread_id: eventThreadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  type: "turn.started",
+  created_at: now,
+  data: {},
+})
+
+const messageAdded = (
+  eventThreadId: Ids.ThreadId,
+  turnId: Ids.TurnId,
+  sequence: number,
+  content: string,
+): Event.MessageAdded => ({
+  id: Ids.EventId.make(`event_${eventThreadId}_${sequence}`),
+  thread_id: eventThreadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  type: "message.added",
+  created_at: now,
+  data: {
+    message: Message.assistant({
+      id: Ids.MessageId.make(`message_${eventThreadId}_${sequence}`),
+      thread_id: eventThreadId,
+      turn_id: turnId,
+      content: [Message.text(content)],
+      created_at: now,
+    }),
+  },
+})
+
+const turnCompleted = (eventThreadId: Ids.ThreadId, turnId: Ids.TurnId, sequence: number): Event.TurnCompleted => ({
+  id: Ids.EventId.make(`event_${eventThreadId}_${sequence}`),
+  thread_id: eventThreadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  type: "turn.completed",
+  created_at: now,
+  data: {},
+})
+
+const turnFailed = (
+  eventThreadId: Ids.ThreadId,
+  turnId: Ids.TurnId,
+  sequence: number,
+  message: string,
+): Event.TurnFailed => ({
+  id: Ids.EventId.make(`event_${eventThreadId}_${sequence}`),
+  thread_id: eventThreadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  type: "turn.failed",
+  created_at: now,
+  data: { error: { kind: "unknown", message } },
+})
+
+const fakeJudgeLayer = (inputs: Array<JudgeService.CompareInput>, fails: boolean, winnerIndex?: number) =>
+  JudgeService.fakeLayer((input) =>
+    Effect.sync(() => {
+      inputs.push(input)
+    }).pipe(
+      Effect.andThen(
+        fails
+          ? Effect.fail(new JudgeService.JudgeError({ message: "judge unavailable", operation: "compare" }))
+          : Effect.sync(() => fakeVerdict(input, winnerIndex)),
+      ),
+    ),
+  )
+
+const fakeVerdict = (input: JudgeService.CompareInput, winnerIndex?: number): JudgeService.Verdict => {
+  const winner = input.candidates[winnerIndex ?? 1] ?? input.candidates[0]
+  if (winner === undefined) throw new Error("fake judge requires candidates")
+  return {
+    winner_id: winner.id,
+    ranking: input.candidates
+      .map((candidate) => ({
+        candidate_id: candidate.id,
+        median_score: candidate.id === winner.id ? 10 : 7,
+        first_place_votes: candidate.id === winner.id ? 1 : 0,
+      }))
+      .toSorted((left, right) => right.median_score - left.median_score),
+    judges: [
+      {
+        winner_id: winner.id,
+        rationale: "second candidate wins",
+        scores: input.candidates.map((candidate) => ({
+          candidate_id: candidate.id,
+          score: candidate.id === winner.id ? 10 : 7,
+          strengths: candidate.id === winner.id ? "best diff" : "reasonable diff",
+          weaknesses: "none",
+        })),
+      },
+    ],
+    rationale: "second candidate wins",
+  }
+}
+
+const fakeSyncLayer = (calls: Array<string>, output: Output.MemoryOutput, exitCode: number, fails: boolean) =>
+  Layer.succeed(
+    Sync.Service,
+    Sync.Service.of({
+      executeCommand: (command) =>
+        Effect.sync(() => {
+          calls.push(`sync:${command.thread_id}`)
+          output.stdout.push(`/workspace/rika-cli-orb-test/.rika/worktrees/${command.thread_id}`)
+          return exitCode
+        }).pipe(
+          Effect.andThen((code) =>
+            fails ? Effect.fail(new Sync.SyncError({ message: "sync failed", exit_code: 1 })) : Effect.succeed(code),
+          ),
+        ),
+    }),
+  )
 
 const artifactStoreLayer = (calls: Array<string>, putFails: boolean) => {
   const rows = new Map<Ids.ArtifactId, Artifact.Artifact>()
@@ -382,19 +1034,42 @@ const artifactStoreLayer = (calls: Array<string>, putFails: boolean) => {
 const orbManagerLayer = (
   calls: Array<string>,
   killFails: boolean,
+  killFailsOnCall: number | undefined,
 ): Layer.Layer<OrbManager.Service, never, OrbStore.Service> =>
   Layer.effect(
     OrbManager.Service,
-    Effect.map(OrbStore.Service, (orbs) =>
-      OrbManager.Service.of({
+    Effect.map(OrbStore.Service, (orbs) => {
+      let provisionCount = 0
+      let killCount = 0
+      return OrbManager.Service.of({
         provisionForThread: (input) =>
-          Effect.succeed(orbRecord({ thread_id: input.thread_id, project_id: input.project_id })),
+          Effect.gen(function* () {
+            provisionCount += 1
+            calls.push(`provision:${provisionCount}:${input.thread_id}`)
+            const created = yield* orbs
+              .create({
+                thread_id: input.thread_id,
+                project_id: input.project_id,
+                sandbox_id: `sandbox_cli_orb_${provisionCount}`,
+                base_commit: "abc123",
+                endpoint_url: `https://orb-${provisionCount}.cli.test`,
+                token: `orb-token-${provisionCount}`,
+              })
+              .pipe(Effect.mapError(toOrbProvisionError("provision", Ids.OrbId.make(`orb_${provisionCount}`))))
+            return yield* orbs
+              .setStatus(created.orb_id, "running")
+              .pipe(Effect.mapError(toOrbProvisionError("provision", created.orb_id)))
+          }),
         pause: (id) => orbs.setStatus(id, "paused").pipe(Effect.mapError(toOrbProvisionError("pause", id))),
         resume: (id) => orbs.setStatus(id, "running").pipe(Effect.mapError(toOrbProvisionError("resume", id))),
         kill: (id) =>
-          Effect.sync(() => calls.push("kill")).pipe(
-            Effect.andThen(
-              killFails
+          Effect.sync(() => {
+            killCount += 1
+            calls.push(`kill:${id}`)
+            return killCount
+          }).pipe(
+            Effect.andThen((currentKillCount) =>
+              killFails || killFailsOnCall === currentKillCount
                 ? Effect.fail(
                     new OrbManager.OrbProvisionError({
                       message: "sandbox provider denied kill",
@@ -405,8 +1080,8 @@ const orbManagerLayer = (
                 : orbs.setStatus(id, "killed").pipe(Effect.mapError(toOrbProvisionError("kill", id))),
             ),
           ),
-      }),
-    ),
+      })
+    }),
   )
 
 const orbMirrorLayer = (calls: Array<string>, flushFails: boolean) =>
@@ -472,19 +1147,6 @@ const timeSequenceLayer = (times: ReadonlyArray<Common.TimestampMillis>) => {
     }),
   )
 }
-
-const orbRecord = (override: Partial<Orb.OrbRecord> = {}): Orb.OrbRecord => ({
-  orb_id: orbId,
-  thread_id: threadId,
-  project_id: projectId,
-  sandbox_id: "sandbox_cli_orb",
-  status: "running",
-  base_commit: "abc123",
-  endpoint_url: "https://orb.cli.test",
-  created_at: now,
-  last_active_at: now,
-  ...override,
-})
 
 const toOrbProvisionError = (step: string, id: Ids.OrbId) => (error: unknown) =>
   new OrbManager.OrbProvisionError({

@@ -184,6 +184,49 @@ describe("CLI args", () => {
     })
   })
 
+  test("parses orb tournament commands with explicit branch count", async () => {
+    const command = await Effect.runPromise(
+      Args.parse([
+        "orb",
+        "tournament",
+        "ship it",
+        "-n",
+        "3",
+        "--project",
+        "demo",
+        "--modes",
+        "smart,deep2,deep3",
+        "--rubric",
+        "prefer tested diffs",
+        "--sync-winner",
+        "--yes",
+      ]),
+    )
+
+    expect(command).toEqual({
+      type: "orb",
+      action: "tournament",
+      task: "ship it",
+      branch_count: 3,
+      project_name: "demo",
+      modes: ["smart", "deep2", "deep3"],
+      rubric: "prefer tested diffs",
+      sync_winner: true,
+      keep_losers: false,
+      yes: true,
+    })
+  })
+
+  test("rejects orb tournament without explicit branch count", async () => {
+    const result = await Effect.runPromise(Effect.flip(Args.parse(["orb", "tournament", "ship it"])))
+
+    expect(result).toMatchObject({
+      _tag: "ArgsError",
+      exit_code: 2,
+    })
+    expect(result.message).toContain("Missing required flag: --branches")
+  })
+
   test("allows execute without a prompt so piped stdin can supply it", async () => {
     const command = await Effect.runPromise(Args.parse(["-x"]))
 
