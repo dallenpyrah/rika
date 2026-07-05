@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1 --port 4590",
     "build": "vite build",
     "lint": "bun --cwd ../.. oxlint apps/web/src apps/web/test",
-    "test": "bun test test",
+    "test": "bun test --preload ./test/setup.ts test",
     "typecheck": "bun tsc --noEmit"
   },
   "dependencies": {

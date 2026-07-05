@@ -19,7 +19,7 @@ import {
   type Model,
   type OrbTab,
 } from "../src/app"
-import { CompletedShowDialog, ShowDialog } from "../src/components/ui/dialog-state"
+import { CompletedShowDialog, ShowDialog } from "../src/components/ui/alert-dialog"
 import {
   CompletedScrollToBottom,
   GrewContent,

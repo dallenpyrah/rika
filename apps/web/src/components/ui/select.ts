@@ -141,7 +141,6 @@ export type RootConfig<Item extends string = string> = Readonly<{
     item: Item,
     context: Readonly<{ isActive: boolean; isDisabled: boolean; isSelected: boolean }>,
   ) => ListboxPrimitive.ItemConfig
-  itemToValue?: (item: Item) => Item
   trigger: Html
   class?: string
   triggerClass?: string

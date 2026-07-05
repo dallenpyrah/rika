@@ -67,7 +67,7 @@
       "name": "select",
       "path": "src/components/ui/select.ts",
       "source": "local-adapter+local-registry:ui/select.ts",
-      "sha256": "9e103e1609592d52a89f8c85ad2cf7ccdd1eb0d8add30ae30f5b08304bea9d89"
+      "sha256": "03e4634f7448eabe29d7f137ce2337ba5aea083d4a7eebf5138bd6ceab4ccc99"
     },
     {
       "name": "badge",
@@ -154,16 +154,10 @@
       "sha256": "ee533494fb1604f60febc582123e43009d0ddb0d3dc1fdb6ae749950dd629662"
     },
     {
-      "name": "dialog-state",
-      "path": "src/components/ui/dialog-state.ts",
-      "source": "local-adapter",
-      "sha256": "64a9251405742fb2f024666ec2fe0ae585806448fa9aa4aac1eccb150ae1c786"
-    },
-    {
       "name": "alert-dialog",
       "path": "src/components/ui/alert-dialog.ts",
-      "source": "local-registry:ui/alert-dialog.ts",
-      "sha256": "23a3feabcb5816c4c7b1c7747356b0b265e1f02068948c5a195e065c780b55a0"
+      "source": "local-adapter+local-registry:ui/alert-dialog.ts",
+      "sha256": "964553144b24608ec243d1526449e03fc0ac997caf66f737671ede3f1894028c"
     }
   ]
 }

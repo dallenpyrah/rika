@@ -58,7 +58,7 @@ import {
   subscriptions,
   update,
 } from "../src/app"
-import { CompletedCloseDialog, CompletedShowDialog } from "../src/components/ui/dialog-state"
+import { CompletedCloseDialog, CompletedShowDialog } from "../src/components/ui/alert-dialog"
 import type { AppCommand, AppMessage, Model } from "../src/app"
 import { orbTerminalRegistryLayer } from "../src/orb-terminal"
 import { pierreTreeRegistryLayer } from "../src/pierre-tree"

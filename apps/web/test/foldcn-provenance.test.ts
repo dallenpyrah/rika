@@ -50,7 +50,6 @@ describe("FoldCN provenance", () => {
       "chain-of-thought",
       "reasoning",
       "tool",
-      "dialog-state",
       "alert-dialog",
     ])
     for (const component of lock.components) {

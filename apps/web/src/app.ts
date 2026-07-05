@@ -7,7 +7,7 @@ import { m } from "foldkit/message"
 import * as Mount from "foldkit/mount"
 import * as Subscription from "foldkit/subscription"
 import { Duration, Effect, Option, Queue, Schedule, Schema as S, Stream } from "effect"
-import * as AlertDialog from "./components/ui/dialog-state"
+import * as AlertDialog from "./components/ui/alert-dialog"
 import * as MessageScroller from "./components/ui/message-scroller-state"
 import * as Tabs from "./components/ui/tabs-state"
 import {

@@ -19,6 +19,10 @@ export type OutMessage = DialogPrimitive.OutMessage
 export const update = DialogPrimitive.update
 export const open = DialogPrimitive.open
 export const close = DialogPrimitive.close
+export const CompletedShowDialog = DialogPrimitive.CompletedShowDialog
+export const CompletedCloseDialog = DialogPrimitive.CompletedCloseDialog
+export const ShowDialog = DialogPrimitive.ShowDialog
+export const CloseDialog = DialogPrimitive.CloseDialog
 
 export const view = DialogPrimitive.view
 export const titleId = DialogPrimitive.titleId
