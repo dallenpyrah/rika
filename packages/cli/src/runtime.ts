@@ -521,7 +521,6 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(configLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
-  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -538,6 +537,11 @@ const interactiveLiveLayerFromTui = (
     IdGenerator.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
+  const pluginLayer = PluginHost.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(PluginUi.silentLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const embeddingsLayer = Embeddings.layer(
     Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
   )
@@ -1214,7 +1218,11 @@ export const threadsLiveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(timeLayer),
   )
-  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const pluginLayer = PluginHost.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(PluginUi.silentLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -1601,7 +1609,11 @@ export const reviewLiveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(timeLayer),
   )
-  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
+  const pluginLayer = PluginHost.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(PluginUi.silentLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const specialtyToolLayer = SpecialtyTools.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(llmLayer),
@@ -1750,7 +1762,6 @@ export const serverLiveLayer = (
     Layer.provideMerge(configLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
-  const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -1772,6 +1783,11 @@ export const serverLiveLayer = (
   const migratedStorageLayer = Layer.effectDiscard(
     Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
   ).pipe(Layer.provideMerge(storageLayer))
+  const pluginLayer = PluginHost.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(PluginUi.silentLayer),
+    Layer.provideMerge(migratedStorageLayer),
+  )
   const embeddingsLayer = Embeddings.layer(
     Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
   )

@@ -69,7 +69,9 @@ export type Decider = (call: Tool.Call) => Effect.Effect<Decision, PermissionPol
 
 export const allow: Decision = { action: "allow" }
 
-export const defaultConfig: PermissionConfig = { mode: "allow-all" }
+export const defaultGuardedFiles = [".rika/plugins/**", "*/.rika/plugins/**"] as const
+
+export const defaultConfig: PermissionConfig = { mode: "allow-all", guarded_files: [...defaultGuardedFiles] }
 
 export const reject = (message: string, details?: Common.JsonValue): Decision => ({
   action: "reject-and-continue",
@@ -110,13 +112,14 @@ export const rejectLayer = (message: string, details?: Common.JsonValue) =>
 
 export const configFromEnv = (env: Record<string, string | undefined>): PermissionConfig => {
   const guardedTools = csv(env.RIKA_GUARDED_TOOLS ?? env.RIKA_PERMISSION_GUARDED_TOOLS)
-  const guardedFiles = csv(env.RIKA_GUARDED_FILES ?? env.RIKA_PERMISSION_GUARDED_FILES)
+  const configuredGuardedFiles = csv(env.RIKA_GUARDED_FILES ?? env.RIKA_PERMISSION_GUARDED_FILES)
+  const guardedFiles = unique([...defaultGuardedFiles, ...configuredGuardedFiles])
   const requestedMode = EnvConfig.optionalSync(
     EnvConfig.providerFromEnv(env),
     EffectConfig.literals(["allow-all", "plugin", "configured"], "RIKA_PERMISSION_MODE"),
   )
-  const hasGuards = guardedTools.length > 0 || guardedFiles.length > 0
-  const mode = requestedMode ?? (hasGuards ? "configured" : "allow-all")
+  const hasConfiguredGuards = guardedTools.length > 0 || configuredGuardedFiles.length > 0
+  const mode = requestedMode ?? (hasConfiguredGuards ? "configured" : "allow-all")
 
   return compactConfig({
     mode,
@@ -136,6 +139,16 @@ export const decideFromConfig = (
   call: Tool.Call,
 ): Effect.Effect<Decision, PermissionPolicyError> =>
   Effect.sync(() => {
+    const fileMatch = firstGuardedFileMatch(config.guarded_files ?? [], call.input)
+    if (fileMatch !== undefined) {
+      return reject(`File ${fileMatch.path} is guarded by permission policy`, {
+        permission_mode: config.mode,
+        matched: "file",
+        path: fileMatch.path,
+        pattern: fileMatch.pattern,
+      })
+    }
+
     if (config.mode !== "configured") return allow
 
     const toolPattern = firstMatchingToolPattern(config.guarded_tools ?? [], call.name)
@@ -145,16 +158,6 @@ export const decideFromConfig = (
         matched: "tool",
         tool: call.name,
         pattern: toolPattern,
-      })
-    }
-
-    const fileMatch = firstGuardedFileMatch(config.guarded_files ?? [], call.input)
-    if (fileMatch !== undefined) {
-      return reject(`File ${fileMatch.path} is guarded by permission policy`, {
-        permission_mode: "configured",
-        matched: "file",
-        path: fileMatch.path,
-        pattern: fileMatch.pattern,
       })
     }
 
@@ -194,6 +197,8 @@ const csv = (value: string | undefined): ReadonlyArray<string> =>
         .split(",")
         .map((item) => item.trim())
         .filter((item) => item.length > 0)
+
+const unique = (values: ReadonlyArray<string>): ReadonlyArray<string> => [...new Set(values)]
 
 const firstMatchingPattern = (patterns: ReadonlyArray<string>, value: string): string | undefined =>
   patterns.find((pattern) => matchesPattern(pattern, value))

@@ -14,6 +14,12 @@ export const ListInput = Schema.Struct({
   limit: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Persistence.ArtifactStore.ListInput" })
 
+export interface ListAllInput extends Schema.Schema.Type<typeof ListAllInput> {}
+export const ListAllInput = Schema.Struct({
+  kind: Schema.optional(Artifact.Kind),
+  limit: Schema.optional(Schema.Int),
+}).annotate({ identifier: "Rika.Persistence.ArtifactStore.ListAllInput" })
+
 export class ArtifactStoreError extends Schema.TaggedErrorClass<ArtifactStoreError>()("ArtifactStoreError", {
   message: Schema.String,
   operation: Schema.String,
@@ -27,6 +33,9 @@ export interface Interface {
   ) => Effect.Effect<Option.Option<Artifact.Artifact>, Database.DatabaseError | ArtifactStoreError>
   readonly list: (
     input: ListInput,
+  ) => Effect.Effect<ReadonlyArray<Artifact.Artifact>, Database.DatabaseError | ArtifactStoreError>
+  readonly listAll: (
+    input?: ListAllInput,
   ) => Effect.Effect<ReadonlyArray<Artifact.Artifact>, Database.DatabaseError | ArtifactStoreError>
 }
 
@@ -64,6 +73,14 @@ export const layer = Layer.effect(
           }),
         )
       }),
+      listAll: Effect.fn("ArtifactStore.listAll")(function* (input: ListAllInput = {}) {
+        return yield* databaseService.withDatabaseEffect((database) =>
+          Effect.try({
+            try: () => listAllRows(database, input),
+            catch: (cause) => toError(cause, "listAll"),
+          }),
+        )
+      }),
     })
   }),
 )
@@ -86,7 +103,13 @@ export const fakeLayer = (initial: ReadonlyArray<Artifact.Artifact> = []) => {
         return [...rows.values()]
           .filter((artifact) => artifact.thread_id === input.thread_id)
           .filter((artifact) => input.kind === undefined || artifact.kind === input.kind)
-          .toSorted((left, right) => right.created_at - left.created_at)
+          .toSorted(compareNewest)
+          .slice(0, input.limit ?? 100)
+      }),
+      listAll: Effect.fn("ArtifactStore.listAll.fake")(function* (input: ListAllInput = {}) {
+        return [...rows.values()]
+          .filter((artifact) => input.kind === undefined || artifact.kind === input.kind)
+          .toSorted(compareNewest)
           .slice(0, input.limit ?? 100)
       }),
     }),
@@ -106,6 +129,11 @@ export const get = Effect.fn("ArtifactStore.get.call")(function* (artifactId: Id
 export const list = Effect.fn("ArtifactStore.list.call")(function* (input: ListInput) {
   const store = yield* Service
   return yield* store.list(input)
+})
+
+export const listAll = Effect.fn("ArtifactStore.listAll.call")(function* (input: ListAllInput = {}) {
+  const store = yield* Service
+  return yield* store.listAll(input)
 })
 
 type ArtifactDatabase = Pick<Database.DrizzleDatabase, "get" | "insert" | "all">
@@ -128,16 +156,33 @@ const listRows = (database: ArtifactDatabase, input: ListInput) => {
   const rows =
     input.kind === undefined
       ? database.all<ArtifactRow>(
-          sql`select * from artifacts where thread_id = ${input.thread_id} order by created_at desc limit ${limit}`,
+          sql`select * from artifacts where thread_id = ${input.thread_id} order by created_at desc, id desc limit ${limit}`,
         )
       : database.all<ArtifactRow>(
-          sql`select * from artifacts where thread_id = ${input.thread_id} and kind = ${input.kind} order by created_at desc limit ${limit}`,
+          sql`select * from artifacts where thread_id = ${input.thread_id} and kind = ${input.kind} order by created_at desc, id desc limit ${limit}`,
         )
   return rows.flatMap((row) => {
     const artifact = rowToArtifact(row)
     return artifact === undefined ? [] : [artifact]
   })
 }
+
+const listAllRows = (database: ArtifactDatabase, input: ListAllInput) => {
+  const limit = input.limit ?? 100
+  const rows =
+    input.kind === undefined
+      ? database.all<ArtifactRow>(sql`select * from artifacts order by created_at desc, id desc limit ${limit}`)
+      : database.all<ArtifactRow>(
+          sql`select * from artifacts where kind = ${input.kind} order by created_at desc, id desc limit ${limit}`,
+        )
+  return rows.flatMap((row) => {
+    const artifact = rowToArtifact(row)
+    return artifact === undefined ? [] : [artifact]
+  })
+}
+
+const compareNewest = (left: Artifact.Artifact, right: Artifact.Artifact) =>
+  right.created_at - left.created_at || right.id.localeCompare(left.id)
 
 const artifactToRow = (artifact: Artifact.Artifact) => ({
   id: artifact.id,

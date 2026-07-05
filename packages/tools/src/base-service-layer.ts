@@ -180,10 +180,11 @@ const serviceLayersFromStorage = <StorageLayer extends SharedStorageLayer>(
     embeddingsLayer,
     llmLayer,
     permissionConfig,
-    pluginLayer,
+    pluginLayer: unprovidedPluginLayer,
     skillLayer,
     timeLayer,
   } = components
+  const pluginLayer = unprovidedPluginLayer.pipe(Layer.provideMerge(migratedStorageLayer))
   const storageAndThreadLayer = ThreadService.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(diagnosticsLayer),
@@ -249,6 +250,7 @@ const serviceLayersFromStorage = <StorageLayer extends SharedStorageLayer>(
   return {
     commonBaseLayer,
     memoryIndexerLayer,
+    pluginLayer,
     storageAndThreadLayer,
     threadMemoryLayer,
   }
@@ -272,7 +274,7 @@ export const fromEnv = (options: Options) => {
     embeddingsLayer: components.embeddingsLayer,
     llmLayer: components.llmLayer,
     migratedStorageLayer,
-    pluginLayer: components.pluginLayer,
+    pluginLayer: services.pluginLayer,
     redactorLayer: components.redactorLayer,
     settingsLayer: components.settingsLayer,
     storageAndThreadLayer: services.storageAndThreadLayer,
@@ -304,7 +306,7 @@ export const fromEnvWithOrbStoreAndMemoryIndexer = (options: Options) => {
     embeddingsLayer: components.embeddingsLayer,
     llmLayer: components.llmLayer,
     migratedStorageLayer: repairedStorageLayer,
-    pluginLayer: components.pluginLayer,
+    pluginLayer: services.pluginLayer,
     redactorLayer: components.redactorLayer,
     settingsLayer: components.settingsLayer,
     storageAndThreadLayer: services.storageAndThreadLayer,

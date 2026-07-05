@@ -4,6 +4,7 @@ import { Context, Effect, Layer, Option, Schema } from "effect"
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { join, relative, sep } from "node:path"
 import { Config, IdGenerator, Time } from "@rika/core"
+import { createHash } from "node:crypto"
 
 export const ExtensionKind = Schema.Literals(["skill", "plugin"]).annotate({
   identifier: "Rika.Plugin.SelfExtension.ExtensionKind",
@@ -45,6 +46,7 @@ export const TrustDecision = Schema.Struct({
   model: Schema.Literal("explicit-local"),
   enabled: Schema.Boolean,
   reason: Schema.String,
+  content_hash: Schema.optional(Schema.String),
   verification: VerificationResult,
 }).annotate({ identifier: "Rika.Plugin.SelfExtension.TrustDecision" })
 
@@ -200,6 +202,8 @@ export const fakeVerifier = (result: VerificationResult): VerificationRunner => 
   run: (command) => Effect.succeed(withCommand(result, command)),
 })
 
+export const contentHash = (content: string) => `sha256:${createHash("sha256").update(content).digest("hex")}`
+
 const makeService = (dependencies: Dependencies): Interface =>
   Service.of({
     createSkill: Effect.fn("SelfExtension.createSkill")(function* (input: CreateSkillInput) {
@@ -249,6 +253,7 @@ const makeService = (dependencies: Dependencies): Interface =>
           enabled: false,
           reason:
             "Generated executable plugins are written disabled until a verification command passes and the user enables them.",
+          content_hash: contentHash(content),
           verification: { status: "skipped" },
         },
       })
@@ -281,6 +286,7 @@ const makeService = (dependencies: Dependencies): Interface =>
           reason: passed
             ? "User explicitly enabled the plugin after verification passed."
             : "Plugin remained disabled because verification did not pass.",
+          content_hash: contentHash(before),
           verification,
         },
       })
@@ -319,6 +325,7 @@ const disableOrRollback = (
           model: "explicit-local",
           enabled: false,
           reason: input.reason ?? "User disabled the local plugin.",
+          content_hash: contentHash(active.value),
           verification: { status: "skipped" },
         },
       })
@@ -342,6 +349,7 @@ const disableOrRollback = (
           model: "explicit-local",
           enabled: false,
           reason: input.reason ?? "Plugin was already disabled.",
+          content_hash: contentHash(disabled.value),
           verification: { status: "skipped" },
         },
       })
@@ -485,6 +493,7 @@ const trustDecisionToJson = (trust: TrustDecision): Common.JsonValue => ({
   model: trust.model,
   enabled: trust.enabled,
   reason: trust.reason,
+  ...(trust.content_hash === undefined ? {} : { content_hash: trust.content_hash }),
   verification: verificationToJson(trust.verification),
 })
 

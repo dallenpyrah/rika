@@ -1027,6 +1027,13 @@ const artifactStoreLayer = (calls: Array<string>, putFails: boolean) => {
             .toSorted((left, right) => right.created_at - left.created_at)
             .slice(0, input.limit ?? 100),
         ),
+      listAll: (input = {}) =>
+        Effect.succeed(
+          [...rows.values()]
+            .filter((artifact) => input.kind === undefined || artifact.kind === input.kind)
+            .toSorted((left, right) => right.created_at - left.created_at)
+            .slice(0, input.limit ?? 100),
+        ),
     }),
   )
 }

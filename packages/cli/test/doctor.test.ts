@@ -58,7 +58,7 @@ describe("CLI doctor command", () => {
       permission: {
         mode: "configured",
         guarded_tools_configured: true,
-        guarded_files_configured: false,
+        guarded_files_configured: true,
       },
       rivet: {
         host: "remote",
