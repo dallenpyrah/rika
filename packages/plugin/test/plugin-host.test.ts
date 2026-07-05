@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { PermissionPolicy, ToolExecutor, ToolRegistry } from "@rika/agent"
+import { Diagnostics, SecretRedactor } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
 import { PluginHost, PluginUi } from "../src/index"
@@ -28,6 +29,11 @@ const call = (name: string, input: Common.JsonValue): Tool.Call => ({
 
 const hostLayer = (sources: ReadonlyArray<PluginHost.PluginSource>, ui = memoryUi()) =>
   PluginHost.layerFromSources(sources).pipe(Layer.provide(PluginUi.memoryLayer(ui)))
+
+const diagnosticsLayer = () => {
+  const redactorLayer = SecretRedactor.layer
+  return Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+}
 
 describe("PluginHost", () => {
   test("loads plugins and reports load errors without hiding valid plugins", async () => {
@@ -174,6 +180,7 @@ describe("PluginHost", () => {
         }),
       ),
       Layer.provideMerge(PluginHost.permissionPolicyLayerFromConfig()),
+      Layer.provideMerge(diagnosticsLayer()),
     )
 
     const result = await Effect.runPromise(
@@ -205,7 +212,9 @@ describe("PluginHost", () => {
         }))
       }),
     ])
-    const baseExecutorLayer = ToolExecutor.fakeLayer({ fake_tool: () => Effect.succeed({ original: true }) })
+    const baseExecutorLayer = ToolExecutor.fakeLayer({ fake_tool: () => Effect.succeed({ original: true }) }).pipe(
+      Layer.provideMerge(diagnosticsLayer()),
+    )
     const executorLayer = PluginHost.toolResultExecutorLayer.pipe(
       Layer.provideMerge(baseExecutorLayer),
       Layer.provideMerge(layer),

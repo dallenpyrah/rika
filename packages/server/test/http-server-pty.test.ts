@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Diagnostics, Time } from "@rika/core"
+import { Diagnostics, SecretRedactor, Time } from "@rika/core"
 import { OrbChanges, OrbPty } from "@rika/orb"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
 import { HttpServer, PresenceHub, RemoteControl } from "../src/index"
@@ -376,17 +376,21 @@ describe("orb PTY WebSocket", () => {
   }, 20_000)
 })
 
-const makeLayer = (pty: Layer.Layer<OrbPty.Service, never, Diagnostics.Service>) =>
-  HttpServer.layerWithOrbChanges(
+const makeLayer = (pty: Layer.Layer<OrbPty.Service, never, Diagnostics.Service>) => {
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+  const ptyLayer = pty.pipe(Layer.provideMerge(diagnosticsLayer))
+  return HttpServer.layerWithOrbChanges(
     OrbChanges.testLayer({
       changes: () => Effect.succeed({ base_commit: "abc123", head_commit: "abc123", diff: "", dirty: false }),
     }),
   ).pipe(
-    Layer.provideMerge(pty),
+    Layer.provideMerge(ptyLayer),
     Layer.provideMerge(remoteLayer),
     Layer.provideMerge(PresenceHub.layer.pipe(Layer.provideMerge(Time.layer))),
-    Layer.provideMerge(Diagnostics.memoryLayer([])),
+    Layer.provideMerge(diagnosticsLayer),
   )
+}
 
 const remoteLayer = Layer.succeed(
   RemoteControl.Service,
@@ -536,7 +540,11 @@ const runTmux = async (tmuxDir: string, args: ReadonlyArray<string>) => {
 
 const fakeSocketData = (pty: OrbPty.Interface) => ({
   pty,
-  diagnostics: Diagnostics.Service.of({ emit: () => Effect.void }),
+  diagnostics: Diagnostics.Service.of({
+    emit: () => Effect.void,
+    redactEntry: (entry) => entry,
+    redactFields: (fields) => fields,
+  }),
   workspace_root: "/workspace/rika",
   cols: 80,
   rows: 24,

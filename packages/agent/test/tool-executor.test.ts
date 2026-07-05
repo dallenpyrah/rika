@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { access, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Config } from "@rika/core"
+import { Config, Diagnostics, SecretRedactor } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
@@ -23,7 +23,16 @@ const readOnlyCall = (name: string, input: Common.JsonValue = {}): Tool.Call => 
 const fakeToolLayer = (
   handlers: Readonly<Record<string, ToolRegistry.FakeHandler>>,
   policy: Layer.Layer<PermissionPolicy.Service> = PermissionPolicy.allowLayer,
-) => ToolExecutor.layer.pipe(Layer.provideMerge(ToolRegistry.fakeLayer(handlers)), Layer.provideMerge(policy))
+  diagnostics: Array<Diagnostics.Entry> = [],
+) => {
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer(diagnostics).pipe(Layer.provideMerge(redactorLayer))
+  return ToolExecutor.layer.pipe(
+    Layer.provideMerge(ToolRegistry.fakeLayer(handlers)),
+    Layer.provideMerge(policy),
+    Layer.provideMerge(diagnosticsLayer),
+  )
+}
 
 describe("ToolExecutor", () => {
   test("runs allowed tools through the registry", async () => {
@@ -38,6 +47,37 @@ describe("ToolExecutor", () => {
       status: "success",
       output: { echoed: { text: "hello" } },
       metadata: { permission_mode: "allow-all", permission_action: "allow" },
+    })
+  })
+
+  test("emits a tool execution wide event through Diagnostics", async () => {
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const result = await Effect.runPromise(
+      ToolExecutor.execute(call("fake_echo", { text: "hello" })).pipe(
+        Effect.provide(
+          fakeToolLayer(
+            { fake_echo: (toolCall) => Effect.succeed({ echoed: toolCall.input }) },
+            PermissionPolicy.allowLayer,
+            diagnostics,
+          ),
+        ),
+      ),
+    )
+
+    expect(result.status).toBe("success")
+    expect(diagnostics).toHaveLength(1)
+    expect(diagnostics[0]).toMatchObject({
+      level: "info",
+      message: "tool.exec success",
+      data: {
+        op: "tool.exec",
+        outcome: "success",
+        tool_name: "fake_echo",
+        tool_call_id: "tool_call_fake_echo",
+        permission_mode: "allow-all",
+        permission_action: "allow",
+        status: "success",
+      },
     })
   })
 
@@ -258,7 +298,9 @@ describe("shell_command tool", () => {
     data_dir: `${process.cwd()}/.rika-test`,
     default_mode: "smart",
   })
-  const layer = ToolExecutor.shellLayer.pipe(Layer.provideMerge(configLayer))
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+  const layer = ToolExecutor.shellLayer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(diagnosticsLayer))
 
   test("returns capped stdout for successful commands", async () => {
     const result = await Effect.runPromise(

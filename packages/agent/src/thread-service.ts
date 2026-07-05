@@ -173,6 +173,7 @@ interface Dependencies {
   readonly projectStore?: ProjectStore.Interface
   readonly idGenerator: IdGenerator.Interface
   readonly time: Time.Interface
+  readonly diagnostics: Diagnostics.Interface
 }
 
 export const layer = Layer.effect(
@@ -185,6 +186,7 @@ export const layer = Layer.effect(
     const projectStore = Option.getOrUndefined(yield* Effect.serviceOption(ProjectStore.Service))
     const idGenerator = yield* IdGenerator.Service
     const time = yield* Time.Service
+    const diagnostics = yield* Diagnostics.Service
     const dependencies: Dependencies = {
       config,
       database,
@@ -193,11 +195,13 @@ export const layer = Layer.effect(
       ...(projectStore === undefined ? {} : { projectStore }),
       idGenerator,
       time,
+      diagnostics,
     }
 
     return Service.of({
       create: Effect.fn("ThreadService.create")(function* (input: CreateInput) {
         return yield* threadEvent(
+          dependencies.diagnostics,
           "thread.create",
           input.thread_id === undefined ? {} : { thread_id: input.thread_id },
           (fields) => createThread(dependencies, input, fields),
@@ -213,22 +217,29 @@ export const layer = Layer.effect(
         return yield* previewThread(dependencies, input)
       }),
       fork: Effect.fn("ThreadService.fork")(function* (input: ForkInput) {
-        return yield* threadEvent("thread.fork", { thread_id: input.thread_id }, (fields) =>
+        return yield* threadEvent(dependencies.diagnostics, "thread.fork", { thread_id: input.thread_id }, (fields) =>
           forkThread(dependencies, input, fields),
         )
       }),
       archive: Effect.fn("ThreadService.archive")(function* (input: ThreadIdInput) {
-        return yield* threadEvent("thread.archive", { thread_id: input.thread_id }, (fields) =>
-          setArchived(dependencies, input.thread_id, true, fields),
+        return yield* threadEvent(
+          dependencies.diagnostics,
+          "thread.archive",
+          { thread_id: input.thread_id },
+          (fields) => setArchived(dependencies, input.thread_id, true, fields),
         )
       }),
       unarchive: Effect.fn("ThreadService.unarchive")(function* (input: ThreadIdInput) {
-        return yield* threadEvent("thread.unarchive", { thread_id: input.thread_id }, (fields) =>
-          setArchived(dependencies, input.thread_id, false, fields),
+        return yield* threadEvent(
+          dependencies.diagnostics,
+          "thread.unarchive",
+          { thread_id: input.thread_id },
+          (fields) => setArchived(dependencies, input.thread_id, false, fields),
         )
       }),
       setVisibility: Effect.fn("ThreadService.setVisibility")(function* (input: SetVisibilityInput) {
         return yield* threadEvent(
+          dependencies.diagnostics,
           "thread.visibility",
           { thread_id: input.thread_id, visibility: input.visibility },
           (fields) => setVisibilityInternal(dependencies, input, fields),
@@ -343,17 +354,12 @@ export const reference = Effect.fn("ThreadService.reference.call")(function* (in
   return yield* service.reference(input)
 })
 
-const noopDiagnostics: Diagnostics.Interface = { emit: () => Effect.void }
-
 const threadEvent = <A, E>(
+  diagnostics: Diagnostics.Interface,
   op: string,
   seed: Diagnostics.Fields,
   run: (fields: Diagnostics.Fields) => Effect.Effect<A, E>,
-) =>
-  Effect.gen(function* () {
-    const diagnostics = Option.getOrElse(yield* Effect.serviceOption(Diagnostics.Service), () => noopDiagnostics)
-    return yield* Diagnostics.event(op, run, seed).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
-  })
+) => Diagnostics.event(op, run, seed).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
 
 const createThread = (dependencies: Dependencies, input: CreateInput, fields: Diagnostics.Fields) =>
   Effect.gen(function* () {

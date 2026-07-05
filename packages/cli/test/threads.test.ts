@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { ThreadService, TournamentService } from "@rika/agent"
-import { Config, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { Embeddings } from "@rika/llm"
 import { Database, Migration, OrbStore, ThreadEventLog, ThreadMemoryStore, ThreadProjection } from "@rika/persistence"
 import { Client } from "@rika/sdk"
@@ -28,22 +28,28 @@ const makeLayer = (
   embeddingsLayer: Layer.Layer<Embeddings.Service> = vectorEmbeddingsLayer([1, 0]),
 ) => {
   const databaseLayer = Database.memoryLayer
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
   const baseServices = Layer.mergeAll(
     configLayer,
     Output.memoryLayer(output),
     databaseLayer,
     Migration.layer,
-    ThreadEventLog.layer,
+    redactorLayer,
+    ThreadEventLog.layer.pipe(Layer.provideMerge(redactorLayer)),
     ThreadMemoryStore.layer.pipe(Layer.provideMerge(databaseLayer)),
     ThreadProjection.layer,
     Time.fixedLayer(now),
     IdGenerator.sequenceLayer(1),
+    diagnosticsLayer,
   )
   const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseServices))
   const services = Layer.mergeAll(baseServices, orbStoreLayer)
 
   return Threads.layer
-    .pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
+    .pipe(
+      Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services), Layer.provideMerge(diagnosticsLayer))),
+    )
     .pipe(
       Layer.provideMerge(Input.memoryLayer(stdin, false)),
       Layer.provideMerge(tournamentLayer),

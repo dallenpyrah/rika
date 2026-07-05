@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { PermissionPolicy, ToolExecutor, ToolRegistry } from "@rika/agent"
-import { Config, SecretRedactor } from "@rika/core"
+import { Config, Diagnostics, SecretRedactor } from "@rika/core"
 import { Database, McpApprovalStore } from "@rika/persistence"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Deferred, Effect, Fiber, Layer } from "effect"
@@ -11,6 +11,11 @@ const configLayer = Config.layerFromValues({
   data_dir: "/repo/.rika",
   default_mode: "smart",
 })
+
+const diagnosticsLayer = () => {
+  const redactorLayer = SecretRedactor.layer
+  return Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+}
 
 const workspaceSource = (servers: Readonly<Record<string, McpClient.ServerConfig>>): McpClient.SettingsSource => ({
   source: "workspace",
@@ -319,7 +324,7 @@ describe("McpClient", () => {
       Effect.gen(function* () {
         const definitions = yield* McpClient.toolDefinitions()
         return yield* ToolExecutor.execute(toolCall("mcp.remote.echo", { text: "hello" })).pipe(
-          Effect.provide(ToolExecutor.layer),
+          Effect.provide(ToolExecutor.layer.pipe(Layer.provideMerge(diagnosticsLayer()))),
           Effect.provide(ToolRegistry.layerFromDefinitions(definitions)),
           Effect.provide(PermissionPolicy.rejectLayer("blocked by policy")),
         )
@@ -416,6 +421,7 @@ describe("McpClient", () => {
         const executorLayer = ToolExecutor.layer.pipe(
           Layer.provideMerge(ToolRegistry.layerFromDefinitions(definitions)),
           Layer.provideMerge(PermissionPolicy.allowLayer),
+          Layer.provideMerge(diagnosticsLayer()),
         )
         const success = yield* ToolExecutor.execute(toolCall("mcp.remote.ok", { text: "hello" })).pipe(
           Effect.provide(executorLayer),

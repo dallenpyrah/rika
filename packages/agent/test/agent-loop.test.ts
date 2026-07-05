@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { Provider, Router, Tokens } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
@@ -68,7 +68,14 @@ const makeLayer = (
   activeConfigLayer = configLayer,
   skillToolProviderLayer = SkillToolProvider.emptyLayer,
 ) => {
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(activeConfigLayer), Layer.provideMerge(providerLayer))
+  const redactorLayer = SecretRedactor.layer
+  const configuredDiagnosticsLayer = diagnosticsLayer.pipe(Layer.provideMerge(redactorLayer))
+  const configuredToolLayer = toolLayer.pipe(Layer.provideMerge(configuredDiagnosticsLayer))
+  const llmLayer = Router.layer.pipe(
+    Layer.provideMerge(activeConfigLayer),
+    Layer.provideMerge(providerLayer),
+    Layer.provideMerge(configuredDiagnosticsLayer),
+  )
   const services = Layer.mergeAll(
     activeConfigLayer,
     Database.memoryLayer,
@@ -77,7 +84,8 @@ const makeLayer = (
     ThreadProjection.layer,
     Time.fixedLayer(Common.TimestampMillis.make(1_900_000_000_000)),
     IdGenerator.sequenceLayer(1),
-    diagnosticsLayer,
+    redactorLayer,
+    configuredDiagnosticsLayer,
     ContextResolver.fakeLayer({
       entries: [
         {
@@ -94,11 +102,16 @@ const makeLayer = (
     }),
     skillLayer,
     skillToolProviderLayer,
-    toolLayer,
+    configuredToolLayer,
     llmLayer,
   )
 
-  return Layer.mergeAll(AgentLoop.layer, ThreadService.layer).pipe(Layer.provideMerge(services))
+  const threadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(services),
+    Layer.provideMerge(configuredDiagnosticsLayer),
+  )
+
+  return AgentLoop.layer.pipe(Layer.provideMerge(threadLayer), Layer.provideMerge(services))
 }
 
 describe("AgentLoop", () => {

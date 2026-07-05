@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { AgentLoop, ReviewService, SkillRegistry, ThreadService, TournamentService } from "@rika/agent"
-import { Config, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer, Stream } from "effect"
@@ -42,6 +42,8 @@ const makeLayer = (
   keys: ReadonlyArray<Keys.Key>,
   turns: Array<AgentLoop.RunTurnInput> = [],
 ) => {
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
   const services = Layer.mergeAll(
     configLayer,
     Database.memoryLayer,
@@ -50,6 +52,8 @@ const makeLayer = (
     ThreadProjection.layer,
     Time.fixedLayer(Common.TimestampMillis.make(1_970_000_000_000)),
     IdGenerator.sequenceLayer(1),
+    redactorLayer,
+    diagnosticsLayer,
     Adapter.memoryLayer({ rendered, keys }),
     Ticker.memoryLayer,
     ReviewService.fakeLayer(() => Effect.succeed(fakeReviewResult)),
@@ -57,7 +61,8 @@ const makeLayer = (
     SkillRegistry.fakeLayer([deploySkill]),
     fakeAgentLayer(turns),
   )
-  return Session.layer.pipe(Layer.provideMerge(ThreadService.layer.pipe(Layer.provideMerge(services))))
+  const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(services), Layer.provideMerge(diagnosticsLayer))
+  return Session.layer.pipe(Layer.provideMerge(threadLayer))
 }
 
 const line = (text: string): ReadonlyArray<Keys.Key> => [...Keys.fromString(text), Keys.enter]

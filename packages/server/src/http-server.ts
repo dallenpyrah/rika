@@ -123,7 +123,15 @@ const emptyOrbPtySocketData: OrbPtySocketData = {
         }),
       ),
   }),
-  diagnostics: Diagnostics.Service.of({ emit: () => Effect.void }),
+  diagnostics: Diagnostics.Service.of({
+    emit: () => Effect.die(new Error("PTY socket diagnostics were not initialized")),
+    redactEntry: () => {
+      throw new Error("PTY socket diagnostics were not initialized")
+    },
+    redactFields: () => {
+      throw new Error("PTY socket diagnostics were not initialized")
+    },
+  }),
   workspace_root: "",
   cols: 80,
   rows: 24,

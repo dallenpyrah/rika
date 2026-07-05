@@ -11,7 +11,7 @@ import {
   ToolExecutor,
   WorkspaceAccess,
 } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Provider, Router } from "@rika/llm"
 import { OrbManager } from "@rika/orb"
@@ -410,6 +410,8 @@ const makeLayer = (
   })
   const databaseLayer = Database.memoryLayer
   const idLayer = IdGenerator.sequenceLayer(1)
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
@@ -430,24 +432,33 @@ const makeLayer = (
     workspaceStoreLayer,
     projectStoreLayer,
     Migration.layer,
-    ThreadEventLog.layer,
+    redactorLayer,
+    ThreadEventLog.layer.pipe(Layer.provideMerge(redactorLayer)),
     ThreadProjection.layer,
     timeLayer,
     idLayer,
     orbStoreLayer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const threadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const llmLayer = Router.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(providerRegistryLayer))
+  const llmLayer = Router.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(providerRegistryLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
     threadLayer,
     workspaceAccessLayer,
     ContextResolver.fakeLayer({ entries: [], rendered: "", total_chars: 0 }),
     SkillRegistry.emptyLayer,
-    ToolExecutor.fakeLayer({}),
-    Diagnostics.memoryLayer([]),
+    ToolExecutor.fakeLayer({}).pipe(Layer.provideMerge(diagnosticsLayer)),
+    redactorLayer,
+    diagnosticsLayer,
     llmLayer,
     IdeBridge.layer,
     unusedCompactionLayer(),
@@ -461,7 +472,11 @@ const makeLayer = (
     Layer.provideMerge(agentBase),
     Layer.provideMerge(presenceLayer),
   )
-  const httpLayer = HttpServer.layer.pipe(Layer.provideMerge(remoteLayer), Layer.provideMerge(presenceLayer))
+  const httpLayer = HttpServer.layer.pipe(
+    Layer.provideMerge(remoteLayer),
+    Layer.provideMerge(presenceLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   return Layer.mergeAll(agentBase, agentLayer, remoteLayer, httpLayer)
 }
 

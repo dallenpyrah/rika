@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { Effect, Redacted } from "effect"
-import { Config, Diagnostics, IdGenerator, Runtime, TestHarness, Time } from "../src/index"
+import { Config, Diagnostics, IdGenerator, Runtime, SecretRedactor, TestHarness, Time } from "../src/index"
 
 const config = {
   workspace_root: "/workspace",
@@ -73,6 +73,7 @@ describe("core runtime services", () => {
       await Effect.runPromise(
         Diagnostics.emit({ level: "info", message: "configured-log", data: { thread_id: "thread_test" } }).pipe(
           Effect.provide(Diagnostics.layer),
+          Effect.provide(SecretRedactor.layer),
           Effect.provide(Config.layerFromValues(config, { RIKA_LOG_FILE: path })),
         ),
       )

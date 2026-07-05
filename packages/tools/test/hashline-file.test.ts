@@ -3,9 +3,9 @@ import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { ToolExecutor } from "@rika/agent"
-import { Config } from "@rika/core"
+import { Config, Diagnostics, SecretRedactor } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import { HashlineFile } from "../src/index"
 
 const tempWorkspace = () => mkdtemp(join(tmpdir(), "rika-hashline-"))
@@ -17,12 +17,20 @@ const configLayer = (workspaceRoot: string) =>
     default_mode: "smart",
   })
 
+const diagnosticsLayer = () => {
+  const redactorLayer = SecretRedactor.layer
+  return Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+}
+
 const run = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, HashlineFile.Service>) =>
   Effect.runPromise(effect.pipe(Effect.provide(HashlineFile.layer), Effect.provide(configLayer(workspaceRoot))))
 
 const runTool = <A, E>(workspaceRoot: string, effect: Effect.Effect<A, E, ToolExecutor.Service>) =>
   Effect.runPromise(
-    effect.pipe(Effect.provide(HashlineFile.toolExecutorLayer), Effect.provide(configLayer(workspaceRoot))),
+    effect.pipe(
+      Effect.provide(HashlineFile.toolExecutorLayer.pipe(Layer.provideMerge(diagnosticsLayer()))),
+      Effect.provide(configLayer(workspaceRoot)),
+    ),
   )
 
 const call = (name: string, input: Common.JsonValue): Tool.Call => ({

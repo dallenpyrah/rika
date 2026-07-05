@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PermissionPolicy, ToolExecutor } from "@rika/agent"
-import { Config } from "@rika/core"
+import { Config, Diagnostics, SecretRedactor } from "@rika/core"
 import { Common, Ids, Tool } from "@rika/schema"
 import { Effect, Layer } from "effect"
 import { SemanticSearch } from "../src/index"
@@ -19,6 +19,11 @@ const configLayer = (workspaceRoot: string, env: Record<string, string | undefin
     },
     env,
   )
+
+const diagnosticsLayer = () => {
+  const redactorLayer = SecretRedactor.layer
+  return Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+}
 
 const fakeHits: ReadonlyArray<SemanticSearch.Hit> = [
   {
@@ -138,6 +143,7 @@ describe("SemanticSearch", () => {
     const executorLayer = ToolExecutor.layer.pipe(
       Layer.provideMerge(registryLayer),
       Layer.provideMerge(PermissionPolicy.allowLayer),
+      Layer.provideMerge(diagnosticsLayer()),
     )
 
     const descriptors = await Effect.runPromise(ToolExecutor.describe().pipe(Effect.provide(executorLayer)))

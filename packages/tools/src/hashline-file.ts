@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { dirname, relative, resolve } from "node:path"
 import { PermissionPolicy, ToolExecutor, ToolRegistry } from "@rika/agent"
-import { Config } from "@rika/core"
+import { Config, Diagnostics } from "@rika/core"
 import { Common } from "@rika/schema"
 import type { Call } from "@rika/schema/tool"
 import { parseDiffFromFile, type FileContents } from "@pierre/diffs"
@@ -249,10 +249,8 @@ export const registryLayer: Layer.Layer<ToolRegistry.Service, never, Config.Serv
   }),
 ).pipe(Layer.provideMerge(layer))
 
-export const toolExecutorLayer: Layer.Layer<ToolExecutor.Service, never, Config.Service> = ToolExecutor.layer.pipe(
-  Layer.provideMerge(registryLayer),
-  Layer.provideMerge(PermissionPolicy.allowLayer),
-)
+export const toolExecutorLayer: Layer.Layer<ToolExecutor.Service, never, Config.Service | Diagnostics.Service> =
+  ToolExecutor.layer.pipe(Layer.provideMerge(registryLayer), Layer.provideMerge(PermissionPolicy.allowLayer))
 
 interface Anchor {
   readonly line: number

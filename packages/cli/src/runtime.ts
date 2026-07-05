@@ -419,7 +419,10 @@ export const liveLayer = (
     Layer.provideMerge(IdGenerator.layer),
   )
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
@@ -450,7 +453,10 @@ export const liveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const threadMemoryLayer = ThreadMemory.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(storageAndThreadLayer),
@@ -467,6 +473,7 @@ export const liveLayer = (
     Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -479,6 +486,7 @@ export const liveLayer = (
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
     Layer.provideMerge(configLayer),
@@ -611,7 +619,10 @@ const interactiveLiveLayerFromTui = (
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const memoryStoreLayer = ThreadMemoryStore.layer.pipe(Layer.provideMerge(databaseLayer))
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
@@ -637,7 +648,10 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const threadMemoryLayer = ThreadMemory.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(storageAndThreadLayer),
@@ -654,6 +668,7 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -666,6 +681,7 @@ const interactiveLiveLayerFromTui = (
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
     Layer.provideMerge(configLayer),
@@ -735,7 +751,7 @@ const interactiveRemoteLiveLayerFromTui = (
   const timeLayer = Time.layer
   const redactorLayer = secretRedactorLayer(env)
   const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(redactorLayer))
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
@@ -766,7 +782,10 @@ const interactiveRemoteLiveLayerFromTui = (
   const migratedStorageLayer = Layer.effectDiscard(
     Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
   ).pipe(Layer.provideMerge(storageLayer))
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const activityLayer = OrbActivity.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
@@ -840,7 +859,7 @@ const interactiveRemoteLiveLayerFromTui = (
     Layer.provideMerge(managerLayer),
   )
 
-  return remoteSessionLayer
+  return remoteSessionLayer.pipe(Layer.provideMerge(telemetryLayer))
 }
 
 const localTournamentTurnControlLayer = Layer.effect(
@@ -1176,6 +1195,7 @@ export const skillsLiveLayer = (
 ): Layer.Layer<SkillsLayerOutput, LiveLayerError> => {
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
   const timeLayer = Time.layer
   const installerLayer = SkillInstaller.liveLayer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(timeLayer))
 
@@ -1185,6 +1205,7 @@ export const skillsLiveLayer = (
     Layer.provideMerge(installerLayer),
     Layer.provideMerge(configLayer),
     Layer.provideMerge(timeLayer),
+    Layer.provideMerge(telemetryLayer),
   )
 }
 
@@ -1198,7 +1219,7 @@ export const memoryLiveLayer = (
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const redactorLayer = secretRedactorLayer(env)
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(redactorLayer))
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
   const memoryStoreLayer = ThreadMemoryStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const storageLayer = Layer.mergeAll(
     configLayer,
@@ -1220,9 +1241,14 @@ export const memoryLiveLayer = (
   const indexerLayer = ThreadMemoryIndexer.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(embeddingsLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
 
-  return Memory.layer.pipe(Layer.provideMerge(migratedStorageLayer), Layer.provideMerge(indexerLayer))
+  return Memory.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(indexerLayer),
+    Layer.provideMerge(telemetryLayer),
+  )
 }
 
 export const threadsLiveLayer = (
@@ -1237,6 +1263,7 @@ export const threadsLiveLayer = (
   const timeLayer = Time.layer
   const redactorLayer = secretRedactorLayer(env)
   const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -1264,13 +1291,17 @@ export const threadsLiveLayer = (
   const migratedStorageLayer = Layer.effectDiscard(
     Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
   ).pipe(Layer.provideMerge(storageLayer))
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(redactorLayer))
-  const telemetryLayer = Layer.empty
   const permissionConfig = PermissionPolicy.configFromEnv(env)
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const embeddingsLayer = Embeddings.layer(
     Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
   )
@@ -1296,6 +1327,7 @@ export const threadsLiveLayer = (
     Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1308,6 +1340,7 @@ export const threadsLiveLayer = (
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
     Layer.provideMerge(configLayer),
@@ -1451,7 +1484,7 @@ export const threadsLiveLayer = (
   const commandLayer =
     command.action === "tournament" ? baseCommandLayer.pipe(Layer.provideMerge(tournamentLayer)) : baseCommandLayer
 
-  return commandLayer
+  return commandLayer.pipe(Layer.provideMerge(telemetryLayer))
 }
 
 export const orbLiveLayer = (
@@ -1465,6 +1498,7 @@ export const orbLiveLayer = (
   const timeLayer = Time.layer
   const redactorLayer = secretRedactorLayer(env)
   const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
@@ -1499,7 +1533,6 @@ export const orbLiveLayer = (
     Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
   ).pipe(Layer.provideMerge(storageLayer))
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
-  const diagnosticsLayer = Diagnostics.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(redactorLayer))
   const activityLayer = OrbActivity.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(migratedStorageLayer),
@@ -1532,7 +1565,10 @@ export const orbLiveLayer = (
     Layer.provideMerge(OrbShell.systemLayer),
   )
   const syncLayer = Sync.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(resolverLayer))
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const judgeLayer = JudgeService.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(IdGenerator.layer),
@@ -1552,6 +1588,7 @@ export const orbLiveLayer = (
     Layer.provideMerge(mirrorLayer),
     Layer.provideMerge(shellLayer),
     Layer.provideMerge(tournamentLayer),
+    Layer.provideMerge(telemetryLayer),
   )
 }
 
@@ -1562,6 +1599,7 @@ export const projectLiveLayer = (
 ): Layer.Layer<ProjectLayerOutput, LiveLayerError> => {
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const projectStoreLayer = ProjectStore.layer.pipe(
@@ -1583,7 +1621,7 @@ export const projectLiveLayer = (
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const commandLayer = Project.layer.pipe(Layer.provideMerge(migratedStorageLayer))
 
-  return commandLayer
+  return commandLayer.pipe(Layer.provideMerge(telemetryLayer))
 }
 
 export const mcpLiveLayer = (
@@ -1593,6 +1631,7 @@ export const mcpLiveLayer = (
 ): Layer.Layer<McpLayerOutput, LiveLayerError> => {
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
@@ -1613,7 +1652,7 @@ export const mcpLiveLayer = (
     Layer.provideMerge(skillLayer),
   )
 
-  return commandLayer
+  return commandLayer.pipe(Layer.provideMerge(telemetryLayer))
 }
 
 export const reviewLiveLayer = (
@@ -1623,6 +1662,9 @@ export const reviewLiveLayer = (
 ): Layer.Layer<ReviewLayerOutput, LiveLayerError> => {
   const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const redactorLayer = secretRedactorLayer(env)
+  const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
   const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -1633,20 +1675,28 @@ export const reviewLiveLayer = (
     Output.layer,
     databaseLayer,
     Migration.layer,
+    redactorLayer,
+    settingsLayer,
     timeLayer,
     IdGenerator.layer,
     artifactLayer,
     mcpApprovalLayer,
     memoryStoreLayer,
-    ThreadEventLog.layer,
+    ThreadEventLog.layer.pipe(Layer.provideMerge(redactorLayer)),
     ThreadProjection.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const embeddingsLayer = Embeddings.layer(
     Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
   )
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const threadMemoryLayer = ThreadMemory.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(storageAndThreadLayer),
@@ -1666,6 +1716,7 @@ export const reviewLiveLayer = (
     Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1677,7 +1728,11 @@ export const reviewLiveLayer = (
     Layer.provideMerge(CheckRegistry.layer.pipe(Layer.provideMerge(configLayer))),
     Layer.provideMerge(subagentLayer),
   )
-  const commandLayer = Review.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(reviewServiceLayer))
+  const commandLayer = Review.layer.pipe(
+    Layer.provideMerge(Output.layer),
+    Layer.provideMerge(reviewServiceLayer),
+    Layer.provideMerge(telemetryLayer),
+  )
 
   return commandLayer
 }
@@ -1689,6 +1744,7 @@ export const extensionsLiveLayer = (
 ): Layer.Layer<ExtensionsLayerOutput, LiveLayerError> => {
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
@@ -1703,22 +1759,35 @@ export const extensionsLiveLayer = (
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const selfExtensionLayer = SelfExtension.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const commandLayer = Extensions.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(selfExtensionLayer))
+  const commandLayer = Extensions.layer.pipe(
+    Layer.provideMerge(Output.layer),
+    Layer.provideMerge(selfExtensionLayer),
+    Layer.provideMerge(telemetryLayer),
+  )
 
   return commandLayer
 }
 
 export const ideLiveLayer = (
   _command: Args.IdeCommand,
-  _env: Record<string, string | undefined>,
-  _cwd: string,
-): Layer.Layer<IdeLayerOutput, LiveLayerError> => Ide.layer.pipe(Layer.provideMerge(Output.layer))
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<IdeLayerOutput, LiveLayerError> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
+  return Ide.layer.pipe(Layer.provideMerge(Output.layer), Layer.provideMerge(telemetryLayer))
+}
 
 export const configLiveLayer = (
   env: Record<string, string | undefined>,
   cwd: string,
-): Layer.Layer<CliConfig.Service, CliConfig.ConfigCommandError, Output.Service> =>
-  CliConfig.layerFromInput({ env, cwd })
+): Layer.Layer<CliConfig.Service, CliConfig.ConfigCommandError, Output.Service> => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
+  return CliConfig.layerFromInput({ env, cwd }).pipe(Layer.provideMerge(telemetryLayer))
+}
 
 export const doctorLiveLayer = (
   env: Record<string, string | undefined>,
@@ -1726,6 +1795,7 @@ export const doctorLiveLayer = (
 ): Layer.Layer<DoctorLayerOutput, LiveLayerError> => {
   const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const { telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer)
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const baseStorageLayer = Layer.mergeAll(configLayer, databaseLayer, Migration.layer, Time.layer, IdGenerator.layer)
   const orbStoreLayer = OrbStore.layer.pipe(Layer.provideMerge(baseStorageLayer))
@@ -1743,6 +1813,7 @@ export const doctorLiveLayer = (
     Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(BackendEndpoint.healthLayer),
     Layer.provideMerge(settingsLayer),
+    Layer.provideMerge(telemetryLayer),
   )
 }
 
@@ -1777,7 +1848,10 @@ export const serverLiveLayer = (
     Layer.provideMerge(IdGenerator.layer),
   )
   const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
-  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
+  const llmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const pluginLayer = PluginHost.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(PluginUi.silentLayer))
   const permissionConfig = PermissionPolicy.configFromEnv(env)
   const storageLayer = Layer.mergeAll(
@@ -1808,7 +1882,10 @@ export const serverLiveLayer = (
     Layer.provideMerge(embeddingsLayer),
     Layer.provideMerge(diagnosticsLayer),
   )
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const threadMemoryLayer = ThreadMemory.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
     Layer.provideMerge(storageAndThreadLayer),
@@ -1825,6 +1902,7 @@ export const serverLiveLayer = (
     Layer.provideMerge(threadMemoryLayer),
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const subagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -1837,6 +1915,7 @@ export const serverLiveLayer = (
     Layer.provideMerge(pluginLayer),
     Layer.provideMerge(specialtyToolLayer),
     Layer.provideMerge(subagentLayer),
+    Layer.provideMerge(diagnosticsLayer),
   )
   const skillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
     Layer.provideMerge(configLayer),
@@ -1924,7 +2003,7 @@ export const syncLiveLayer = (
   const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
   const redactorLayer = secretRedactorLayer(env)
   const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
-  const { diagnosticsLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
   const timeLayer = Time.layer
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
@@ -1967,7 +2046,11 @@ export const syncLiveLayer = (
     Layer.provideMerge(managerLayer),
   )
 
-  return Sync.layer.pipe(Layer.provideMerge(configLayer), Layer.provideMerge(resolverLayer))
+  return Sync.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(resolverLayer),
+    Layer.provideMerge(telemetryLayer),
+  )
 }
 
 export type LiveLayerOutput =

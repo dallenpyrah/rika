@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Config, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { ArtifactStore, Database, Migration } from "@rika/persistence"
 import { Common, Ids } from "@rika/schema"
@@ -19,6 +19,8 @@ const configLayer = Config.layerFromValues({
   data_dir: "/workspace/.rika",
   default_mode: "smart",
 })
+
+const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(SecretRedactor.layer))
 
 const judgeDraft = (
   winnerId: string,
@@ -91,6 +93,7 @@ const makeLiveishLayer = (responses: ReadonlyArray<string>) => {
       Router.layer.pipe(
         Layer.provideMerge(configLayer),
         Layer.provideMerge(Provider.fakeRegistryLayer([{ name: "openai", responses }])),
+        Layer.provideMerge(diagnosticsLayer),
       ),
     ),
   )

@@ -17,6 +17,7 @@ import * as Tracer from "@effect/opentelemetry/Tracer"
 import { Effect, Layer, Option } from "effect"
 import * as Diagnostics from "./diagnostics"
 import * as EnvConfig from "./env-config"
+import * as SecretRedactor from "./secret-redactor"
 import * as Settings from "./settings"
 
 export const serviceName = "rika"
@@ -89,17 +90,16 @@ export const diagnosticsLayer = (options: Options) =>
     Diagnostics.Service,
     Effect.gen(function* () {
       const path = yield* Diagnostics.resolveLogPath()
-      const fileEmit = Diagnostics.makeFileEmit(path)
+      const redactor = yield* SecretRedactor.Service
+      const fileEmit = Diagnostics.makeFileEmit(redactor, path)
       const otelLogger = logs.getLogger(serviceName, options.version)
-      return Diagnostics.Service.of({
-        emit: (entry) =>
-          Effect.gen(function* () {
-            const redacted = yield* Diagnostics.redactEntry(entry)
-            yield* fileEmit(redacted)
-            const span = yield* Tracer.currentOtelSpan.pipe(Effect.option)
-            yield* Effect.sync(() => emitLogRecord(otelLogger, redacted, span))
-          }),
-      })
+      return Diagnostics.makeService(redactor, (entry) =>
+        Effect.gen(function* () {
+          yield* fileEmit(entry)
+          const span = yield* Tracer.currentOtelSpan.pipe(Effect.option)
+          yield* Effect.sync(() => emitLogRecord(otelLogger, entry, span))
+        }),
+      )
     }),
   )
 

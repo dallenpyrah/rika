@@ -11,7 +11,7 @@ import {
   ToolExecutor,
   WorkspaceAccess,
 } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { OrbManager } from "@rika/orb"
 import { Provider, Router } from "@rika/llm"
@@ -104,7 +104,7 @@ const makeLayer = (
     readonly agentLayer?: Layer.Layer<AgentLoop.Service>
     readonly compactionLayer?: Layer.Layer<CompactionService.Service>
     readonly providerResponses?: ReadonlyArray<Provider.FakeResponse>
-    readonly toolLayer?: Layer.Layer<ToolExecutor.Service>
+    readonly toolLayer?: Layer.Layer<ToolExecutor.Service, never, Diagnostics.Service>
   } = {},
 ) => {
   const runtimeConfigLayer = options.dataDir === undefined ? configLayer : configLayerForDataDir(options.dataDir)
@@ -112,6 +112,8 @@ const makeLayer = (
     options.dataDir === undefined ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(runtimeConfigLayer))
   const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const redactorLayer = SecretRedactor.layer
+  const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
   const storageLayer = Layer.mergeAll(
     runtimeConfigLayer,
     databaseLayer,
@@ -123,14 +125,18 @@ const makeLayer = (
       Layer.provideMerge(Time.fixedLayer(now)),
       Layer.provideMerge(IdGenerator.sequenceLayer(1)),
     ),
-    ThreadEventLog.layer,
+    redactorLayer,
+    ThreadEventLog.layer.pipe(Layer.provideMerge(redactorLayer)),
     ThreadProjection.layer,
     Time.fixedLayer(now),
     IdGenerator.sequenceLayer(1),
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(Layer.provideMerge(migratedStorageLayer))
-  const threadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const threadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
   const workspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const providedOrbManagerLayer = orbManagerLayer.pipe(Layer.provideMerge(migratedStorageLayer))
   const llmLayer = Router.layer.pipe(
@@ -141,8 +147,9 @@ const makeLayer = (
         { name: "openai", responses: options.providerResponses ?? ["remote hello"] },
       ]),
     ),
+    Layer.provideMerge(diagnosticsLayer),
   )
-  const toolLayer = options.toolLayer ?? ToolExecutor.fakeLayer({})
+  const toolLayer = (options.toolLayer ?? ToolExecutor.fakeLayer({})).pipe(Layer.provideMerge(diagnosticsLayer))
   const agentBase = Layer.mergeAll(
     migratedStorageLayer,
     projectStoreLayer,
@@ -151,7 +158,8 @@ const makeLayer = (
     contextLayer,
     SkillRegistry.emptyLayer,
     toolLayer,
-    Diagnostics.memoryLayer([]),
+    redactorLayer,
+    diagnosticsLayer,
     llmLayer,
     IdeBridge.layer,
     providedOrbManagerLayer,

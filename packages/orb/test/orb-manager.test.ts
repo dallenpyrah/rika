@@ -1067,7 +1067,8 @@ describe("OrbManager", () => {
       Layer.provideMerge(idLayer),
     )
     const sandboxLayer = SandboxClient.layer.pipe(Layer.provide(configLayer))
-    const diagnosticsLayer = Diagnostics.memoryLayer(diagnostics)
+    const redactorLayer = SecretRedactor.layer
+    const diagnosticsLayer = Diagnostics.memoryLayer(diagnostics).pipe(Layer.provideMerge(redactorLayer))
     const managerLayer = OrbManager.layer.pipe(
       Layer.provideMerge(configLayer),
       Layer.provideMerge(mcpApprovalLayer),
@@ -1075,6 +1076,7 @@ describe("OrbManager", () => {
       Layer.provideMerge(orbStoreLayer),
       Layer.provideMerge(sandboxLayer),
       Layer.provideMerge(diagnosticsLayer),
+      Layer.provideMerge(redactorLayer),
     )
     const layer = Layer.mergeAll(
       configLayer,
@@ -1086,6 +1088,7 @@ describe("OrbManager", () => {
       projectStoreLayer,
       orbStoreLayer,
       sandboxLayer,
+      redactorLayer,
       diagnosticsLayer,
       managerLayer,
     )
@@ -1158,7 +1161,7 @@ const makeLayer = (input: {
   const timeLayer = Time.fixedLayer(now)
   const idLayer = IdGenerator.sequenceLayer(1)
   const redactorLayer = SecretRedactor.layer
-  const diagnosticsLayer = Diagnostics.memoryLayer(input.diagnostics)
+  const diagnosticsLayer = Diagnostics.memoryLayer(input.diagnostics).pipe(Layer.provideMerge(redactorLayer))
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const projectStoreLayer = ProjectStore.layer.pipe(
     Layer.provideMerge(configLayer),

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { PermissionPolicy, ToolExecutor } from "@rika/agent"
-import { Config, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { ArtifactStore } from "@rika/persistence"
 import { Common, Ids, Tool } from "@rika/schema"
@@ -15,6 +15,11 @@ const configLayer = Config.layerFromValues({
   data_dir: `${workspaceRoot}/.rika`,
   default_mode: "smart",
 })
+
+const diagnosticsLayer = () => {
+  const redactorLayer = SecretRedactor.layer
+  return Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
+}
 
 const call = (name: string, input: Common.JsonValue): Tool.Call => ({
   id: Ids.ToolCallId.make(`tool_call_${name}`),
@@ -41,6 +46,7 @@ const modelLayer = (responses: ReadonlyArray<Provider.FakeResponse>) =>
           ]),
         ),
         Layer.provideMerge(configLayer),
+        Layer.provideMerge(diagnosticsLayer()),
       ),
     ),
   )
@@ -202,6 +208,7 @@ describe("SpecialtyTools", () => {
         ),
       ),
       Layer.provideMerge(PermissionPolicy.rejectLayer("specialty calls disabled")),
+      Layer.provideMerge(diagnosticsLayer()),
     )
 
     const result = await Effect.runPromise(

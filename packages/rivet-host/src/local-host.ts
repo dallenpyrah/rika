@@ -100,15 +100,18 @@ export const serviceLayerFromEnv = (
     Layer.provideMerge(configuredTimeLayer),
     Layer.provideMerge(IdGenerator.layer),
   )
-  const configuredLlmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(Layer.provideMerge(configLayer))
-  const configuredEmbeddingsLayer = Embeddings.layer(
-    Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
-  )
-  const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const configuredDiagnosticsLayer = Diagnostics.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(redactorLayer),
   )
+  const configuredLlmLayer = Live.layer(Live.optionsFromEnv(env)).pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(configuredDiagnosticsLayer),
+  )
+  const configuredEmbeddingsLayer = Embeddings.layer(
+    Embeddings.optionsFromEnv(env, { openaiConfigured: Live.optionsFromEnv(env).openai !== undefined }),
+  )
+  const configuredSkillLayer = SkillRegistry.layer.pipe(Layer.provideMerge(configLayer))
   const configuredPluginLayer = PluginHost.layer.pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(PluginUi.silentLayer),
@@ -130,7 +133,10 @@ export const serviceLayerFromEnv = (
     IdGenerator.layer,
   )
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const storageAndThreadLayer = ThreadService.layer.pipe(Layer.provideMerge(migratedStorageLayer))
+  const storageAndThreadLayer = ThreadService.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(configuredDiagnosticsLayer),
+  )
   const configuredWorkspaceAccessLayer = WorkspaceAccess.layer.pipe(Layer.provideMerge(migratedStorageLayer))
   const configuredThreadMemoryLayer = ThreadMemory.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -153,6 +159,7 @@ export const serviceLayerFromEnv = (
     Layer.provideMerge(configuredThreadMemoryLayer),
     Layer.provideMerge(configuredPluginLayer),
     Layer.provideMerge(configuredSpecialtyToolLayer),
+    Layer.provideMerge(configuredDiagnosticsLayer),
   )
   const configuredSubagentLayer = SubagentRuntime.layer.pipe(
     Layer.provideMerge(migratedStorageLayer),
@@ -165,6 +172,7 @@ export const serviceLayerFromEnv = (
     Layer.provideMerge(configuredPluginLayer),
     Layer.provideMerge(configuredSpecialtyToolLayer),
     Layer.provideMerge(configuredSubagentLayer),
+    Layer.provideMerge(configuredDiagnosticsLayer),
   )
   const configuredSkillToolProviderLayer = BuiltInTools.skillToolProviderLayer.pipe(
     Layer.provideMerge(configLayer),

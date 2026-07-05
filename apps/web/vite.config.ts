@@ -174,6 +174,7 @@ async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModule
   )
   const databaseLayer = Persistence.Database.layer.pipe(EffectRuntime.Layer.provideMerge(configLayer))
   const timeLayer = Core.Time.layer
+  const redactorLayer = Core.SecretRedactor.layerFromEnv(env)
   const mcpApprovalLayer = Persistence.McpApprovalStore.layer.pipe(
     EffectRuntime.Layer.provideMerge(databaseLayer),
     EffectRuntime.Layer.provideMerge(timeLayer),
@@ -194,6 +195,7 @@ async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModule
     configLayer,
     databaseLayer,
     Persistence.Migration.layer,
+    redactorLayer,
     timeLayer,
     mcpApprovalLayer,
     Core.IdGenerator.layer,
@@ -206,7 +208,13 @@ async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModule
   const managerLayer = Orb.OrbManager.layer.pipe(
     EffectRuntime.Layer.provideMerge(migratedStorageLayer),
     EffectRuntime.Layer.provideMerge(sandboxLayer),
-    EffectRuntime.Layer.provideMerge(Core.Diagnostics.layer.pipe(EffectRuntime.Layer.provideMerge(configLayer))),
+    EffectRuntime.Layer.provideMerge(
+      Core.Diagnostics.layer.pipe(
+        EffectRuntime.Layer.provideMerge(configLayer),
+        EffectRuntime.Layer.provideMerge(redactorLayer),
+      ),
+    ),
+    EffectRuntime.Layer.provideMerge(redactorLayer),
   )
   const layer = BackendEndpointModule.resolverLayerFromEnv(env).pipe(
     EffectRuntime.Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd: workspaceRoot })),

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { AgentLoop, ContextResolver, SkillRegistry, ToolExecutor, WorkspaceAccess } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
 import { Provider, Router } from "@rika/llm"
 import { Database, Migration, ThreadEventLog, ThreadProjection, WorkspaceStore } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
@@ -16,6 +16,8 @@ const configLayer = Config.layerFromValues({
   data_dir: "/workspace/rika-actor-test/.rika",
   default_mode: "smart",
 })
+const redactorLayer = SecretRedactor.layer
+const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
 const llmLayer = Router.layer.pipe(
   Layer.provideMerge(
     Provider.fakeRegistryLayer([
@@ -24,7 +26,9 @@ const llmLayer = Router.layer.pipe(
     ]),
   ),
   Layer.provideMerge(configLayer),
+  Layer.provideMerge(diagnosticsLayer),
 )
+const toolLayer = ToolExecutor.emptyLayer.pipe(Layer.provideMerge(diagnosticsLayer))
 
 const baseServiceLayer = Layer.mergeAll(
   configLayer,
@@ -35,10 +39,11 @@ const baseServiceLayer = Layer.mergeAll(
   WorkspaceStore.layer.pipe(Layer.provideMerge(Database.memoryLayer)),
   Time.fixedLayer(Common.TimestampMillis.make(1_800_000_000_000)),
   IdGenerator.sequenceLayer(1),
-  Diagnostics.memoryLayer([]),
+  redactorLayer,
+  diagnosticsLayer,
   ContextResolver.emptyLayer,
   SkillRegistry.emptyLayer,
-  ToolExecutor.emptyLayer,
+  toolLayer,
   llmLayer,
 )
 
