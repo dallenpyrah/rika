@@ -137,6 +137,7 @@ const reportFromInput = (
     const rivetHost = input.env.RIKA_RIVET_HOST ?? "local"
     const rivetEndpoint = input.env.RIKA_RIVET_ENDPOINT ?? input.env.RIVET_ENDPOINT ?? "http://127.0.0.1:6420"
     const apiKeyConfigured = secretConfigured(input.env.RIKA_API_KEY)
+    const baseUrlConfigured = secretConfigured(input.env.RIKA_BASE_URL)
     const embeddingsApiKeyConfigured = secretConfigured(input.env.RIKA_EMBEDDINGS_API_KEY)
     const settingsSnapshot = dependencies.settings === undefined ? undefined : yield* dependencies.settings.snapshot
     const telemetry =
@@ -151,6 +152,7 @@ const reportFromInput = (
     const diagnosticChecks = yield* checks({
       dataDir,
       apiKeyConfigured,
+      baseUrlConfigured,
       embeddingsApiKeyConfigured,
       permissionSummary,
       rivetHost,
@@ -172,7 +174,7 @@ const reportFromInput = (
         workspace_root: workspaceRoot,
         data_dir: dataDir,
         database_url_configured: input.env.RIKA_DATABASE_URL !== undefined,
-        base_url_configured: input.env.RIKA_BASE_URL !== undefined,
+        base_url_configured: baseUrlConfigured,
         api_key_configured: apiKeyConfigured,
         embeddings_api_key_configured: embeddingsApiKeyConfigured,
         telemetry: telemetry.enabled ? "enabled" : "disabled",
@@ -198,6 +200,7 @@ const reportFromInput = (
 const checks = (input: {
   readonly dataDir: string
   readonly apiKeyConfigured: boolean
+  readonly baseUrlConfigured: boolean
   readonly embeddingsApiKeyConfigured: boolean
   readonly permissionSummary: PermissionPolicy.PermissionSummary
   readonly rivetHost: string
@@ -220,6 +223,15 @@ const checks = (input: {
         message: input.apiKeyConfigured
           ? "Model provider API key is configured. Secret values are not printed."
           : "RIKA_API_KEY is required for live model calls.",
+      },
+      {
+        name: "model-proxy",
+        status: !input.apiKeyConfigured ? "skipped" : input.baseUrlConfigured ? "ok" : "warning",
+        message: !input.apiKeyConfigured
+          ? "Model proxy check skipped because RIKA_API_KEY is unset."
+          : input.baseUrlConfigured
+            ? "RIKA_BASE_URL is configured for live model proxying."
+            : "RIKA_BASE_URL is required when live model calls are enabled.",
       },
       {
         name: "embeddings-provider",
