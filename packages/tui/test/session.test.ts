@@ -132,6 +132,18 @@ describe("TUI session", () => {
     }
   })
 
+  test("welcome cannot unlock mode after completed activity", async () => {
+    const existingThread = Ids.ThreadId.make("thread_welcome_mode_locked_tui")
+    const seedEvents = [threadCreated(existingThread, 1), messageAdded(existingThread, 2, "locked thread")]
+    const { rendered } = await runSessionKeys(
+      [`/thread ${existingThread}`, "/welcome", "/mode rush", "/exit"].flatMap(line),
+      seedEvents,
+    )
+
+    expect(rendered.some((state) => state.notice === "Mode is locked once a thread is active.")).toBe(true)
+    expect(rendered.some((state) => state.mode === "rush")).toBe(false)
+  })
+
   test("uses an explicit workspace identity for interactive turns", async () => {
     const rendered: Array<ViewState.ViewState> = []
     const keys = ["hello", "/exit"].flatMap(line)
