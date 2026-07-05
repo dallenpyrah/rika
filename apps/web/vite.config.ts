@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path"
 import type { Duplex } from "node:stream"
 import { fileURLToPath } from "node:url"
 import { foldkit } from "@foldkit/vite-plugin"
+import tailwindcss from "@tailwindcss/vite"
 import type * as BackendEndpoint from "@rika/cli/backend-endpoint"
 import { createServerModuleRunner, defineConfig, type Plugin } from "vite"
 import type { ModuleRunner } from "vite/module-runner"
@@ -69,7 +70,11 @@ interface ProxyModules {
 type LoadProxyModules = () => Promise<ProxyModules>
 
 export default defineConfig({
-  plugins: [foldkit(process.env.NODE_ENV === "test" ? {} : { devToolsMcpPort: 9988 }), localBackendProxy()],
+  plugins: [
+    tailwindcss(),
+    foldkit(process.env.NODE_ENV === "test" ? {} : { devToolsMcpPort: 9988 }),
+    localBackendProxy(),
+  ],
   resolve: {
     alias: [{ find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) }],
   },

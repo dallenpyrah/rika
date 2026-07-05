@@ -7,6 +7,8 @@ import { m } from "foldkit/message"
 import * as Mount from "foldkit/mount"
 import * as Subscription from "foldkit/subscription"
 import { Duration, Effect, Option, Queue, Schedule, Schema as S, Scope, Stream } from "effect"
+import * as AlertDialog from "./components/ui/dialog-state"
+import * as MessageScroller from "./components/ui/message-scroller-state"
 import * as Tabs from "./components/ui/tabs-state"
 import {
   asFileDiffMetadata,
@@ -176,12 +178,16 @@ export const Model = S.Struct({
   selected_orb: S.optional(Remote.OrbSummary),
   selected_orb_tab: OrbTab,
   orb_tabs: Tabs.Model,
+  transcript_scroller: MessageScroller.Model,
+  kill_orb_dialog: AlertDialog.Model,
   orb_files: OrbFilesModel,
   orb_changes: OrbChangesModel,
   orb_terminal_status: OrbTerminalStatusSchema,
   orb_terminal_error: S.optional(S.String),
   expanded_diff_ids: S.Array(S.String),
+  collapsed_transcript_row_ids: S.Array(S.String),
   confirm_kill_orb_id: S.optional(Ids.OrbId),
+  delete_secret_dialog: AlertDialog.Model,
   backend: S.optional(Remote.BackendHealth),
   notice: S.optional(S.String),
   pending_submit: S.optional(S.String),
@@ -206,6 +212,11 @@ export interface TextTranscriptRow {
   readonly kind: "message" | "event" | "tool" | "error"
   readonly title: string
   readonly body: string
+  readonly is_open?: boolean
+  readonly author?: {
+    readonly label: string
+    readonly is_local: boolean
+  }
 }
 
 export interface PierreDiffTranscriptRow {
@@ -244,6 +255,8 @@ export const FailedOpenThread = m("FailedOpenThread", { message: S.String, reque
 export const LoadedSelectedOrb = m("LoadedSelectedOrb", { orb: Remote.OrbSummary })
 export const FailedLoadSelectedOrb = m("FailedLoadSelectedOrb", { message: S.String })
 export const GotOrbTabsMessage = m("GotOrbTabsMessage", { message: Tabs.Message })
+export const GotTranscriptScrollerMessage = m("GotTranscriptScrollerMessage", { message: MessageScroller.Message })
+export const GotKillOrbDialogMessage = m("GotKillOrbDialogMessage", { message: AlertDialog.Message })
 export const ClickedPauseOrb = m("ClickedPauseOrb")
 export const ClickedResumeOrb = m("ClickedResumeOrb")
 export const ClickedKillOrb = m("ClickedKillOrb")
@@ -251,6 +264,7 @@ export const CancelledKillOrb = m("CancelledKillOrb")
 export const ConfirmedKillOrb = m("ConfirmedKillOrb")
 export const UpdatedSelectedOrb = m("UpdatedSelectedOrb", { orb: Remote.OrbSummary })
 export const FailedOrbAction = m("FailedOrbAction", { message: S.String })
+export const ClickedTranscriptDisclosure = m("ClickedTranscriptDisclosure", { row_id: S.String })
 export const LoadedOrbDirectory = m("LoadedOrbDirectory", { response: Remote.OrbFilesResponse })
 export const FailedLoadOrbDirectory = m("FailedLoadOrbDirectory", { path: S.String, message: S.String })
 export const SelectedOrbFile = m("SelectedOrbFile", { path: S.String })
@@ -305,6 +319,7 @@ export const SubmittedProjectSecret = m("SubmittedProjectSecret")
 export const ClickedDeleteProjectSecret = m("ClickedDeleteProjectSecret", { name: S.String })
 export const CancelledDeleteProjectSecret = m("CancelledDeleteProjectSecret")
 export const ConfirmedDeleteProjectSecret = m("ConfirmedDeleteProjectSecret")
+export const GotDeleteSecretDialogMessage = m("GotDeleteSecretDialogMessage", { message: AlertDialog.Message })
 
 const BackendMessage = S.Union([
   LoadedBackendHealth,
@@ -325,6 +340,7 @@ const OrbControlMessage = S.Union([
   LoadedSelectedOrb,
   FailedLoadSelectedOrb,
   GotOrbTabsMessage,
+  GotKillOrbDialogMessage,
   ClickedPauseOrb,
   ClickedResumeOrb,
   ClickedKillOrb,
@@ -332,6 +348,7 @@ const OrbControlMessage = S.Union([
   ConfirmedKillOrb,
   UpdatedSelectedOrb,
   FailedOrbAction,
+  ClickedTranscriptDisclosure,
 ])
 
 const OrbWorkspaceMessage = S.Union([
@@ -343,6 +360,7 @@ const OrbWorkspaceMessage = S.Union([
   LoadedOrbChanges,
   FailedLoadOrbChanges,
   ChangedDraft,
+  GotTranscriptScrollerMessage,
   ChangedDraftMode,
   SubmittedDraft,
   AcceptedTurn,
@@ -387,6 +405,7 @@ const ProjectMessage = S.Union([
   ClickedDeleteProjectSecret,
   CancelledDeleteProjectSecret,
   ConfirmedDeleteProjectSecret,
+  GotDeleteSecretDialogMessage,
 ])
 
 export const AppMessage = S.Union([BackendMessage, OrbControlMessage, OrbWorkspaceMessage, ProjectMessage]).pipe(
@@ -961,6 +980,8 @@ export const initialModel = (config: RuntimeConfig): Model => ({
   presence: [],
   typing_presence_cooling: false,
   expanded_diff_ids: [],
+  collapsed_transcript_row_ids: [],
+  delete_secret_dialog: AlertDialog.init({ id: "delete-secret-dialog" }),
   ...initialOrbWorkspace(),
   ...(config.thread_id === undefined ? {} : { selected_thread_id: config.thread_id }),
 })
@@ -1045,6 +1066,7 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
           ...initialOrbWorkspace(),
           confirm_kill_orb_id: undefined,
           expanded_diff_ids: [],
+          collapsed_transcript_row_ids: [],
           pending_interrupt_turn_id: undefined,
           pending_turn: false,
           pending_submit: undefined,
@@ -1077,22 +1099,27 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return [{ ...model, notice: message.message }, []]
     case "GotOrbTabsMessage":
       return orbTabsModel(model, message.message)
+    case "GotKillOrbDialogMessage":
+      return killOrbDialogModel(model, message.message)
     case "ClickedPauseOrb":
       return selectedOrbActionModel(model, "pause")
     case "ClickedResumeOrb":
       return selectedOrbActionModel(model, "resume")
     case "ClickedKillOrb":
-      return model.selected_orb === undefined
-        ? [model, []]
-        : [{ ...model, confirm_kill_orb_id: model.selected_orb.orb_id, notice: undefined }, []]
+      return clickedKillOrbModel(model)
     case "CancelledKillOrb":
-      return [{ ...model, confirm_kill_orb_id: undefined }, []]
+      return cancelKillOrbModel(model)
     case "ConfirmedKillOrb":
       return confirmedKillOrbModel(model)
     case "UpdatedSelectedOrb":
       return selectedOrbLoadedModel(model, message.orb)
     case "FailedOrbAction":
       return [{ ...model, confirm_kill_orb_id: undefined, notice: message.message }, []]
+    case "ClickedTranscriptDisclosure":
+      return [
+        { ...model, collapsed_transcript_row_ids: toggleString(model.collapsed_transcript_row_ids, message.row_id) },
+        [],
+      ]
     case "LoadedOrbDirectory":
       return loadedOrbDirectoryModel(model, message.response)
     case "FailedLoadOrbDirectory":
@@ -1107,6 +1134,8 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
       return loadedOrbChangesModel(model, message.response)
     case "FailedLoadOrbChanges":
       return [{ ...model, orb_changes: { state: "failed", message: message.message }, notice: message.message }, []]
+    case "GotTranscriptScrollerMessage":
+      return transcriptScrollerModel(model, message.message)
     case "ChangedDraft":
       return changedDraftModel(model, message.value)
     case "ChangedDraftMode":
@@ -1183,21 +1212,9 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
     case "FailedLoadProjects":
       return [{ ...model, notice: message.message }, []]
     case "ClickedProject":
-      return [
-        {
-          ...model,
-          active_view: "projects",
-          selected_project_id: message.project_id,
-          selected_project: undefined,
-          project_form: emptyProjectForm(),
-          project_secret_name: "",
-          project_secret_value: "",
-          notice: undefined,
-        },
-        [LoadProject({ api_base_url: model.api_base_url, project_id: message.project_id })],
-      ]
+      return clickedProjectModel(model, message.project_id)
     case "LoadedProject":
-      return [projectLoadedModel(model, message.project), []]
+      return loadedProjectModel(model, message.project)
     case "FailedLoadProject":
       return [{ ...model, notice: message.message }, []]
     case "ChangedNewProjectField":
@@ -1232,17 +1249,7 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
     case "SubmittedProjectSettings":
       return submittedProjectSettingsModel(model)
     case "SavedProject":
-      return [
-        {
-          ...projectLoadedModel(model, message.project),
-          projects: newestProjectFirst([projectSummaryFromDetail(message.project), ...model.projects]),
-          new_project_form: emptyNewProjectForm(),
-          project_secret_value: "",
-          pending_secret_delete_name: undefined,
-          notice: undefined,
-        },
-        [],
-      ]
+      return savedProjectModel(model, message.project)
     case "FailedSaveProject":
       return [{ ...model, notice: message.message }, []]
     case "ChangedProjectSecretField":
@@ -1255,31 +1262,29 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
     case "SubmittedProjectSecret":
       return submittedProjectSecretModel(model)
     case "ClickedDeleteProjectSecret":
-      return [
-        {
-          ...model,
-          pending_secret_delete_name: model.pending_secret_delete_name === message.name ? undefined : message.name,
-          notice: undefined,
-        },
-        [],
-      ]
+      return clickedDeleteSecretModel(model, message.name)
     case "CancelledDeleteProjectSecret":
-      return [{ ...model, pending_secret_delete_name: undefined, notice: undefined }, []]
+      return cancelDeleteSecretModel(model)
     case "ConfirmedDeleteProjectSecret": {
       const name = model.pending_secret_delete_name
-      return model.selected_project_id === undefined || name === undefined
-        ? [model, []]
-        : [
-            { ...model, pending_secret_delete_name: undefined, notice: undefined },
-            [
-              DeleteProjectSecret({
-                api_base_url: model.api_base_url,
-                project_id: model.selected_project_id,
-                name,
-              }),
-            ],
-          ]
+      if (model.selected_project_id === undefined || name === undefined) return [model, []]
+      const [delete_secret_dialog, dialogCommands] = AlertDialog.close(model.delete_secret_dialog)
+      return [
+        { ...model, pending_secret_delete_name: undefined, notice: undefined, delete_secret_dialog },
+        [
+          DeleteProjectSecret({
+            api_base_url: model.api_base_url,
+            project_id: model.selected_project_id,
+            name,
+          }),
+          ...Command.mapMessages(dialogCommands, (childMessage) =>
+            GotDeleteSecretDialogMessage({ message: childMessage }),
+          ),
+        ],
+      ]
     }
+    case "GotDeleteSecretDialogMessage":
+      return deleteSecretDialogModel(model, message.message)
   }
   return [model, []]
 }
@@ -1335,21 +1340,32 @@ export const eventRows = (
   events: ReadonlyArray<Event.Event>,
   expandedDiffIds: ReadonlySet<string> = new Set(),
   userId?: Ids.UserId,
+  collapsedTranscriptRowIds: ReadonlySet<string> = new Set(),
 ): ReadonlyArray<TranscriptRow> =>
   events.flatMap((event) => {
     switch (event.type) {
-      case "message.added":
+      case "message.added": {
+        const author = messageAuthor(event.data.message, userId)
         return {
           id: event.id,
           sequence: event.sequence,
           kind: "message",
           title: roleLabel(event.data.message.role),
-          body: messageDisplayText(event.data.message, userId),
+          body: RikaMessage.displayText(event.data.message),
+          ...(author === undefined ? {} : { author }),
         }
+      }
       case "model.stream.chunk":
         return { id: event.id, sequence: event.sequence, kind: "message", title: "Rika", body: event.data.text }
       case "model.reasoning.delta":
-        return { id: event.id, sequence: event.sequence, kind: "event", title: "Reasoning", body: event.data.text }
+        return {
+          id: event.id,
+          sequence: event.sequence,
+          kind: "event",
+          title: "Reasoning",
+          body: event.data.text,
+          is_open: !collapsedTranscriptRowIds.has(event.id),
+        }
       case "tool.call.requested":
         return {
           id: event.id,
@@ -1357,6 +1373,7 @@ export const eventRows = (
           kind: "tool",
           title: `Tool: ${event.data.call.name}`,
           body: "Running",
+          is_open: !collapsedTranscriptRowIds.has(event.id),
         }
       case "tool.call.completed":
         return (
@@ -1367,12 +1384,14 @@ export const eventRows = (
             fallbackKind: event.data.result.status === "success" ? "tool" : "error",
             value: event.data.result.output,
             expandedDiffIds,
+            collapsedTranscriptRowIds,
           }) ?? {
             id: event.id,
             sequence: event.sequence,
             kind: event.data.result.status === "success" ? "tool" : "error",
             title: `Tool: ${event.data.result.name}`,
             body: event.data.result.status,
+            is_open: !collapsedTranscriptRowIds.has(event.id),
           }
         )
       case "turn.started":
@@ -1430,6 +1449,7 @@ export const eventRows = (
             fallbackKind: "event",
             value: event.data.artifact.content,
             expandedDiffIds,
+            collapsedTranscriptRowIds,
           }) ?? {
             id: event.id,
             sequence: event.sequence,
@@ -1465,9 +1485,17 @@ export const eventRows = (
           kind: "tool",
           title: `Tool input: ${event.data.name}`,
           body: "Started",
+          is_open: !collapsedTranscriptRowIds.has(event.id),
         }
       case "tool.call.input.delta":
-        return { id: event.id, sequence: event.sequence, kind: "tool", title: "Tool input", body: event.data.text }
+        return {
+          id: event.id,
+          sequence: event.sequence,
+          kind: "tool",
+          title: "Tool input",
+          body: event.data.text,
+          is_open: !collapsedTranscriptRowIds.has(event.id),
+        }
       case "tool.call.input.ended":
         return {
           id: event.id,
@@ -1475,6 +1503,7 @@ export const eventRows = (
           kind: "tool",
           title: `Tool input: ${event.data.name}`,
           body: event.data.input_text,
+          is_open: !collapsedTranscriptRowIds.has(event.id),
         }
     }
     return unreachableEventRow(event)
@@ -1601,6 +1630,60 @@ const projectLoadedModel = (model: Model, project: Remote.ProjectDetail): Model 
   notice: undefined,
 })
 
+const closeDeleteSecretDialog = (model: Model): readonly [AlertDialog.Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands] = AlertDialog.close(model.delete_secret_dialog)
+  return [
+    delete_secret_dialog,
+    Command.mapMessages(dialogCommands, (childMessage) => GotDeleteSecretDialogMessage({ message: childMessage })),
+  ]
+}
+
+const clickedProjectModel = (model: Model, projectId: Ids.ProjectId): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands] = closeDeleteSecretDialog(model)
+  return [
+    {
+      ...model,
+      active_view: "projects",
+      selected_project_id: projectId,
+      selected_project: undefined,
+      project_form: emptyProjectForm(),
+      project_secret_name: "",
+      project_secret_value: "",
+      pending_secret_delete_name: undefined,
+      delete_secret_dialog,
+      notice: undefined,
+    },
+    [...dialogCommands, LoadProject({ api_base_url: model.api_base_url, project_id: projectId })],
+  ]
+}
+
+const loadedProjectModel = (
+  model: Model,
+  project: Remote.ProjectDetail,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands] = closeDeleteSecretDialog(model)
+  return [{ ...projectLoadedModel(model, project), delete_secret_dialog }, dialogCommands]
+}
+
+const savedProjectModel = (
+  model: Model,
+  project: Remote.ProjectDetail,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands] = closeDeleteSecretDialog(model)
+  return [
+    {
+      ...projectLoadedModel(model, project),
+      projects: newestProjectFirst([projectSummaryFromDetail(project), ...model.projects]),
+      new_project_form: emptyNewProjectForm(),
+      project_secret_value: "",
+      pending_secret_delete_name: undefined,
+      delete_secret_dialog,
+      notice: undefined,
+    },
+    dialogCommands,
+  ]
+}
+
 const submittedNewProjectModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
   const form = model.new_project_form
   const name = form.name.trim()
@@ -1656,6 +1739,40 @@ const submittedProjectSecretModel = (model: Model): readonly [Model, ReadonlyArr
   ]
 }
 
+const clickedDeleteSecretModel = (model: Model, name: string): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands] = AlertDialog.open(model.delete_secret_dialog)
+  return [
+    { ...model, pending_secret_delete_name: name, delete_secret_dialog, notice: undefined },
+    Command.mapMessages(dialogCommands, (childMessage) => GotDeleteSecretDialogMessage({ message: childMessage })),
+  ]
+}
+
+const deleteSecretDialogModel = (
+  model: Model,
+  message: AlertDialog.Message,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands, maybeOutMessage] = AlertDialog.update(
+    model.delete_secret_dialog,
+    message,
+  )
+  return [
+    {
+      ...model,
+      delete_secret_dialog,
+      pending_secret_delete_name: dialogWasClosed(maybeOutMessage) ? undefined : model.pending_secret_delete_name,
+    },
+    Command.mapMessages(dialogCommands, (childMessage) => GotDeleteSecretDialogMessage({ message: childMessage })),
+  ]
+}
+
+const cancelDeleteSecretModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [delete_secret_dialog, dialogCommands] = AlertDialog.close(model.delete_secret_dialog)
+  return [
+    { ...model, pending_secret_delete_name: undefined, delete_secret_dialog, notice: undefined },
+    Command.mapMessages(dialogCommands, (childMessage) => GotDeleteSecretDialogMessage({ message: childMessage })),
+  ]
+}
+
 const newestProjectFirst = (projects: ReadonlyArray<Remote.ProjectSummary>) => {
   const seen = new Set<Ids.ProjectId>()
   const unique = projects.filter((project) => {
@@ -1695,6 +1812,7 @@ const openThreadModel = (model: Model, threadId: Ids.ThreadId): readonly [Model,
       ...initialOrbWorkspace(),
       confirm_kill_orb_id: undefined,
       expanded_diff_ids: [],
+      collapsed_transcript_row_ids: [],
       pending_interrupt_turn_id: undefined,
       events: [],
       last_sequence: 0,
@@ -1736,6 +1854,7 @@ const createdThreadModel = (
     ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
+    collapsed_transcript_row_ids: [],
     pending_interrupt_turn_id: undefined,
     events: [],
     last_sequence: 0,
@@ -1815,6 +1934,7 @@ const openedThreadModel = (
     ...initialOrbWorkspace(),
     confirm_kill_orb_id: undefined,
     expanded_diff_ids: [],
+    collapsed_transcript_row_ids: [],
     pending_interrupt_turn_id: undefined,
     threads: newestFirst([
       record.summary,
@@ -2045,6 +2165,60 @@ const orbTabsModel = (model: Model, message: Tabs.Message): readonly [Model, Rea
   return [next, tabCommands]
 }
 
+const transcriptScrollerModel = (
+  model: Model,
+  message: MessageScroller.Message,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [transcript_scroller, commands] = MessageScroller.update(model.transcript_scroller, message)
+  return [
+    { ...model, transcript_scroller },
+    Command.mapMessages(commands, (childMessage) => GotTranscriptScrollerMessage({ message: childMessage })),
+  ]
+}
+
+const dialogWasClosed = (maybeOutMessage: Option.Option<AlertDialog.OutMessage>): boolean =>
+  Option.match(maybeOutMessage, {
+    onNone: () => false,
+    onSome: (outMessage) => outMessage._tag === "Closed",
+  })
+
+const clickedKillOrbModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
+  if (model.selected_orb === undefined) return [model, []]
+  const [kill_orb_dialog, dialogCommands] = AlertDialog.open(model.kill_orb_dialog)
+  return [
+    {
+      ...model,
+      confirm_kill_orb_id: model.selected_orb.orb_id,
+      kill_orb_dialog,
+      notice: undefined,
+    },
+    Command.mapMessages(dialogCommands, (childMessage) => GotKillOrbDialogMessage({ message: childMessage })),
+  ]
+}
+
+const killOrbDialogModel = (
+  model: Model,
+  message: AlertDialog.Message,
+): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [kill_orb_dialog, dialogCommands, maybeOutMessage] = AlertDialog.update(model.kill_orb_dialog, message)
+  return [
+    {
+      ...model,
+      kill_orb_dialog,
+      confirm_kill_orb_id: dialogWasClosed(maybeOutMessage) ? undefined : model.confirm_kill_orb_id,
+    },
+    Command.mapMessages(dialogCommands, (childMessage) => GotKillOrbDialogMessage({ message: childMessage })),
+  ]
+}
+
+const cancelKillOrbModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
+  const [kill_orb_dialog, dialogCommands] = AlertDialog.close(model.kill_orb_dialog)
+  return [
+    { ...model, confirm_kill_orb_id: undefined, kill_orb_dialog, notice: undefined },
+    Command.mapMessages(dialogCommands, (childMessage) => GotKillOrbDialogMessage({ message: childMessage })),
+  ]
+}
+
 const receivedEventModel = (model: Model, event: Event.Event): readonly [Model, ReadonlyArray<AppCommand>] => {
   if (model.subscribed_thread_id === undefined || event.thread_id !== model.subscribed_thread_id) return [model, []]
   if (event.sequence <= model.last_sequence) return [model, []]
@@ -2101,15 +2275,20 @@ const drainQueuedMessagesModel = (model: Model): readonly [Model, ReadonlyArray<
 
 const selectedOrbLoadedModel = (model: Model, orb: Remote.OrbSummary): readonly [Model, ReadonlyArray<AppCommand>] => {
   if (model.selected_thread_id !== orb.thread_id) return [model, []]
+  const keepsPendingKill = model.confirm_kill_orb_id === orb.orb_id && orb.status !== "killed"
+  const [kill_orb_dialog, dialogCommands] = keepsPendingKill
+    ? ([model.kill_orb_dialog, []] as const)
+    : AlertDialog.close(model.kill_orb_dialog)
   return [
     {
       ...model,
       selected_orb: orb,
-      confirm_kill_orb_id: undefined,
+      confirm_kill_orb_id: keepsPendingKill ? model.confirm_kill_orb_id : undefined,
+      kill_orb_dialog,
       threads: updateThreadOrbStatus(model.threads, orb),
       notice: undefined,
     },
-    [],
+    Command.mapMessages(dialogCommands, (childMessage) => GotKillOrbDialogMessage({ message: childMessage })),
   ]
 }
 
@@ -2127,9 +2306,13 @@ const selectedOrbActionModel = (
 
 const confirmedKillOrbModel = (model: Model): readonly [Model, ReadonlyArray<AppCommand>] => {
   if (model.selected_orb === undefined || model.confirm_kill_orb_id !== model.selected_orb.orb_id) return [model, []]
+  const [kill_orb_dialog, dialogCommands] = AlertDialog.close(model.kill_orb_dialog)
   return [
-    { ...model, confirm_kill_orb_id: undefined, notice: undefined },
-    [KillSelectedOrb({ api_base_url: model.api_base_url, orb_id: model.selected_orb.orb_id })],
+    { ...model, confirm_kill_orb_id: undefined, kill_orb_dialog, notice: undefined },
+    [
+      KillSelectedOrb({ api_base_url: model.api_base_url, orb_id: model.selected_orb.orb_id }),
+      ...Command.mapMessages(dialogCommands, (childMessage) => GotKillOrbDialogMessage({ message: childMessage })),
+    ],
   ]
 }
 
@@ -2459,6 +2642,8 @@ const lastEventSequence = (events: ReadonlyArray<Event.Event>) => events.at(-1)?
 const initialOrbWorkspace = () => ({
   selected_orb_tab: "transcript" as const,
   orb_tabs: Tabs.init({ id: "orb-tabs" }),
+  transcript_scroller: MessageScroller.init({ id: "transcript-scroller" }),
+  kill_orb_dialog: AlertDialog.init({ id: "kill-orb-dialog" }),
   orb_files: initialOrbFiles(),
   orb_changes: { state: "idle" as const },
   orb_terminal_status: "idle" as const,
@@ -2482,6 +2667,7 @@ const diffRows = (input: {
     | Event.ToolCallCompleted["data"]["result"]["output"]
     | Event.ArtifactCreated["data"]["artifact"]["content"]
   readonly expandedDiffIds: ReadonlySet<string>
+  readonly collapsedTranscriptRowIds: ReadonlySet<string>
 }): ReadonlyArray<TranscriptRow> | undefined => {
   const payloads = collectPierreDiffPayloads(input.value)
   if (payloads.length === 0) return undefined
@@ -2497,6 +2683,7 @@ const diffRows = (input: {
         kind: input.fallbackKind,
         title: input.title,
         body: fileName === undefined ? "diff unavailable" : `${fileName} · diff unavailable`,
+        is_open: !input.collapsedTranscriptRowIds.has(unavailableId),
       }
     }
     return {
@@ -2536,12 +2723,17 @@ const roleLabel = (role: RikaMessage.Role) => {
   return "System"
 }
 
-const messageDisplayText = (message: RikaMessage.Message, userId: Ids.UserId | undefined): string => {
-  const text = RikaMessage.displayText(message)
+const messageAuthor = (
+  message: RikaMessage.Message,
+  userId: Ids.UserId | undefined,
+): TextTranscriptRow["author"] | undefined => {
   const messageUserId = messageUserIdFromMetadata(message)
-  return message.role === "user" && messageUserId !== undefined && (userId === undefined || messageUserId !== userId)
-    ? `${messageUserId} › ${text}`
-    : text
+  if (message.role !== "user" || messageUserId === undefined) return undefined
+  const isLocal = userId !== undefined && messageUserId === userId
+  return {
+    label: isLocal ? "User" : messageUserId,
+    is_local: isLocal,
+  }
 }
 
 const messageUserIdFromMetadata = (message: RikaMessage.Message): Ids.UserId | undefined => {

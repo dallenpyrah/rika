@@ -46,6 +46,8 @@ import {
   ChangedProjectSecretField,
   ClickedProject,
   ClickedProjects,
+  GotDeleteSecretDialogMessage,
+  GotKillOrbDialogMessage,
   ReceivedPresence,
   SubmittedNewProject,
   SubmittedProjectSecret,
@@ -56,6 +58,7 @@ import {
   subscriptions,
   update,
 } from "../src/app"
+import { CompletedCloseDialog, CompletedShowDialog } from "../src/components/ui/dialog-state"
 import type { AppCommand, AppMessage, Model } from "../src/app"
 import { orbTerminalRegistryLayer } from "../src/orb-terminal"
 import { pierreTreeRegistryLayer } from "../src/pierre-tree"
@@ -230,7 +233,7 @@ describe("web local sync e2e", () => {
 
       const [confirmingKill, firstKillCommands] = update(webModel, ClickedKillOrb())
       const preKill = await runtime.runPromise(OrbStore.get(resumed.orb_id))
-      expect(firstKillCommands).toEqual([])
+      expect(firstKillCommands.map((command) => command.name)).toEqual(["ShowDialog"])
       expect(confirmingKill.confirm_kill_orb_id).toBe(resumed.orb_id)
       expect(preKill?.status).toBe("running")
 
@@ -238,7 +241,7 @@ describe("web local sync e2e", () => {
       webModel = await runCommands(killing, killCommands)
       const killed = requireSelectedOrb(webModel)
       const killedStored = await runtime.runPromise(OrbStore.get(killed.orb_id))
-      expect(killCommands.map((command) => command.name)).toEqual(["KillSelectedOrb"])
+      expect(killCommands.map((command) => command.name)).toEqual(["KillSelectedOrb", "CloseDialog"])
       expect(killed.status).toBe("killed")
       expect(killedStored?.status).toBe("killed")
       expect(webModel.threads.find((thread) => thread.thread_id === orbThreadId)?.orb_status).toBe("killed")
@@ -542,6 +545,17 @@ const runCommands = async (initial: Model, initialCommands: ReadonlyArray<AppCom
   while (queue.length > 0) {
     const command = queue.shift()
     if (command === undefined) continue
+    if (command.name === "ShowDialog" || command.name === "CloseDialog") {
+      const childMessage = command.name === "ShowDialog" ? CompletedShowDialog() : CompletedCloseDialog()
+      const parentMessage =
+        command.args?.id === "delete-secret-dialog"
+          ? GotDeleteSecretDialogMessage({ message: childMessage })
+          : GotKillOrbDialogMessage({ message: childMessage })
+      const [next, commands] = update(model, parentMessage)
+      model = next
+      queue.push(...commands)
+      continue
+    }
     const message = await Effect.runPromise(command.effect.pipe(Effect.provide(webResourcesLayer)))
     const [next, commands] = update(model, message)
     model = next

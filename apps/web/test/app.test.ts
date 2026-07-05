@@ -18,6 +18,7 @@ import {
   ClickedKillOrb,
   ClickedNewThread,
   ClickedPauseOrb,
+  ClickedTranscriptDisclosure,
   ConfirmedKillOrb,
   ConfirmedDeleteProjectSecret,
   CreatedThread,
@@ -63,6 +64,7 @@ const workspaceId = Ids.WorkspaceId.make("workspace-web")
 const messageId = Ids.MessageId.make("message-web")
 const orbId = Ids.OrbId.make("orb-web")
 const projectId = Ids.ProjectId.make("project-web")
+const alternateProjectId = Ids.ProjectId.make("project-web-alternate")
 const userId = Ids.UserId.make("user_web")
 const otherUserId = Ids.UserId.make("sarah")
 const searchNow = Common.TimestampMillis.make(2_000_000_000_000)
@@ -311,8 +313,19 @@ describe("web app state", () => {
       secretSaved,
       ClickedDeleteProjectSecret({ name: "OPENAI_API_KEY" }),
     )
+    const [savedWhileDeleteOpen, saveWhileDeleteOpenCommands] = update(
+      confirmingDelete,
+      SavedProject({ project: savedDetail }),
+    )
+    const [switchingWhileDeleteOpen, switchWhileDeleteOpenCommands] = update(
+      confirmingDelete,
+      ClickedProject({ project_id: alternateProjectId }),
+    )
     const [cancelledDelete, cancelCommands] = update(confirmingDelete, CancelledDeleteProjectSecret())
-    const [confirmingDeleteAgain] = update(cancelledDelete, ClickedDeleteProjectSecret({ name: "OPENAI_API_KEY" }))
+    const [confirmingDeleteAgain, deleteClickAgainCommands] = update(
+      cancelledDelete,
+      ClickedDeleteProjectSecret({ name: "OPENAI_API_KEY" }),
+    )
     const [deletingSecret, deleteCommands] = update(confirmingDeleteAgain, ConfirmedDeleteProjectSecret())
 
     expect(projectsView.active_view).toBe("projects")
@@ -347,10 +360,19 @@ describe("web app state", () => {
     expect(secretSaved.selected_project?.secret_names).toEqual(["OPENAI_API_KEY"])
     expect(JSON.stringify(secretSaved)).not.toContain("secret-value")
     expect(confirmingDelete.pending_secret_delete_name).toBe("OPENAI_API_KEY")
-    expect(deleteClickCommands).toEqual([])
+    expect(confirmingDelete.delete_secret_dialog.isOpen).toBe(true)
+    expect(deleteClickCommands.map((command) => command.name)).toEqual(["ShowDialog"])
+    expect(savedWhileDeleteOpen.pending_secret_delete_name).toBeUndefined()
+    expect(savedWhileDeleteOpen.delete_secret_dialog.isOpen).toBe(false)
+    expect(saveWhileDeleteOpenCommands.map((command) => command.name)).toEqual(["CloseDialog"])
+    expect(switchingWhileDeleteOpen.pending_secret_delete_name).toBeUndefined()
+    expect(switchingWhileDeleteOpen.delete_secret_dialog.isOpen).toBe(false)
+    expect(switchWhileDeleteOpenCommands.map((command) => command.name)).toEqual(["CloseDialog", "LoadProject"])
     expect(cancelledDelete.pending_secret_delete_name).toBeUndefined()
-    expect(cancelCommands).toEqual([])
-    expect(deleteCommands.map((command) => command.name)).toEqual(["DeleteProjectSecret"])
+    expect(cancelledDelete.delete_secret_dialog.isOpen).toBe(false)
+    expect(cancelCommands.map((command) => command.name)).toEqual(["CloseDialog"])
+    expect(deleteClickAgainCommands.map((command) => command.name)).toEqual(["ShowDialog"])
+    expect(deleteCommands.map((command) => command.name)).toEqual(["DeleteProjectSecret", "CloseDialog"])
     expect(deleteCommands[0]?.args).toEqual({
       api_base_url: "/api/rika",
       project_id: project.project_id,
@@ -759,12 +781,66 @@ describe("web app state", () => {
     ])
   })
 
-  test("prefixes other users' message rows with attribution", () => {
+  test("keeps user message attribution separate from body text", () => {
     expect(eventRows([messageAdded(1, "user", "hi", otherUserId)], new Set(), userId)).toEqual([
-      { id: "event-1", sequence: 1, kind: "message", title: "User", body: "sarah › hi" },
+      {
+        id: "event-1",
+        sequence: 1,
+        kind: "message",
+        title: "User",
+        body: "hi",
+        author: { label: "sarah", is_local: false },
+      },
     ])
     expect(eventRows([messageAdded(2, "user", "mine", userId)], new Set(), userId)).toEqual([
-      { id: "event-2", sequence: 2, kind: "message", title: "User", body: "mine" },
+      {
+        id: "event-2",
+        sequence: 2,
+        kind: "message",
+        title: "User",
+        body: "mine",
+        author: { label: "User", is_local: true },
+      },
+    ])
+  })
+
+  test("toggles transcript disclosure rows by row id", () => {
+    const [collapsed] = update(
+      initialModel({ api_base_url: "/api/rika" }),
+      ClickedTranscriptDisclosure({ row_id: "event-1" }),
+    )
+    const [expanded] = update(collapsed, ClickedTranscriptDisclosure({ row_id: "event-1" }))
+
+    expect(collapsed.collapsed_transcript_row_ids).toEqual(["event-1"])
+    expect(expanded.collapsed_transcript_row_ids).toEqual([])
+    expect(
+      eventRows(
+        [reasoningDelta(1, "checking files")],
+        new Set(),
+        userId,
+        new Set(collapsed.collapsed_transcript_row_ids),
+      ),
+    ).toEqual([
+      {
+        id: "event-1",
+        sequence: 1,
+        kind: "event",
+        title: "Reasoning",
+        body: "checking files",
+        is_open: false,
+      },
+    ])
+    expect(
+      eventRows([toolInputStarted(1, "write")], new Set(), userId, new Set(collapsed.collapsed_transcript_row_ids)),
+    ).toEqual([
+      {
+        id: "event-1",
+        sequence: 1,
+        kind: "tool",
+        title: "Tool input: write",
+        body: "Started",
+        is_open: false,
+      },
     ])
   })
 
@@ -846,6 +922,7 @@ describe("web app state", () => {
         kind: "tool",
         title: "Tool: edit",
         body: "src/broken.ts · diff unavailable",
+        is_open: true,
       },
     ])
   })
@@ -1110,6 +1187,8 @@ describe("web app state", () => {
 
   test("kill requires a confirmation before sending the lifecycle command", () => {
     const running = orbSummary("running")
+    const paused = { ...running, status: "paused" as const }
+    const killed = { ...running, status: "killed" as const }
     const model = {
       ...initialModel({ api_base_url: "/api/rika" }),
       selected_thread_id: threadId,
@@ -1118,14 +1197,28 @@ describe("web app state", () => {
     }
 
     const [confirming, firstCommands] = update(model, ClickedKillOrb())
-    const [cancelled] = update(confirming, CancelledKillOrb())
+    const [refreshed, refreshCommands] = update(confirming, UpdatedSelectedOrb({ orb: paused }))
+    const [cancelled, cancelCommands] = update(confirming, CancelledKillOrb())
     const [confirmed, secondCommands] = update(confirming, ConfirmedKillOrb())
+    const [killedRefresh, killedRefreshCommands] = update(confirming, UpdatedSelectedOrb({ orb: killed }))
+    const [confirmedAfterKilled, confirmedAfterKilledCommands] = update(killedRefresh, ConfirmedKillOrb())
 
-    expect(firstCommands).toEqual([])
+    expect(firstCommands.map((command) => command.name)).toEqual(["ShowDialog"])
     expect(confirming.confirm_kill_orb_id).toBe(orbId)
+    expect(confirming.kill_orb_dialog.isOpen).toBe(true)
+    expect(refreshed.confirm_kill_orb_id).toBe(orbId)
+    expect(refreshed.kill_orb_dialog.isOpen).toBe(true)
+    expect(refreshCommands).toEqual([])
     expect(cancelled.confirm_kill_orb_id).toBeUndefined()
-    expect(secondCommands.map((command) => command.name)).toEqual(["KillSelectedOrb"])
+    expect(cancelled.kill_orb_dialog.isOpen).toBe(false)
+    expect(cancelCommands.map((command) => command.name)).toEqual(["CloseDialog"])
+    expect(secondCommands.map((command) => command.name)).toEqual(["KillSelectedOrb", "CloseDialog"])
     expect(confirmed.confirm_kill_orb_id).toBeUndefined()
+    expect(killedRefresh.confirm_kill_orb_id).toBeUndefined()
+    expect(killedRefresh.kill_orb_dialog.isOpen).toBe(false)
+    expect(killedRefreshCommands.map((command) => command.name)).toEqual(["CloseDialog"])
+    expect(confirmedAfterKilled).toBe(killedRefresh)
+    expect(confirmedAfterKilledCommands).toEqual([])
   })
 })
 
@@ -1249,6 +1342,31 @@ const contextPruned = (sequence: number): Event.ContextPruned => ({
   data: {
     tool_call_ids: [Ids.ToolCallId.make("tool-web-a"), Ids.ToolCallId.make("tool-web-b")],
     estimated_tokens_freed: 24_000,
+  },
+})
+
+const reasoningDelta = (sequence: number, text: string): Event.ModelReasoningDelta => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: Ids.TurnId.make("turn-web"),
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "model.reasoning.delta",
+  data: { text, provider: "openai", model: "gpt-5.5" },
+})
+
+const toolInputStarted = (sequence: number, name: string): Event.ToolCallInputStarted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: Ids.TurnId.make("turn-web"),
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "tool.call.input.started",
+  data: {
+    id: Ids.ToolCallId.make(`tool-web-${sequence}`),
+    name,
   },
 })
 
