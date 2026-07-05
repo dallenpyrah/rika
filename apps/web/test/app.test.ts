@@ -55,6 +55,7 @@ import {
   subscriptions,
   update,
 } from "../src/app"
+import type { Model } from "../src/app"
 
 const threadId = Ids.ThreadId.make("thread-web")
 const alternateThreadId = Ids.ThreadId.make("thread-web-alternate")
@@ -135,8 +136,8 @@ describe("web app state", () => {
     expect(listed.orb_files.paths).toEqual(["src/", "README.md"])
     expect(listed.orb_files.path_kinds).toEqual({ src: "dir", "README.md": "file" })
     expect(selected.orb_files.opened_file).toEqual({ state: "loading", path: "README.md" })
-    expect(selectCommands.map((command) => command.name)).toEqual(["LoadOrbFile"])
-    expect(selectCommands[0]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, path: "README.md" })
+    expect(selectCommands.map((command) => command.name)).toEqual(["UpdatePierreTree", "LoadOrbFile"])
+    expect(selectCommands[1]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, path: "README.md" })
     expect(opened.orb_files.opened_file).toEqual({
       state: "text",
       path: "README.md",
@@ -166,6 +167,37 @@ describe("web app state", () => {
     expect(selected.orb_files.opened_file).toEqual({ state: "idle" })
     expect(commands.map((command) => command.name)).toEqual(["LoadOrbDirectory"])
     expect(commands[0]?.args).toEqual({ api_base_url: "/api/rika", thread_id: threadId, path: "src" })
+  })
+
+  test("updates the mounted Pierre tree for file selections and lazy directory loads", () => {
+    const model = activeFilesModel()
+
+    const [selected, selectCommands] = update(model, SelectedOrbFile({ path: "README.md" }))
+    const [loaded, loadCommands] = update(
+      model,
+      LoadedOrbDirectory({
+        response: {
+          path: "src",
+          entries: [{ name: "index.ts", path: "src/index.ts", kind: "file", size: 6 }],
+        },
+      }),
+    )
+
+    expect(selected.orb_files.selected_path).toBe("README.md")
+    expect(selectCommands.map((command) => command.name)).toEqual(["UpdatePierreTree", "LoadOrbFile"])
+    expect(selectCommands[0]?.args).toEqual({
+      mount_key: `orb-tree:${threadId}:${orbId}`,
+      paths: ["src/", "README.md"],
+      selected_path: "README.md",
+      git_status: [],
+    })
+    expect(loaded.orb_files.paths).toEqual(["src/", "README.md", "src/index.ts"])
+    expect(loadCommands.map((command) => command.name)).toEqual(["UpdatePierreTree"])
+    expect(loadCommands[0]?.args).toEqual({
+      mount_key: `orb-tree:${threadId}:${orbId}`,
+      paths: ["src/", "README.md", "src/index.ts"],
+      git_status: [],
+    })
   })
 
   test("loads and parses orb changes through the selected thread endpoint", () => {
@@ -209,6 +241,28 @@ describe("web app state", () => {
       file_name: "README.md",
       additions: 1,
       deletions: 0,
+    })
+  })
+
+  test("derives Pierre tree git status from loaded orb changes", () => {
+    const [loaded, commands] = update(
+      activeFilesModel(),
+      LoadedOrbChanges({
+        response: {
+          base_commit: "abc123",
+          head_commit: "def456",
+          dirty: true,
+          diff: gitPatch("README.md"),
+        },
+      }),
+    )
+
+    expect(loaded.orb_files.git_status).toEqual([{ path: "README.md", status: "modified" }])
+    expect(commands.map((command) => command.name)).toEqual(["UpdatePierreTree"])
+    expect(commands[0]?.args).toEqual({
+      mount_key: `orb-tree:${threadId}:${orbId}`,
+      paths: ["src/", "README.md"],
+      git_status: [{ path: "README.md", status: "modified" }],
     })
   })
 
@@ -331,6 +385,7 @@ describe("web app state", () => {
         payload_id: "orb-changes:0:0",
         file_name: "image.bin",
         reason: "No renderable hunks",
+        git_status: { path: "image.bin", status: "added" },
       },
     ])
   })
@@ -1103,6 +1158,21 @@ const orbSummary = (status: Remote.OrbSummary["status"]): Remote.OrbSummary => (
   created_at: 1,
   last_active_at: 121_001,
   running_minutes: 7,
+})
+
+const activeFilesModel = (): Model => ({
+  ...initialModel({ api_base_url: "/api/rika" }),
+  selected_thread_id: threadId,
+  selected_orb: orbSummary("running"),
+  selected_orb_tab: "files",
+  orb_tabs: tabModel(1),
+  threads: [summary(threadId, { orb_status: "running" })],
+  orb_files: {
+    ...initialModel({ api_base_url: "/api/rika" }).orb_files,
+    directories: { "": { state: "loaded" } },
+    paths: ["src/", "README.md"],
+    path_kinds: { src: "dir", "README.md": "file" },
+  },
 })
 
 const projectSummary = (): Remote.ProjectSummary => ({

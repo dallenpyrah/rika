@@ -40,6 +40,7 @@ import {
   contextUsage,
   eventRows,
   OrbTabItems,
+  pierreTreeMountKey,
   type AppMessage,
   type ContextUsage,
   type Model,
@@ -775,7 +776,12 @@ const activeTitle = (model: Model) => {
 const orbTreeMountArgs = (model: Model) => {
   const selected = selectedTreePath(model)
   return {
+    mount_key:
+      model.selected_thread_id === undefined || model.selected_orb === undefined
+        ? "orb-tree:unmounted"
+        : pierreTreeMountKey(model.selected_thread_id, model.selected_orb.orb_id),
     paths: model.orb_files.paths,
+    git_status: model.orb_files.git_status,
     ...(selected === undefined ? {} : { selected_path: selected }),
   }
 }
@@ -786,7 +792,10 @@ const selectedTreePath = (model: Model) => {
   return model.orb_files.path_kinds[selected] === "dir" ? `${selected}/` : selected
 }
 
-const orbTreeKey = (model: Model) => `${model.orb_files.paths.join("\n")}\n${selectedTreePath(model) ?? ""}`
+const orbTreeKey = (model: Model) =>
+  model.selected_thread_id === undefined || model.selected_orb === undefined
+    ? "orb-tree:unmounted"
+    : pierreTreeMountKey(model.selected_thread_id, model.selected_orb.orb_id)
 
 const orbTerminalKey = (thread_id: NonNullable<Model["selected_thread_id"]>) => `orb-terminal:${thread_id}`
 

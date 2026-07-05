@@ -58,6 +58,9 @@ import {
 } from "../src/app"
 import type { AppCommand, AppMessage, Model } from "../src/app"
 import { orbTerminalRegistryLayer } from "../src/orb-terminal"
+import { pierreTreeRegistryLayer } from "../src/pierre-tree"
+
+const webResourcesLayer = Layer.mergeAll(orbTerminalRegistryLayer, pierreTreeRegistryLayer)
 
 const threadId = Ids.ThreadId.make("thread_web_e2e_sync")
 const orbThreadId = Ids.ThreadId.make("thread_web_orb_controls")
@@ -539,7 +542,7 @@ const runCommands = async (initial: Model, initialCommands: ReadonlyArray<AppCom
   while (queue.length > 0) {
     const command = queue.shift()
     if (command === undefined) continue
-    const message = await Effect.runPromise(command.effect.pipe(Effect.provide(orbTerminalRegistryLayer)))
+    const message = await Effect.runPromise(command.effect.pipe(Effect.provide(webResourcesLayer)))
     const [next, commands] = update(model, message)
     model = next
     queue.push(...commands)

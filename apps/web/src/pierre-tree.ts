@@ -1,4 +1,11 @@
-import { FileTree, type FileTreeOptions, type GitStatusEntry } from "@pierre/trees"
+import {
+  FileTree,
+  type FileTreeDirectoryHandle,
+  type FileTreeItemHandle,
+  type FileTreeOptions,
+  type GitStatusEntry,
+} from "@pierre/trees"
+import { Context, Effect, HashMap, Layer, Option, Ref } from "effect"
 
 export interface PierreTreeInput {
   readonly paths: ReadonlyArray<string>
@@ -17,11 +24,61 @@ export interface PierreTreeHandle {
   readonly destroy: () => void
 }
 
+export interface PierreTreeRegistryInterface {
+  readonly register: (key: string, handle: PierreTreeHandle) => Effect.Effect<void>
+  readonly unregister: (key: string, handle: PierreTreeHandle) => Effect.Effect<void>
+  readonly update: (key: string, input: PierreTreeInput) => Effect.Effect<boolean>
+}
+
+export class PierreTreeRegistry extends Context.Service<PierreTreeRegistry, PierreTreeRegistryInterface>()(
+  "@rika/web/PierreTreeRegistry",
+) {}
+
+export const pierreTreeRegistryLayer = Layer.effect(
+  PierreTreeRegistry,
+  Effect.gen(function* () {
+    const emptyHandles: HashMap.HashMap<string, PierreTreeHandle> = HashMap.empty()
+    const handles = yield* Ref.make(emptyHandles)
+    const register: PierreTreeRegistryInterface["register"] = Effect.fn("PierreTreeRegistry.register")(
+      (key: string, handle: PierreTreeHandle) => Ref.update(handles, (current) => HashMap.set(current, key, handle)),
+    )
+    const unregister: PierreTreeRegistryInterface["unregister"] = Effect.fn("PierreTreeRegistry.unregister")(
+      (key: string, handle: PierreTreeHandle) =>
+        Ref.update(handles, (current) =>
+          Option.match(HashMap.get(current, key), {
+            onNone: () => current,
+            onSome: (currentHandle) => (currentHandle === handle ? HashMap.remove(current, key) : current),
+          }),
+        ),
+    )
+    const update: PierreTreeRegistryInterface["update"] = Effect.fn("PierreTreeRegistry.update")(function* (
+      key: string,
+      input: PierreTreeInput,
+    ) {
+      const current = yield* Ref.get(handles)
+      const handle = Option.getOrUndefined(HashMap.get(current, key))
+      if (handle === undefined) return false
+      yield* Effect.sync(() => handle.update(input))
+      return true
+    })
+    return PierreTreeRegistry.of({ register, unregister, update })
+  }),
+)
+
+export const updatePierreTree = Effect.fn("PierreTreeRegistry.update.call")(function* (
+  key: string,
+  input: PierreTreeInput,
+) {
+  const registry = yield* PierreTreeRegistry
+  return yield* registry.update(key, input)
+})
+
 export const mountPierreTree = (input: PierreTreeMountInput): PierreTreeHandle => {
   let suppressSelection = false
   const options: FileTreeOptions = {
     paths: input.paths,
-    initialExpansion: "open",
+    initialExpansion: "closed",
+    initialExpandedPaths: directoryPaths(input.paths),
     search: true,
     initialSelectedPaths: input.selected_path === undefined ? [] : [input.selected_path],
     onSelectionChange: (selectedPaths) => {
@@ -38,7 +95,7 @@ export const mountPierreTree = (input: PierreTreeMountInput): PierreTreeHandle =
     update: (next) => {
       suppressSelection = true
       try {
-        tree.resetPaths(next.paths)
+        tree.resetPaths(next.paths, { initialExpandedPaths: expandedDirectoryPaths(tree, next.paths) })
         tree.setGitStatus(next.git_status)
         for (const path of tree.getSelectedPaths()) tree.getItem(path)?.deselect()
         if (next.selected_path !== undefined) tree.getItem(next.selected_path)?.select()
@@ -57,3 +114,16 @@ export const mountPierreTree = (input: PierreTreeMountInput): PierreTreeHandle =
     },
   }
 }
+
+const expandedDirectoryPaths = (tree: FileTree, paths: ReadonlyArray<string>): ReadonlyArray<string> =>
+  paths.filter((path) => {
+    if (!path.endsWith("/")) return false
+    const item = tree.getItem(path)
+    return isDirectoryHandle(item) && item.isExpanded()
+  })
+
+const directoryPaths = (paths: ReadonlyArray<string>): ReadonlyArray<string> =>
+  paths.filter((path) => path.endsWith("/"))
+
+const isDirectoryHandle = (item: FileTreeItemHandle | null): item is FileTreeDirectoryHandle =>
+  item?.isDirectory() === true

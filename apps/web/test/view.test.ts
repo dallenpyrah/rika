@@ -105,6 +105,43 @@ describe("web app view", () => {
     )
   })
 
+  test("keys the Pierre tree mount by selected thread and orb", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(filesModel()),
+      Scene.tap((simulation) => expect(treeMountKey(simulation.html)).toBe(`orb-tree:${threadId}:${orbId}`)),
+      Scene.Mount.resolve(MountPierreTree, RenderedPierreTree({ selected_path: "README.md" })),
+    )
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with({
+        ...filesModel(),
+        selected_thread_id: secondThreadId,
+        selected_orb: {
+          ...orbSummary("running"),
+          orb_id: Ids.OrbId.make("orb-view-second"),
+          thread_id: secondThreadId,
+        },
+      }),
+      Scene.tap((simulation) =>
+        expect(treeMountKey(simulation.html)).toBe(`orb-tree:${secondThreadId}:orb-view-second`),
+      ),
+      Scene.Mount.resolve(MountPierreTree, RenderedPierreTree({ selected_path: "README.md" })),
+    )
+  })
+
+  test("passes git status markers into the Pierre tree mount", () => {
+    Scene.scene(
+      { update, view: View.view },
+      Scene.with(filesWithChangesModel()),
+      Scene.tap(({ mounts }) => {
+        const tree = mounts.find((mount) => mount.name === "MountPierreTree")
+        expect(tree?.args?.git_status).toEqual([{ path: "README.md", status: "modified" }])
+      }),
+      Scene.Mount.resolve(MountPierreTree, RenderedPierreTree({ selected_path: "README.md" })),
+    )
+  })
+
   test("renders terminal failure status from the model", () => {
     Scene.scene(
       { update, view: View.view },
@@ -286,6 +323,21 @@ const filesModel = (): Model => {
   return opened
 }
 
+const filesWithChangesModel = (): Model => {
+  const [loaded] = update(
+    filesModel(),
+    LoadedOrbChanges({
+      response: {
+        base_commit: "abc123",
+        head_commit: "def456",
+        dirty: true,
+        diff: gitPatch("README.md"),
+      },
+    }),
+  )
+  return loaded
+}
+
 const changesModel = (): Model => {
   const [loaded] = update(
     orbModel("changes", 2),
@@ -388,6 +440,20 @@ const terminalMountKey = (html: Html): string | undefined => {
   for (const child of html.children ?? []) {
     if (typeof child !== "string") {
       const key = terminalMountKey(child)
+      if (key !== undefined) return key
+    }
+  }
+  return undefined
+}
+
+const treeMountKey = (html: Html): string | undefined => {
+  if (html === null) return undefined
+  if (html.data?.attrs?.["data-pierre-tree"] === "") {
+    return typeof html.data.key === "string" ? html.data.key : undefined
+  }
+  for (const child of html.children ?? []) {
+    if (typeof child !== "string") {
+      const key = treeMountKey(child)
       if (key !== undefined) return key
     }
   }

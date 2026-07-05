@@ -1,4 +1,4 @@
-import { Common, Event, Ids, Message as RikaMessage, Remote } from "@rika/schema"
+import { Common, Event, Ids, Message as RikaMessage, PierreDiff, Remote } from "@rika/schema"
 import { Client } from "@rika/sdk"
 import * as ModelInfo from "@rika/llm/model-info"
 import { parsePatchFiles } from "@pierre/diffs"
@@ -17,7 +17,7 @@ import {
   toWebPierreDiff,
   type WebPierreDiff,
 } from "./pierre-diff"
-import { mountPierreTree } from "./pierre-tree"
+import { PierreTreeRegistry, mountPierreTree, updatePierreTree } from "./pierre-tree"
 import { OrbTerminalRegistry, mountOrbTerminal, reconnectOrbTerminal } from "./orb-terminal"
 
 export const Connection = S.Literals(["idle", "loading", "connected", "failed"])
@@ -50,11 +50,21 @@ export const OrbOpenedFile = S.Union([
 ])
 export type OrbOpenedFile = typeof OrbOpenedFile.Type
 
+export const PierreTreeGitStatus = S.Literals(["added", "deleted", "ignored", "modified", "renamed", "untracked"])
+export type PierreTreeGitStatus = typeof PierreTreeGitStatus.Type
+
+export const PierreTreeGitStatusEntry = S.Struct({
+  path: S.String,
+  status: PierreTreeGitStatus,
+})
+export type PierreTreeGitStatusEntry = typeof PierreTreeGitStatusEntry.Type
+
 export const OrbFilesModel = S.Struct({
   directories: S.Record(S.String, OrbDirectoryState),
   paths: S.Array(S.String),
   path_kinds: S.Record(S.String, Remote.OrbFileKind),
   selected_path: S.optional(S.String),
+  git_status: S.Array(PierreTreeGitStatusEntry),
   opened_file: OrbOpenedFile,
 })
 export type OrbFilesModel = typeof OrbFilesModel.Type
@@ -65,7 +75,8 @@ export const OrbChangeDiff = S.Struct({
   file_name: S.String,
   additions: S.Int,
   deletions: S.Int,
-  file_diff: S.Unknown,
+  file_diff: PierreDiff.FileDiffMetadata,
+  git_status: PierreTreeGitStatusEntry,
 })
 export type OrbChangeDiff = typeof OrbChangeDiff.Type
 
@@ -74,6 +85,7 @@ export const OrbChangeSkipped = S.Struct({
   payload_id: S.String,
   file_name: S.String,
   reason: S.String,
+  git_status: PierreTreeGitStatusEntry,
 })
 export type OrbChangeSkipped = typeof OrbChangeSkipped.Type
 
@@ -389,11 +401,11 @@ type PierreTreeMessage =
 
 type OrbTerminalMessage = typeof TerminalStatusChanged.Type | typeof TerminalFailed.Type
 
-export type AppCommand = Command.Command<AppMessage, never, OrbTerminalRegistry>
+export type AppCommand = Command.Command<AppMessage, never, OrbTerminalRegistry | PierreTreeRegistry>
 
 export const MountPierreDiff = Mount.define(
   "MountPierreDiff",
-  { payload_id: S.String, file_diff: S.Unknown, theme_type: S.Literals(["light", "dark"]) },
+  { payload_id: S.String, file_diff: PierreDiff.FileDiffMetadata, theme_type: S.Literals(["light", "dark"]) },
   RenderedPierreDiff,
   FailedRenderPierreDiff,
 )(
@@ -439,31 +451,46 @@ export const MountPierreDiff = Mount.define(
 
 export const MountPierreTree = Mount.defineStream(
   "MountPierreTree",
-  { paths: S.Array(S.String), selected_path: S.optional(S.String) },
+  {
+    mount_key: S.String,
+    paths: S.Array(S.String),
+    selected_path: S.optional(S.String),
+    git_status: S.Array(PierreTreeGitStatusEntry),
+  },
   RenderedPierreTree,
   SelectedOrbFile,
   FailedRenderPierreTree,
 )(
-  ({ paths, selected_path }) =>
+  ({ mount_key, paths, selected_path, git_status }) =>
     (element) =>
-      Stream.callback<PierreTreeMessage>((queue) =>
+      Stream.callback<PierreTreeMessage, never, PierreTreeRegistry>((queue) =>
         Effect.gen(function* () {
           if (!(element instanceof HTMLElement)) {
             Queue.offerUnsafe(queue, FailedRenderPierreTree({ message: "tree mount target unavailable" }))
             return yield* Effect.never
           }
+          const registry = yield* PierreTreeRegistry
           yield* Effect.acquireRelease(
-            Effect.try({
-              try: () =>
-                mountPierreTree({
-                  container: element,
-                  paths,
-                  ...(selected_path === undefined ? {} : { selected_path }),
-                  onSelectedPath: (path) => Queue.offerUnsafe(queue, SelectedOrbFile({ path })),
-                }),
-              catch: (cause: unknown) => cause,
+            Effect.gen(function* () {
+              const handle = yield* Effect.try({
+                try: () =>
+                  mountPierreTree({
+                    container: element,
+                    paths,
+                    git_status,
+                    ...(selected_path === undefined ? {} : { selected_path }),
+                    onSelectedPath: (path) => Queue.offerUnsafe(queue, SelectedOrbFile({ path })),
+                  }),
+                catch: (cause: unknown) => cause,
+              })
+              yield* registry.register(mount_key, handle)
+              return handle
             }),
-            (handle) => Effect.sync(() => handle.destroy()),
+            (handle) =>
+              Effect.gen(function* () {
+                yield* registry.unregister(mount_key, handle)
+                yield* Effect.sync(() => handle.destroy())
+              }),
           )
           Queue.offerUnsafe(
             queue,
@@ -481,7 +508,7 @@ export const MountPierreTree = Mount.defineStream(
             }),
           ),
         ),
-      ),
+      ) as Stream.Stream<PierreTreeMessage>,
 )
 
 export const MountOrbTerminal = Mount.defineStream(
@@ -878,6 +905,29 @@ export const ReconnectOrbTerminal = Command.define(
       reconnected
         ? TerminalStatusChanged({ status: "connecting" })
         : TerminalFailed({ message: "terminal is not mounted" }),
+    ),
+  ),
+)
+
+export const UpdatePierreTree = Command.define(
+  "UpdatePierreTree",
+  {
+    mount_key: S.String,
+    paths: S.Array(S.String),
+    selected_path: S.optional(S.String),
+    git_status: S.Array(PierreTreeGitStatusEntry),
+  },
+  RenderedPierreTree,
+  FailedRenderPierreTree,
+)(({ mount_key, paths, selected_path, git_status }) =>
+  updatePierreTree(mount_key, {
+    paths,
+    git_status,
+    ...(selected_path === undefined ? {} : { selected_path }),
+  }).pipe(
+    Effect.map(() => (selected_path === undefined ? RenderedPierreTree({}) : RenderedPierreTree({ selected_path }))),
+    Effect.catch((cause: unknown) =>
+      Effect.succeed(FailedRenderPierreTree({ message: cause instanceof Error ? cause.message : String(cause) })),
     ),
   ),
 )
@@ -2087,16 +2137,20 @@ const loadOrbDirectoryModel = (model: Model, path: string): readonly [Model, Rea
   if (model.selected_thread_id === undefined || model.selected_orb === undefined) return [model, []]
   const state = model.orb_files.directories[path]
   if (state?.state === "loading" || state?.state === "loaded") return [model, []]
-  return [
-    {
-      ...model,
-      orb_files: {
-        ...model.orb_files,
-        directories: { ...model.orb_files.directories, [path]: { state: "loading" } },
-      },
-      notice: undefined,
+  const next = {
+    ...model,
+    orb_files: {
+      ...model.orb_files,
+      directories: { ...model.orb_files.directories, [path]: { state: "loading" as const } },
     },
-    [LoadOrbDirectory({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, path })],
+    notice: undefined,
+  }
+  return [
+    next,
+    [
+      ...pierreTreeUpdateCommands(next),
+      LoadOrbDirectory({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, path }),
+    ],
   ]
 }
 
@@ -2118,19 +2172,17 @@ const loadedOrbDirectoryModel = (
     pathKinds[entry.path] = entry.kind
     return treePath(entry)
   })
-  return [
-    {
-      ...model,
-      orb_files: {
-        ...model.orb_files,
-        directories: { ...model.orb_files.directories, [response.path]: { state: "loaded" } },
-        paths: mergeTreePaths(model.orb_files.paths, treePaths),
-        path_kinds: pathKinds,
-      },
-      notice: undefined,
+  const next = {
+    ...model,
+    orb_files: {
+      ...model.orb_files,
+      directories: { ...model.orb_files.directories, [response.path]: { state: "loaded" as const } },
+      paths: mergeTreePaths(model.orb_files.paths, treePaths),
+      path_kinds: pathKinds,
     },
-    [],
-  ]
+    notice: undefined,
+  }
+  return [next, pierreTreeUpdateCommands(next)]
 }
 
 const failedLoadOrbDirectoryModel = (
@@ -2163,17 +2215,21 @@ const selectedOrbFileModel = (model: Model, path: string): readonly [Model, Read
     return [next, commands]
   }
   if (model.selected_thread_id === undefined || model.selected_orb === undefined) return [model, []]
-  return [
-    {
-      ...model,
-      orb_files: {
-        ...model.orb_files,
-        selected_path: normalized,
-        opened_file: { state: "loading", path: normalized },
-      },
-      notice: undefined,
+  const next = {
+    ...model,
+    orb_files: {
+      ...model.orb_files,
+      selected_path: normalized,
+      opened_file: { state: "loading" as const, path: normalized },
     },
-    [LoadOrbFile({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, path: normalized })],
+    notice: undefined,
+  }
+  return [
+    next,
+    [
+      ...pierreTreeUpdateCommands(next),
+      LoadOrbFile({ api_base_url: model.api_base_url, thread_id: model.selected_thread_id, path: normalized }),
+    ],
   ]
 }
 
@@ -2219,7 +2275,16 @@ const loadedOrbChangesModel = (
   response: Remote.OrbChangesResponse,
 ): readonly [Model, ReadonlyArray<AppCommand>] => {
   const parsed = parseOrbChanges(response)
-  return [{ ...model, orb_changes: parsed, notice: parsed.state === "failed" ? parsed.message : undefined }, []]
+  const next = {
+    ...model,
+    orb_changes: parsed,
+    orb_files: {
+      ...model.orb_files,
+      git_status: parsed.state === "loaded" ? gitStatusFromOrbChanges(parsed.diffs) : [],
+    },
+    notice: parsed.state === "failed" ? parsed.message : undefined,
+  }
+  return [next, pierreTreeUpdateCommands(next)]
 }
 
 const parseOrbChanges = (response: Remote.OrbChangesResponse): OrbChangesModel => {
@@ -2231,19 +2296,30 @@ const parseOrbChanges = (response: Remote.OrbChangesResponse): OrbChangesModel =
         parsedFileNames.add(fileDiff.name)
         const payloadId = `orb-changes:${patchIndex}:${fileIndex}`
         if (fileDiff.hunks.length === 0) {
-          return { kind: "skipped", payload_id: payloadId, file_name: fileDiff.name, reason: "No renderable hunks" }
+          return {
+            kind: "skipped",
+            payload_id: payloadId,
+            file_name: fileDiff.name,
+            reason: "No renderable hunks",
+            git_status: gitStatusFromFileDiff(fileDiff),
+          }
         }
-        return { kind: "diff", ...toWebPierreDiffFromFileDiff(fileDiff, payloadId) }
+        return {
+          kind: "diff",
+          ...toWebPierreDiffFromFileDiff(fileDiff, payloadId),
+          git_status: gitStatusFromFileDiff(fileDiff),
+        }
       }),
     )
-    const skipped = diffFileNames(response.diff)
-      .filter((fileName) => !parsedFileNames.has(fileName))
+    const skipped = diffFileEntries(response.diff)
+      .filter((entry) => !parsedFileNames.has(entry.file_name))
       .map(
-        (fileName, index): OrbChangeSkipped => ({
+        (entry, index): OrbChangeSkipped => ({
           kind: "skipped",
           payload_id: `orb-changes:skipped:${index}`,
-          file_name: fileName,
+          file_name: entry.file_name,
           reason: "Diff unavailable",
+          git_status: entry.git_status,
         }),
       )
     return {
@@ -2254,12 +2330,13 @@ const parseOrbChanges = (response: Remote.OrbChangesResponse): OrbChangesModel =
       diffs: [...diffs, ...skipped],
     }
   } catch (cause) {
-    const skipped = diffFileNames(response.diff).map(
-      (fileName, index): OrbChangeSkipped => ({
+    const skipped = diffFileEntries(response.diff).map(
+      (entry, index): OrbChangeSkipped => ({
         kind: "skipped",
         payload_id: `orb-changes:skipped:${index}`,
-        file_name: fileName,
+        file_name: entry.file_name,
         reason: cause instanceof Error ? cause.message : String(cause),
+        git_status: entry.git_status,
       }),
     )
     if (skipped.length > 0) {
@@ -2275,11 +2352,37 @@ const parseOrbChanges = (response: Remote.OrbChangesResponse): OrbChangesModel =
   }
 }
 
-const diffFileNames = (diff: string): ReadonlyArray<string> =>
-  diff.split("\n").flatMap((line) => {
+interface DiffFileEntry {
+  readonly file_name: string
+  readonly git_status: PierreTreeGitStatusEntry
+}
+
+const diffFileEntries = (diff: string): ReadonlyArray<DiffFileEntry> => {
+  const entries: Array<DiffFileEntry> = []
+  let current: DiffFileEntry | undefined
+  for (const line of diff.split("\n")) {
     const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line)
-    return match?.[2] === undefined ? [] : [match[2]]
-  })
+    if (match?.[2] !== undefined) {
+      if (current !== undefined) entries.push(current)
+      current = { file_name: match[2], git_status: { path: match[2], status: "modified" } }
+      continue
+    }
+    if (current === undefined) continue
+    if (line.startsWith("new file mode ") || line === "--- /dev/null") {
+      current = { ...current, git_status: { path: current.file_name, status: "added" } }
+      continue
+    }
+    if (line.startsWith("deleted file mode ") || line === "+++ /dev/null") {
+      current = { ...current, git_status: { path: current.file_name, status: "deleted" } }
+      continue
+    }
+    if (line.startsWith("rename from ") || line.startsWith("rename to ")) {
+      current = { ...current, git_status: { path: current.file_name, status: "renamed" } }
+    }
+  }
+  if (current !== undefined) entries.push(current)
+  return entries
+}
 
 const treePath = (entry: Remote.OrbFileEntry) => (entry.kind === "dir" ? `${entry.path}/` : entry.path)
 
@@ -2296,6 +2399,50 @@ const compareTreePaths = (left: string, right: string) => {
 const normalizeTreeSelection = (path: string) => {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/g, "")
   return normalized === "." ? "" : normalized
+}
+
+export const pierreTreeMountKey = (threadId: Ids.ThreadId, orbId: Ids.OrbId): string => `orb-tree:${threadId}:${orbId}`
+
+const pierreTreeUpdateCommands = (model: Model): ReadonlyArray<AppCommand> => {
+  const args = pierreTreeCommandArgs(model)
+  return args === undefined ? [] : [UpdatePierreTree(args)]
+}
+
+const pierreTreeCommandArgs = (model: Model) => {
+  if (model.selected_orb_tab !== "files") return undefined
+  if (model.selected_thread_id === undefined || model.selected_orb === undefined) return undefined
+  if (model.orb_files.paths.length === 0) return undefined
+  const selected = selectedTreePath(model.orb_files)
+  return {
+    mount_key: pierreTreeMountKey(model.selected_thread_id, model.selected_orb.orb_id),
+    paths: model.orb_files.paths,
+    git_status: model.orb_files.git_status,
+    ...(selected === undefined ? {} : { selected_path: selected }),
+  }
+}
+
+const selectedTreePath = (orbFiles: OrbFilesModel) => {
+  const selected = orbFiles.selected_path
+  if (selected === undefined) return undefined
+  return orbFiles.path_kinds[selected] === "dir" ? `${selected}/` : selected
+}
+
+const gitStatusFromOrbChanges = (diffs: ReadonlyArray<OrbChangeRow>): ReadonlyArray<PierreTreeGitStatusEntry> => {
+  const entries = new Map<string, PierreTreeGitStatusEntry>()
+  for (const diff of diffs) entries.set(diff.git_status.path, diff.git_status)
+  return [...entries.values()]
+}
+
+const gitStatusFromFileDiff = (fileDiff: PierreDiff.FileDiffMetadata): PierreTreeGitStatusEntry => ({
+  path: fileDiff.name,
+  status: gitStatusFromFileDiffType(fileDiff.type),
+})
+
+const gitStatusFromFileDiffType = (type: PierreDiff.FileDiffChangeType): PierreTreeGitStatus => {
+  if (type === "new") return "added"
+  if (type === "deleted") return "deleted"
+  if (type === "rename-pure" || type === "rename-changed") return "renamed"
+  return "modified"
 }
 
 const updateThreadOrbStatus = (
@@ -2322,6 +2469,7 @@ const initialOrbFiles = (): OrbFilesModel => ({
   directories: {},
   paths: [],
   path_kinds: {},
+  git_status: [],
   opened_file: { state: "idle" },
 })
 
