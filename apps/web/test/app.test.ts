@@ -45,6 +45,7 @@ import {
   eventRows,
   init,
   initialModel,
+  InterruptedTurn,
   update,
 } from "../src/app"
 
@@ -502,6 +503,27 @@ describe("web app state", () => {
     expect(secondCommands).toEqual([])
   })
 
+  test("treats a completed interrupt response as benign", () => {
+    const turnId = Ids.TurnId.make("turn-web-active")
+    const completed = turnCompleted(5, turnId)
+    const model = {
+      ...initialModel({ api_base_url: "/api/rika" }),
+      selected_thread_id: threadId,
+      subscribed_thread_id: threadId,
+      events: [turnStarted(4, turnId), completed],
+      last_sequence: 5,
+      subscription_after_sequence: 5,
+      pending_interrupt_turn_id: turnId,
+    }
+
+    const [next, commands] = update(model, InterruptedTurn({ event: completed }))
+
+    expect(next.pending_interrupt_turn_id).toBeUndefined()
+    expect(next.notice).toBeUndefined()
+    expect(next.events).toEqual(model.events)
+    expect(commands).toEqual([])
+  })
+
   test("applies live events once by sequence", () => {
     const event = messageAdded(5, "assistant", "streamed everywhere")
     const model = {
@@ -934,6 +956,17 @@ const turnStarted = (sequence: number, turnId: Ids.TurnId): Event.TurnStarted =>
   version: 1,
   created_at: sequence,
   type: "turn.started",
+  data: {},
+})
+
+const turnCompleted = (sequence: number, turnId: Ids.TurnId): Event.TurnCompleted => ({
+  id: Ids.EventId.make(`event-${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "turn.completed",
   data: {},
 })
 

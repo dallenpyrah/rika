@@ -110,7 +110,9 @@ export interface Interface {
     input: Authorized<Remote.SetThreadPresenceRequest>,
   ) => Effect.Effect<Remote.PresenceFrame, RunError>
   readonly startTurn: (input: Authorized<Remote.StartTurnRequest>) => Effect.Effect<Remote.StartTurnResponse, RunError>
-  readonly interruptTurn: (input: Authorized<Remote.InterruptTurnRequest>) => Effect.Effect<Event.TurnFailed, RunError>
+  readonly interruptTurn: (
+    input: Authorized<Remote.InterruptTurnRequest>,
+  ) => Effect.Effect<Event.TurnTerminal, RunError>
   readonly listArtifacts: (
     input: Authorized<Remote.ListArtifactsRequest>,
   ) => Effect.Effect<ReadonlyArray<Artifact.Artifact>, RunError>
@@ -146,8 +148,7 @@ interface ActiveThreadState {
   readonly turn_id?: Ids.TurnId
 }
 
-const activeThreadState = (userId?: Ids.UserId): ActiveThreadState =>
-  userId === undefined ? {} : { user_id: userId }
+const activeThreadState = (userId?: Ids.UserId): ActiveThreadState => (userId === undefined ? {} : { user_id: userId })
 
 export const layerWithLive = Layer.effect(
   Service,
@@ -205,6 +206,12 @@ export const layerWithLive = Layer.effect(
         .pipe(Effect.provideService(Database.Service, database))
     const latestLoggedSequence = (threadId: Ids.ThreadId) =>
       readLoggedEvents(threadId, 0).pipe(Effect.map((events) => events.at(-1)?.sequence ?? 0))
+    const requestedTurnTerminal = Effect.fn("RemoteControl.requestedTurnTerminal")(function* (
+      input: Remote.InterruptTurnRequest,
+    ) {
+      const events = yield* readLoggedEvents(input.thread_id, 0)
+      return terminalForTurn(events, input.turn_id)
+    })
     const publishLoggedEvents = (threadId: Ids.ThreadId, afterSequence: number) =>
       readLoggedEvents(threadId, afterSequence).pipe(Effect.flatMap((events) => live.publishAll(events)))
     const projectedThread = (threadId: Ids.ThreadId) =>
@@ -264,20 +271,16 @@ export const layerWithLive = Layer.effect(
         action: "write",
       })
     })
-    const logTurnFiberFailure = (
-      input: AgentLoop.RunTurnInput,
-      cause: Cause.Cause<RunError>,
-    ): Effect.Effect<void> =>
-      Diagnostics.event(
-        "remote_control.turn_fiber",
-        () => Effect.failCause(cause),
-        {
-          thread_id: input.thread_id,
-          workspace_id: input.workspace_id,
-          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
-          ...(input.mode === undefined ? {} : { mode: input.mode }),
-        },
-      ).pipe(Effect.provideService(Diagnostics.Service, diagnostics), Effect.catchCause(() => Effect.void))
+    const logTurnFiberFailure = (input: AgentLoop.RunTurnInput, cause: Cause.Cause<RunError>): Effect.Effect<void> =>
+      Diagnostics.event("remote_control.turn_fiber", () => Effect.failCause(cause), {
+        thread_id: input.thread_id,
+        workspace_id: input.workspace_id,
+        ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+        ...(input.mode === undefined ? {} : { mode: input.mode }),
+      }).pipe(
+        Effect.provideService(Diagnostics.Service, diagnostics),
+        Effect.catchCause(() => Effect.void),
+      )
     const requireInterruptMatchesActiveTurn = Effect.fn("RemoteControl.requireInterruptMatchesActiveTurn")(function* (
       input: Remote.InterruptTurnRequest,
     ) {
@@ -682,11 +685,28 @@ export const layerWithLive = Layer.effect(
       }),
       interruptTurn: Effect.fn("RemoteControl.interruptTurn")(function* (input: Remote.InterruptTurnRequest) {
         yield* requireThreadWrite(input.thread_id, authUserId(input))
+        const existingTerminal = yield* requestedTurnTerminal(input)
+        if (existingTerminal !== undefined) return existingTerminal
         const active = yield* requireInterruptMatchesActiveTurn(input)
         if (active !== undefined) yield* FiberMap.remove(turnFibers, input.thread_id)
-        const failed = yield* agentLoop.cancelTurn({ ...input, ...userIdField(requestUserId(input)) })
-        yield* live.publish(failed)
-        return failed
+        const result = yield* agentLoop.cancelTurn({ ...input, ...userIdField(requestUserId(input)) }).pipe(
+          Effect.map((cancelled) => ({
+            event: cancelled.event,
+            existing: cancelled.status === "existing",
+          })),
+          Effect.catchTag("AgentLoopError", (error) =>
+            requestedTurnTerminal(input).pipe(
+              Effect.flatMap((terminal) =>
+                terminal === undefined
+                  ? Effect.fail(error)
+                  : Effect.succeed({ event: terminal, existing: true as const }),
+              ),
+            ),
+          ),
+        )
+        if (result.existing) return result.event
+        yield* live.publish(result.event)
+        return result.event
       }),
       listArtifacts: Effect.fn("RemoteControl.listArtifacts")(function* (input: Remote.ListArtifactsRequest) {
         yield* requireThreadRead(input.thread_id, authUserId(input))
@@ -1060,6 +1080,12 @@ const latestOpenTurnId = (events: ReadonlyArray<Event.Event>): Ids.TurnId | unde
   }
   return open
 }
+
+const terminalForTurn = (events: ReadonlyArray<Event.Event>, turnId: Ids.TurnId): Event.TurnTerminal | undefined =>
+  events.findLast(
+    (event): event is Event.TurnTerminal =>
+      event.turn_id === turnId && (event.type === "turn.completed" || event.type === "turn.failed"),
+  )
 
 const toOrbSummary = Effect.fn("RemoteControl.toOrbSummary")(function* (orbs: OrbStore.Interface, orb: Orb.OrbRecord) {
   const usage = yield* orbs.usage({ orb_id: orb.orb_id })

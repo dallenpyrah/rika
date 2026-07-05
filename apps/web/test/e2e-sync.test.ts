@@ -57,6 +57,7 @@ import {
   update,
 } from "../src/app"
 import type { AppCommand, AppMessage, Model } from "../src/app"
+import { orbTerminalRegistryLayer } from "../src/orb-terminal"
 
 const threadId = Ids.ThreadId.make("thread_web_e2e_sync")
 const orbThreadId = Ids.ThreadId.make("thread_web_orb_controls")
@@ -523,7 +524,7 @@ const runCommands = async (initial: Model, initialCommands: ReadonlyArray<AppCom
   while (queue.length > 0) {
     const command = queue.shift()
     if (command === undefined) continue
-    const message = await Effect.runPromise(command.effect)
+    const message = await Effect.runPromise(command.effect.pipe(Effect.provide(orbTerminalRegistryLayer)))
     const [next, commands] = update(model, message)
     model = next
     queue.push(...commands)

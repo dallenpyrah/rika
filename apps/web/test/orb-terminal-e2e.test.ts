@@ -210,7 +210,7 @@ class FakeFitAddon {
   dispose() {}
 }
 
-const makeLayer = (pty: Layer.Layer<OrbPty.Service>) =>
+const makeLayer = (pty: Layer.Layer<OrbPty.Service, never, Diagnostics.Service>) =>
   HttpServer.layerWithOrbChanges(
     OrbChanges.testLayer({
       changes: () => Effect.succeed({ base_commit: "abc123", head_commit: "abc123", diff: "", dirty: false }),

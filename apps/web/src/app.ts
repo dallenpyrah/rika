@@ -6,7 +6,7 @@ import * as Command from "foldkit/command"
 import { m } from "foldkit/message"
 import * as Mount from "foldkit/mount"
 import * as Subscription from "foldkit/subscription"
-import { Effect, Option, Queue, Schema as S, Stream } from "effect"
+import { Effect, Option, Queue, Schema as S, Scope, Stream } from "effect"
 import * as Tabs from "./components/ui/tabs-state"
 import {
   asFileDiffMetadata,
@@ -18,7 +18,7 @@ import {
   type WebPierreDiff,
 } from "./pierre-diff"
 import { mountPierreTree } from "./pierre-tree"
-import { mountOrbTerminal, reconnectOrbTerminal } from "./orb-terminal"
+import { OrbTerminalRegistry, mountOrbTerminal, reconnectOrbTerminal } from "./orb-terminal"
 
 export const Connection = S.Literals(["idle", "loading", "connected", "failed"])
 export type Connection = typeof Connection.Type
@@ -236,7 +236,7 @@ export const AcceptedTurn = m("AcceptedTurn", { response: Remote.StartTurnRespon
 export const FailedStartTurn = m("FailedStartTurn", { message: S.String })
 export const TypingPresenceReady = m("TypingPresenceReady")
 export const ClickedInterrupt = m("ClickedInterrupt")
-export const InterruptedTurn = m("InterruptedTurn", { event: Event.TurnFailed })
+export const InterruptedTurn = m("InterruptedTurn", { event: Event.TurnTerminal })
 export const FailedInterruptTurn = m("FailedInterruptTurn", { message: S.String })
 export const ReceivedThreadEvent = m("ReceivedThreadEvent", { event: Event.Event })
 export const ReceivedPresence = m("ReceivedPresence", { presence: Remote.PresencePayload })
@@ -367,7 +367,7 @@ type PierreTreeMessage =
 
 type OrbTerminalMessage = typeof TerminalStatusChanged.Type | typeof TerminalFailed.Type
 
-export type AppCommand = Command.Command<AppMessage>
+export type AppCommand = Command.Command<AppMessage, never, OrbTerminalRegistry>
 
 export const MountPierreDiff = Mount.define(
   "MountPierreDiff",
@@ -470,37 +470,43 @@ export const MountOrbTerminal = Mount.defineStream(
 )(
   ({ thread_id }) =>
     (element) =>
-      Stream.callback<OrbTerminalMessage>((queue) =>
-        Effect.gen(function* () {
-          if (!(element instanceof HTMLElement)) {
-            Queue.offerUnsafe(queue, TerminalFailed({ message: "terminal mount target unavailable" }))
-            return yield* Effect.never
-          }
-          yield* Effect.acquireRelease(
-            Effect.sync(() => {
-              const handle = mountOrbTerminal({
-                container: element,
-                thread_id,
-                onStatus: (status) => Queue.offerUnsafe(queue, TerminalStatusChanged({ status })),
-                onError: (message) => Queue.offerUnsafe(queue, TerminalFailed({ message })),
-              })
-              void handle.activate()
-              return handle
-            }),
-            (handle) => Effect.sync(() => handle.destroy()),
-          )
-          return yield* Effect.never
-        }).pipe(
-          Effect.catch((cause: unknown) =>
-            Effect.gen(function* () {
-              Queue.offerUnsafe(
-                queue,
-                TerminalFailed({ message: cause instanceof Error ? cause.message : String(cause) }),
-              )
+      Stream.callback<OrbTerminalMessage>(
+        (queue) =>
+          Effect.gen(function* () {
+            if (!(element instanceof HTMLElement)) {
+              Queue.offerUnsafe(queue, TerminalFailed({ message: "terminal mount target unavailable" }))
               return yield* Effect.never
-            }),
-          ),
-        ),
+            }
+            const registry = yield* OrbTerminalRegistry
+            yield* Effect.acquireRelease(
+              Effect.sync(() => {
+                const handle = mountOrbTerminal(
+                  {
+                    container: element,
+                    thread_id,
+                    onStatus: (status) => Queue.offerUnsafe(queue, TerminalStatusChanged({ status })),
+                    onError: (message) => Queue.offerUnsafe(queue, TerminalFailed({ message })),
+                  },
+                  undefined,
+                  registry,
+                )
+                void handle.activate()
+                return handle
+              }),
+              (handle) => Effect.sync(() => handle.destroy()),
+            )
+            return yield* Effect.never
+          }).pipe(
+            Effect.catch((cause: unknown) =>
+              Effect.gen(function* () {
+                Queue.offerUnsafe(
+                  queue,
+                  TerminalFailed({ message: cause instanceof Error ? cause.message : String(cause) }),
+                )
+                return yield* Effect.never
+              }),
+            ),
+          ) as Effect.Effect<never, never, Scope.Scope>,
       ),
 )
 
@@ -835,10 +841,12 @@ export const ReconnectOrbTerminal = Command.define(
   TerminalStatusChanged,
   TerminalFailed,
 )(({ thread_id }) =>
-  Effect.sync(() =>
-    reconnectOrbTerminal(thread_id)
-      ? TerminalStatusChanged({ status: "connecting" })
-      : TerminalFailed({ message: "terminal is not mounted" }),
+  reconnectOrbTerminal(thread_id).pipe(
+    Effect.map((reconnected) =>
+      reconnected
+        ? TerminalStatusChanged({ status: "connecting" })
+        : TerminalFailed({ message: "terminal is not mounted" }),
+    ),
   ),
 )
 
@@ -994,7 +1002,7 @@ export const update = (model: Model, message: AppMessage): readonly [Model, Read
     case "ClickedInterrupt":
       return interruptTurnModel(model)
     case "InterruptedTurn":
-      return [model, []]
+      return [{ ...model, pending_interrupt_turn_id: undefined }, []]
     case "FailedInterruptTurn":
       return [{ ...model, pending_interrupt_turn_id: undefined, notice: message.message }, []]
     case "ReceivedThreadEvent":

@@ -455,15 +455,13 @@ describe("remote control API and SDK", () => {
     expect(preview.summary.thread_id).toBe(threadId)
     expect(preview.events.map((event) => event.type)).toEqual(["message.added", "turn.completed"])
 
-    const completedInterruptError = await Effect.runPromise(
-      client.interruptTurn({ thread_id: threadId, turn_id: turnId, reason: "already completed" }).pipe(Effect.flip),
+    const completedInterrupt = await Effect.runPromise(
+      client.interruptTurn({ thread_id: threadId, turn_id: turnId, reason: "already completed" }),
     )
     const previewAfterCompletedInterrupt = await Effect.runPromise(client.previewThread(threadId, { limit: 2 }))
-    expect(completedInterruptError).toBeInstanceOf(Client.SdkError)
-    expect(completedInterruptError).toMatchObject({
-      message: `Cannot cancel completed turn ${turnId}`,
-      operation: "requestJson",
-      status: 500,
+    expect(completedInterrupt).toMatchObject({
+      type: "turn.completed",
+      turn_id: turnId,
     })
     expect(previewAfterCompletedInterrupt.events.map((event) => event.type)).toEqual([
       "message.added",
@@ -569,12 +567,8 @@ describe("remote control API and SDK", () => {
         }),
       )
       const started = await runtime.runPromise(Deferred.await(toolStarted).pipe(Effect.timeoutOption("1 second")))
-      const beforeInterrupt = await runtime.runPromise(
-        ThreadEventLog.readThread({ thread_id: interruptThreadId }),
-      )
-      const startedTurn = beforeInterrupt.find(
-        (event): event is Event.TurnStarted => event.type === "turn.started",
-      )
+      const beforeInterrupt = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: interruptThreadId }))
+      const startedTurn = beforeInterrupt.find((event): event is Event.TurnStarted => event.type === "turn.started")
       if (startedTurn === undefined) throw new Error("Missing started turn")
 
       const interrupted = await Effect.runPromise(
@@ -624,7 +618,7 @@ describe("remote control API and SDK", () => {
     }
   })
 
-  test("interrupting a stale turn id does not stop the active turn", async () => {
+  test("interrupting a terminal stale turn id does not stop the active turn", async () => {
     const staleInterruptThreadId = Ids.ThreadId.make("thread_remote_stale_interrupt")
     const toolStarted = Effect.runSync(Deferred.make<void>())
     const releaseTool = Effect.runSync(Deferred.make<void>())
@@ -696,14 +690,12 @@ describe("remote control API and SDK", () => {
       )
       if (activeTurn === undefined) throw new Error("Missing active started turn")
 
-      const staleError = await Effect.runPromise(
-        client
-          .interruptTurn({
-            thread_id: staleInterruptThreadId,
-            turn_id: staleTurn.turn_id,
-            reason: "stale interrupt",
-          })
-          .pipe(Effect.flip),
+      const staleInterrupt = await Effect.runPromise(
+        client.interruptTurn({
+          thread_id: staleInterruptThreadId,
+          turn_id: staleTurn.turn_id,
+          reason: "stale interrupt",
+        }),
       )
       const afterStaleInterrupt = await runtime.runPromise(
         ThreadEventLog.readThread({ thread_id: staleInterruptThreadId }),
@@ -719,6 +711,17 @@ describe("remote control API and SDK", () => {
           reason: "cleanup",
         }),
       )
+      const afterCleanup = await runtime.runPromise(ThreadEventLog.readThread({ thread_id: staleInterruptThreadId }))
+      const cleanupAgain = await Effect.runPromise(
+        client.interruptTurn({
+          thread_id: staleInterruptThreadId,
+          turn_id: activeTurn.turn_id,
+          reason: "cleanup again",
+        }),
+      )
+      const afterCleanupAgain = await runtime.runPromise(
+        ThreadEventLog.readThread({ thread_id: staleInterruptThreadId }),
+      )
       await runtime.runPromise(
         Deferred.succeed(releaseTool, undefined).pipe(
           Effect.andThen(Effect.yieldNow),
@@ -731,14 +734,19 @@ describe("remote control API and SDK", () => {
       )
 
       expect(started._tag).toBe("Some")
-      expect(staleError).toBeInstanceOf(Client.SdkError)
-      expect(staleError.status).toBe(409)
+      expect(staleInterrupt).toMatchObject({ type: "turn.completed", turn_id: staleTurn.turn_id })
       expect(activeTerminalAfterStale).toHaveLength(0)
       expect(cleanup).toMatchObject({
         type: "turn.failed",
         turn_id: activeTurn.turn_id,
         data: { error: { kind: "cancelled" } },
       })
+      expect(cleanupAgain).toMatchObject({
+        type: "turn.failed",
+        turn_id: activeTurn.turn_id,
+        data: { error: { kind: "cancelled" } },
+      })
+      expect(afterCleanupAgain).toHaveLength(afterCleanup.length)
       expect(sideEffectRan).toBe(false)
       expect(sideEffectObserved._tag).toBe("None")
     } finally {

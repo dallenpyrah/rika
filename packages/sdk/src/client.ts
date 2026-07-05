@@ -93,7 +93,7 @@ export interface Interface {
   readonly subscribeThreadEvents: (input: SubscribeThreadEventsInput) => Stream.Stream<Event.Event, SdkError>
   readonly setThreadPresence: (input: Remote.SetThreadPresenceRequest) => Effect.Effect<Remote.PresenceFrame, SdkError>
   readonly startTurn: (input: Remote.StartTurnRequest) => Effect.Effect<Remote.StartTurnResponse, SdkError>
-  readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnFailed, SdkError>
+  readonly interruptTurn: (input: Remote.InterruptTurnRequest) => Effect.Effect<Event.TurnTerminal, SdkError>
   readonly listArtifacts: (
     input: Remote.ListArtifactsRequest,
   ) => Effect.Effect<ReadonlyArray<Artifact.Artifact>, SdkError>
@@ -328,7 +328,7 @@ export const make = (transport: Transport): Interface => ({
         path: "/v1/turns/interrupt",
         body: Codec.encode(Remote.InterruptTurnRequest)(withUserId(transport, input)),
       })
-      .pipe(Effect.flatMap(decodeEffect(Event.TurnFailed, "interruptTurn"))),
+      .pipe(Effect.flatMap(decodeEffect(Event.TurnTerminal, "interruptTurn"))),
   listArtifacts: (input: Remote.ListArtifactsRequest) =>
     transport
       .requestJson({ method: "GET", path: `/v1/artifacts${query(withUserId(transport, input))}` })
@@ -388,7 +388,8 @@ export const fetchTransport = (input: FetchTransportInput): Transport => {
           try: async (signal) => {
             const response = await fetchImpl(`${baseUrl}${request.path}`, fetchInit(request, input.token, signal))
             const status = response.status
-            if (!response.ok) throw apiError(await readResponseJson(response, "streamJson", status), "streamJson", status)
+            if (!response.ok)
+              throw apiError(await readResponseJson(response, "streamJson", status), "streamJson", status)
             if (response.body === null) {
               throw new SdkError({
                 message: "Rika API stream response did not include a body",

@@ -6,6 +6,12 @@ import { Diagnostics, Time } from "@rika/core"
 import { OrbChanges, OrbPty } from "@rika/orb"
 import { Effect, Layer, ManagedRuntime, Stream } from "effect"
 import { HttpServer, PresenceHub, RemoteControl } from "../src/index"
+import {
+  closeOrbPtyWebSocketHandler,
+  drainOrbPtyWebSocket,
+  openOrbPtyWebSocket,
+  type OrbPtyWebSocket,
+} from "../src/http-server"
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -70,13 +76,88 @@ describe("orb PTY WebSocket", () => {
     }
   })
 
-  test("closes a PTY session that finishes opening after the WebSocket has closed", async () => {
-    let releaseOpen: (() => void) | undefined
+  test("interrupts the PTY open when the WebSocket closes before attach", async () => {
     let openStarted: (() => void) | undefined
-    let closes = 0
+    let openInterrupted = false
     const opened = new Promise<void>((resolve) => {
       openStarted = resolve
     })
+    const pty = OrbPty.testLayer({
+      open: () =>
+        Effect.sync(() => {
+          openStarted?.()
+        }).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              openInterrupted = true
+            }),
+          ),
+        ),
+    })
+    const runtime = ManagedRuntime.make(makeLayer(pty))
+    let handle: HttpServer.ServerHandle | undefined
+    let socket: WebSocket | undefined
+
+    try {
+      handle = await runtime.runPromise(
+        HttpServer.serve({
+          port: 0,
+          token: "secret",
+          orb: true,
+          workspace_root: "/workspace/rika",
+          base_commit: "abc123",
+        }),
+      )
+      socket = await connect(`${toWsUrl(handle.url)}/v1/orb/pty?token=secret`)
+      await opened
+      socket.close()
+      await waitFor(() => openInterrupted, "delayed PTY open interrupt")
+
+      expect(openInterrupted).toBe(true)
+    } finally {
+      if (socket !== undefined) await closeSocket(socket)
+      if (handle !== undefined) await runtime.runPromise(handle.close())
+      await runtime.dispose()
+    }
+  })
+
+  test("interrupts a PTY open that is still pending when the WebSocket closes", async () => {
+    let openStarted = false
+    let openInterrupted = false
+    const data = fakeSocketData(
+      OrbPty.Service.of({
+        open: () =>
+          Effect.sync(() => {
+            openStarted = true
+          }).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                openInterrupted = true
+              }),
+            ),
+          ),
+      }),
+    )
+    const socket = fakeBunSocket(data)
+
+    openOrbPtyWebSocket(socket)
+    await waitFor(() => openStarted, "pending PTY open")
+    closeOrbPtyWebSocketHandler(socket, 1000, "client closed")
+    await waitFor(() => openInterrupted, "pending PTY open interrupt")
+
+    expect(openInterrupted).toBe(true)
+  })
+
+  test("buffers early client messages until the PTY session is attached", async () => {
+    let releaseOpen: (() => void) | undefined
+    let openStarted: (() => void) | undefined
+    const opened = new Promise<void>((resolve) => {
+      openStarted = resolve
+    })
+    const writes: Array<string> = []
+    const resizes: Array<{ readonly cols: number; readonly rows: number }> = []
     const pty = OrbPty.testLayer({
       open: () =>
         Effect.promise(
@@ -85,11 +166,15 @@ describe("orb PTY WebSocket", () => {
               openStarted?.()
               releaseOpen = () =>
                 resolve({
-                  write: () => Effect.void,
-                  resize: () => Effect.void,
-                  close: Effect.sync(() => {
-                    closes += 1
-                  }),
+                  write: (bytes) =>
+                    Effect.sync(() => {
+                      writes.push(decoder.decode(bytes))
+                    }),
+                  resize: (cols, rows) =>
+                    Effect.sync(() => {
+                      resizes.push({ cols, rows })
+                    }),
+                  close: Effect.void,
                 })
             }),
         ),
@@ -110,18 +195,122 @@ describe("orb PTY WebSocket", () => {
       )
       socket = await connect(`${toWsUrl(handle.url)}/v1/orb/pty?token=secret`)
       await opened
-      socket.close()
-      await Bun.sleep(50)
-
+      socket.send(JSON.stringify({ type: "resize", cols: 120, rows: 44 }))
+      socket.send(encoder.encode("early input\n"))
       releaseOpen?.()
-      await waitFor(() => closes === 1, "delayed PTY close")
+      await waitFor(() => writes.length === 1 && resizes.length === 1, "early PTY message replay")
 
-      expect(closes).toBe(1)
+      expect(resizes).toEqual([{ cols: 120, rows: 44 }])
+      expect(writes).toEqual(["early input\n"])
     } finally {
       if (socket !== undefined) await closeSocket(socket)
       if (handle !== undefined) await runtime.runPromise(handle.close())
       await runtime.dispose()
     }
+  })
+
+  test("closes the WebSocket when the PTY process exits", async () => {
+    let openInput: OrbPty.OpenOptions | undefined
+    const data = fakeSocketData(
+      OrbPty.Service.of({
+        open: (input) =>
+          Effect.sync(() => {
+            openInput = input
+            return {
+              write: () => Effect.void,
+              resize: () => Effect.void,
+              close: Effect.void,
+            }
+          }),
+      }),
+    )
+    const closes: Array<{ readonly code: number; readonly reason: string }> = []
+    const socket = fakeBunSocket(data, {
+      close: (code, reason) => {
+        closes.push({ code: code ?? 0, reason: reason ?? "" })
+      },
+    })
+
+    openOrbPtyWebSocket(socket)
+    await waitFor(() => openInput !== undefined, "fake PTY open")
+    await Effect.runPromise(openInput?.onExit({ source: "process", exit_code: 0, signal: null }) ?? Effect.void)
+    await waitFor(() => closes.length === 1, "PTY exit close")
+
+    expect(closes).toEqual([{ code: 1000, reason: "pty process exited" }])
+  })
+
+  test("pauses PTY output forwarding under WebSocket backpressure until drain", async () => {
+    let openInput: OrbPty.OpenOptions | undefined
+    let closeCount = 0
+    const data = fakeSocketData(
+      OrbPty.Service.of({
+        open: (input) =>
+          Effect.sync(() => {
+            openInput = input
+            return {
+              write: () => Effect.void,
+              resize: () => Effect.void,
+              close: Effect.sync(() => {
+                closeCount += 1
+              }),
+            }
+          }),
+      }),
+    )
+    const sent: Array<string> = []
+    const statuses = [-1, 3]
+    const socket = fakeBunSocket(data, {
+      send: (bytes) => {
+        sent.push(decoder.decode(bytes))
+        return statuses.shift() ?? bytes.byteLength
+      },
+    })
+
+    openOrbPtyWebSocket(socket)
+    await waitFor(() => openInput !== undefined, "fake PTY open")
+    await Effect.runPromise(openInput?.onData(encoder.encode("one")) ?? Effect.void)
+    await waitFor(() => sent.length === 1, "first backpressured send")
+    await Effect.runPromise(openInput?.onData(encoder.encode("two")) ?? Effect.void)
+    await Bun.sleep(50)
+
+    expect(sent).toEqual(["one"])
+    drainOrbPtyWebSocket(socket)
+    await waitFor(() => sent.length === 2, "drained PTY send")
+
+    expect(sent).toEqual(["one", "two"])
+    closeOrbPtyWebSocketHandler(socket, 1000, "test done")
+    await waitFor(() => closeCount === 1, "fake PTY close")
+  })
+
+  test("closes the WebSocket when PTY output is dropped by send", async () => {
+    let openInput: OrbPty.OpenOptions | undefined
+    const data = fakeSocketData(
+      OrbPty.Service.of({
+        open: (input) =>
+          Effect.sync(() => {
+            openInput = input
+            return {
+              write: () => Effect.void,
+              resize: () => Effect.void,
+              close: Effect.void,
+            }
+          }),
+      }),
+    )
+    const closes: Array<{ readonly code: number; readonly reason: string }> = []
+    const socket = fakeBunSocket(data, {
+      send: () => 0,
+      close: (code, reason) => {
+        closes.push({ code: code ?? 0, reason: reason ?? "" })
+      },
+    })
+
+    openOrbPtyWebSocket(socket)
+    await waitFor(() => openInput !== undefined, "fake PTY open")
+    await Effect.runPromise(openInput?.onData(encoder.encode("dropped")) ?? Effect.void)
+    await waitFor(() => closes.length === 1, "dropped PTY output close")
+
+    expect(closes).toEqual([{ code: 1011, reason: "pty output dropped" }])
   })
 
   test("runs a real tmux PTY locally and reconnects to the same session", async () => {
@@ -187,7 +376,7 @@ describe("orb PTY WebSocket", () => {
   }, 20_000)
 })
 
-const makeLayer = (pty: Layer.Layer<OrbPty.Service>) =>
+const makeLayer = (pty: Layer.Layer<OrbPty.Service, never, Diagnostics.Service>) =>
   HttpServer.layerWithOrbChanges(
     OrbChanges.testLayer({
       changes: () => Effect.succeed({ base_commit: "abc123", head_commit: "abc123", diff: "", dirty: false }),
@@ -344,3 +533,25 @@ const runTmux = async (tmuxDir: string, args: ReadonlyArray<string>) => {
   })
   await subprocess.exited
 }
+
+const fakeSocketData = (pty: OrbPty.Interface) => ({
+  pty,
+  diagnostics: Diagnostics.Service.of({ emit: () => Effect.void }),
+  workspace_root: "/workspace/rika",
+  cols: 80,
+  rows: 24,
+  closed: false,
+  pendingMessages: [],
+})
+
+const fakeBunSocket = (
+  data: ReturnType<typeof fakeSocketData>,
+  implementation: {
+    readonly send?: (bytes: Uint8Array) => number
+    readonly close?: (code?: number, reason?: string) => void
+  } = {},
+): OrbPtyWebSocket => ({
+  data,
+  send: (bytes: Uint8Array) => implementation.send?.(bytes) ?? bytes.byteLength,
+  close: (code?: number, reason?: string) => implementation.close?.(code, reason),
+})

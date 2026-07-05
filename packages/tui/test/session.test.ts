@@ -28,7 +28,7 @@ const fakeAgentLayer = (turns: Array<AgentLoop.RunTurnInput>) =>
         return Stream.fromIterable(turnEvents(input, "session response"))
       },
       cancelTurn: Effect.fn("Tui.Session.test.cancelTurn")(function* (input: AgentLoop.CancelTurnInput) {
-        return turnFailed(input.thread_id, input.turn_id, 1)
+        return { status: "inserted" as const, event: turnFailed(input.thread_id, input.turn_id, 1) }
       }),
     }),
   )

@@ -13,6 +13,9 @@ const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const workspaceRoot = process.env.RIKA_WORKSPACE_ROOT ?? rootDir
 const dataDir = process.env.RIKA_DATA_DIR ?? join(workspaceRoot, ".rika")
 const apiPrefix = "/api/rika"
+const bridgeHighWaterBytes = 1024 * 1024
+const bridgeLowWaterBytes = 256 * 1024
+const bridgeCloseBytes = 4 * 1024 * 1024
 type ConfigMode = "rush" | "smart" | "deep1" | "deep2" | "deep3"
 
 interface ProxyForwardTarget {
@@ -338,16 +341,46 @@ const bridgeWebSockets = (client: WebSocket, upstream: WebSocket): void => {
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING)
       upstream.close(code, reason)
   }
-  client.on("message", (data, isBinary) => {
-    if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary })
-  })
-  upstream.on("message", (data, isBinary) => {
-    if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary })
-  })
+  bridgeWebSocketDirection(client, upstream, closeBoth)
+  bridgeWebSocketDirection(upstream, client, closeBoth)
   client.once("close", (code, reason) => closeBoth(code, reason))
   upstream.once("close", (code, reason) => closeBoth(code, reason))
   client.once("error", () => closeBoth())
   upstream.once("error", () => closeBoth())
+}
+
+const bridgeWebSocketDirection = (
+  source: WebSocket,
+  target: WebSocket,
+  closeBoth: (code?: number, reason?: Buffer) => void,
+): void => {
+  let paused = false
+  const pauseSource = () => {
+    if (paused) return
+    paused = true
+    source.pause()
+  }
+  const resumeSource = () => {
+    if (!paused || target.bufferedAmount > bridgeLowWaterBytes) return
+    paused = false
+    source.resume()
+  }
+  source.on("message", (data, isBinary) => {
+    if (target.readyState !== WebSocket.OPEN) return
+    if (target.bufferedAmount > bridgeHighWaterBytes) pauseSource()
+    target.send(data, { binary: isBinary }, (error) => {
+      if (error != null) {
+        closeBoth(1011, Buffer.from("websocket bridge send failed"))
+        return
+      }
+      resumeSource()
+    })
+    if (target.bufferedAmount > bridgeCloseBytes) {
+      closeBoth(1011, Buffer.from("websocket bridge backpressure limit"))
+      return
+    }
+    if (target.bufferedAmount > bridgeHighWaterBytes) pauseSource()
+  })
 }
 
 export const resolveProxyTarget = async (input: ResolveProxyTargetInput): Promise<ProxyTarget> => {
