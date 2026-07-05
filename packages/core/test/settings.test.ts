@@ -218,6 +218,45 @@ describe("Settings", () => {
     }
   })
 
+  test("keeps integer env parsing decimal-only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-settings-decimal-env-"))
+    const home = join(root, "home")
+    const workspace = join(root, "workspace")
+    await mkdir(join(home, ".config", "rika"), { recursive: true })
+    await mkdir(join(workspace, ".rika"), { recursive: true })
+    await writeFile(
+      join(home, ".config", "rika", "settings.json"),
+      JSON.stringify({
+        "orb.idleTimeoutSeconds": 111,
+        "compaction.reserved": 222,
+      }),
+    )
+
+    try {
+      const snapshot = await Effect.runPromise(
+        Settings.snapshot.pipe(
+          Effect.provide(
+            Settings.layerFromEnv(
+              {
+                HOME: home,
+                RIKA_ORB_IDLE_TIMEOUT: "+5",
+                RIKA_COMPACTION_RESERVED: "1e3",
+              },
+              workspace,
+            ),
+          ),
+        ),
+      )
+
+      expect(snapshot.values.orb.idleTimeoutSeconds).toBe(111)
+      expect(snapshot.values.compaction.reserved).toBe(222)
+      expect(snapshot.sources["orb.idleTimeoutSeconds"]).toBe("user")
+      expect(snapshot.sources["compaction.reserved"]).toBe("user")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("warns on unknown keys and wrong value types without rejecting the file", async () => {
     const root = await mkdtemp(join(tmpdir(), "rika-settings-validation-"))
     const home = join(root, "home")

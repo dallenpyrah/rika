@@ -1,5 +1,6 @@
+import { EnvConfig } from "@rika/core"
 import { Common, ErrorEnvelope, Tool } from "@rika/schema"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Config as EffectConfig, Context, Effect, Layer, Schema } from "effect"
 
 export const PermissionMode = Schema.Literals(["allow-all", "plugin", "configured"]).annotate({
   identifier: "Rika.Agent.PermissionPolicy.PermissionMode",
@@ -110,7 +111,10 @@ export const rejectLayer = (message: string, details?: Common.JsonValue) =>
 export const configFromEnv = (env: Record<string, string | undefined>): PermissionConfig => {
   const guardedTools = csv(env.RIKA_GUARDED_TOOLS ?? env.RIKA_PERMISSION_GUARDED_TOOLS)
   const guardedFiles = csv(env.RIKA_GUARDED_FILES ?? env.RIKA_PERMISSION_GUARDED_FILES)
-  const requestedMode = parsePermissionMode(env.RIKA_PERMISSION_MODE)
+  const requestedMode = EnvConfig.optionalSync(
+    EnvConfig.providerFromEnv(env),
+    EffectConfig.literals(["allow-all", "plugin", "configured"], "RIKA_PERMISSION_MODE"),
+  )
   const hasGuards = guardedTools.length > 0 || guardedFiles.length > 0
   const mode = requestedMode ?? (hasGuards ? "configured" : "allow-all")
 
@@ -182,11 +186,6 @@ const compactConfig = (input: {
   ...(input.guarded_tools.length === 0 ? {} : { guarded_tools: input.guarded_tools }),
   ...(input.guarded_files.length === 0 ? {} : { guarded_files: input.guarded_files }),
 })
-
-const parsePermissionMode = (value: string | undefined): PermissionMode | undefined => {
-  if (value === "allow-all" || value === "plugin" || value === "configured") return value
-  return undefined
-}
 
 const csv = (value: string | undefined): ReadonlyArray<string> =>
   value === undefined

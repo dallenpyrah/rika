@@ -686,7 +686,7 @@ const requiredConfiguration = (config: Config.Interface) =>
   Effect.gen(function* () {
     const missing: Array<string> = []
     for (const key of ["OPENROUTER_API_KEY", "TURBOPUFFER_API_KEY"] as const) {
-      const present = yield* config.requireEnv(key).pipe(
+      const present = yield* config.requireSecret(key).pipe(
         Effect.as(true),
         Effect.catch(() => Effect.succeed(false)),
       )

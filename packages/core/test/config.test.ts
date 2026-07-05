@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
-import { Config } from "../src/index"
+import { Config, Settings, Telemetry } from "../src/index"
 
 describe("Config", () => {
   test("parses compaction auto and reserved token settings from env", async () => {
@@ -33,6 +33,55 @@ describe("Config", () => {
       compaction_prune_protect: 40_000,
       compaction_prune_minimum: 20_000,
     })
+  })
+
+  test("uses the same lenient boolean env parser for config settings and telemetry", async () => {
+    const env = {
+      RIKA_COMPACTION_AUTO: "1",
+      RIKA_COMPACTION_PRUNE: "enabled",
+      RIKA_MEMORY_AUTO_CONTEXT: "yes",
+      RIKA_TELEMETRY: "on",
+    }
+    const workspace = "/workspace/rika-config-test"
+
+    const values = await Effect.runPromise(Config.get().pipe(Effect.provide(Config.layerFromEnv(env, workspace))))
+    const snapshot = await Effect.runPromise(
+      Settings.snapshot.pipe(Effect.provide(Settings.layerFromEnv(env, workspace))),
+    )
+    const telemetry = Telemetry.fromEnv(env, "0.0.0")
+
+    expect(values.compaction_auto).toBe(true)
+    expect(values.compaction_prune).toBe(true)
+    expect(snapshot.values.memory.autoContext).toBe(true)
+    expect(snapshot.values.telemetry.enabled).toBe(true)
+    expect(telemetry.enabled).toBe(true)
+  })
+
+  test("invalid settings-backed env values resolve identically through settings and config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-config-invalid-shared-"))
+    const home = join(root, "home")
+    const workspace = join(root, "workspace")
+    await mkdir(join(home, ".config", "rika"), { recursive: true })
+    await mkdir(join(workspace, ".rika"), { recursive: true })
+    await writeFile(join(home, ".config", "rika", "settings.json"), JSON.stringify({ "compaction.auto": true }))
+
+    const env = {
+      HOME: home,
+      RIKA_COMPACTION_AUTO: "sometimes",
+    }
+
+    try {
+      const values = await Effect.runPromise(Config.get().pipe(Effect.provide(Config.layerFromEnv(env, workspace))))
+      const snapshot = await Effect.runPromise(
+        Settings.snapshot.pipe(Effect.provide(Settings.layerFromEnv(env, workspace))),
+      )
+
+      expect(values.compaction_auto).toBe(true)
+      expect(snapshot.values.compaction.auto).toBe(true)
+      expect(snapshot.sources["compaction.auto"]).toBe("user")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   test("parses subagent tool mode from env", async () => {

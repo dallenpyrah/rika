@@ -1,6 +1,6 @@
 import { Config } from "@rika/core"
 import { OpenAiClient, OpenAiLanguageModel } from "@effect/ai-openai"
-import { Effect, Layer, Redacted, Stream } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import * as Modes from "./modes"
 import * as Provider from "./provider"
@@ -46,10 +46,10 @@ export const clientLayer = (options: Options = {}) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const config = yield* Config.Service
-      const apiKey = yield* config.requireEnv(options.apiKeyEnv ?? defaultApiKeyEnv)
+      const apiKey = yield* config.requireSecret(options.apiKeyEnv ?? defaultApiKeyEnv)
 
       return OpenAiClient.layer({
-        apiKey: Redacted.make(apiKey),
+        apiKey,
         ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
       }).pipe(Layer.provide(FetchHttpClient.layer))
     }),

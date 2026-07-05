@@ -1,5 +1,6 @@
 export * as Config from "./config"
 export * as Diagnostics from "./diagnostics"
+export * as EnvConfig from "./env-config"
 export * as ExampleService from "./example-service"
 export * as IdGenerator from "./id-generator"
 export * as Runtime from "./runtime"

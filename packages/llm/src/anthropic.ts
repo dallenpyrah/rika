@@ -1,6 +1,6 @@
 import { Config } from "@rika/core"
 import { AnthropicClient, AnthropicLanguageModel, Generated } from "@effect/ai-anthropic"
-import { Effect, Layer, Option, Redacted, Schema, Stream } from "effect"
+import { Effect, Layer, Option, Schema, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import * as Modes from "./modes"
 import * as Provider from "./provider"
@@ -44,10 +44,10 @@ export const clientLayer = (options: Options = {}) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const config = yield* Config.Service
-      const apiKey = yield* config.requireEnv(options.apiKeyEnv ?? defaultApiKeyEnv)
+      const apiKey = yield* config.requireSecret(options.apiKeyEnv ?? defaultApiKeyEnv)
 
       return AnthropicClient.layer({
-        apiKey: Redacted.make(apiKey),
+        apiKey,
         ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
         transformClient: transformClient,
       }).pipe(Layer.provide(FetchHttpClient.layer))
