@@ -13,6 +13,7 @@ import WebSocket, { WebSocketServer } from "ws"
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const workspaceRoot = process.env.RIKA_WORKSPACE_ROOT ?? rootDir
 const dataDir = process.env.RIKA_DATA_DIR ?? join(workspaceRoot, ".rika")
+const cliEntryScript = join(rootDir, "packages", "cli", "src", "main.ts")
 const apiPrefix = "/api/rika"
 const bridgeHighWaterBytes = 1024 * 1024
 const bridgeLowWaterBytes = 256 * 1024
@@ -145,6 +146,11 @@ const errorBody = (error: unknown, code: string) => ({
 export const isApiRequestUrl = (requestUrl: string | undefined): boolean =>
   requestUrl !== undefined && requestUrl.startsWith(apiPrefix)
 
+export const backendProxyEnv = (env: Record<string, string | undefined>): Record<string, string | undefined> => ({
+  ...env,
+  RIKA_BACKEND_SCRIPT: env.RIKA_BACKEND_SCRIPT ?? cliEntryScript,
+})
+
 export const isOrbPtyWebSocketRequestUrl = (requestUrl: string | undefined): boolean => {
   if (requestUrl === undefined) return false
   const url = new URL(requestUrl, "http://rika.local")
@@ -167,7 +173,7 @@ async function loadProxyModules(): Promise<ProxyModules> {
 async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModules): Promise<ProxyResolver> {
   const { Core, Persistence, SchemaModule, EffectRuntime, BackendEndpointModule, LocalBackend, Orb } =
     await loadModules()
-  const env = process.env
+  const env = backendProxyEnv(process.env)
   const configLayer = Core.Config.layerFromValues(
     {
       workspace_root: workspaceRoot,
@@ -222,7 +228,9 @@ async function makeProxyResolver(loadModules: LoadProxyModules = loadProxyModule
     EffectRuntime.Layer.provideMerge(redactorLayer),
   )
   const layer = BackendEndpointModule.resolverLayerFromEnv(env).pipe(
-    EffectRuntime.Layer.provideMerge(LocalBackend.layerFromInput({ env, cwd: workspaceRoot })),
+    EffectRuntime.Layer.provideMerge(
+      LocalBackend.layerFromInput({ env, cwd: workspaceRoot, adoptHealthyRecord: true }),
+    ),
     EffectRuntime.Layer.provideMerge(BackendEndpointModule.healthLayer),
     EffectRuntime.Layer.provideMerge(migratedStorageLayer),
     EffectRuntime.Layer.provideMerge(BackendEndpointModule.orbManagerResumerLayer),

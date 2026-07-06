@@ -1,4 +1,4 @@
-import { EnvConfig } from "@rika/core"
+import { EnvConfig } from "@rika/core/env-config"
 import { Schema } from "effect"
 
 export interface ModelInfo extends Schema.Schema.Type<typeof ModelInfo> {}

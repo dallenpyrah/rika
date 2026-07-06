@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 4590",
+    "dev": "bun --bun vite --host 127.0.0.1 --port 4590",
     "build": "vite build",
     "lint": "bun --cwd ../.. oxlint apps/web/src apps/web/test",
     "test": "bun test --preload ./test/setup.ts test",

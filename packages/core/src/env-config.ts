@@ -81,3 +81,17 @@ const parseDecimalInteger = (
   if (options.minimum === 1 && parsed < 1) return undefined
   return parsed
 }
+
+export const EnvConfig = {
+  boolean,
+  falsyBooleanValues,
+  integer,
+  literals,
+  optional,
+  optionalDecimalInteger,
+  optionalDecimalIntegerSync,
+  optionalSync,
+  providerFromEnv,
+  string,
+  truthyBooleanValues,
+} as const
