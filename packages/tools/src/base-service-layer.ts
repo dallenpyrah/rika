@@ -12,7 +12,7 @@ import {
   ToolExecutor,
   WorkspaceAccess,
 } from "@rika/agent"
-import { Config, Diagnostics, IdGenerator, SecretRedactor, Settings, Time } from "@rika/core"
+import { Config, Diagnostics, EnvConfig, IdGenerator, SecretRedactor, Settings, Time } from "@rika/core"
 import { Embeddings, Live, Router } from "@rika/llm"
 import {
   ArtifactStore,
@@ -27,7 +27,7 @@ import {
   WorkspaceStore,
 } from "@rika/persistence"
 import { PluginHost, PluginUi } from "@rika/plugin"
-import { Layer } from "effect"
+import { Effect, Layer } from "effect"
 import * as BuiltInTools from "./builtins"
 import * as FffSearch from "./fff-search"
 import * as McpClient from "./mcp-client"
@@ -43,6 +43,11 @@ export interface Options {
   readonly diagnosticsLayer?: Layer.Layer<Diagnostics.Service, Error>
   readonly redactorLayer?: Layer.Layer<SecretRedactor.Service>
   readonly permissionConfig?: PermissionPolicy.PermissionConfig
+}
+
+export interface RuntimeEnvValidationInput {
+  readonly env: Record<string, string | undefined>
+  readonly workspaceRoot: string
 }
 
 export type StorageOutput =
@@ -97,6 +102,25 @@ export type Error =
   | ThreadEventLog.ThreadEventLogError
   | ThreadMemoryStore.ThreadMemoryStoreError
   | ThreadProjection.ThreadProjectionError
+
+export const validateRuntimeEnv = Effect.fn("BaseServiceLayer.validateRuntimeEnv")(function* (
+  input: RuntimeEnvValidationInput,
+) {
+  const configEnv = {
+    ...input.env,
+    RIKA_WORKSPACE_ROOT: input.workspaceRoot,
+  }
+  yield* Config.valuesFromEnv(configEnv, input.workspaceRoot)
+  const provider = EnvConfig.providerFromEnv(configEnv)
+  yield* EnvConfig.optionalDecimalInteger(provider, "RIKA_MODEL_CONTEXT_WINDOW", {
+    minimum: 1,
+    allowLeadingZero: false,
+  }).pipe(Effect.mapError(() => invalidRuntimeEnv(configEnv, "RIKA_MODEL_CONTEXT_WINDOW")))
+  yield* Effect.try({
+    try: () => PermissionPolicy.configFromEnv(configEnv),
+    catch: () => invalidRuntimeEnv(configEnv, "RIKA_PERMISSION_MODE"),
+  })
+})
 
 const componentsFromEnv = (options: Options) => {
   const configLayer = options.configLayer
@@ -170,6 +194,20 @@ const componentsFromEnv = (options: Options) => {
 
 type ComponentLayers = ReturnType<typeof componentsFromEnv>
 type SharedStorageLayer = Layer.Layer<any, Error>
+
+const invalidRuntimeEnv = (env: Record<string, string | undefined>, key: string) =>
+  new Config.ConfigError({
+    message: `Invalid ${key} ${env[key] ?? ""}`,
+    key,
+  })
+
+const runtimeEnvPreflightLayer = (options: Options) =>
+  Layer.effectDiscard(validateRuntimeEnv({ env: options.env, workspaceRoot: options.workspaceRoot }))
+
+const withRuntimeEnvPreflight = <A, E, R>(
+  preflightLayer: Layer.Layer<never, Config.ConfigError>,
+  layer: Layer.Layer<A, E, R>,
+): Layer.Layer<A, E | Config.ConfigError, R> => preflightLayer.pipe(Layer.flatMap(() => layer))
 
 const serviceLayersFromStorage = <StorageLayer extends SharedStorageLayer>(
   components: ComponentLayers,
@@ -258,6 +296,7 @@ const serviceLayersFromStorage = <StorageLayer extends SharedStorageLayer>(
 }
 
 export const fromEnv = (options: Options) => {
+  const preflightLayer = runtimeEnvPreflightLayer(options)
   const components = componentsFromEnv(options)
   const storageLayer = components.storageCoreLayer
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
@@ -266,26 +305,27 @@ export const fromEnv = (options: Options) => {
   const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
 
   return {
-    agentLoopLayer,
-    artifactLayer: components.artifactLayer,
-    baseLayer,
-    configLayer: components.configLayer,
-    databaseLayer: components.databaseLayer,
-    diagnosticsLayer: components.diagnosticsLayer,
-    embeddingsLayer: components.embeddingsLayer,
-    llmLayer: components.llmLayer,
-    migratedStorageLayer,
-    pluginLayer: services.pluginLayer,
-    redactorLayer: components.redactorLayer,
-    settingsLayer: components.settingsLayer,
-    storageAndThreadLayer: services.storageAndThreadLayer,
-    storageLayer,
-    threadMemoryLayer: services.threadMemoryLayer,
-    timeLayer: components.timeLayer,
+    agentLoopLayer: withRuntimeEnvPreflight(preflightLayer, agentLoopLayer),
+    artifactLayer: withRuntimeEnvPreflight(preflightLayer, components.artifactLayer),
+    baseLayer: withRuntimeEnvPreflight(preflightLayer, baseLayer),
+    configLayer: withRuntimeEnvPreflight(preflightLayer, components.configLayer),
+    databaseLayer: withRuntimeEnvPreflight(preflightLayer, components.databaseLayer),
+    diagnosticsLayer: withRuntimeEnvPreflight(preflightLayer, components.diagnosticsLayer),
+    embeddingsLayer: withRuntimeEnvPreflight(preflightLayer, components.embeddingsLayer),
+    llmLayer: withRuntimeEnvPreflight(preflightLayer, components.llmLayer),
+    migratedStorageLayer: withRuntimeEnvPreflight(preflightLayer, migratedStorageLayer),
+    pluginLayer: withRuntimeEnvPreflight(preflightLayer, services.pluginLayer),
+    redactorLayer: withRuntimeEnvPreflight(preflightLayer, components.redactorLayer),
+    settingsLayer: withRuntimeEnvPreflight(preflightLayer, components.settingsLayer),
+    storageAndThreadLayer: withRuntimeEnvPreflight(preflightLayer, services.storageAndThreadLayer),
+    storageLayer: withRuntimeEnvPreflight(preflightLayer, storageLayer),
+    threadMemoryLayer: withRuntimeEnvPreflight(preflightLayer, services.threadMemoryLayer),
+    timeLayer: withRuntimeEnvPreflight(preflightLayer, components.timeLayer),
   }
 }
 
 export const fromEnvWithOrbStoreAndMemoryIndexer = (options: Options) => {
+  const preflightLayer = runtimeEnvPreflightLayer(options)
   const components = componentsFromEnv(options)
   const storageLayer = Layer.mergeAll(components.storageCoreLayer, components.orbStoreLayer)
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
@@ -298,21 +338,21 @@ export const fromEnvWithOrbStoreAndMemoryIndexer = (options: Options) => {
   const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
 
   return {
-    agentLoopLayer,
-    artifactLayer: components.artifactLayer,
-    baseLayer,
-    configLayer: components.configLayer,
-    databaseLayer: components.databaseLayer,
-    diagnosticsLayer: components.diagnosticsLayer,
-    embeddingsLayer: components.embeddingsLayer,
-    llmLayer: components.llmLayer,
-    migratedStorageLayer: repairedStorageLayer,
-    pluginLayer: services.pluginLayer,
-    redactorLayer: components.redactorLayer,
-    settingsLayer: components.settingsLayer,
-    storageAndThreadLayer: services.storageAndThreadLayer,
-    storageLayer,
-    threadMemoryLayer: services.threadMemoryLayer,
-    timeLayer: components.timeLayer,
+    agentLoopLayer: withRuntimeEnvPreflight(preflightLayer, agentLoopLayer),
+    artifactLayer: withRuntimeEnvPreflight(preflightLayer, components.artifactLayer),
+    baseLayer: withRuntimeEnvPreflight(preflightLayer, baseLayer),
+    configLayer: withRuntimeEnvPreflight(preflightLayer, components.configLayer),
+    databaseLayer: withRuntimeEnvPreflight(preflightLayer, components.databaseLayer),
+    diagnosticsLayer: withRuntimeEnvPreflight(preflightLayer, components.diagnosticsLayer),
+    embeddingsLayer: withRuntimeEnvPreflight(preflightLayer, components.embeddingsLayer),
+    llmLayer: withRuntimeEnvPreflight(preflightLayer, components.llmLayer),
+    migratedStorageLayer: withRuntimeEnvPreflight(preflightLayer, repairedStorageLayer),
+    pluginLayer: withRuntimeEnvPreflight(preflightLayer, services.pluginLayer),
+    redactorLayer: withRuntimeEnvPreflight(preflightLayer, components.redactorLayer),
+    settingsLayer: withRuntimeEnvPreflight(preflightLayer, components.settingsLayer),
+    storageAndThreadLayer: withRuntimeEnvPreflight(preflightLayer, services.storageAndThreadLayer),
+    storageLayer: withRuntimeEnvPreflight(preflightLayer, storageLayer),
+    threadMemoryLayer: withRuntimeEnvPreflight(preflightLayer, services.threadMemoryLayer),
+    timeLayer: withRuntimeEnvPreflight(preflightLayer, components.timeLayer),
   }
 }

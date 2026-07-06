@@ -100,6 +100,7 @@ describe("orb PTY WebSocket", () => {
         }),
       )
       const unauthorized = await fetch(`${enabled.url}/v1/orb/pty`)
+      const wrongToken = await fetch(`${enabled.url}/v1/orb/pty?token=wrong`)
       const socket = await connect(`${toWsUrl(enabled.url)}/v1/orb/pty?token=secret`)
 
       socket.send(encoder.encode("echo hi\n"))
@@ -111,6 +112,7 @@ describe("orb PTY WebSocket", () => {
 
       expect(disabledResponse.status).toBe(404)
       expect(unauthorized.status).toBe(401)
+      expect(wrongToken.status).toBe(401)
       expect(decodeMessage(first)).toBe("pty:echo hi\n")
       expect(decodeMessage(second)).toBe("pty:after resize\n")
       expect(writes).toEqual(["echo hi\n", "after resize\n"])

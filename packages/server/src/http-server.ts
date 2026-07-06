@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto"
 import { Diagnostics } from "@rika/core"
 import { OrbChanges, OrbFiles, OrbPty } from "@rika/orb"
 import { Artifact, Codec, Event, Ide, Ids, Remote } from "@rika/schema"
@@ -254,7 +255,8 @@ const upgradeOrbPty = (
   if (request.method !== "GET" || url.pathname !== "/v1/orb/pty") return undefined
   if (orbMode === undefined) return notFound()
   const required = tokenValue(requiredToken)
-  if (required !== undefined && url.searchParams.get("token") !== required) return unauthorizedJson()
+  if (required !== undefined && !constantTimeTokenEquals(url.searchParams.get("token"), required))
+    return unauthorizedJson()
   const upgraded = server.upgrade(request, {
     data: {
       pty: orbPty,
@@ -858,9 +860,19 @@ const unauthorizedResponse = (request: Request, requiredToken: string | undefine
 }
 
 const isAuthorized = (request: Request, requiredToken: string | undefined) =>
-  requiredToken !== undefined && request.headers.get("authorization") === `Bearer ${requiredToken}`
+  requiredToken !== undefined &&
+  constantTimeTokenEquals(request.headers.get("authorization"), `Bearer ${requiredToken}`)
 
 const tokenValue = (token: string | undefined) => (token === undefined || token.length === 0 ? undefined : token)
+
+const constantTimeTokenEquals = (actual: string | null | undefined, expected: string): boolean => {
+  const actualValue = actual ?? ""
+  const actualDigest = tokenDigest(actualValue)
+  const expectedDigest = tokenDigest(expected)
+  return timingSafeEqual(actualDigest, expectedDigest) && actualValue.length === expected.length
+}
+
+const tokenDigest = (value: string) => createHash("sha256").update(value, "utf8").digest()
 
 const authorizationFromToken = (token: string | undefined): RemoteControl.AuthorizationContext => {
   const userId = userIdFromToken(token)

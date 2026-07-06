@@ -17,7 +17,7 @@ import {
   WorkspaceAccess,
   WorkspaceIdentity,
 } from "@rika/agent"
-import { Config, Diagnostics, EnvConfig, IdGenerator, SecretRedactor, Settings, Telemetry, Time } from "@rika/core"
+import { Config, Diagnostics, IdGenerator, SecretRedactor, Settings, Telemetry, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Embeddings, Live, Router } from "@rika/llm"
 import { OrbActivity, OrbManager, SandboxClient } from "@rika/orb"
@@ -410,25 +410,8 @@ const validateRuntimeEnv = (
     RIKA_WORKSPACE_ROOT: workspaceRoot,
     ...(modeOverride === undefined ? {} : { RIKA_MODE: modeOverride }),
   }
-  return Effect.gen(function* () {
-    yield* Config.valuesFromEnv(configEnv, workspaceRoot)
-    const provider = EnvConfig.providerFromEnv(env)
-    yield* EnvConfig.optionalDecimalInteger(provider, "RIKA_MODEL_CONTEXT_WINDOW", {
-      minimum: 1,
-      allowLeadingZero: false,
-    }).pipe(Effect.mapError(() => invalidRuntimeEnv(env, "RIKA_MODEL_CONTEXT_WINDOW")))
-    yield* Effect.try({
-      try: () => PermissionPolicy.configFromEnv(env),
-      catch: () => invalidRuntimeEnv(env, "RIKA_PERMISSION_MODE"),
-    })
-  }).pipe(Effect.asVoid)
+  return BaseServiceLayer.validateRuntimeEnv({ env: configEnv, workspaceRoot })
 }
-
-const invalidRuntimeEnv = (env: Record<string, string | undefined>, key: string) =>
-  new Config.ConfigError({
-    message: `Invalid ${key} ${env[key] ?? ""}`,
-    key,
-  })
 
 const commandWorkspaceRoot = (command: Args.Command, env: Record<string, string | undefined>, cwd: string) => {
   const workspaceRoot = "workspace_root" in command ? command.workspace_root : undefined

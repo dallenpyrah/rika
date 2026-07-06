@@ -1424,6 +1424,9 @@ describe("remote control API and SDK", () => {
     const client = Client.make(Client.fetchTransport({ base_url: handle.url, token: "secret" }))
     try {
       const unauthorized = await fetch(`${handle.url}/v1/threads`)
+      const wrongToken = await fetch(`${handle.url}/v1/threads`, {
+        headers: { authorization: "Bearer wrong" },
+      })
       const unauthorizedHealth = await fetch(`${handle.url}/health`)
       const authorized = await fetch(`${handle.url}/v1/threads`, {
         headers: { authorization: "Bearer secret" },
@@ -1434,8 +1437,10 @@ describe("remote control API and SDK", () => {
       const sdkHealth = await Effect.runPromise(client.backendHealth())
 
       expect(unauthorized.status).toBe(401)
+      expect(wrongToken.status).toBe(401)
       expect(unauthorizedHealth.status).toBe(200)
       expect(await unauthorized.json()).toEqual({ error: { message: "Unauthorized", code: "unauthorized" } })
+      expect(await wrongToken.json()).toEqual({ error: { message: "Unauthorized", code: "unauthorized" } })
       expect(await unauthorizedHealth.json()).toEqual({ status: "ok" })
       expect(authorized.status).toBe(200)
       expect(authorizedHealth.status).toBe(200)
