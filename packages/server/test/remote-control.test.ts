@@ -205,6 +205,7 @@ const fakeOrbManagerLayer = (
       pause: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "paused", id)),
       resume: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "running", id)),
       kill: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "killed", id)),
+      forceKill: (id) => Effect.succeed(orbRecord(orbThreadId, projectId, "killed", id)),
     }),
   )
 
@@ -269,6 +270,7 @@ const orbManagerLayerWithStoredResume = (
             onResume(id)
           }).pipe(Effect.andThen(orbManagerStoreStep("resume", id, orbs.setStatus(id, "running")))),
         kill: (id) => orbManagerStoreStep("kill", id, orbs.setStatus(id, "killed")),
+        forceKill: (id) => orbManagerStoreStep("forceKill", id, orbs.setStatus(id, "killed")),
       }),
     ),
   )
@@ -295,6 +297,10 @@ const orbManagerLayerWithStoredLifecycle = (
         kill: (id) =>
           Effect.sync(() => onCall("kill", id)).pipe(
             Effect.andThen(orbManagerStoreStep("kill", id, orbs.setStatus(id, "killed"))),
+          ),
+        forceKill: (id) =>
+          Effect.sync(() => onCall("kill", id)).pipe(
+            Effect.andThen(orbManagerStoreStep("forceKill", id, orbs.setStatus(id, "killed"))),
           ),
       }),
     ),

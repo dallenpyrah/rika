@@ -706,6 +706,7 @@ const remoteOrbManagerLayer = () =>
       pause: () => Effect.never,
       resume: () => Effect.never,
       kill: () => Effect.never,
+      forceKill: () => Effect.never,
     }),
   )
 

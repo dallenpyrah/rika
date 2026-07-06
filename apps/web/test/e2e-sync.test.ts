@@ -516,6 +516,10 @@ const fakeOrbManagerLayer = () =>
             .pipe(Effect.mapError((error) => toOrbProvisionError("resume", orbId, error))),
         kill: (orbId) =>
           orbs.setStatus(orbId, "killed").pipe(Effect.mapError((error) => toOrbProvisionError("kill", orbId, error))),
+        forceKill: (orbId) =>
+          orbs
+            .setStatus(orbId, "killed")
+            .pipe(Effect.mapError((error) => toOrbProvisionError("forceKill", orbId, error))),
       }),
     ),
   )

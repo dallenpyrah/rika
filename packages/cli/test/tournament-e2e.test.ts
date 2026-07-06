@@ -426,6 +426,7 @@ const fakeOrbManagerLayer = Layer.succeed(
     pause: (id) => Effect.succeed(orbRecord(sourceThreadId, projectId, "paused", id)),
     resume: (id) => Effect.succeed(orbRecord(sourceThreadId, projectId, "running", id)),
     kill: (id) => Effect.succeed(orbRecord(sourceThreadId, projectId, "killed", id)),
+    forceKill: (id) => Effect.succeed(orbRecord(sourceThreadId, projectId, "killed", id)),
   }),
 )
 
