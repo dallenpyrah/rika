@@ -827,6 +827,179 @@ describe("OrbManager", () => {
     await rm(dataDir, { force: true, recursive: true })
   })
 
+  test("pause and kill on the same orb do not overlap sandbox lifecycle calls", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+    const pauseEntered = Effect.runSync(Deferred.make<void>())
+    const releasePause = Effect.runSync(Deferred.make<void>())
+    const killEntered = Effect.runSync(Deferred.make<void>())
+    const events: Array<string> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://sandbox_1-4587.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        const pauseFiber = yield* OrbManager.pause(created.orb_id).pipe(Effect.exit, Effect.forkChild)
+        yield* Deferred.await(pauseEntered)
+        const killFiber = yield* OrbManager.kill(created.orb_id).pipe(Effect.exit, Effect.forkChild)
+        yield* Effect.yieldNow
+        yield* Effect.yieldNow
+        const killEnteredBeforePauseRelease = yield* Deferred.isDone(killEntered)
+        yield* Deferred.succeed(releasePause, undefined)
+        const pauseResult = yield* Fiber.join(pauseFiber)
+        const killResult = yield* Fiber.join(killFiber)
+        const stored = yield* OrbStore.get(created.orb_id)
+        return { killEnteredBeforePauseRelease, killResult, pauseResult, stored }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            sandbox: SandboxClientFake.makeState(),
+            diagnostics,
+            system,
+            dataDir,
+            sandboxLayer: delayedPauseLifecycleLayer({
+              events,
+              killEntered,
+              pauseEntered,
+              releasePause,
+            }),
+          }),
+        ),
+      ),
+    )
+
+    expect(result.killEnteredBeforePauseRelease).toBe(false)
+    expect(result.pauseResult._tag).toBe("Success")
+    expect(result.killResult._tag).toBe("Success")
+    expect(result.stored).toMatchObject({ status: "killed" })
+    expect(events).toEqual(["pause-enter", "pause-exit", "kill-enter", "kill-exit"])
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("pause queued behind kill rejects without pausing a killed sandbox", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+    const killEntered = Effect.runSync(Deferred.make<void>())
+    const releaseKill = Effect.runSync(Deferred.make<void>())
+    const events: Array<string> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://sandbox_1-4587.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        const killFiber = yield* OrbManager.kill(created.orb_id).pipe(Effect.exit, Effect.forkChild)
+        yield* Deferred.await(killEntered)
+        const pauseFiber = yield* OrbManager.pause(created.orb_id).pipe(Effect.exit, Effect.forkChild)
+        yield* Effect.yieldNow
+        yield* Effect.yieldNow
+        yield* Deferred.succeed(releaseKill, undefined)
+        const killResult = yield* Fiber.join(killFiber)
+        const pauseResult = yield* Fiber.join(pauseFiber)
+        const stored = yield* OrbStore.get(created.orb_id)
+        return { killResult, pauseResult, stored }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            sandbox: SandboxClientFake.makeState(),
+            diagnostics,
+            system,
+            dataDir,
+            sandboxLayer: delayedKillLifecycleLayer({
+              events,
+              killEntered,
+              releaseKill,
+            }),
+          }),
+        ),
+      ),
+    )
+
+    expect(result.killResult._tag).toBe("Success")
+    expect(result.pauseResult._tag).toBe("Failure")
+    expect(result.stored).toMatchObject({ status: "killed" })
+    expect(events).toEqual(["kill-enter", "kill-exit"])
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
+  test("pause and resume on the same orb serialize into a final running status", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
+    const diagnostics: Array<Diagnostics.Entry> = []
+    const system = makeSystem()
+    const pauseEntered = Effect.runSync(Deferred.make<void>())
+    const releasePause = Effect.runSync(Deferred.make<void>())
+    const events: Array<string> = []
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        const created = yield* OrbStore.create({
+          thread_id: threadId,
+          project_id: projectId,
+          sandbox_id: "sandbox_1",
+          base_commit: "abc123",
+          endpoint_url: "https://sandbox_1-4587.fake.rika.local",
+          token: "server-token",
+        })
+        yield* OrbStore.setStatus(created.orb_id, "running")
+        const resumeCompleted = yield* Deferred.make<void>()
+        const pauseFiber = yield* OrbManager.pause(created.orb_id).pipe(Effect.exit, Effect.forkChild)
+        yield* Deferred.await(pauseEntered)
+        const resumeFiber = yield* OrbManager.resume(created.orb_id).pipe(
+          Effect.exit,
+          Effect.tap(() => Deferred.succeed(resumeCompleted, undefined)),
+          Effect.forkChild,
+        )
+        yield* Effect.yieldNow
+        yield* Effect.yieldNow
+        const resumeCompletedBeforePauseRelease = yield* Deferred.isDone(resumeCompleted)
+        yield* Deferred.succeed(releasePause, undefined)
+        const pauseResult = yield* Fiber.join(pauseFiber)
+        const resumeResult = yield* Fiber.join(resumeFiber)
+        const stored = yield* OrbStore.get(created.orb_id)
+        return { pauseResult, resumeCompletedBeforePauseRelease, resumeResult, stored }
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            sandbox: SandboxClientFake.makeState(),
+            diagnostics,
+            system,
+            dataDir,
+            sandboxLayer: delayedPauseLifecycleLayer({
+              events,
+              pauseEntered,
+              releasePause,
+            }),
+          }),
+        ),
+      ),
+    )
+
+    expect(result.resumeCompletedBeforePauseRelease).toBe(false)
+    expect(result.pauseResult._tag).toBe("Success")
+    expect(result.resumeResult._tag).toBe("Success")
+    expect(result.stored).toMatchObject({ status: "running" })
+    expect(events).toEqual(["pause-enter", "pause-exit", "resume-enter", "resume-exit"])
+    await rm(dataDir, { force: true, recursive: true })
+  })
+
   test("pause and kill reject provisioning orbs without mutating the sandbox", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "rika-orb-manager-"))
     const sandbox = SandboxClientFake.makeState()
@@ -1264,6 +1437,76 @@ const activityReleaseRecorderLayer = (releases: Array<Ids.OrbId>) =>
         Effect.sync(() => {
           releases.push(releasedOrbId)
         }),
+    }),
+  )
+
+const delayedPauseLifecycleLayer = (input: {
+  readonly events: Array<string>
+  readonly pauseEntered: Deferred.Deferred<void>
+  readonly releasePause: Deferred.Deferred<void>
+  readonly killEntered?: Deferred.Deferred<void>
+}) =>
+  Layer.succeed(
+    SandboxClient.Service,
+    SandboxClient.Service.of({
+      create: () => Effect.never,
+      exec: () => Stream.fromIterable([{ type: "exit" as const, exitCode: 0 }]),
+      writeFile: () => Effect.never,
+      readFile: () => Effect.never,
+      hostUrl: (sandboxId, port) => Effect.succeed(`https://${sandboxId}-${port}.fake.rika.local`),
+      pause: () =>
+        Effect.gen(function* () {
+          input.events.push("pause-enter")
+          yield* Deferred.succeed(input.pauseEntered, undefined)
+          yield* Deferred.await(input.releasePause)
+          input.events.push("pause-exit")
+        }),
+      resume: () =>
+        Effect.sync(() => {
+          input.events.push("resume-enter")
+          input.events.push("resume-exit")
+        }),
+      kill: () =>
+        Effect.gen(function* () {
+          input.events.push("kill-enter")
+          if (input.killEntered !== undefined) yield* Deferred.succeed(input.killEntered, undefined)
+          input.events.push("kill-exit")
+        }),
+      setTimeout: () => Effect.never,
+      list: () => Effect.never,
+      templateExists: () => Effect.never,
+    }),
+  )
+
+const delayedKillLifecycleLayer = (input: {
+  readonly events: Array<string>
+  readonly killEntered: Deferred.Deferred<void>
+  readonly releaseKill: Deferred.Deferred<void>
+}) =>
+  Layer.succeed(
+    SandboxClient.Service,
+    SandboxClient.Service.of({
+      create: () => Effect.never,
+      exec: () => Stream.fromIterable([{ type: "exit" as const, exitCode: 0 }]),
+      writeFile: () => Effect.never,
+      readFile: () => Effect.never,
+      hostUrl: (sandboxId, port) => Effect.succeed(`https://${sandboxId}-${port}.fake.rika.local`),
+      pause: () =>
+        Effect.sync(() => {
+          input.events.push("pause-enter")
+          input.events.push("pause-exit")
+        }),
+      resume: () => Effect.never,
+      kill: () =>
+        Effect.gen(function* () {
+          input.events.push("kill-enter")
+          yield* Deferred.succeed(input.killEntered, undefined)
+          yield* Deferred.await(input.releaseKill)
+          input.events.push("kill-exit")
+        }),
+      setTimeout: () => Effect.never,
+      list: () => Effect.never,
+      templateExists: () => Effect.never,
     }),
   )
 

@@ -79,7 +79,7 @@ export const layerWithSystem = (system: System) =>
       const registerSecrets = (entries: ReadonlyArray<SecretRedactor.Entry>) =>
         redactor === undefined ? Effect.void : redactor.register(entries)
       const releaseActivity = (orbId: Ids.OrbId) => (activity === undefined ? Effect.void : activity.release(orbId))
-      const resumeLocks = yield* KeyedSemaphore.make<Ids.OrbId>()
+      const orbLifecycleLocks = yield* KeyedSemaphore.make<Ids.OrbId>()
 
       const provisionForThread: Interface["provisionForThread"] = Effect.fn("OrbManager.provisionForThread")(function* (
         input: ProvisionInput,
@@ -229,25 +229,41 @@ export const layerWithSystem = (system: System) =>
       return Service.of({
         provisionForThread,
         pause: Effect.fn("OrbManager.pause")(function* (orbId: Ids.OrbId) {
-          return yield* Diagnostics.event(
-            "orb.pause",
-            (fields) =>
-              Effect.gen(function* () {
-                const record = yield* requireControllableOrbRecord(orbId, "pause")
-                const sandboxId = record.sandbox_id
-                fields.sandbox_id = sandboxId
-                fields.previous_status = record.status
-                yield* step("pause", sandbox.pause(sandboxId), { orbId, sandboxId })
-                const paused = yield* step("pause_status", orbs.setStatus(orbId, "paused"), { orbId, sandboxId })
-                fields.status = paused.status
-                return paused
-              }),
-            { orb_id: orbId },
-          ).pipe(Effect.provideService(Diagnostics.Service, diagnostics))
+          return yield* KeyedSemaphore.withPermit(
+            orbLifecycleLocks,
+            orbId,
+            Diagnostics.event(
+              "orb.pause",
+              (fields) =>
+                Effect.gen(function* () {
+                  const record = yield* requireControllableOrbRecord(orbId, "pause")
+                  const sandboxId = record.sandbox_id
+                  fields.sandbox_id = sandboxId
+                  fields.previous_status = record.status
+                  if (record.status === "paused") {
+                    fields.status = "already_paused"
+                    return record
+                  }
+                  if (record.status !== "running") {
+                    return yield* new OrbProvisionError({
+                      message: `Orb ${orbId} cannot pause from ${record.status}`,
+                      step: "pause",
+                      orb_id: orbId,
+                      sandbox_id: sandboxId,
+                    })
+                  }
+                  yield* step("pause", sandbox.pause(sandboxId), { orbId, sandboxId })
+                  const paused = yield* step("pause_status", orbs.setStatus(orbId, "paused"), { orbId, sandboxId })
+                  fields.status = paused.status
+                  return paused
+                }),
+              { orb_id: orbId },
+            ).pipe(Effect.provideService(Diagnostics.Service, diagnostics)),
+          )
         }),
         resume: Effect.fn("OrbManager.resume")(function* (orbId: Ids.OrbId) {
           return yield* KeyedSemaphore.withPermit(
-            resumeLocks,
+            orbLifecycleLocks,
             orbId,
             Diagnostics.event(
               "orb.resume",
@@ -303,7 +319,7 @@ export const layerWithSystem = (system: System) =>
         }),
         kill: Effect.fn("OrbManager.kill")(function* (orbId: Ids.OrbId) {
           const killed = yield* KeyedSemaphore.withPermit(
-            resumeLocks,
+            orbLifecycleLocks,
             orbId,
             Diagnostics.event(
               "orb.kill",
@@ -324,7 +340,7 @@ export const layerWithSystem = (system: System) =>
               { orb_id: orbId },
             ).pipe(Effect.provideService(Diagnostics.Service, diagnostics)),
           )
-          yield* KeyedSemaphore.remove(resumeLocks, orbId)
+          yield* KeyedSemaphore.remove(orbLifecycleLocks, orbId)
           yield* releaseActivity(orbId)
           return killed
         }),

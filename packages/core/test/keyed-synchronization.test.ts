@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, HashMap, Ref } from "effect"
+import { Deferred, Effect, Fiber, HashMap, Option, Ref } from "effect"
 import { TestClock } from "effect/testing"
 import { KeyedSemaphore, SynchronizedMap } from "../src/index"
 
@@ -117,7 +117,7 @@ describe("KeyedSemaphore", () => {
     expect(result.finalEvents).toContain("second-exit")
   })
 
-  test("remove drops the cached semaphore for a key", async () => {
+  test("remove drops the cached semaphore for an idle key", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const locks = yield* KeyedSemaphore.make<string>()
@@ -133,7 +133,7 @@ describe("KeyedSemaphore", () => {
     expect(result.afterRemove).toBe(0)
   })
 
-  test("remove does not corrupt fibers already waiting on the removed semaphore", async () => {
+  test("remove does not delete a semaphore while fibers are using it", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const locks = yield* KeyedSemaphore.make<string>()
@@ -167,16 +167,155 @@ describe("KeyedSemaphore", () => {
         yield* Deferred.succeed(releaseFirst, undefined)
         yield* Fiber.join(first)
         yield* Fiber.join(second)
+        const sizeAfterDrain = yield* semaphoreCount(locks)
         const finalEvents = yield* Ref.get(events)
-        return { finalEvents, secondEnteredBeforeRelease, sizeAfterRemove }
+        return { finalEvents, secondEnteredBeforeRelease, sizeAfterDrain, sizeAfterRemove }
       }),
     )
 
-    expect(result.sizeAfterRemove).toBe(0)
+    expect(result.sizeAfterRemove).toBe(1)
+    expect(result.sizeAfterDrain).toBe(0)
     expect(result.secondEnteredBeforeRelease).toBe(false)
     expect(result.finalEvents).toEqual(["first-enter", "first-exit", "second-enter", "second-exit"])
+  })
+
+  test("interrupted waiters release their in-use reference before idle eviction", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const locks = yield* KeyedSemaphore.make<string>()
+        const firstEntered = yield* Deferred.make<void>()
+        const secondEntered = yield* Deferred.make<void>()
+        const releaseFirst = yield* Deferred.make<void>()
+        const first = yield* KeyedSemaphore.withPermit(
+          locks,
+          "orb",
+          Deferred.succeed(firstEntered, undefined).pipe(Effect.andThen(Deferred.await(releaseFirst))),
+        ).pipe(Effect.forkChild)
+        yield* Deferred.await(firstEntered)
+        const second = yield* KeyedSemaphore.withPermit(locks, "orb", Deferred.succeed(secondEntered, undefined)).pipe(
+          Effect.forkChild,
+        )
+        yield* waitForInUse(locks, "orb", 2)
+        yield* Fiber.interrupt(second)
+        const secondEnteredBeforeInterrupt = yield* Deferred.isDone(secondEntered)
+        yield* KeyedSemaphore.remove(locks, "orb")
+        const sizeBeforeActiveRelease = yield* semaphoreCount(locks)
+        yield* Deferred.succeed(releaseFirst, undefined)
+        yield* Fiber.join(first)
+        const sizeAfterActiveRelease = yield* semaphoreCount(locks)
+        return { secondEnteredBeforeInterrupt, sizeAfterActiveRelease, sizeBeforeActiveRelease }
+      }),
+    )
+
+    expect(result.secondEnteredBeforeInterrupt).toBe(false)
+    expect(result.sizeBeforeActiveRelease).toBe(1)
+    expect(result.sizeAfterActiveRelease).toBe(0)
+  })
+
+  test("preserves mutual exclusion for a fresh caller after remove while an older waiter still runs", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const locks = yield* KeyedSemaphore.make<string>()
+        const events = yield* Ref.make<Array<string>>([])
+        const firstEntered = yield* Deferred.make<void>()
+        const secondEntered = yield* Deferred.make<void>()
+        const thirdEntered = yield* Deferred.make<void>()
+        const fourthEntered = yield* Deferred.make<void>()
+        const secondRemoved = yield* Deferred.make<void>()
+        const releaseFirst = yield* Deferred.make<void>()
+        const releaseSecond = yield* Deferred.make<void>()
+        const releaseThird = yield* Deferred.make<void>()
+        const first = yield* KeyedSemaphore.withPermit(
+          locks,
+          "orb",
+          Ref.update(events, (items) => [...items, "first-enter"]).pipe(
+            Effect.andThen(Deferred.succeed(firstEntered, undefined)),
+            Effect.andThen(Deferred.await(releaseFirst)),
+            Effect.andThen(Ref.update(events, (items) => [...items, "first-exit"])),
+          ),
+        ).pipe(Effect.forkChild)
+        yield* Deferred.await(firstEntered)
+        const second = yield* Effect.gen(function* () {
+          yield* KeyedSemaphore.withPermit(
+            locks,
+            "orb",
+            Ref.update(events, (items) => [...items, "second-enter"]).pipe(
+              Effect.andThen(Deferred.succeed(secondEntered, undefined)),
+              Effect.andThen(Deferred.await(releaseSecond)),
+              Effect.andThen(Ref.update(events, (items) => [...items, "second-exit"])),
+            ),
+          )
+          yield* KeyedSemaphore.remove(locks, "orb")
+          yield* Deferred.succeed(secondRemoved, undefined)
+        }).pipe(Effect.forkChild)
+        const third = yield* KeyedSemaphore.withPermit(
+          locks,
+          "orb",
+          Ref.update(events, (items) => [...items, "third-enter"]).pipe(
+            Effect.andThen(Deferred.succeed(thirdEntered, undefined)),
+            Effect.andThen(Deferred.await(releaseThird)),
+            Effect.andThen(Ref.update(events, (items) => [...items, "third-exit"])),
+          ),
+        ).pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        yield* Effect.yieldNow
+        yield* Deferred.succeed(releaseFirst, undefined)
+        yield* Deferred.await(secondEntered)
+        yield* Deferred.succeed(releaseSecond, undefined)
+        yield* Deferred.await(secondRemoved)
+        yield* Deferred.await(thirdEntered)
+        const fourth = yield* KeyedSemaphore.withPermit(
+          locks,
+          "orb",
+          Ref.update(events, (items) => [...items, "fourth-enter"]).pipe(
+            Effect.andThen(Deferred.succeed(fourthEntered, undefined)),
+            Effect.andThen(Ref.update(events, (items) => [...items, "fourth-exit"])),
+          ),
+        ).pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        yield* Effect.yieldNow
+        const fourthEnteredBeforeThirdRelease = yield* Deferred.isDone(fourthEntered)
+        yield* Deferred.succeed(releaseThird, undefined)
+        yield* Fiber.join(first)
+        yield* Fiber.join(second)
+        yield* Fiber.join(third)
+        yield* Fiber.join(fourth)
+        const finalEvents = yield* Ref.get(events)
+        return { finalEvents, fourthEnteredBeforeThirdRelease }
+      }),
+    )
+
+    expect(result.fourthEnteredBeforeThirdRelease).toBe(false)
+    expect(result.finalEvents).toEqual([
+      "first-enter",
+      "first-exit",
+      "second-enter",
+      "second-exit",
+      "third-enter",
+      "third-exit",
+      "fourth-enter",
+      "fourth-exit",
+    ])
   })
 })
 
 const semaphoreCount = <Key>(locks: KeyedSemaphore.KeyedSemaphore<Key>): Effect.Effect<number> =>
   SynchronizedMap.modify(locks.semaphores, (entries) => [HashMap.size(entries), entries] as const)
+
+const semaphoreInUse = <Key>(locks: KeyedSemaphore.KeyedSemaphore<Key>, key: Key): Effect.Effect<number> =>
+  SynchronizedMap.modify(locks.semaphores, (entries) => {
+    const entry = HashMap.get(entries, key)
+    return [Option.isSome(entry) ? entry.value.inUse : 0, entries] as const
+  })
+
+const waitForInUse = <Key>(
+  locks: KeyedSemaphore.KeyedSemaphore<Key>,
+  key: Key,
+  expected: number,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const inUse = yield* semaphoreInUse(locks, key)
+    if (inUse >= expected) return
+    yield* Effect.yieldNow
+    yield* waitForInUse(locks, key, expected)
+  })

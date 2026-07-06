@@ -67,20 +67,23 @@ export const layer: Layer.Layer<
             orb_id: orbId,
           })
         }
-        const sandboxId = record.sandbox_id
         yield* KeyedSemaphore.withPermit(
           refreshLocks,
           orbId,
           Effect.gen(function* () {
+            const refreshedRecord = yield* orbs.get(orbId)
+            if (refreshedRecord === undefined || refreshedRecord.status !== "running") return
+            const refreshedSandboxId = refreshedRecord.sandbox_id
+            if (refreshedSandboxId === null) return
             const now = yield* time.nowMillis
             const previousRefresh = Option.getOrUndefined(yield* SynchronizedMap.get(lastRefreshByOrb, orbId))
             if (previousRefresh === undefined || now - previousRefresh >= refreshThrottleMillis) {
-              yield* sandbox.setTimeout(sandboxId, timeoutMs)
+              yield* sandbox.setTimeout(refreshedSandboxId, timeoutMs)
               yield* SynchronizedMap.set(lastRefreshByOrb, orbId, now)
             }
+            yield* orbs.touch(orbId)
           }),
         )
-        yield* orbs.touch(orbId)
         return yield* Effect.void
       }),
       release: Effect.fn("OrbActivity.release")(function* (orbId: Ids.OrbId) {
