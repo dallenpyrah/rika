@@ -23,7 +23,7 @@ RUN apt-get update \
   && curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
   && ln -sf /opt/bun/bin/bun /usr/local/bin/bun \
   && ln -sf /opt/bun/bin/bunx /usr/local/bin/bunx \
-  && useradd --create-home --shell /bin/bash user \
+  && (id -u user >/dev/null 2>&1 || useradd --create-home --shell /bin/bash user) \
   && mkdir -p /opt/rika/bin /opt/rika/share/rika /home/user/repo \
   && printf 'new-session -A -s rika\n' > /home/user/.tmux.conf \
   && chmod -R a+rx /opt/bun \
