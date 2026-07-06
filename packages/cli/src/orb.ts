@@ -1,3 +1,4 @@
+import { WorkspaceIdentity } from "@rika/agent"
 import { IdGenerator, Time } from "@rika/core"
 import { OrbManager, SandboxClient } from "@rika/orb"
 import { ArtifactStore, OrbStore } from "@rika/persistence"
@@ -86,6 +87,7 @@ export const layerWithClientFactory = (clientFactory: ClientFactory) =>
         yield* artifacts.put({
           id: artifactId,
           thread_id: orb.thread_id,
+          workspace_id: WorkspaceIdentity.resolveWorkspaceId({ project_id: orb.project_id }),
           kind: "orb-final-diff",
           title: "Orb final diff",
           content: changes,

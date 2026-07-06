@@ -2,7 +2,7 @@ import { Artifact, Common, Ids } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import { sql } from "drizzle-orm"
 import * as Database from "./database"
-import { artifacts } from "./schema"
+import { artifacts, thread_projections } from "./schema"
 
 export const PutInput = Artifact.Artifact
 export type PutInput = typeof PutInput.Type
@@ -51,8 +51,9 @@ export const layer = Layer.effect(
         return yield* databaseService.withDatabaseEffect((database) =>
           Effect.try({
             try: () => {
-              database.insert(artifacts).values(artifactToRow(artifact)).onConflictDoNothing().run()
-              return artifact
+              const stored = artifactWithWorkspace(database, artifact)
+              database.insert(artifacts).values(artifactToRow(stored)).onConflictDoNothing().run()
+              return stored
             },
             catch: (cause) => toError(cause, "put", artifact.id),
           }),
@@ -152,6 +153,10 @@ interface ArtifactRow {
   readonly created_at: number
 }
 
+interface ThreadWorkspaceRow {
+  readonly workspace_id: string
+}
+
 const selectById = (artifactId: Ids.ArtifactId) => sql`select * from artifacts where id = ${artifactId} limit 1`
 
 const listRows = (database: ArtifactDatabase, input: ListInput) => {
@@ -212,6 +217,21 @@ const artifactToRow = (artifact: Artifact.Artifact) => ({
   metadata: artifact.metadata === undefined ? null : JSON.stringify(artifact.metadata),
   created_at: artifact.created_at,
 })
+
+const artifactWithWorkspace = (database: ArtifactDatabase, artifact: Artifact.Artifact): Artifact.Artifact => {
+  if (artifact.workspace_id !== undefined) return artifact
+  const row = database.get<ThreadWorkspaceRow>(
+    sql`select ${thread_projections.workspace_id} from ${thread_projections} where ${thread_projections.thread_id} = ${artifact.thread_id} limit 1`,
+  )
+  if (row === undefined) {
+    throw new ArtifactStoreError({
+      message: `Thread ${artifact.thread_id} is not present in thread_projections`,
+      operation: "put",
+      artifact_id: artifact.id,
+    })
+  }
+  return { ...artifact, workspace_id: Ids.WorkspaceId.make(row.workspace_id) }
+}
 
 const rowToArtifact = (row: ArtifactRow | undefined): Artifact.Artifact | undefined => {
   if (row === undefined) return undefined

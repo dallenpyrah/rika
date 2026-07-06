@@ -495,11 +495,12 @@ describe("remote control API and SDK", () => {
       content: { ok: true },
       created_at: now,
     }
+    const storedArtifact = { ...artifact, workspace_id: workspaceId }
     await runtime.runPromise(ArtifactStore.put(artifact))
     const artifacts = await Effect.runPromise(client.listArtifacts({ thread_id: threadId, kind: "research" }))
     const fetched = await Effect.runPromise(client.getArtifact(artifactId))
     expect(artifacts.map((item) => item.id)).toEqual([artifactId])
-    expect(fetched).toEqual(artifact)
+    expect(fetched).toEqual(storedArtifact)
   })
 
   test("startTurn preserves read-only tool access for the agent loop", async () => {
@@ -2114,6 +2115,7 @@ describe("remote control API and SDK", () => {
       content: { ok: true },
       created_at: now,
     }
+    const storedArtifact = { ...artifact, workspace_id: workspaceId }
 
     const result = await runtime.runPromise(
       Effect.gen(function* () {
@@ -2167,7 +2169,7 @@ describe("remote control API and SDK", () => {
     expect(result.getError).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
     expect(result.presenceError).toBeInstanceOf(WorkspaceAccess.WorkspaceAccessDenied)
     expect(result.ownerArtifacts.map((item) => item.id)).toEqual([artifactId])
-    expect(result.ownerArtifact).toEqual(artifact)
+    expect(result.ownerArtifact).toEqual(storedArtifact)
   })
 
   test("remote thread event subscriptions stop when visibility is revoked", async () => {

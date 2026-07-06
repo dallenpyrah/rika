@@ -127,7 +127,10 @@ describe("CLI orb commands", () => {
         const finalDiffArtifacts = yield* Effect.forEach(records, (record) =>
           ArtifactStore.list({ thread_id: record.thread_id, kind: "orb-final-diff" }),
         )
-        return { exitCode, records, artifacts, finalDiffArtifacts: finalDiffArtifacts.flat() }
+        const workspaceArtifacts = yield* ArtifactStore.listAll({
+          workspace_id: Ids.WorkspaceId.make("project:project_1"),
+        })
+        return { exitCode, records, artifacts, finalDiffArtifacts: finalDiffArtifacts.flat(), workspaceArtifacts }
       }).pipe(
         Effect.provide(
           makeLayer({
@@ -177,6 +180,11 @@ describe("CLI orb commands", () => {
     expect(result.artifacts).toHaveLength(1)
     expect(result.artifacts[0]?.metadata).toMatchObject({ winner_id: "orb-2", candidate_count: 3 })
     expect(result.finalDiffArtifacts).toHaveLength(2)
+    expect(result.workspaceArtifacts.map((artifact) => artifact.kind).toSorted()).toEqual([
+      "orb-final-diff",
+      "orb-final-diff",
+      "verdict",
+    ])
     expect(
       result.finalDiffArtifacts
         .map((artifact) => Schema.decodeUnknownSync(Remote.OrbChangesResponse)(artifact.content).diff)
@@ -513,6 +521,36 @@ describe("CLI orb commands", () => {
     expect(JSON.stringify(result.artifacts[0]?.content)).not.toContain("orb-token")
   })
 
+  test("kill with force stores final diff artifacts under the project workspace", async () => {
+    const output: Output.MemoryOutput = { stdout: [], stderr: [] }
+    const calls: Array<string> = []
+    const workspaceId = Ids.WorkspaceId.make(`project:${projectId}`)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedOrb("running")
+        const exitCode = yield* CliOrb.executeCommand({
+          type: "orb",
+          action: "kill",
+          thread_id: threadId,
+          force: true,
+        })
+        const artifacts = yield* ArtifactStore.listAll({ workspace_id: workspaceId, kind: "orb-final-diff" })
+        return { exitCode, artifacts }
+      }).pipe(Effect.provide(makeLayer({ output, calls, liveArtifactStore: true }))),
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.artifacts).toHaveLength(1)
+    expect(result.artifacts[0]).toMatchObject({
+      thread_id: threadId,
+      workspace_id: workspaceId,
+      kind: "orb-final-diff",
+      content: finalDiff,
+    })
+  })
+
   test("kill default no aborts without mutation", async () => {
     const output: Output.MemoryOutput = { stdout: [], stderr: [] }
     const calls: Array<string> = []
@@ -694,6 +732,7 @@ const makeLayer = (input: {
   readonly syncFails?: boolean
   readonly judgeWinnerIndex?: number
   readonly killFailsOnCall?: number
+  readonly liveArtifactStore?: boolean
 }) => {
   const calls = input.calls ?? []
   const tournamentState = {
@@ -708,7 +747,10 @@ const makeLayer = (input: {
   const databaseLayer = Database.memoryLayer
   const timeLayer = input.times === undefined ? Time.fixedLayer(now) : timeSequenceLayer(input.times)
   const idLayer = IdGenerator.sequenceLayer(1)
-  const artifactLayer = artifactStoreLayer(calls, input.artifactPutFails === true)
+  const artifactLayer =
+    input.liveArtifactStore === true
+      ? ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+      : artifactStoreLayer(calls, input.artifactPutFails === true)
   const projectLayer = ProjectStore.layer.pipe(
     Layer.provideMerge(databaseLayer),
     Layer.provideMerge(configLayer),
@@ -1030,6 +1072,7 @@ const artifactStoreLayer = (calls: Array<string>, putFails: boolean) => {
       listAll: (input = {}) =>
         Effect.succeed(
           [...rows.values()]
+            .filter((artifact) => input.workspace_id === undefined || artifact.workspace_id === input.workspace_id)
             .filter((artifact) => input.kind === undefined || artifact.kind === input.kind)
             .toSorted((left, right) => right.created_at - left.created_at)
             .slice(0, input.limit ?? 100),
