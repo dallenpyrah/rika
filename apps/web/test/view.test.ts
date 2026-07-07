@@ -227,7 +227,6 @@ describe("web app view", () => {
       Scene.expect(Scene.role("combobox", { name: "Mode" })).toExist(),
       Scene.expect(Scene.text("deep2")).toExist(),
       Scene.expect(Scene.role("button", { name: "Stop" })).toExist(),
-      ...resolveTranscriptScroller(),
     )
 
     Scene.scene(
@@ -255,7 +254,6 @@ describe("web app view", () => {
       }),
       Scene.expect(Scene.text("S")).toExist(),
       Scene.expect(Scene.text("sarah is typing")).toExist(),
-      Scene.expect(Scene.text("sarah")).toExist(),
       Scene.expect(Scene.text("hello from Sarah")).toExist(),
       ...resolveTranscriptScroller(),
     )
@@ -266,6 +264,7 @@ describe("web app view", () => {
       { update, view: View.view },
       Scene.with({
         ...orbModel("transcript", 0),
+        user_id: userId,
         events: [
           messageAdded(1, "user", "hello from user", userId),
           messageAdded(2, "assistant", "```ts\nconst value = 1\n```"),
@@ -287,20 +286,17 @@ describe("web app view", () => {
     )
   })
 
-  test("renders sidebar thread search controls", () => {
+  test("renders the Amp-style sidebar without search controls", () => {
     Scene.scene(
       { update, view: View.view },
       Scene.with({
         ...initialModel({ api_base_url: "/api/rika" }),
         threads: [summary(threadId)],
-        thread_search_query: "file:src/view.ts",
-        thread_search_window: "72h",
       }),
-      Scene.expect(Scene.role("searchbox", { name: "Thread search" })).toExist(),
-      Scene.expect(Scene.displayValue("file:src/view.ts")).toExist(),
-      Scene.expect(Scene.role("combobox", { name: "Thread search window" })).toExist(),
-      Scene.expect(Scene.text("72h")).toExist(),
-      ...resolveTranscriptScroller(),
+      Scene.expect(Scene.role("searchbox", { name: "Thread search" })).not.toExist(),
+      Scene.expect(Scene.role("button", { name: "Search threads" })).toExist(),
+      Scene.expect(Scene.role("button", { name: "New thread" })).toExist(),
+      Scene.expect(Scene.text("Inactive Last 24h")).toExist(),
     )
   })
 })
