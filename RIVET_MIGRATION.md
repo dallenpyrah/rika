@@ -54,3 +54,10 @@ Remaining residual:
 - Wire PresenceActor into NativeEdge live presence instead of process-local hub only.
 - CLI `login`/`logout` write `~/.rika/settings.json` using `UserTokenStore` issue path against hosted edge.
 - Production promote via `git merge main → release` once staging smoke is green.
+
+Residual limits (2026-07-08 end of pass):
+
+- `bun run package:smoke` and Railway staging edge fail readiness with `Service not found: @rivetkit/effect/Client` while the local Rivet engine connects — packaging/layer Client provision across managed host still needs a follow-up.
+- Full async Postgres query migration is complete for WorkspaceStore, ThreadProjection, UserTokenStore, and Migration; remaining stores still use sync `withDatabaseEffect` (SQLite product path).
+- Staging Railway project `rika` exists under My Projects with Postgres Online; edge/runner/web/engine not healthy for multi-subscriber smoke yet.
+

@@ -162,6 +162,22 @@ export const layer = Layer.effect(
         )
       }),
       repairUsageIntervals: Effect.fn("OrbStore.repairUsageIntervals")(function* () {
+        if (databaseService.dialect === "postgres") {
+          const rows = yield* databaseService
+            .queryAll<{ readonly id: string; readonly last_active_at: number | string }>(sql`
+              select i.id as id, o.last_active_at as last_active_at
+              from orb_usage_intervals i
+              join orbs o on o.orb_id = i.orb_id
+              where i.ended_at is null and o.status != 'running'
+            `)
+            .pipe(Effect.mapError((cause) => toError(cause, "repairUsageIntervals")))
+          for (const row of rows) {
+            yield* databaseService
+              .queryRun(sql`update orb_usage_intervals set ended_at = ${Number(row.last_active_at)} where id = ${row.id}`)
+              .pipe(Effect.mapError((cause) => toError(cause, "repairUsageIntervals")))
+          }
+          return rows.length
+        }
         return yield* databaseService.withDatabaseEffect((database) =>
           Effect.try({
             try: () =>
