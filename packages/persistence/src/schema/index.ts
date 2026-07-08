@@ -8,6 +8,7 @@ import {
   thread_files,
   thread_memory_chunks,
   thread_projections,
+  user_tokens,
   workspace_memberships,
 } from "./event-log"
 
@@ -21,6 +22,7 @@ export {
   thread_files,
   thread_memory_chunks,
   thread_projections,
+  user_tokens,
   workspace_memberships,
 } from "./event-log"
 
@@ -34,5 +36,6 @@ export const schema = {
   thread_files,
   thread_memory_chunks,
   thread_projections,
+  user_tokens,
   workspace_memberships,
 }

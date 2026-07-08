@@ -3,7 +3,6 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { sql } from "drizzle-orm"
 import { createHash } from "node:crypto"
 import * as Database from "./database"
-import { workspace_memberships } from "./schema"
 
 export interface MembershipKey extends Schema.Schema.Type<typeof MembershipKey> {}
 export const MembershipKey = Schema.Struct({
@@ -44,62 +43,49 @@ export const layer = Layer.effect(
     const databaseService = yield* Database.Service
     return Service.of({
       putMembership: Effect.fn("WorkspaceStore.putMembership")(function* (membership: Workspace.Membership) {
-        return yield* databaseService.withDatabaseEffect((database) =>
-          Effect.try({
-            try: () => putMembershipRow(database, membership),
-            catch: (cause) => toError(cause, "putMembership", membership.workspace_id, membership.user_id),
-          }),
+        return yield* putMembershipRow(databaseService, membership).pipe(
+          Effect.mapError((cause) => toError(cause, "putMembership", membership.workspace_id, membership.user_id)),
         )
       }),
       getMembership: Effect.fn("WorkspaceStore.getMembership")(function* (input: MembershipKey) {
-        return yield* databaseService.withDatabaseEffect((database) =>
-          Effect.try({
-            try: () =>
-              rowToMembership(
-                database.get<MembershipRow>(
-                  sql`select * from workspace_memberships where workspace_id = ${input.workspace_id} and user_id = ${input.user_id} limit 1`,
-                ),
-              ),
-            catch: (cause) => toError(cause, "getMembership", input.workspace_id, input.user_id),
-          }),
-        )
+        return yield* databaseService
+          .queryGet<MembershipRow>(
+            sql`select * from workspace_memberships where workspace_id = ${input.workspace_id} and user_id = ${input.user_id} limit 1`,
+          )
+          .pipe(
+            Effect.map(rowToMembership),
+            Effect.mapError((cause) => toError(cause, "getMembership", input.workspace_id, input.user_id)),
+          )
       }),
       listMemberships: Effect.fn("WorkspaceStore.listMemberships")(function* (workspaceId: Ids.WorkspaceId) {
-        return yield* databaseService.withDatabaseEffect((database) =>
-          Effect.try({
-            try: () =>
-              database
-                .all<MembershipRow>(
-                  sql`select * from workspace_memberships where workspace_id = ${workspaceId} order by role asc, user_id asc`,
-                )
-                .map(rowToExistingMembership),
-            catch: (cause) => toError(cause, "listMemberships", workspaceId),
-          }),
-        )
+        return yield* databaseService
+          .queryAll<MembershipRow>(
+            sql`select * from workspace_memberships where workspace_id = ${workspaceId} order by role asc, user_id asc`,
+          )
+          .pipe(
+            Effect.map((rows) => rows.map(rowToExistingMembership)),
+            Effect.mapError((cause) => toError(cause, "listMemberships", workspaceId)),
+          )
       }),
       listUserMemberships: Effect.fn("WorkspaceStore.listUserMemberships")(function* (userId: Ids.UserId) {
-        return yield* databaseService.withDatabaseEffect((database) =>
-          Effect.try({
-            try: () =>
-              database
-                .all<MembershipRow>(
-                  sql`select * from workspace_memberships where user_id = ${userId} order by workspace_id asc`,
-                )
-                .map(rowToExistingMembership),
-            catch: (cause) => toError(cause, "listUserMemberships", undefined, userId),
-          }),
-        )
+        return yield* databaseService
+          .queryAll<MembershipRow>(
+            sql`select * from workspace_memberships where user_id = ${userId} order by workspace_id asc`,
+          )
+          .pipe(
+            Effect.map((rows) => rows.map(rowToExistingMembership)),
+            Effect.mapError((cause) => toError(cause, "listUserMemberships", undefined, userId)),
+          )
       }),
       workspaceHasMembers: Effect.fn("WorkspaceStore.workspaceHasMembers")(function* (workspaceId: Ids.WorkspaceId) {
-        return yield* databaseService.withDatabaseEffect((database) =>
-          Effect.try({
-            try: () =>
-              database.get<{ readonly count: number }>(
-                sql`select count(*) as count from workspace_memberships where workspace_id = ${workspaceId}`,
-              )?.count !== 0,
-            catch: (cause) => toError(cause, "workspaceHasMembers", workspaceId),
-          }),
-        )
+        return yield* databaseService
+          .queryGet<{ readonly count: number | string }>(
+            sql`select count(*) as count from workspace_memberships where workspace_id = ${workspaceId}`,
+          )
+          .pipe(
+            Effect.map((row) => Number(row?.count ?? 0) !== 0),
+            Effect.mapError((cause) => toError(cause, "workspaceHasMembers", workspaceId)),
+          )
       }),
     })
   }),
@@ -164,32 +150,27 @@ export const workspaceHasMembers = Effect.fn("WorkspaceStore.workspaceHasMembers
   return yield* store.workspaceHasMembers(workspaceId)
 })
 
-type MembershipDatabase = Pick<Database.DrizzleDatabase, "all" | "get" | "insert">
-
 interface MembershipRow {
   readonly id: string
   readonly workspace_id: string
   readonly user_id: string
   readonly role: string
-  readonly created_at: number
+  readonly created_at: number | string
 }
 
-const putMembershipRow = (database: MembershipDatabase, membership: Workspace.Membership) => {
-  const id = membershipId(membership)
-  const existing = database.get<MembershipRow>(sql`select * from workspace_memberships where id = ${id} limit 1`)
-  if (existing !== undefined) return rowToExistingMembership(existing)
-  database
-    .insert(workspace_memberships)
-    .values({
-      id,
-      workspace_id: membership.workspace_id,
-      user_id: membership.user_id,
-      role: membership.role,
-      created_at: membership.created_at,
-    })
-    .run()
-  return membership
-}
+const putMembershipRow = (database: Database.Interface, membership: Workspace.Membership) =>
+  Effect.gen(function* () {
+    const id = membershipId(membership)
+    const existing = yield* database.queryGet<MembershipRow>(
+      sql`select * from workspace_memberships where id = ${id} limit 1`,
+    )
+    if (existing !== undefined) return rowToExistingMembership(existing)
+    yield* database.queryRun(sql`
+      insert into workspace_memberships (id, workspace_id, user_id, role, created_at)
+      values (${id}, ${membership.workspace_id}, ${membership.user_id}, ${membership.role}, ${membership.created_at})
+    `)
+    return membership
+  })
 
 export const membershipId = (input: MembershipKey) =>
   createHash("sha256")
@@ -203,7 +184,7 @@ const rowToExistingMembership = (row: MembershipRow): Workspace.Membership => ({
   workspace_id: Ids.WorkspaceId.make(row.workspace_id),
   user_id: Ids.UserId.make(row.user_id),
   role: Schema.decodeUnknownSync(Workspace.MembershipRole)(row.role),
-  created_at: Common.TimestampMillis.make(row.created_at),
+  created_at: Common.TimestampMillis.make(Number(row.created_at)),
 })
 
 const toError = (cause: unknown, operation: string, workspaceId?: Ids.WorkspaceId, userId?: Ids.UserId) => {

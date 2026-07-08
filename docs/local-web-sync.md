@@ -3,11 +3,11 @@
 Rika local development uses one shared backend per workspace. Interactive terminal windows and the Foldkit web app are clients of that backend; none of them own thread state.
 
 ```diagram
-╭────────────╮       ╭────────────────────╮       ╭───────────────╮
-│ TUI window │──────▶│ Remote control API │──────▶│ Thread event  │
-╰────────────╯       │ submit + subscribe │       │ log           │
-╭────────────╮       │                    │       ╰──────┬────────╯
-│ TUI window │──────▶│ ThreadLive pubsub  │◀─────────────╯
+╭────────────╮       ╭────────────────────╮       ╭────────────────╮
+│ TUI window │──────▶│ Native Rivet edge  │──────▶│ ThreadActor    │
+╰────────────╯       │ submit + subscribe │       │ actor c.db log │
+╭────────────╮       │                    │       ╰───────┬────────╯
+│ TUI window │──────▶│ actor event tail   │◀──────────────╯
 ╰────────────╯       ╰─────────┬──────────╯
 ╭────────────╮                 │
 │ Foldkit UI │◀────────────────╯
@@ -18,10 +18,10 @@ Rika local development uses one shared backend per workspace. Interactive termin
 
 - `startTurn` is submit-only. A successful response means the backend accepted the turn; it does not return turn events.
 - `subscribeThreadEvents` is the shared source of UI truth. TUI and web clients render only events from initial thread open plus the live subscription.
-- Presence frames may share the same NDJSON stream, but they are not thread events and do not have event `sequence` values. SDK consumers receive them through `onPresence`.
+- Presence frames may share the same compatibility event stream, but they are not thread events and do not have event `sequence` values. SDK consumers receive them through `onPresence`.
 - TUI and web clients render other connected users from presence snapshots, show typing state, and prefix user messages from other `user_id` values.
-- `ThreadEventLog` remains canonical durable truth. `ThreadLive` is notification and catch-up plumbing, not a second store.
-- Clients subscribe with `after_sequence`. The server attaches to live events, catches up from the event log, deduplicates by `sequence`, and repairs gaps from the log.
+- Actor c.db remains canonical durable truth for actor-native threads. Rebuildable central projections support lists, search, and local compatibility clients.
+- Clients subscribe with `after_sequence`. The server tails actor events, catches up from the actor event log, deduplicates by `sequence`, and repairs gaps from the log.
 - Clients must dedupe by `sequence` and must not optimistically append their own submitted user messages.
 - Only one active turn per thread is accepted in the local MVP. A concurrent turn can return a typed `409` API error with `active_user_id`; clients keep the submitted message queued instead of retrying immediately.
 
@@ -49,9 +49,9 @@ Set the browser identity with `?user_id=<name>` or `VITE_RIKA_USER_ID`. The valu
 
 The sidebar search input calls `GET /v1/threads/search` and accepts the same thread search filters as the CLI. The adjacent window selector applies `24h`, `72h`, `7d`, or `all` by setting the search `after` bound.
 
-The Vite development server exposes `/api/rika/*`. That proxy reads `<workspace>/.rika/local-backend.json`, forwards requests to the current shared backend, injects the backend token server-side, and streams NDJSON responses through to the browser. The token is not exposed to browser code.
+The Vite development server exposes `/api/rika/*`. That proxy reads `<workspace>/.rika/local-backend.json`, forwards requests to the current native shared backend, injects the backend token server-side, and streams compatibility event responses through to the browser. The token is not exposed to browser code.
 
-Set `RIKA_WORKSPACE_ROOT` or `RIKA_DATA_DIR` when the web dev server should follow a workspace other than the repository root. Set `VITE_RIKA_API_BASE_URL` only when intentionally bypassing the local Vite proxy.
+The source checkout defaults `RIKA_WORKSPACE_ROOT` to the repository root and `RIKA_DATA_DIR` to `<workspace>/.rika`. Set `RIKA_WORKSPACE_ROOT` and, when needed, `RIKA_DATA_DIR` when the web dev server should follow a workspace other than the repository root. Set `VITE_RIKA_API_BASE_URL` only when intentionally bypassing the local Vite proxy.
 
 ## Foldkit architecture
 

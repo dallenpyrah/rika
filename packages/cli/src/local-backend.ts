@@ -10,6 +10,11 @@ const lockDirectory = "local-backend.lock"
 const staleLockMillis = 10_000
 const startupAttempts = 100
 const startupDelayMillis = 100
+const ServerBackend = {
+  nativeRivet: "native-rivet",
+} as const
+
+type ServerBackend = (typeof ServerBackend)[keyof typeof ServerBackend]
 
 export const BackendEndpoint = Schema.Union([
   Schema.Struct({
@@ -78,6 +83,7 @@ export interface SpawnInput {
   readonly workspace_root: string
   readonly data_dir: string
   readonly backend_id: string
+  readonly server_backend: ServerBackend
   readonly host: string
   readonly port: number
   readonly token: string
@@ -237,6 +243,7 @@ const startUnderLock = (input: {
 }): Effect.Effect<BackendEndpoint, BackendError> =>
   Effect.gen(function* () {
     const backend_id = backendId(input.env, input.cwd)
+    const server_backend = serverBackendFromEnv(input.env)
     const current = yield* healthyRecord(input.system, input.input.data_dir, backend_id, input.options).pipe(
       Effect.option,
     )
@@ -250,6 +257,7 @@ const startUnderLock = (input: {
       workspace_root: input.input.workspace_root,
       data_dir: input.input.data_dir,
       backend_id,
+      server_backend,
       host: defaultHost,
       port,
       token,
@@ -303,8 +311,12 @@ const isHealthy = (
   backend_id: string,
   options: BackendOptions,
 ): Effect.Effect<boolean, BackendError> => {
+  const server_backend = serverBackendFromBackendId(backend_id)
   const expectedBackendId =
-    record.backend_id === backend_id || options.adoptHealthyRecord ? record.backend_id : undefined
+    record.backend_id === backend_id ||
+    (options.adoptHealthyRecord && recordMatchesServerBackend(record, server_backend))
+      ? record.backend_id
+      : undefined
   if (expectedBackendId === undefined) return Effect.succeed(false)
   return validateEndpointHealth(system, endpointFromRecord(record), expectedBackendId).pipe(
     Effect.as(true),
@@ -395,7 +407,24 @@ const endpointFromEnv = (env: Record<string, string | undefined>): BackendEndpoi
 export const backendId = (env: Record<string, string | undefined>, cwd: string) => {
   const executable = env.RIKA_BACKEND_EXECUTABLE ?? process.execPath
   const script = env.RIKA_BACKEND_SCRIPT ?? defaultScriptArgument() ?? ""
-  return JSON.stringify({ executable, script, cwd })
+  const server_backend = serverBackendFromEnv(env)
+  return JSON.stringify({ executable, script, cwd, server_backend })
+}
+
+const serverBackendFromEnv = (_env: Record<string, string | undefined>): ServerBackend => ServerBackend.nativeRivet
+
+const recordMatchesServerBackend = (record: BackendRecord, serverBackend: ServerBackend | undefined) =>
+  serverBackend !== undefined && serverBackendFromBackendId(record.backend_id) === serverBackend
+
+const serverBackendFromBackendId = (backend_id: string): ServerBackend | undefined => {
+  try {
+    const value: unknown = JSON.parse(backend_id)
+    if (typeof value !== "object" || value === null || !("server_backend" in value)) return undefined
+    const server_backend = value.server_backend
+    return server_backend === ServerBackend.nativeRivet ? server_backend : undefined
+  } catch {
+    return undefined
+  }
 }
 
 const backendPort = (
@@ -485,6 +514,7 @@ const liveSystem = (env: Record<string, string | undefined>, cwd: string): Syste
             RIKA_WORKSPACE_ROOT: input.workspace_root,
             RIKA_DATA_DIR: input.data_dir,
             RIKA_BACKEND_ID: input.backend_id,
+            RIKA_SERVER_BACKEND: input.server_backend,
             RIKA_MODE: input.mode,
           },
           stdin: "ignore",

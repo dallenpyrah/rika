@@ -19,11 +19,14 @@
     "@rika/core": "workspace:*",
     "@rika/schema": "workspace:*",
     "drizzle-orm": "catalog:",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "postgres": "3.4.7"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.3.4",
     "@types/bun": "catalog:",
     "drizzle-kit": "catalog:",
+    "pg-mem": "3.0.5",
     "typescript": "catalog:"
   }
 }

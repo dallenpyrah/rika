@@ -24,7 +24,7 @@ bun install
 bun run update:local
 ```
 
-For launch builds, `bun run package` writes the compiled artifact and manifest under `dist/release/`.
+For launch builds, `bun run package` writes the compiled artifact and manifest under `dist/release/` and shared runtime assets under `dist/share/rika/`. The local installer copies both trees so the packaged CLI can load the Rivet host sidecar and native RivetKit runtime packages.
 
 ## Settings
 
@@ -259,9 +259,9 @@ rika
 bun run web:dev
 ```
 
-Open `http://127.0.0.1:4590`. The web UI connects through the same shared local backend as the TUI, so two terminal windows and the browser all render the same thread events. Turn submission is submit-only; all visible transcript updates arrive through the shared thread subscription. A specific thread can be opened with `?thread=<thread-id>`.
+Open `http://127.0.0.1:4590`. In the source checkout, the web UI defaults to the repository root and its `.rika` data directory, matching a TUI started from the same checkout. The web UI connects through the same shared local backend as the TUI, so two terminal windows and the browser all render the same thread events. Turn submission is submit-only; all visible transcript updates arrive through the shared thread subscription. A specific thread can be opened with `?thread=<thread-id>`.
 
-The development server proxies `/api/rika/*` to the backend recorded in `<workspace>/.rika/local-backend.json` and injects the local backend token server-side. Use `RIKA_WORKSPACE_ROOT` or `RIKA_DATA_DIR` when the web UI should follow a different workspace. See `docs/local-web-sync.md` for the contract.
+The development server proxies `/api/rika/*` to the backend recorded in `<workspace>/.rika/local-backend.json` and injects the local backend token server-side. Set `RIKA_WORKSPACE_ROOT` and, when needed, `RIKA_DATA_DIR` when the web UI should follow a different workspace. See `docs/local-web-sync.md` for the contract.
 
 ## Non-interactive and streaming JSON
 
@@ -308,11 +308,15 @@ The report prints thread, project, total running minutes, interval count, and a 
 
 ## Remote control, IDEs, and SDK
 
-Start the local remote-control server:
+Start the local server:
 
 ```bash
 rika server --host 127.0.0.1 --port 4587 --token secret
 ```
+
+The direct `rika server` backend is the native Rivet edge. Shared local backends launched automatically for the interactive TUI, web dev proxy, and SDK-heavy helpers also use the native Rivet edge. `rika server --orb` uses the native edge for orb file, file content, changes, and PTY routes; native orb mode is route-limited to orb endpoints so generated orb bearer tokens do not expose actor thread routes on non-loopback binds.
+
+The native backend stores thread events in Rivet actor c.db; `--ephemeral` does not make actor c.db disposable. Use an isolated Rivet storage path for throwaway native runs. IDE commands that target a manually started local native server use the native IDE bridge routes.
 
 IDE adapters and external clients should use `@rika/sdk` instead of duplicating HTTP details. CLI IDE helpers:
 
@@ -343,27 +347,27 @@ Use `.env.local` in a development checkout when that workspace needs different m
 
 Common environment variables:
 
-| Variable                                   | Purpose                                                     |
-| ------------------------------------------ | ----------------------------------------------------------- |
-| `RIKA_MODE`                                | Default agent mode when no command flag overrides it.       |
-| `RIKA_WORKSPACE_ROOT`                      | Default workspace root.                                     |
-| `RIKA_DATA_DIR`                            | Local data directory. Defaults to `<workspace>/.rika`.      |
-| `RIKA_DATABASE_URL`                        | Optional SQLite database URL/path override.                 |
-| `RIKA_TELEMETRY`                           | Enable or disable local OTLP telemetry export.              |
-| `RIKA_TELEMETRY_ENDPOINT`                  | OTLP base URL for traces and logs.                          |
-| `RIKA_COMPACTION_*`                        | Optional automatic compaction thresholds and pruning knobs. |
-| `RIKA_SUBAGENT_TOOLS`                      | `readonly` or `full`; local default is `readonly`.          |
-| `RIKA_API_KEY`                             | Model provider credentials.                                 |
-| `RIKA_EMBEDDINGS_API_KEY`                  | Optional dedicated key for thread memory embeddings.        |
-| `RIKA_BASE_URL`                            | Optional model provider proxy endpoint.                     |
-| `RIKA_BACKEND_URL` / `RIKA_BACKEND_TOKEN`  | Connect interactive TUI to an existing backend.             |
-| `RIKA_BACKEND_PORT`                        | Override deterministic shared local backend port.           |
-| `VITE_RIKA_API_BASE_URL`                   | Optional web UI API base override; defaults to `/api/rika`. |
-| `RIKA_RIVET_HOST`                          | `local` or `remote`.                                        |
-| `RIKA_RIVET_ENDPOINT` / `RIVET_ENDPOINT`   | Rivet endpoint.                                             |
-| `RIKA_RIVET_TOKEN` / `RIVET_TOKEN`         | Optional Rivet token.                                       |
-| `RIKA_RIVET_NAMESPACE` / `RIVET_NAMESPACE` | Optional Rivet namespace.                                   |
-| `RIKA_INSTALL_DIR`                         | Destination for `install:local` / `update:local`.           |
+| Variable                                   | Purpose                                                                                                          |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `RIKA_MODE`                                | Default agent mode when no command flag overrides it.                                                            |
+| `RIKA_WORKSPACE_ROOT`                      | Default workspace root.                                                                                          |
+| `RIKA_DATA_DIR`                            | Local data directory. Core config defaults to `~/.rika`; shared TUI/web backends default to `<workspace>/.rika`. |
+| `RIKA_DATABASE_URL`                        | Optional SQLite database URL/path override.                                                                      |
+| `RIKA_TELEMETRY`                           | Enable or disable local OTLP telemetry export.                                                                   |
+| `RIKA_TELEMETRY_ENDPOINT`                  | OTLP base URL for traces and logs.                                                                               |
+| `RIKA_COMPACTION_*`                        | Optional automatic compaction thresholds and pruning knobs.                                                      |
+| `RIKA_SUBAGENT_TOOLS`                      | `readonly` or `full`; local default is `readonly`.                                                               |
+| `RIKA_API_KEY`                             | Model provider credentials.                                                                                      |
+| `RIKA_EMBEDDINGS_API_KEY`                  | Optional dedicated key for thread memory embeddings.                                                             |
+| `RIKA_BASE_URL`                            | Optional model provider proxy endpoint.                                                                          |
+| `RIKA_BACKEND_URL` / `RIKA_BACKEND_TOKEN`  | Connect interactive TUI to an existing backend.                                                                  |
+| `RIKA_BACKEND_PORT`                        | Override deterministic shared local backend port.                                                                |
+| `VITE_RIKA_API_BASE_URL`                   | Optional web UI API base override; defaults to `/api/rika`.                                                      |
+| `RIKA_RIVET_HOST`                          | `local` or `remote`.                                                                                             |
+| `RIKA_RIVET_ENDPOINT` / `RIVET_ENDPOINT`   | Rivet endpoint.                                                                                                  |
+| `RIKA_RIVET_TOKEN` / `RIVET_TOKEN`         | Optional Rivet token.                                                                                            |
+| `RIKA_RIVET_NAMESPACE` / `RIVET_NAMESPACE` | Optional Rivet namespace.                                                                                        |
+| `RIKA_INSTALL_DIR`                         | Destination for `install:local` / `update:local`.                                                                |
 
 ## Persistence and Rivet hosting
 

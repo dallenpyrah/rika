@@ -20,7 +20,7 @@ import {
 import { Config, Diagnostics, IdGenerator, SecretRedactor, Settings, Telemetry, Time } from "@rika/core"
 import { IdeBridge } from "@rika/ide"
 import { Embeddings, Live, Router } from "@rika/llm"
-import { OrbActivity, OrbManager, SandboxClient } from "@rika/orb"
+import { OrbActivity, OrbChanges, OrbFiles, OrbManager, OrbPty, SandboxClient } from "@rika/orb"
 import {
   ArtifactStore,
   Database,
@@ -39,7 +39,7 @@ import { Ids, Remote } from "@rika/schema"
 import { HttpServer, OrbMirror, PresenceHub, RemoteControl, ThreadLive } from "@rika/server"
 import { BaseServiceLayer, BuiltInTools, FffSearch, McpClient, SpecialtyTools } from "@rika/tools"
 import type { Adapter, RemoteSession, Session, Ticker } from "@rika/tui"
-import { Effect, Layer, Schedule, Stream } from "effect"
+import { Effect, Fiber, Layer, ManagedRuntime, Schedule, Stream } from "effect"
 import * as Args from "./args"
 import * as BackendEndpoint from "./backend-endpoint"
 import * as CliConfig from "./config"
@@ -59,6 +59,7 @@ import * as OrbTournament from "./orb-tournament"
 import * as Output from "./output"
 import * as Project from "./project"
 import * as Review from "./review"
+import { loadRivetHostModule } from "./rivet-host-loader.js"
 import * as RuntimeEnv from "./runtime-env"
 import * as Server from "./server"
 import * as SkillInstaller from "./skill-installer"
@@ -347,6 +348,17 @@ const orbMirrorSyncFailure = (error: OrbMirror.RunError): Diagnostics.Entry => (
   },
 })
 
+const nativeOrbMirrorSyncFailure = (error: unknown): Diagnostics.Entry => ({
+  level: "error",
+  message: "orb_mirror.sync error",
+  data: {
+    op: "orb_mirror.sync",
+    outcome: "error",
+    error: error instanceof Error ? error.message : String(error),
+    error_tag: taggedErrorName(error),
+  },
+})
+
 const taggedErrorName = (error: unknown) =>
   typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string"
     ? error._tag
@@ -387,13 +399,19 @@ const runtimeConfigLayer = (
   workspaceRoot: string,
   modeOverride?: Config.Mode,
 ): Layer.Layer<Config.Service, Config.ConfigError> => {
-  const configEnv = {
-    ...env,
-    RIKA_WORKSPACE_ROOT: workspaceRoot,
-    ...(modeOverride === undefined ? {} : { RIKA_MODE: modeOverride }),
-  }
+  const configEnv = envForWorkspaceRoot(env, workspaceRoot, modeOverride)
   return Config.layerFromEnv(configEnv, workspaceRoot)
 }
+
+export const envForWorkspaceRoot = (
+  env: Record<string, string | undefined>,
+  workspaceRoot: string,
+  modeOverride?: Config.Mode,
+): Record<string, string | undefined> => ({
+  ...env,
+  RIKA_WORKSPACE_ROOT: workspaceRoot,
+  ...(modeOverride === undefined ? {} : { RIKA_MODE: modeOverride }),
+})
 
 const validateRuntimeEnv = (
   command: Args.Command,
@@ -676,7 +694,7 @@ const interactiveRemoteLiveLayerFromTui = (
   const dataDir = env.RIKA_DATA_DIR ?? `${workspaceRoot}/.rika`
   const mode = command.mode
   const configLayer = runtimeConfigLayer(env, workspaceRoot, mode)
-  const databaseLayer = Database.layer.pipe(Layer.provideMerge(configLayer))
+  const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
   const timeLayer = Time.layer
   const redactorLayer = secretRedactorLayer(env)
   const settingsLayer = Settings.layerFromEnv(env, workspaceRoot)
@@ -1762,6 +1780,7 @@ export const serverLiveLayer = (
   env: Record<string, string | undefined>,
   cwd: string,
 ): Layer.Layer<ServerLayerOutput, LiveLayerError> => {
+  if (serverBackendForCommand(command, env) === "native-rivet") return nativeRivetServerLiveLayer(command, env, cwd)
   const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
   const configLayer = runtimeConfigLayer(env, workspaceRoot)
   const redactorLayer = secretRedactorLayer(
@@ -1936,6 +1955,318 @@ export const serverLiveLayer = (
   )
 
   return commandLayer
+}
+
+export const ServerBackend = {
+  nativeRivet: "native-rivet",
+} as const
+
+export type ServerBackend = (typeof ServerBackend)[keyof typeof ServerBackend]
+
+export const serverBackendFromEnv = (_env: Record<string, string | undefined>): ServerBackend =>
+  ServerBackend.nativeRivet
+
+export const serverBackendForCommand = (
+  _command: Pick<Args.ServerCommand, "orb">,
+  _env: Record<string, string | undefined>,
+): ServerBackend => ServerBackend.nativeRivet
+
+export interface RivetHostModule {
+  readonly LocalHost: {
+    readonly layerFromEnv: (
+      env: Record<string, string | undefined>,
+      cwd: string,
+      options?: Record<string, unknown>,
+    ) => Layer.Layer<never, unknown>
+    readonly managedLayerFromEnv: (
+      env: Record<string, string | undefined>,
+      cwd: string,
+      options?: Record<string, unknown>,
+    ) => Layer.Layer<never, unknown>
+    readonly threadClientLayerFromEnv: (
+      env: Record<string, string | undefined>,
+      options?: Record<string, unknown>,
+    ) => Layer.Layer<never, unknown>
+  }
+  readonly NativeEdge: {
+    readonly layer: (options?: Server.NativeServeInput) => Layer.Layer<never, unknown>
+    readonly serve: (input?: Server.NativeServeInput) => Effect.Effect<Server.NativeServedEdge, unknown>
+  }
+  readonly ThreadClient: {
+    readonly getEvents: (input: {
+      readonly thread_id: Ids.ThreadId
+      readonly after_sequence: number
+    }) => Effect.Effect<ReadonlyArray<unknown>, unknown>
+  }
+  readonly ThreadDirectory: {
+    readonly layer: Layer.Layer<never, unknown>
+    readonly liveLayer: Layer.Layer<never, unknown>
+  }
+  readonly OrbMirror: {
+    readonly layer: Layer.Layer<never, unknown>
+    readonly syncRunning: () => Effect.Effect<unknown, unknown>
+  }
+}
+
+const loadRivetHost = (): Effect.Effect<RivetHostModule, Server.ServerError> =>
+  Effect.tryPromise({
+    try: loadRivetHostModule,
+    catch: (cause) => serverErrorFromUnknown(cause),
+  }).pipe(
+    Effect.flatMap((module) =>
+      isRivetHostModule(module)
+        ? Effect.succeed(module)
+        : Effect.fail(new Server.ServerError({ message: "Loaded @rika/rivet-host with an unexpected module shape" })),
+    ),
+  )
+
+const serverErrorFromUnknown = (cause: unknown) =>
+  new Server.ServerError({
+    message: cause instanceof Error ? cause.message : String(cause),
+  })
+
+const isObject = (value: unknown): value is object => typeof value === "object" && value !== null
+
+const isRivetHostModule = (value: unknown): value is RivetHostModule => {
+  if (!isObject(value)) return false
+  const localHost = Reflect.get(value, "LocalHost")
+  const nativeEdge = Reflect.get(value, "NativeEdge")
+  const threadClient = Reflect.get(value, "ThreadClient")
+  const threadDirectory = Reflect.get(value, "ThreadDirectory")
+  const orbMirror = Reflect.get(value, "OrbMirror")
+  if (
+    !isObject(localHost) ||
+    !isObject(nativeEdge) ||
+    !isObject(threadClient) ||
+    !isObject(threadDirectory) ||
+    !isObject(orbMirror)
+  )
+    return false
+  return (
+    typeof Reflect.get(localHost, "layerFromEnv") === "function" &&
+    typeof Reflect.get(localHost, "managedLayerFromEnv") === "function" &&
+    typeof Reflect.get(localHost, "threadClientLayerFromEnv") === "function" &&
+    typeof Reflect.get(nativeEdge, "layer") === "function" &&
+    typeof Reflect.get(nativeEdge, "serve") === "function" &&
+    typeof Reflect.get(threadClient, "getEvents") === "function" &&
+    Reflect.get(threadDirectory, "layer") !== undefined &&
+    Reflect.get(threadDirectory, "liveLayer") !== undefined &&
+    Reflect.get(orbMirror, "layer") !== undefined &&
+    typeof Reflect.get(orbMirror, "syncRunning") === "function"
+  )
+}
+
+const nativeRivetServerLiveLayer = (
+  command: Args.ServerCommand,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): Layer.Layer<ServerLayerOutput, Server.ServerError | Config.ConfigError | Settings.SettingsError> => {
+  const workspaceRoot = command.workspace_root ?? env.RIKA_WORKSPACE_ROOT ?? cwd
+  const configLayer = runtimeConfigLayer(env, workspaceRoot)
+  const redactorLayer = secretRedactorLayer(
+    env,
+    command.token === undefined ? [] : [{ label: "RIKA_SERVER_TOKEN", value: command.token }],
+  )
+  const { diagnosticsLayer, telemetryLayer } = telemetryLayers(env, workspaceRoot, configLayer, redactorLayer)
+  const nativeServerEdgeLayer = Layer.succeed(
+    Server.NativeServerEdge,
+    Server.NativeServerEdge.of({
+      serve: (input) =>
+        loadRivetHost().pipe(
+          Effect.flatMap((rivetHost) =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                let transferred = false
+                const runtime = yield* Effect.acquireRelease(
+                  Effect.sync(() =>
+                    ManagedRuntime.make(
+                      nativeRivetEdgeRuntimeLayer(
+                        rivetHost,
+                        command,
+                        env,
+                        workspaceRoot,
+                        configLayer,
+                        redactorLayer,
+                        diagnosticsLayer,
+                      ),
+                    ),
+                  ),
+                  (edgeRuntime) => (transferred ? Effect.void : edgeRuntime.disposeEffect),
+                )
+                const handle = yield* Effect.tryPromise({
+                  try: (signal) =>
+                    runtime.runPromise(
+                      waitForNativeRivetActor(rivetHost)
+                        .pipe(
+                          Effect.andThen(
+                            rivetHost.OrbMirror.syncRunning().pipe(
+                              Effect.catch((error) => Diagnostics.emit(nativeOrbMirrorSyncFailure(error))),
+                            ),
+                          ),
+                        )
+                        .pipe(Effect.andThen(rivetHost.NativeEdge.serve(input)))
+                        .pipe(Effect.mapError(serverErrorFromUnknown)),
+                      {
+                        signal,
+                      },
+                    ),
+                  catch: (cause) => serverErrorFromUnknown(cause),
+                })
+                const orbMirrorFiber = runtime.runFork(
+                  Effect.repeat(
+                    rivetHost.OrbMirror.syncRunning().pipe(
+                      Effect.catch((error) => Diagnostics.emit(nativeOrbMirrorSyncFailure(error))),
+                    ),
+                    Schedule.spaced("5 seconds"),
+                  ),
+                )
+                yield* Effect.sync(() => {
+                  transferred = true
+                })
+                return {
+                  url: handle.url,
+                  close: () =>
+                    Fiber.interrupt(orbMirrorFiber).pipe(
+                      Effect.andThen(handle.close()),
+                      Effect.asVoid,
+                      Effect.ensuring(runtime.disposeEffect),
+                    ),
+                }
+              }),
+            ),
+          ),
+        ),
+    }),
+  )
+
+  return Server.nativeLayer.pipe(
+    Layer.provideMerge(Output.layer),
+    Layer.provideMerge(nativeServerEdgeLayer),
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(diagnosticsLayer),
+    Layer.provideMerge(telemetryLayer),
+  )
+}
+
+export const waitForNativeRivetActor = (
+  rivetHost: RivetHostModule,
+  options: {
+    readonly thread_id?: Ids.ThreadId
+  } = {},
+) =>
+  Effect.forEach(
+    options.thread_id === undefined
+      ? [
+          Ids.ThreadId.make(`thread_native_rivet_ready_${process.pid}_1`),
+          Ids.ThreadId.make(`thread_native_rivet_ready_${process.pid}_2`),
+          Ids.ThreadId.make(`thread_native_rivet_ready_${process.pid}_3`),
+        ]
+      : [options.thread_id],
+    (thread_id) =>
+      rivetHost.ThreadClient.getEvents({
+        thread_id,
+        after_sequence: 0,
+      }),
+    { discard: true },
+  )
+
+export const nativeRivetEdgeRuntimeLayer = (
+  rivetHost: RivetHostModule,
+  command: Args.ServerCommand,
+  env: Record<string, string | undefined>,
+  workspaceRoot: string,
+  configLayer: Layer.Layer<Config.Service, Config.ConfigError>,
+  redactorLayer: Layer.Layer<SecretRedactor.Service>,
+  diagnosticsLayer: Layer.Layer<
+    Diagnostics.Service | Config.Service | SecretRedactor.Service,
+    Config.ConfigError | Settings.SettingsError
+  >,
+  orbPtySystemLayer: Layer.Layer<OrbPty.System, never, Diagnostics.Service> = OrbPty.systemLayer,
+) => {
+  const rivetEnv = envForWorkspaceRoot(env, workspaceRoot)
+  const databaseLayer = command.ephemeral ? Database.memoryLayer : Database.layer.pipe(Layer.provideMerge(configLayer))
+  const migrationLayer = Migration.layer.pipe(Layer.provideMerge(databaseLayer))
+  const eventLogLayer = ThreadEventLog.layer.pipe(Layer.provideMerge(redactorLayer))
+  const projectionLayer = ThreadProjection.layer.pipe(Layer.provideMerge(databaseLayer))
+  const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
+  const settingsLayer = Settings.layerFromEnv(rivetEnv, workspaceRoot)
+  const timeLayer = Time.layer
+  const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
+  const orbStoreLayer = OrbStore.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
+  const projectStoreLayer = ProjectStore.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(timeLayer),
+    Layer.provideMerge(IdGenerator.layer),
+  )
+  const sandboxLayer = SandboxClient.layer.pipe(Layer.provideMerge(configLayer))
+  const storageLayer = Layer.mergeAll(
+    databaseLayer,
+    migrationLayer,
+    redactorLayer,
+    eventLogLayer,
+    projectionLayer,
+    artifactLayer,
+    workspaceStoreLayer,
+    settingsLayer,
+    mcpApprovalLayer,
+    orbStoreLayer,
+    projectStoreLayer,
+  )
+  const migratedStorageLayer = Layer.effectDiscard(
+    Migration.migrate().pipe(Effect.andThen(OrbStore.repairUsageIntervals())),
+  ).pipe(Layer.provideMerge(storageLayer))
+  const workspaceAccessLayer = WorkspaceAccess.layer.pipe(
+    Layer.provideMerge(databaseLayer),
+    Layer.provideMerge(projectionLayer),
+    Layer.provideMerge(workspaceStoreLayer),
+    Layer.provideMerge(timeLayer),
+  )
+  const managerLayer = OrbManager.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(diagnosticsLayer),
+  )
+  const rivetHostLayer = rivetHost.LocalHost.managedLayerFromEnv(rivetEnv, workspaceRoot, {
+    workspaceAccessLayer,
+    databaseMode: "memory",
+  })
+  const threadClientLayer = rivetHost.LocalHost.threadClientLayerFromEnv(rivetEnv)
+  const orbActivityLayer = OrbActivity.layer.pipe(
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(timeLayer),
+  )
+  const orbMirrorLayer = rivetHost.OrbMirror.layer.pipe(
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(threadClientLayer),
+    Layer.provideMerge(sandboxLayer),
+    Layer.provideMerge(orbActivityLayer),
+    Layer.provideMerge(redactorLayer),
+  )
+  const edgeLayer = rivetHost.NativeEdge.layer(command.token === undefined ? {} : { token: command.token }).pipe(
+    Layer.provideMerge(threadClientLayer),
+    Layer.provideMerge(OrbChanges.layer),
+    Layer.provideMerge(OrbFiles.layer),
+    Layer.provideMerge(OrbPty.layerWithSystem(orbPtySystemLayer, rivetEnv)),
+    Layer.provideMerge(managerLayer),
+    Layer.provideMerge(IdeBridge.layer),
+    Layer.provideMerge(rivetHost.ThreadDirectory.liveLayer),
+    Layer.provideMerge(PresenceHub.layer.pipe(Layer.provideMerge(timeLayer))),
+    Layer.provideMerge(migratedStorageLayer),
+    Layer.provideMerge(workspaceAccessLayer),
+    Layer.provideMerge(configLayer),
+    Layer.provideMerge(IdGenerator.layer),
+    Layer.provideMerge(diagnosticsLayer),
+    Layer.provideMerge(rivetHostLayer),
+  )
+  return Layer.mergeAll(edgeLayer, orbMirrorLayer)
 }
 
 export const syncLiveLayer = (
@@ -2251,43 +2582,7 @@ export type DoctorLayerOutput =
   | Time.Service
   | BackendEndpoint.Health
 
-export type ServerLayerOutput =
-  | AgentLoop.Service
-  | ArtifactStore.Service
-  | Embeddings.Service
-  | Config.Service
-  | ContextResolver.Service
-  | Database.Service
-  | HttpServer.Service
-  | IdeBridge.Service
-  | IdGenerator.Service
-  | McpApprovalStore.Service
-  | Migration.Service
-  | Output.Service
-  | PluginHost.Service
-  | RemoteControl.Service
-  | Router.Service
-  | OrbManager.Service
-  | OrbMirror.Service
-  | OrbActivity.Service
-  | OrbStore.Service
-  | ProjectStore.Service
-  | SandboxClient.Service
-  | Server.Service
-  | SkillRegistry.Service
-  | SkillToolProvider.Service
-  | SpecialtyTools.Service
-  | SubagentRuntime.Service
-  | ThreadEventLog.Service
-  | ThreadLive.Service
-  | ThreadMemoryIndexer.Service
-  | ThreadMemoryStore.Service
-  | ThreadProjection.Service
-  | ThreadService.Service
-  | Time.Service
-  | ToolExecutor.Service
-  | WorkspaceAccess.Service
-  | WorkspaceStore.Service
+export type ServerLayerOutput = Server.Service
 
 export type LiveLayerError =
   | BackendEndpoint.BackendEndpointError
@@ -2307,6 +2602,7 @@ export type LiveLayerError =
   | ProjectStore.ProjectStoreError
   | ReviewService.RunError
   | SandboxClient.OrbConfigError
+  | Server.ServerError
   | Settings.SettingsError
   | ThreadEventLog.ThreadEventLogError
   | ThreadMemoryStore.ThreadMemoryStoreError

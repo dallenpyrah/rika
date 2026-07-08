@@ -623,8 +623,8 @@ const orbTournamentConfig = {
 }
 
 const ideServerConfig = {
-  server: Flag.string("server").pipe(Flag.optional, Flag.withDescription("Remote-control server URL")),
-  token: Flag.string("token").pipe(Flag.optional, Flag.withDescription("Bearer token for the remote-control server")),
+  server: Flag.string("server").pipe(Flag.optional, Flag.withDescription("Local server URL")),
+  token: Flag.string("token").pipe(Flag.optional, Flag.withDescription("Bearer token for the local server")),
 }
 
 const ideConnectConfig = {
@@ -1263,8 +1263,8 @@ const makeServerCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
   CliCommand.make("server", serverConfig, (input: ServerInput) =>
     Ref.set(parsedRef, Option.some(toServerCommand(input))),
   ).pipe(
-    CliCommand.withDescription("Start the local Rika remote-control server"),
-    CliCommand.withShortDescription("Start remote-control server"),
+    CliCommand.withDescription("Start the local Rika server"),
+    CliCommand.withShortDescription("Start local server"),
   )
 
 const makeSyncCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) =>
@@ -1319,7 +1319,7 @@ const makeIdeCommand = (parsedRef: Ref.Ref<Option.Option<Command>>) => {
   ).pipe(CliCommand.withDescription("Request IDE file navigation"), CliCommand.withShortDescription("Open file in IDE"))
 
   return CliCommand.make("ide", {}, () => Ref.set(parsedRef, Option.some(toIdeStatusCommand(emptyIdeInput)))).pipe(
-    CliCommand.withDescription("Connect, inspect, and command IDE clients over the remote-control server"),
+    CliCommand.withDescription("Connect, inspect, and command IDE clients over the local server"),
     CliCommand.withShortDescription("Manage IDE connection"),
     CliCommand.withSubcommands([status, connect, disconnect, openFile]),
   )

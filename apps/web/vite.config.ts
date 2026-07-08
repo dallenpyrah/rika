@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer"
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http"
-import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import type { Duplex } from "node:stream"
 import { fileURLToPath } from "node:url"
@@ -13,7 +12,7 @@ import WebSocket, { WebSocketServer } from "ws"
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const workspaceRoot = process.env.RIKA_WORKSPACE_ROOT ?? rootDir
-const dataDir = process.env.RIKA_DATA_DIR ?? join(process.env.HOME ?? homedir(), ".rika")
+const dataDir = process.env.RIKA_DATA_DIR ?? join(workspaceRoot, ".rika")
 const cliEntryScript = join(rootDir, "packages", "cli", "src", "main.ts")
 const apiPrefix = "/api/rika"
 const bridgeHighWaterBytes = 1024 * 1024
@@ -147,10 +146,15 @@ const errorBody = (error: unknown, code: string) => ({
 export const isApiRequestUrl = (requestUrl: string | undefined): boolean =>
   requestUrl !== undefined && requestUrl.startsWith(apiPrefix)
 
-export const backendProxyEnv = (env: Record<string, string | undefined>): Record<string, string | undefined> => ({
-  ...env,
-  RIKA_BACKEND_SCRIPT: env.RIKA_BACKEND_SCRIPT ?? cliEntryScript,
-})
+export const backendProxyEnv = (env: Record<string, string | undefined>): Record<string, string | undefined> => {
+  const effectiveWorkspaceRoot = env.RIKA_WORKSPACE_ROOT ?? workspaceRoot
+  return {
+    ...env,
+    RIKA_WORKSPACE_ROOT: effectiveWorkspaceRoot,
+    RIKA_DATA_DIR: env.RIKA_DATA_DIR ?? join(effectiveWorkspaceRoot, ".rika"),
+    RIKA_BACKEND_SCRIPT: env.RIKA_BACKEND_SCRIPT ?? cliEntryScript,
+  }
+}
 
 export const isOrbPtyWebSocketRequestUrl = (requestUrl: string | undefined): boolean => {
   if (requestUrl === undefined) return false

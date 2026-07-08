@@ -96,6 +96,10 @@ _Avoid_: Database, history table, audit log
 A rebuildable read model derived from the event log for fast UI, search, or runtime decisions.
 _Avoid_: Cache, state, snapshot
 
+**Thread Directory**:
+A derived discovery index of known thread actors used to find list and search candidates before hydrating the authoritative Thread Actor event log.
+_Avoid_: Event source, actor enumeration, projection authority
+
 **Thread Visibility**:
 The durable read-sharing level for a thread: `private` for the creator, `workspace` for workspace members, and `unlisted` for anyone with the thread id.
 _Avoid_: Repo visibility, permission role, publication state

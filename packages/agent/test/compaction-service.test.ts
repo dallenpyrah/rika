@@ -96,6 +96,33 @@ describe("CompactionService", () => {
     expect(JSON.stringify(captured[0]?.messages)).not.toContain("third user message")
   })
 
+  test("plans a compacted event without appending it to the thread log", async () => {
+    const captured: Array<Router.Request> = []
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* seedThread()
+        const planned = yield* CompactionService.planCompact({ thread_id: threadId, trigger: "manual" })
+        const events = yield* ThreadEventLog.readThread({ thread_id: threadId })
+        return { planned, events }
+      }).pipe(Effect.provide(makeLayer(captured, [responseWith("Planned summary")]))),
+    )
+
+    expect(result.planned.event).toMatchObject({
+      type: "context.compacted",
+      thread_id: threadId,
+      sequence: 15,
+      data: {
+        summary: "Planned summary",
+        tail_start_sequence: 9,
+        trigger: "manual",
+        model: "gpt-5.5",
+      },
+    })
+    expect(result.events.at(-1)?.type).toBe("turn.completed")
+    expect(result.events).not.toContainEqual(result.planned.event)
+  })
+
   test("passes the previous compaction summary as the anchor on later compactions", async () => {
     const captured: Array<Router.Request> = []
     await Effect.runPromise(

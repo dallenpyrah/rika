@@ -21,7 +21,7 @@ export interface Interface {
   readonly subscribe: (threadId: Ids.ThreadId) => Stream.Stream<Remote.PresenceFrame>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@rika/server/PresenceHub") {}
+export class Service extends Context.Service<Service, Interface>()("@rika/agent/PresenceHub") {}
 
 export const layer = Layer.effect(
   Service,

@@ -55,6 +55,7 @@ export type RunError =
 
 export interface Interface {
   readonly compact: (input: CompactInput) => Effect.Effect<CompactionResult, RunError>
+  readonly planCompact: (input: CompactInput) => Effect.Effect<CompactionResult, RunError>
   readonly prune: (input: PruneInput) => Effect.Effect<PruneResult, RunError>
 }
 
@@ -84,6 +85,9 @@ export const layer = Layer.effect(
       compact: Effect.fn("CompactionService.compact")(function* (input: CompactInput) {
         return yield* compactThread(dependencies, input)
       }),
+      planCompact: Effect.fn("CompactionService.planCompact")(function* (input: CompactInput) {
+        return yield* planCompactThread(dependencies, input)
+      }),
       prune: Effect.fn("CompactionService.prune")(function* (input: PruneInput) {
         return yield* pruneThread(dependencies, input)
       }),
@@ -91,11 +95,14 @@ export const layer = Layer.effect(
   }),
 )
 
-export const fakeLayer = (implementation: Pick<Interface, "compact"> & Partial<Pick<Interface, "prune">>) =>
+export const fakeLayer = (
+  implementation: Pick<Interface, "compact"> & Partial<Pick<Interface, "planCompact" | "prune">>,
+) =>
   Layer.succeed(
     Service,
     Service.of({
       compact: implementation.compact,
+      planCompact: implementation.planCompact ?? implementation.compact,
       prune: implementation.prune ?? (() => Effect.succeed({ tool_call_ids: [], estimated_tokens_freed: 0 })),
     }),
   )
@@ -105,12 +112,24 @@ export const compact = Effect.fn("CompactionService.compact.call")(function* (in
   return yield* service.compact(input)
 })
 
+export const planCompact = Effect.fn("CompactionService.planCompact.call")(function* (input: CompactInput) {
+  const service = yield* Service
+  return yield* service.planCompact(input)
+})
+
 export const prune = Effect.fn("CompactionService.prune.call")(function* (input: PruneInput) {
   const service = yield* Service
   return yield* service.prune(input)
 })
 
 const compactThread = (dependencies: Dependencies, input: CompactInput) =>
+  Effect.gen(function* () {
+    const plan = yield* planCompactThread(dependencies, input)
+    const appended = yield* appendAndProject(dependencies, plan.event)
+    return { event: appended, tokens_before: plan.tokens_before }
+  })
+
+const planCompactThread = (dependencies: Dependencies, input: CompactInput) =>
   Effect.gen(function* () {
     const events = yield* readThread(dependencies, input.thread_id)
     if (events.length === 0) {
@@ -140,8 +159,7 @@ const compactThread = (dependencies: Dependencies, input: CompactInput) =>
       tokensBefore,
       response.model,
     )
-    const appended = yield* appendAndProject(dependencies, event)
-    return { event: appended, tokens_before: tokensBefore }
+    return { event, tokens_before: tokensBefore }
   })
 
 const pruneThread = (dependencies: Dependencies, input: PruneInput) =>

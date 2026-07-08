@@ -1176,7 +1176,7 @@ const secretEntries = (
   ...Object.entries(secrets).map(([label, value]) => ({ label, value })),
 ]
 
-const gitCloneEnv = (envs: Record<string, string>) => {
+const gitCloneEnv = (envs: Record<string, string>): Record<string, string> => {
   const token = envs.GIT_TOKEN
   return token === undefined ? {} : { GIT_TOKEN: token }
 }

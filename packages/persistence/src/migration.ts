@@ -2,7 +2,15 @@ import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
 import { migrate as migrateDatabase } from "drizzle-orm/bun-sqlite/migrator"
-import { DatabaseError, Service as DatabaseService, withDatabaseEffect } from "./database"
+import { sql } from "drizzle-orm"
+import {
+  DatabaseError,
+  Service as DatabaseService,
+  dialect as databaseDialect,
+  queryRun,
+  withDatabaseEffect,
+} from "./database"
+import { postgresIndexSchemaSql } from "./postgres-index-schema"
 import * as ThreadFileProjection from "./thread-file-projection"
 
 export const sourceMigrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url))
@@ -34,6 +42,18 @@ export const layerFromFolder = (migrationsFolder = defaultMigrationsFolder) =>
     Service,
     Service.of({
       migrate: Effect.fn("Migration.migrate")(function* () {
+        const dialect = yield* databaseDialect()
+        if (dialect === "postgres") {
+          return yield* migratePostgresIndex().pipe(
+            Effect.mapError(
+              (cause) =>
+                new MigrationError({
+                  message: describeCause(cause),
+                  migrations_folder: "postgres-index-schema",
+                }),
+            ),
+          )
+        }
         return yield* withDatabaseEffect((database) =>
           Effect.try({
             try: () => {
@@ -54,5 +74,18 @@ export const migrate = Effect.fn("Migration.migrate.call")(function* () {
   const migration = yield* Service
   return yield* migration.migrate()
 })
+
+const migratePostgresIndex = () =>
+  Effect.gen(function* () {
+    for (const statement of splitSqlStatements(postgresIndexSchemaSql)) {
+      yield* queryRun(sql.raw(statement))
+    }
+  })
+
+const splitSqlStatements = (script: string) =>
+  script
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
 
 const describeCause = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))

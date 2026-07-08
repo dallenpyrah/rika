@@ -28,6 +28,7 @@ export const RunTurnInput = Schema.Struct({
   cancelled: Schema.optional(Schema.Boolean),
   ide_context: Schema.optional(Ide.ContextSnapshot),
   tool_access: Schema.optional(Tool.TurnToolAccess),
+  existing_events: Schema.optional(Schema.Array(Event.Event)),
 }).annotate({ identifier: "Rika.Agent.AgentLoop.RunTurnInput" })
 
 export interface CancelTurnInput extends Schema.Schema.Type<typeof CancelTurnInput> {}
@@ -233,7 +234,11 @@ const runTurnInternal = (dependencies: Dependencies, input: RunTurnInput, emit: 
 
 const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit, fields: Diagnostics.Fields) =>
   Effect.gen(function* () {
-    const existingEvents = yield* readThread(dependencies, { thread_id: input.thread_id })
+    if (input.existing_events !== undefined) {
+      yield* validateExistingEvents(input, input.existing_events)
+      yield* mirrorExistingEvents(dependencies, input.existing_events)
+    }
+    const existingEvents = input.existing_events ?? (yield* readThread(dependencies, { thread_id: input.thread_id }))
     const appendedEvents: Array<Event.Event> = []
     let collectAppendedEvents = true
     let sequence = latestSequence(existingEvents)
@@ -1103,6 +1108,34 @@ const appendAndProject = (dependencies: Dependencies, event: Event.Event) =>
       .appendAndProject(event)
       .pipe(Effect.provideService(Database.Service, dependencies.database))
     return appended
+  })
+
+const mirrorExistingEvents = (dependencies: Dependencies, events: ReadonlyArray<Event.Event>) =>
+  Effect.forEach(
+    events,
+    (event) =>
+      dependencies.eventLog
+        .appendIfAbsentAndProject(event)
+        .pipe(Effect.provideService(Database.Service, dependencies.database)),
+    { discard: true },
+  )
+
+const validateExistingEvents = (input: RunTurnInput, events: ReadonlyArray<Event.Event>) =>
+  Effect.gen(function* () {
+    const first = events[0]
+    const created = events.filter((event): event is Event.ThreadCreated => event.type === "thread.created")
+    const invalid =
+      events.length === 0 ||
+      first?.type !== "thread.created" ||
+      created.length !== 1 ||
+      created[0]?.data.workspace_id !== input.workspace_id ||
+      events.some((event, index) => event.thread_id !== input.thread_id || event.sequence !== index + 1)
+    if (!invalid) return
+    yield* new AgentLoopError({
+      message: `Existing events for thread ${input.thread_id} are not a complete matching event prefix`,
+      operation: "validateExistingEvents",
+      thread_id: input.thread_id,
+    })
   })
 
 const appendTurnFailedIfAbsentAndProject = (dependencies: Dependencies, event: Event.TurnFailed) =>

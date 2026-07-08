@@ -30,6 +30,10 @@ describe("ThreadDigest", () => {
 
     expect(Option.isNone(digest)).toBe(true)
   })
+
+  test("does not treat scoped package names as file paths", () => {
+    expect(ThreadDigest.fileEntries([toolCompleted(1, "edit", { renderer: "@pierre/diffs" })])).toEqual([])
+  })
 })
 
 const message = (sequence: number, role: Message.Role, text: string): Event.MessageAdded => ({

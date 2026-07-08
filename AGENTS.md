@@ -42,7 +42,7 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 | `turbo.json`                        | Monorepo task graph for package build, typecheck, and test commands.                                                |
 | `.oxlintrc.json`                    | Root oxlint configuration.                                                                                          |
 | `.mcp.json`                         | MCP server entries for MCP-aware tools, including FoldKit devtools.                                                 |
-| `.codex/config.toml`                | Codex project agent and MCP server configuration.                                                                   |
+| `.codex/config.toml`                | Codex project MCP server configuration. Custom subagents are configured globally in Codex.                          |
 | `scripts/check-docs.ts`             | Lightweight check that documented scripts and guidance files still exist.                                           |
 
 ## Current Standards
@@ -75,11 +75,10 @@ Do not put comments in code (no inline `//`, no JSDoc `/** */`, no block comment
 
 ## For AI Agents
 
-- For every code, config, docs, or behavior change, explicitly consult the Codex `oracle` custom subagent before final handoff. The oracle is configured in `.codex/agents/oracle.toml` as a read-only `gpt-5.5` reviewer with `xhigh` reasoning.
-- Use the oracle for plans, architecture changes, difficult debugging, subtle code review, and final diff review. The oracle may spawn nested read-only subagents for ticket fit, duplication, project standards, Effect/library fit, and verification lanes. Tell the user why the oracle is being invoked. If subagents are unavailable or the change is an emergency containment/no-op inspection, state that the oracle review was skipped and why.
+- ALWAYS call the Codex `oracle` subagent before final handoff on every code, config, docs, or behavior change. Read-only second-opinion reviewer for plans, architecture, bugs, diffs, correctness, safety, and verification gaps. Tell the user why the oracle is being invoked. If subagents are unavailable or the change is an emergency containment/no-op inspection, state that the oracle review was skipped and why.
 - Treat read-only review and research agents as read-only even when the current Codex runtime grants broader filesystem permissions. When invoking `oracle`, `librarian`, or `herald`, explicitly tell the agent not to edit, stage, commit, or run destructive commands.
 - Keep nested subagent fan-out bounded. The oracle may spawn at most five nested subagents per review; the librarian and herald may spawn at most four nested subagents per request. Nested children must not spawn their own children.
-- Use the Codex `librarian` custom subagent for deep source research across this repo, `node_modules`, upstream repositories, and official docs. Use the Codex `herald` custom subagent for deep web search and current public-source discovery. Both are configured with live web search and may spawn nested read-only subagents for independent research tracks.
+- ALWAYS call the Codex `librarian` subagent to ground library APIs, dependency behavior, upstream source, and official documentation before implementation. It must search local source, search node_modules for the installed version, and shallow-clone upstream repositories into tmp when needed. ALWAYS call the Codex `herald` subagent for current public facts, release notes, changelogs, advisories, and external references before trusting training data. Both may spawn nested read-only subagents for independent research tracks.
 - Read `CONTEXT.md` before naming new domain concepts.
 - Read `docs/RESEARCH.md` before changing the architecture or issue stack.
 - Read `docs/effect-module-conventions.md` before adding or changing an Effect service.

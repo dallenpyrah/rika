@@ -226,3 +226,18 @@ export const orb_usage_intervals = sqliteTable(
 
 export type OrbUsageIntervalRow = typeof orb_usage_intervals.$inferSelect
 export type NewOrbUsageIntervalRow = typeof orb_usage_intervals.$inferInsert
+
+export const user_tokens = sqliteTable(
+  "user_tokens",
+  {
+    token_hash: text().primaryKey(),
+    user_id: text().notNull(),
+    label: text(),
+    created_at: integer().notNull(),
+    revoked_at: integer(),
+  },
+  (table) => [index("user_tokens_user_idx").on(table.user_id)],
+)
+
+export type UserTokenRow = typeof user_tokens.$inferSelect
+export type NewUserTokenRow = typeof user_tokens.$inferInsert

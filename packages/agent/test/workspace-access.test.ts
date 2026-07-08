@@ -114,6 +114,89 @@ describe("WorkspaceAccess", () => {
     expect(result.readable.map((summary) => summary.thread_id)).toEqual([threadId])
   })
 
+  test("checks thread access through a supplied thread summary", async () => {
+    const decisions = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        yield* WorkspaceStore.putMembership(membership(ownerId, "owner", workspaceId))
+        yield* WorkspaceStore.putMembership(membership(memberId, "member", workspaceId))
+        const privateSummary = threadSummary("private")
+        const workspaceSummary = threadSummary("workspace")
+        const unlistedSummary = threadSummary("unlisted")
+        const ownerPrivateRead = yield* WorkspaceAccess.authorizeThreadSummary(privateSummary, {
+          thread_id: privateSummary.thread_id,
+          user_id: ownerId,
+          action: "read",
+        })
+        const memberPrivateRead = yield* WorkspaceAccess.authorizeThreadSummary(privateSummary, {
+          thread_id: privateSummary.thread_id,
+          user_id: memberId,
+          action: "read",
+        })
+        const memberWorkspaceRead = yield* WorkspaceAccess.authorizeThreadSummary(workspaceSummary, {
+          thread_id: workspaceSummary.thread_id,
+          user_id: memberId,
+          action: "read",
+        })
+        const outsiderWorkspaceRead = yield* WorkspaceAccess.authorizeThreadSummary(workspaceSummary, {
+          thread_id: workspaceSummary.thread_id,
+          user_id: outsiderId,
+          action: "read",
+        })
+        const outsiderUnlistedWrite = yield* WorkspaceAccess.requireThreadSummary(unlistedSummary, {
+          thread_id: unlistedSummary.thread_id,
+          user_id: outsiderId,
+          action: "write",
+        }).pipe(Effect.flip)
+        const localPrivateRead = yield* WorkspaceAccess.authorizeThreadSummary(privateSummary, {
+          thread_id: privateSummary.thread_id,
+          action: "read",
+        })
+        return {
+          ownerPrivateRead,
+          memberPrivateRead,
+          memberWorkspaceRead,
+          outsiderWorkspaceRead,
+          outsiderUnlistedWrite,
+          localPrivateRead,
+        }
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(decisions.ownerPrivateRead.allowed).toBe(true)
+    expect(decisions.memberPrivateRead.allowed).toBe(false)
+    expect(decisions.memberWorkspaceRead.allowed).toBe(true)
+    expect(decisions.outsiderWorkspaceRead.allowed).toBe(false)
+    expect(decisions.outsiderUnlistedWrite).toMatchObject({
+      _tag: "WorkspaceAccessDenied",
+      action: "write",
+      workspace_id: workspaceId,
+      user_id: outsiderId,
+    })
+    expect(decisions.localPrivateRead.allowed).toBe(true)
+  })
+
+  test("rejects a supplied thread summary for a different thread", async () => {
+    const error = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Migration.migrate()
+        return yield* WorkspaceAccess.authorizeThreadSummary(threadSummary("workspace"), {
+          thread_id: threadId,
+          user_id: memberId,
+          action: "read",
+        }).pipe(Effect.flip)
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(error).toMatchObject({
+      _tag: "WorkspaceAccessError",
+      operation: "authorizeThreadSummary",
+      workspace_id: workspaceId,
+      thread_id: threadId,
+      user_id: memberId,
+    })
+  })
+
   test("enforces thread visibility for creator, members, outsiders, and local no-user reads", async () => {
     const decisions = await Effect.runPromise(
       Effect.gen(function* () {
@@ -322,3 +405,14 @@ const threadVisibilitySet = (visibility: "workspace" | "unlisted"): Event.Event 
     type: "thread.visibility.set",
     data: { visibility },
   }) as Event.Event
+
+const threadSummary = (visibility: "private" | "workspace" | "unlisted"): ThreadProjection.ThreadSummary => ({
+  thread_id: visibilityThreadId(visibility),
+  workspace_id: workspaceId,
+  user_id: ownerId,
+  diff: { additions: 0, modifications: 0, deletions: 0 },
+  archived: false,
+  visibility,
+  created_at: now,
+  updated_at: now,
+})

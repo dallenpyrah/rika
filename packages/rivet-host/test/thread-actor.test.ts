@@ -22,8 +22,19 @@ describe("ThreadActor state projection", () => {
       message_count: 1,
       active_turn_id: turnId,
       active_turn_status: "active",
+      active_user_id: userId,
       latest_message_text: "hello from the log",
     })
+  })
+
+  test("clears active user after terminal turn events", () => {
+    const state = ThreadActor.stateFromEvents(threadId, [threadCreated(1), turnStarted(2), turnCompleted(3)])
+
+    expect(ThreadActor.snapshotFromState(state, threadId)).toMatchObject({
+      active_turn_id: turnId,
+      active_turn_status: "completed",
+    })
+    expect(ThreadActor.snapshotFromState(state, threadId).active_user_id).toBeUndefined()
   })
 
   test("declares workspace access denial as a typed action error", () => {
@@ -42,6 +53,39 @@ describe("ThreadActor state projection", () => {
       action: "read",
       workspace_id: workspaceId,
       user_id: userId,
+    })
+  })
+
+  test("exposes actor-native turn and event actions", () => {
+    expect(ThreadActor.ThreadActor.actions.map((action) => action._tag)).toEqual([
+      "EnsureThread",
+      "StartTurn",
+      "GetEvents",
+      "AppendMirroredEvents",
+      "ReplayThread",
+      "GetSnapshot",
+      "SetVisibility",
+      "PrepareForkThread",
+      "ImportForkThread",
+      "ArchiveThread",
+      "UnarchiveThread",
+      "CompactThread",
+      "InterruptTurn",
+    ])
+  })
+
+  test("rebuilds archive and visibility lifecycle state from actor events", () => {
+    const state = ThreadActor.stateFromEvents(threadId, [
+      threadCreated(1),
+      threadVisibilitySet(2, "unlisted"),
+      threadArchived(3),
+      threadUnarchived(4),
+    ])
+
+    expect(ThreadActor.snapshotFromState(state, threadId)).toMatchObject({
+      archived: false,
+      visibility: "unlisted",
+      last_sequence: 4,
     })
   })
 })
@@ -64,7 +108,18 @@ const turnStarted = (sequence: number): Event.TurnStarted => ({
   version: 1,
   created_at: sequence,
   type: "turn.started",
-  data: {},
+  data: { user_id: userId },
+})
+
+const turnCompleted = (sequence: number): Event.TurnCompleted => ({
+  id: Ids.EventId.make(`state_event_${sequence}`),
+  thread_id: threadId,
+  turn_id: turnId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "turn.completed",
+  data: { provider: "test", model: "test" },
 })
 
 const messageAdded = (sequence: number, content: string): Event.MessageAdded => ({
@@ -84,4 +139,34 @@ const messageAdded = (sequence: number, content: string): Event.MessageAdded => 
       created_at: sequence,
     }),
   },
+})
+
+const threadArchived = (sequence: number): Event.ThreadArchived => ({
+  id: Ids.EventId.make(`state_event_${sequence}`),
+  thread_id: threadId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "thread.archived",
+  data: {},
+})
+
+const threadUnarchived = (sequence: number): Event.ThreadUnarchived => ({
+  id: Ids.EventId.make(`state_event_${sequence}`),
+  thread_id: threadId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "thread.unarchived",
+  data: {},
+})
+
+const threadVisibilitySet = (sequence: number, visibility: Event.ThreadVisibility): Event.ThreadVisibilitySet => ({
+  id: Ids.EventId.make(`state_event_${sequence}`),
+  thread_id: threadId,
+  sequence,
+  version: 1,
+  created_at: sequence,
+  type: "thread.visibility.set",
+  data: { visibility },
 })

@@ -9,6 +9,7 @@ export * as ThreadEventLog from "./thread-event-log"
 export * as ThreadImport from "./thread-import"
 export * as ThreadMemoryStore from "./thread-memory-store"
 export * as ThreadProjection from "./thread-projection"
+export * as UserTokenStore from "./user-token-store"
 export * as WorkspaceStore from "./workspace-store"
 
 export const persistencePackage = "@rika/persistence"

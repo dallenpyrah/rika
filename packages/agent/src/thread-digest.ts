@@ -103,6 +103,7 @@ const normalizePath = (value: string) => value.trim().replace(/\\/g, "/").replac
 const looksLikePath = (value: string) => {
   const normalized = normalizePath(value)
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) return false
+  if (/^@[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(normalized)) return false
   return normalized.includes("/") || /\.[A-Za-z0-9]+$/.test(normalized)
 }
 const isJsonObject = (value: Common.JsonValue | undefined): value is Record<string, Common.JsonValue> =>

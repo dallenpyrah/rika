@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http"
+import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import { WebSocketServer } from "ws"
 import { Ids } from "@rika/schema"
@@ -26,6 +27,21 @@ describe("web Vite backend proxy", () => {
     const env = backendProxyEnv({})
 
     expect(env.RIKA_BACKEND_SCRIPT).toEndWith("/packages/cli/src/main.ts")
+  })
+
+  test("defaults the local backend data directory to the workspace", () => {
+    const env = backendProxyEnv({})
+
+    expect(typeof env.RIKA_WORKSPACE_ROOT).toBe("string")
+    if (env.RIKA_WORKSPACE_ROOT === undefined) throw new Error("missing workspace root")
+    expect(env.RIKA_DATA_DIR).toBe(join(env.RIKA_WORKSPACE_ROOT, ".rika"))
+  })
+
+  test("derives the local backend data directory from an overridden workspace", () => {
+    const env = backendProxyEnv({ RIKA_WORKSPACE_ROOT: "/workspace/other" })
+
+    expect(env.RIKA_WORKSPACE_ROOT).toBe("/workspace/other")
+    expect(env.RIKA_DATA_DIR).toBe("/workspace/other/.rika")
   })
 
   test("routes thread path requests through the matching orb endpoint", async () => {

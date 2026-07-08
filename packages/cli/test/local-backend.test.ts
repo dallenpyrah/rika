@@ -69,12 +69,13 @@ describe("CLI local backend", () => {
 
   test("adopts a healthy backend from a different frontend when explicitly enabled", async () => {
     const system = fakeSystem()
+    const env = { RIKA_BACKEND_EXECUTABLE: "/workspace/rika-local-backend/bin/source-rika" }
     const record: LocalBackend.BackendRecord = {
       url: "http://127.0.0.1:65001",
       token: "installed-token",
       workspace_root: workspaceRoot,
       data_dir: dataDir,
-      backend_id: "installed-rika",
+      backend_id: LocalBackend.backendId(env, workspaceRoot),
       pid: 322,
       started_at: 1,
     }
@@ -115,6 +116,122 @@ describe("CLI local backend", () => {
     expect(system.spawns).toHaveLength(1)
     expect(first.url).toBe("http://127.0.0.1:45678")
     expect(LocalBackend.redactEndpoint(first)).not.toHaveProperty("token")
+  })
+
+  test("starts shared local backends on the native Rivet server by default", async () => {
+    const system = fakeSystem()
+
+    await Effect.runPromise(
+      LocalBackend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode: "smart" }).pipe(
+        Effect.provide(LocalBackend.layerFromInput({ env: {}, cwd: workspaceRoot, system })),
+      ),
+    )
+
+    expect(system.spawns[0]).toMatchObject({ server_backend: "native-rivet" })
+  })
+
+  test("ignores the legacy remote-control backend selector for shared local backends", async () => {
+    const system = fakeSystem()
+    const env = { RIKA_SERVER_BACKEND: "remote-control" }
+
+    await Effect.runPromise(
+      LocalBackend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode: "smart" }).pipe(
+        Effect.provide(LocalBackend.layerFromInput({ env, cwd: workspaceRoot, system })),
+      ),
+    )
+
+    expect(LocalBackend.backendId(env, workspaceRoot)).toBe(defaultBackendId)
+    expect(system.spawns[0]).toMatchObject({ server_backend: "native-rivet" })
+  })
+
+  test("does not reuse a remote-control record when shared backends move to native Rivet", async () => {
+    const system = fakeSystem()
+    const legacyBackendId = JSON.stringify({
+      executable: process.execPath,
+      script: "",
+      cwd: workspaceRoot,
+      server_backend: "remote-control",
+    })
+    const record: LocalBackend.BackendRecord = {
+      url: "http://127.0.0.1:65002",
+      token: "legacy-token",
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      backend_id: legacyBackendId,
+      pid: 323,
+      started_at: 1,
+    }
+    system.files.set(LocalBackend.recordPath(dataDir), JSON.stringify(record))
+    system.healthy.set(healthKey(record.url, record.token), health(record))
+
+    const endpoint = await Effect.runPromise(
+      LocalBackend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode: "smart" }).pipe(
+        Effect.provide(LocalBackend.layerFromInput({ env: {}, cwd: workspaceRoot, system })),
+      ),
+    )
+
+    expect(endpoint.url).not.toBe(record.url)
+    expect(system.spawns).toHaveLength(1)
+    expect(system.spawns[0]).toMatchObject({ server_backend: "native-rivet" })
+  })
+
+  test("does not adopt a healthy remote-control backend when native Rivet is selected", async () => {
+    const system = fakeSystem()
+    const record: LocalBackend.BackendRecord = {
+      url: "http://127.0.0.1:65003",
+      token: "legacy-token",
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      backend_id: JSON.stringify({
+        executable: process.execPath,
+        script: "",
+        cwd: workspaceRoot,
+        server_backend: "remote-control",
+      }),
+      pid: 324,
+      started_at: 1,
+    }
+    system.files.set(LocalBackend.recordPath(dataDir), JSON.stringify(record))
+    system.healthy.set(healthKey(record.url, record.token), health(record))
+
+    const endpoint = await Effect.runPromise(
+      LocalBackend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode: "smart" }).pipe(
+        Effect.provide(LocalBackend.layerFromInput({ env: {}, cwd: workspaceRoot, system, adoptHealthyRecord: true })),
+      ),
+    )
+
+    expect(endpoint.url).not.toBe(record.url)
+    expect(system.spawns).toHaveLength(1)
+    expect(system.spawns[0]).toMatchObject({ server_backend: "native-rivet" })
+  })
+
+  test("does not adopt a pre-migration backend record without a server backend type", async () => {
+    const system = fakeSystem()
+    const record: LocalBackend.BackendRecord = {
+      url: "http://127.0.0.1:65004",
+      token: "legacy-token",
+      workspace_root: workspaceRoot,
+      data_dir: dataDir,
+      backend_id: JSON.stringify({
+        executable: "/workspace/rika-local-backend/bin/source-rika",
+        script: "",
+        cwd: workspaceRoot,
+      }),
+      pid: 325,
+      started_at: 1,
+    }
+    system.files.set(LocalBackend.recordPath(dataDir), JSON.stringify(record))
+    system.healthy.set(healthKey(record.url, record.token), health(record))
+
+    const endpoint = await Effect.runPromise(
+      LocalBackend.connectOrStart({ workspace_root: workspaceRoot, data_dir: dataDir, mode: "smart" }).pipe(
+        Effect.provide(LocalBackend.layerFromInput({ env: {}, cwd: workspaceRoot, system, adoptHealthyRecord: true })),
+      ),
+    )
+
+    expect(endpoint.url).not.toBe(record.url)
+    expect(system.spawns).toHaveLength(1)
+    expect(system.spawns[0]).toMatchObject({ server_backend: "native-rivet" })
   })
 
   test("registers generated backend tokens with the secret redactor", async () => {

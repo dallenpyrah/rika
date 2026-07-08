@@ -1,0 +1,12 @@
+node_modules
+.git
+.rika
+.turbo
+dist
+**/*.sqlite
+**/*.sqlite-*
+.claude
+*.log
+coverage
+tmp
+.DS_Store

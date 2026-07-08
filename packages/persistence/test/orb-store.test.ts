@@ -331,9 +331,13 @@ const recordReadAuditLayer = Layer.effect(
   Effect.gen(function* () {
     const databaseService = yield* Database.Service
     return Database.Service.of({
+      dialect: databaseService.dialect,
       withDatabase: (operation) => databaseService.withDatabase((database) => operation(auditDatabase(database))),
       withDatabaseEffect: (operation) =>
         databaseService.withDatabaseEffect((database) => operation(auditDatabase(database))),
+      queryGet: (query) => databaseService.queryGet(query),
+      queryAll: (query) => databaseService.queryAll(query),
+      queryRun: (query) => databaseService.queryRun(query),
     })
   }),
 ).pipe(Layer.provide(Database.memoryLayer))

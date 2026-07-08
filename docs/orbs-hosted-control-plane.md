@@ -1,6 +1,6 @@
 # Orbs Hosted Control Plane
 
-The Hosted Control Plane is a remote implementation of the local orb control-plane services. It owns hosted authentication, orb lifecycle records, central event mirroring, and multi-client fan-out while preserving the local `OrbManager` and Remote Control contracts.
+The Hosted Control Plane is a remote implementation of the local orb control-plane services. It owns hosted authentication, orb lifecycle records, actor-backed thread routing, and multi-client fan-out while preserving the local `OrbManager` command shape and SDK compatibility where needed.
 
 Spike proof: [`spike/orb-control-plane-http-seam-66`](https://github.com/dallenpyrah/rika/tree/spike/orb-control-plane-http-seam-66), commit [`3234e0a`](https://github.com/dallenpyrah/rika/commit/3234e0a). The branch is intentionally not merged. It proves an HTTP client layer can provide `OrbManager.Service` and pass provision, pause, resume, kill, schema decode, and typed failure mapping against a hosted stub.
 
@@ -16,13 +16,13 @@ What is true now:
 
 - `OrbManager` creates and manages E2B sandboxes from a local process.
 - `OrbStore` and `OrbMirror` persist local orb records and mirror in-orb event streams into local SQLite.
-- `ThreadActor` exists, but it has no live event-stream action equivalent to `subscribeThreadEvents`.
+- `ThreadActor` exists and owns the actor-native thread path, with actor c.db event replay and raw Rivet `threadEvent` broadcasts.
 
 What must remain true:
 
 - `startTurn` stays submit-only.
 - Clients render from `subscribeThreadEvents`.
-- The append-only Event Log remains canonical.
+- The append-only per-thread event log remains canonical inside the owning `ThreadActor` c.db.
 - Workspace authorization uses `WorkspaceAccess`, not self-asserted `user_id`.
 - Local-first CLI use keeps working without hosted credentials.
 
@@ -38,31 +38,31 @@ Core tradeoff: this design centralizes orb control-plane state for hosted reliab
 ```text
 CLI / TUI / Web / SDK
         |
-        | Remote Control HTTP+NDJSON
+        | SDK-compatible HTTP bridge / native Rivet clients
         v
 Hosted Control Plane
         |
         +-- WorkspaceAccess
         +-- HostedOrbManager -> E2B
         +-- HostedOrbStore   -> hosted DB
-        +-- HostedOrbMirror  -> orb Remote Control stream
+        +-- HostedOrbMirror  -> compatibility stream bridge
         |
         v
 ThreadActor
         |
         v
-ThreadEventLog + projections
+actor c.db event log + hosted projections
 ```
 
 The Hosted Control Plane is not a new client protocol. It is a deployment of existing ports behind remote adapters.
 
-| Interface               | Local layer                    | Hosted layer                          | Hides                                                        |
-| ----------------------- | ------------------------------ | ------------------------------------- | ------------------------------------------------------------ |
-| `OrbManager.Service`    | E2B SDK adapter in `@rika/orb` | HTTP client to Hosted Control Plane   | Sandbox provider, endpoint token handling, lifecycle retries |
-| `OrbStore.Service`      | local SQLite                   | hosted DB repository                  | Orb rows, endpoint credentials, usage intervals              |
-| `OrbMirror.Service`     | local process stream consumer  | hosted stream consumer                | In-orb event catch-up, idempotent local/hosted append        |
-| `RemoteControl.Service` | local server process           | hosted API process                    | Thread routes, typed errors, event subscriptions             |
-| `ThreadActor`           | local/parallel adapter today   | hosted turn router and fan-out entity | Active turn serialization and hot subscriptions              |
+| Interface               | Local layer                    | Hosted layer                          | Hides                                                         |
+| ----------------------- | ------------------------------ | ------------------------------------- | ------------------------------------------------------------- |
+| `OrbManager.Service`    | E2B SDK adapter in `@rika/orb` | HTTP client to Hosted Control Plane   | Sandbox provider, endpoint token handling, lifecycle retries  |
+| `OrbStore.Service`      | local SQLite                   | hosted DB repository                  | Orb rows, endpoint credentials, usage intervals               |
+| `OrbMirror.Service`     | local process stream consumer  | hosted stream consumer                | In-orb event catch-up, idempotent local/hosted append         |
+| `RemoteControl.Service` | local compatibility process    | legacy fallback only                  | Historical thread routes and typed errors                     |
+| `ThreadActor`           | local actor-native server path | hosted turn router and fan-out entity | Actor event log, active turn serialization, hot subscriptions |
 
 ## Authentication
 
@@ -90,51 +90,43 @@ The hosted DB owns central records that must outlive local clients:
 - `orb_records`: the existing orb shape, with endpoint credentials behind the same narrow credential accessor.
 - `orb_usage_intervals`: the existing usage interval model.
 - `workspace_memberships`: existing durable membership rows.
-- `thread_events`: append-only hosted event log.
-- `thread_projections`: rebuildable thread summaries and access/search fields.
+- `thread_projections`: rebuildable thread summaries and access/search fields synchronized from actor-owned events.
 - `projects`: hosted project profiles, env names, template ids, and secret references.
 
-The hosted DB adapter stays behind persistence services. Raw Drizzle handles do not cross into server, actor, CLI, or SDK packages.
+The hosted DB adapter stays behind persistence services. Raw Drizzle handles do not cross into server, actor, CLI, or SDK packages. Per-thread `thread_events` live in the owning `ThreadActor` c.db, not in the hosted relational database.
 
 Hosted orb endpoint tokens follow the local rule: normal orb reads omit tokens; only the Hosted Control Plane's `OrbStore.endpointCredentials` equivalent can retrieve them for mirror/resume calls.
 
-## Central Event Mirror
+## Compatibility Event Mirror
 
-The hosted mirror consumes each running orb backend's `subscribeThreadEvents` stream and appends events into hosted `thread_events` idempotently by `(thread_id, sequence)`. Clients subscribe to the Hosted Control Plane, not directly to the sandbox, so the user's laptop does not need to remain online.
+The hosted mirror consumes each running compatibility orb backend's `subscribeThreadEvents` stream and submits validated events to the owning `ThreadActor`. Clients subscribe to the Hosted Control Plane or native actor connection, not directly to the sandbox, so the user's laptop does not need to remain online.
 
 Mirror lifecycle:
 
 1. `HostedOrbManager.provisionForThread` starts the sandbox and stores endpoint credentials.
-2. `HostedOrbMirror.mirror(orb_id)` starts or resumes the stream from the latest hosted sequence.
-3. Each event is validated against the orb's thread id before append.
-4. Appended events update projections and publish through ThreadActor fan-out.
+2. `HostedOrbMirror.mirror(orb_id)` starts or resumes the stream from the latest actor-owned sequence.
+3. Each event is validated against the orb's thread id before actor append.
+4. Actor-appended events update projections and publish through ThreadActor fan-out.
 5. Stream failure inspects sandbox lifecycle, marks the orb paused/killed when observable, and interrupts any active turn with a typed failure event.
 
-The mirror is at-least-once. The event log idempotency key makes replay safe.
+The mirror is at-least-once. Actor-owned sequence checks make replay safe.
 
 ## Rivet Placement
 
-Rivet belongs between Remote Control and the Event Log as the hosted per-thread turn router and live fan-out owner. The per-thread `ThreadActor` serializes active turns, replays state from `ThreadEventLog`, and publishes live event frames to subscribers.
+Rivet is the hosted per-thread turn router, event-log owner, and live fan-out owner. The per-thread `ThreadActor` serializes active turns, replays state from actor c.db, and publishes live event frames to subscribers.
 
-The first Rivet work item is a live event-stream action on `ThreadActor`.
+The current SDK-compatible HTTP event route is a compatibility polling tail over actor `GetEvents`. Native Rivet clients should use raw `threadEvent` broadcasts from connected actor handles until typed streaming actions exist.
 
 Current actor actions:
 
 - `EnsureThread`
-- `AcceptTurn`
+- `StartTurn`
+- `GetEvents`
 - `ReplayThread`
 - `GetSnapshot`
+- `SetVisibility`
 
-Required hosted action:
-
-```ts
-SubscribeThreadEvents(input: {
-  readonly thread_id: ThreadId
-  readonly after_sequence?: number
-}): Stream<Event | PresenceFrame, ThreadActorActionError>
-```
-
-Until that action exists, the Hosted Control Plane may expose Remote Control streams from the API process directly, but hosted multiplayer fan-out is not complete.
+Typed streaming actions are not available in the installed Rivet Effect SDK. Do not reintroduce RemoteControl or hosted relational `thread_events` as the source of truth to compensate for that gap.
 
 ## Thread Visibility
 
@@ -161,7 +153,7 @@ Allowed values are `private`, `workspace`, and `unlisted`. `ThreadProjection` de
 
 The no-user allowance is only for local-first mode.
 
-Thread visibility enforcement is implemented for local and Remote Control paths. Storage lives in `packages/persistence/src/schema/event-log.ts`; visibility events live in `packages/schema/src/event.ts`; `ThreadService.setVisibility` appends `thread.visibility.set` events in `packages/agent/src/thread-service.ts`; `WorkspaceAccess` enforces the visibility matrix in `packages/agent/src/workspace-access.ts`; Remote Control exposes the HTTP route in `packages/server/src/http-server.ts`; the SDK exposes `setThreadVisibility` in `packages/sdk/src/client.ts`; and the CLI exposes `rika threads visibility` plus `rika threads share` through `packages/cli/src/args.ts` and `packages/cli/src/threads.ts`.
+Thread visibility enforcement is implemented for local compatibility paths and the actor-owned summary path. Storage for local compatibility lives in `packages/persistence/src/schema/event-log.ts`; actor-native visibility comes from actor-owned events in c.db; visibility events live in `packages/schema/src/event.ts`; `ThreadActor.SetVisibility` appends `thread.visibility.set` events in native paths; `ThreadService.setVisibility` appends the same event in local compatibility paths; `WorkspaceAccess` enforces the visibility matrix in `packages/agent/src/workspace-access.ts`; NativeEdge exposes the actor-backed HTTP route in `packages/rivet-host/src/native-edge.ts`; Remote Control exposes the legacy HTTP route in `packages/server/src/http-server.ts`; the SDK exposes `setThreadVisibility` in `packages/sdk/src/client.ts`; and the CLI exposes `rika threads visibility` plus `rika threads share` through `packages/cli/src/args.ts` and `packages/cli/src/threads.ts`.
 
 The remaining open hosted work is the multi-tenant authentication path: hosted tokens must identify the principal before the existing `WorkspaceAccess` checks run. The local no-user allowance stays local-first only.
 
@@ -196,7 +188,7 @@ Migration sequence:
 1. Ship remote client layers for `OrbManager` and read-only `OrbStore` behind `RIKA_CONTROL_PLANE_URL`.
 2. Add hosted API endpoints that delegate to the same service interfaces used locally.
 3. Move `OrbMirror` into the hosted service and keep local mirror for local-only orbs.
-4. Add ThreadActor live stream action and route hosted subscriptions through actors.
+4. Route hosted subscriptions through actor replay plus native `threadEvent` fan-out.
 5. Wire hosted authentication into the existing thread visibility enforcement path.
 6. Make project secrets hosted-secret references in hosted mode; local Project secrets remain local.
 
@@ -209,9 +201,9 @@ Rollback is setting `RIKA_CONTROL_PLANE_URL` off. Existing local commands keep u
 | Hosted token invalid                            | Reject before workspace lookup; log auth failure without token value.                 |
 | Hosted DB unavailable                           | Orb lifecycle calls fail typed; no sandbox mutation starts without durable row write. |
 | E2B create succeeds but DB endpoint write fails | Kill sandbox before returning failure, same cleanup invariant as local provisioning.  |
-| Mirror stream drops                             | Resume from latest hosted event sequence; duplicate frames are ignored.               |
-| ThreadActor unavailable                         | API can reject new turns with 503; event log remains canonical and replayable.        |
-| Visibility projection corrupt                   | Rebuild projections from event log before serving hosted reads.                       |
+| Mirror stream drops                             | Resume from latest actor-owned event sequence; duplicate frames are ignored.          |
+| ThreadActor unavailable                         | API can reject new turns with 503; actor c.db remains canonical and replayable.       |
+| Visibility projection corrupt                   | Rebuild projections from actor-owned events before serving hosted reads.              |
 
 ## Non-Goals
 
@@ -233,11 +225,11 @@ Add hosted persistence adapters for orb records, endpoint credentials, usage int
 
 ### Hosted OrbMirror worker
 
-Move continuous orb event mirroring into the Hosted Control Plane. Acceptance: a running orb can be mirrored into hosted `thread_events` while all clients are remote; stream reconnect resumes from the latest stored sequence; duplicate frames are idempotent.
+Move continuous orb event mirroring into the Hosted Control Plane. Acceptance: a running compatibility orb can be mirrored into its owning `ThreadActor` while all clients are remote; stream reconnect resumes from the latest actor-owned sequence; duplicate frames are idempotent.
 
-### ThreadActor live stream action
+### ThreadActor native live tail
 
-Add a live `SubscribeThreadEvents` action to `ThreadActor` and route hosted Remote Control subscriptions through it. Acceptance: replay after `after_sequence` and live events share one stream; presence frames remain ephemeral and are not appended to the Event Log.
+Route hosted subscriptions through `ThreadActor` replay plus native `threadEvent` broadcasts. Acceptance: replay after `after_sequence` and live events share one client stream; SDK-compatible HTTP polling tails are documented as compatibility bridges; presence frames remain ephemeral and are not appended to the event log.
 
 ### Hosted token service
 

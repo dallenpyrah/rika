@@ -80,6 +80,12 @@ export const layer = Layer.succeed(
   Service,
   Service.of({
     apply: Effect.fn("ThreadProjection.apply")(function* (event: Event.Event) {
+      const dialect = yield* Database.dialect()
+      if (dialect === "postgres") {
+        return yield* applyEventOnIndex(event).pipe(
+          Effect.mapError((cause) => toError(cause, "apply", event.thread_id)),
+        )
+      }
       return yield* Database.withDatabaseEffect((database) =>
         Effect.try({
           try: () => ProjectionWriter.applyEvent(database, event),
@@ -88,6 +94,15 @@ export const layer = Layer.succeed(
       )
     }),
     rebuild: Effect.fn("ThreadProjection.rebuild")(function* () {
+      const dialect = yield* Database.dialect()
+      if (dialect === "postgres") {
+        return yield* Effect.fail(
+          new ThreadProjectionError({
+            message: "Postgres index rebuild requires actor event replay into the projection, not a central thread_events log",
+            operation: "rebuild",
+          }),
+        )
+      }
       return yield* Database.withDatabaseEffect((database) =>
         Effect.try({
           try: () => ProjectionWriter.rebuildProjection(database),
@@ -96,6 +111,13 @@ export const layer = Layer.succeed(
       )
     }),
     clear: Effect.fn("ThreadProjection.clear")(function* () {
+      const dialect = yield* Database.dialect()
+      if (dialect === "postgres") {
+        return yield* Database.queryRun(sql`delete from thread_files`).pipe(
+          Effect.andThen(Database.queryRun(sql`delete from thread_projections`)),
+          Effect.mapError((cause) => toError(cause, "clear")),
+        )
+      }
       return yield* Database.withDatabaseEffect((database) =>
         Effect.try({
           try: () => ProjectionWriter.clearProjection(database),
@@ -104,48 +126,101 @@ export const layer = Layer.succeed(
       )
     }),
     listThreads: Effect.fn("ThreadProjection.listThreads")(function* () {
-      return yield* Database.withDatabaseEffect((database) =>
-        Effect.try({
-          try: () =>
-            database
-              .all<ThreadProjectionRow>(sql`select * from thread_projections order by updated_at desc, thread_id asc`)
-              .map(rowToSummary),
-          catch: (cause) => toError(cause, "listThreads"),
-        }),
+      return yield* Database.queryAll<ThreadProjectionRow>(
+        sql`select * from thread_projections order by updated_at desc, thread_id asc`,
+      ).pipe(
+        Effect.map((rows) => rows.map(rowToSummary)),
+        Effect.mapError((cause) => toError(cause, "listThreads")),
       )
     }),
     getThread: Effect.fn("ThreadProjection.getThread")(function* (threadId: Ids.ThreadId) {
-      return yield* Database.withDatabaseEffect((database) =>
-        Effect.try({
-          try: () => {
-            const row = database.get<ThreadProjectionRow>(
-              sql`select * from thread_projections where thread_id = ${threadId}`,
-            )
-            if (row === undefined) return undefined
-            return rowToSummary(row)
-          },
-          catch: (cause) => toError(cause, "getThread", threadId),
-        }),
+      return yield* Database.queryGet<ThreadProjectionRow>(
+        sql`select * from thread_projections where thread_id = ${threadId}`,
+      ).pipe(
+        Effect.map((row) => (row === undefined ? undefined : rowToSummary(row))),
+        Effect.mapError((cause) => toError(cause, "getThread", threadId)),
       )
     }),
     listThreadFiles: Effect.fn("ThreadProjection.listThreadFiles")(function* (input: ThreadFilesInput = {}) {
-      return yield* Database.withDatabaseEffect((database) =>
-        Effect.try({
-          try: () => {
-            const threadIds =
-              input.thread_ids === undefined ? undefined : new Set(input.thread_ids.map((threadId) => String(threadId)))
-            return database
-              .all<ThreadFileRow>(sql`select * from thread_files order by thread_id asc, path asc`)
-              .map(rowToThreadFile)
-              .filter((file) => input.thread_id === undefined || file.thread_id === input.thread_id)
-              .filter((file) => threadIds === undefined || threadIds.has(file.thread_id))
-          },
-          catch: (cause) => toError(cause, "listThreadFiles", input.thread_id),
+      return yield* Database.queryAll<ThreadFileRow>(
+        sql`select * from thread_files order by thread_id asc, path asc`,
+      ).pipe(
+        Effect.map((rows) => {
+          const threadIds =
+            input.thread_ids === undefined ? undefined : new Set(input.thread_ids.map((threadId) => String(threadId)))
+          return rows
+            .map(rowToThreadFile)
+            .filter((file) => input.thread_id === undefined || file.thread_id === input.thread_id)
+            .filter((file) => threadIds === undefined || threadIds.has(file.thread_id))
         }),
+        Effect.mapError((cause) => toError(cause, "listThreadFiles", input.thread_id)),
       )
     }),
   }),
 )
+
+const applyEventOnIndex = (event: Event.Event) =>
+  Effect.gen(function* () {
+    const row = yield* Database.queryGet<ProjectionSequenceRow>(
+      sql`select last_sequence from thread_projections where thread_id = ${event.thread_id}`,
+    )
+    if (row === undefined) {
+      if (event.type !== "thread.created") {
+        return yield* Effect.fail(
+          new ThreadProjectionError({
+            message: `Cannot apply ${event.type} before thread.created for thread ${event.thread_id}`,
+            operation: "apply",
+            thread_id: event.thread_id,
+          }),
+        )
+      }
+      if (event.sequence !== 1) {
+        return yield* Effect.fail(
+          new ThreadProjectionError({
+            message: `Expected first projection sequence 1 for thread ${event.thread_id}, received ${event.sequence}`,
+            operation: "apply",
+            thread_id: event.thread_id,
+          }),
+        )
+      }
+      yield* Database.queryRun(sql`
+        insert into thread_projections (
+          thread_id, workspace_id, user_id, last_user_id, title_text, archived, visibility, last_sequence, created_at, updated_at
+        ) values (
+          ${event.thread_id},
+          ${event.data.workspace_id},
+          ${event.data.user_id ?? null},
+          ${event.data.user_id ?? null},
+          ${event.data.title_text ?? null},
+          0,
+          'private',
+          ${event.sequence},
+          ${event.created_at},
+          ${event.created_at}
+        )
+      `)
+      return
+    }
+    const lastSequence = Number(row.last_sequence)
+    if (event.sequence <= lastSequence) return
+    if (event.sequence !== lastSequence + 1) {
+      return yield* Effect.fail(
+        new ThreadProjectionError({
+          message: `Expected projection sequence ${lastSequence + 1} for thread ${event.thread_id}, received ${event.sequence}`,
+          operation: "apply",
+          thread_id: event.thread_id,
+        }),
+      )
+    }
+    yield* Database.queryRun(sql`
+      update thread_projections set last_sequence = ${event.sequence}, updated_at = ${event.created_at}
+      where thread_id = ${event.thread_id}
+    `)
+  })
+
+interface ProjectionSequenceRow {
+  readonly last_sequence: number | string
+}
 
 export const apply = Effect.fn("ThreadProjection.apply.call")(function* (event: Event.Event) {
   const projection = yield* Service

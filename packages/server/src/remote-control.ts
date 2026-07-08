@@ -1,6 +1,7 @@
 import {
   AgentLoop,
   CompactionService,
+  PresenceHub,
   ThreadSearchQuery,
   ThreadService,
   WorkspaceAccess,
@@ -13,7 +14,6 @@ import { ArtifactStore, Database, OrbStore, ProjectStore, ThreadEventLog, Thread
 import { Artifact, Common, Event, Ide, Ids, Orb, Remote } from "@rika/schema"
 import { Cause, Context, Effect, FiberMap, HashMap, Layer, Option, Schema, Stream } from "effect"
 import * as OrbMirror from "./orb-mirror"
-import * as PresenceHub from "./presence-hub"
 import * as ThreadLive from "./thread-live"
 import * as TurnInterruption from "./turn-interruption"
 

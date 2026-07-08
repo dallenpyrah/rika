@@ -410,7 +410,7 @@ const requireMatchingExisting = (payload: string, event: Event.Event, operation 
   })
 }
 
-const redactEvent = (redactor: SecretRedactor.Interface | undefined, event: Event.Event): Event.Event => {
+export const redactEvent = (redactor: SecretRedactor.Interface | undefined, event: Event.Event): Event.Event => {
   if (redactor === undefined) return event
   switch (event.type) {
     case "thread.created":

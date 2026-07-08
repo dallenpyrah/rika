@@ -5,6 +5,11 @@ import { join } from "node:path"
 
 const artifactName = `rika-${process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`
 const artifactPath = `dist/release/${artifactName}`
+const enginePath = join(
+  process.cwd(),
+  "dist/share/rika/bin",
+  process.platform === "win32" ? "rivet-engine.exe" : "rivet-engine",
+)
 
 await $`bun run package`
 
@@ -76,6 +81,7 @@ async function smokeServerHealth() {
   const workspace = await mkdtemp(join(tmpdir(), "rika-package-smoke-"))
   const token = "package-smoke-token"
   const port = 46_000 + Math.floor(Math.random() * 1_000)
+  const enginePidsBefore = await rivetEnginePids(enginePath)
   const child = Bun.spawn(
     [artifactPath, "server", "--host", "127.0.0.1", "--port", String(port), "--token", token, "--workspace", workspace],
     {
@@ -86,13 +92,33 @@ async function smokeServerHealth() {
         OPENAI_API_KEY: Bun.env.OPENAI_API_KEY ?? "package-smoke-dummy-key",
         RIKA_API_KEY: Bun.env.RIKA_API_KEY ?? "package-smoke-dummy-key",
         RIKA_DATA_DIR: join(workspace, ".rika"),
+        RIKA_SERVER_BACKEND: "native-rivet",
+        RIVETKIT_RUNTIME: "native",
       },
     },
   )
+  const stdout = new Response(child.stdout).text()
+  const stderr = new Response(child.stderr).text()
 
   try {
-    const health = await waitForHealth(`http://127.0.0.1:${port}/health`, token)
-    if (health.workspace_root !== workspace || health.data_dir !== join(workspace, ".rika")) {
+    const health = await waitForHealth(`http://127.0.0.1:${port}/health`, token).catch(async (error) => {
+      child.kill()
+      const [stdoutText, stderrText, exitCode] = await Promise.all([
+        stdout.catch(() => ""),
+        stderr.catch(() => ""),
+        child.exited.catch(() => 1),
+      ])
+      fail("compiled CLI server did not become healthy", {
+        exitCode,
+        stdout: stdoutText,
+        stderr: `${error instanceof Error ? error.message : String(error)}\n${stderrText}`,
+      })
+    })
+    if (
+      health.workspace_root !== workspace ||
+      health.data_dir !== join(workspace, ".rika") ||
+      health.backend_id !== "native-rivet-edge"
+    ) {
       fail("compiled CLI server health returned unexpected workspace metadata", {
         exitCode: 1,
         stdout: JSON.stringify(health),
@@ -102,6 +128,7 @@ async function smokeServerHealth() {
   } finally {
     child.kill()
     await child.exited.catch(() => 0)
+    await terminateNewRivetEnginePids(enginePidsBefore, enginePath)
     await rm(workspace, { force: true, recursive: true })
   }
 }
@@ -118,7 +145,7 @@ async function waitForHealth(url: string, token: string): Promise<Record<string,
     }
     await Bun.sleep(100)
   }
-  return fail("compiled CLI server did not become healthy", { exitCode: 1, stdout: "", stderr: lastError })
+  throw new Error(lastError)
 }
 
 function readHealth(value: unknown): Record<string, string> {
@@ -128,4 +155,44 @@ function readHealth(value: unknown): Record<string, string> {
     if (typeof entryValue === "string") result[key] = entryValue
   }
   return result
+}
+
+async function terminateNewRivetEnginePids(before: ReadonlySet<number>, commandFilter: string) {
+  const targets = [...(await rivetEnginePids(commandFilter))].filter((pid) => !before.has(pid))
+  for (const pid of targets) {
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch {}
+  }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const current = await rivetEnginePids(commandFilter)
+    if (targets.every((pid) => !current.has(pid))) return
+    await Bun.sleep(100)
+  }
+  const current = await rivetEnginePids(commandFilter)
+  for (const pid of targets) {
+    if (!current.has(pid)) continue
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {}
+  }
+}
+
+async function rivetEnginePids(commandFilter: string) {
+  const processList = Bun.spawn(["ps", "-axo", "pid=,command="], {
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  const output = await new Response(processList.stdout).text()
+  await processList.exited.catch(() => 1)
+  const pids = new Set<number>()
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(.+)$/.exec(line)
+    if (match === null) continue
+    const pid = Number(match[1])
+    const command = match[2]
+    if (!Number.isFinite(pid) || command === undefined) continue
+    if (command.includes(commandFilter) && command.includes("rivet-engine start")) pids.add(pid)
+  }
+  return pids
 }

@@ -44,6 +44,14 @@ export interface Interface {
   readonly requireWorkspace: (input: WorkspaceAccessInput) => Effect.Effect<Workspace.AccessDecision, RunError>
   readonly authorizeThread: (input: ThreadAccessInput) => Effect.Effect<Workspace.AccessDecision, RunError>
   readonly requireThread: (input: ThreadAccessInput) => Effect.Effect<Workspace.AccessDecision, RunError>
+  readonly authorizeThreadSummary: (
+    summary: ThreadProjection.ThreadSummary,
+    input: ThreadAccessInput,
+  ) => Effect.Effect<Workspace.AccessDecision, RunError>
+  readonly requireThreadSummary: (
+    summary: ThreadProjection.ThreadSummary,
+    input: ThreadAccessInput,
+  ) => Effect.Effect<Workspace.AccessDecision, RunError>
   readonly ensureWorkspaceForCreate: (input: WorkspaceAccessInput) => Effect.Effect<Workspace.AccessDecision, RunError>
   readonly filterReadableThreads: (
     summaries: ReadonlyArray<ThreadProjection.ThreadSummary>,
@@ -86,6 +94,18 @@ export const layer = Layer.effect(
       requireThread: Effect.fn("WorkspaceAccess.requireThread")(function* (input: ThreadAccessInput) {
         return yield* requireDecision(yield* authorizeThreadFromProjection(dependencies, input))
       }),
+      authorizeThreadSummary: Effect.fn("WorkspaceAccess.authorizeThreadSummary")(function* (
+        summary: ThreadProjection.ThreadSummary,
+        input: ThreadAccessInput,
+      ) {
+        return yield* authorizeThreadSummaryInternal(dependencies, summary, input)
+      }),
+      requireThreadSummary: Effect.fn("WorkspaceAccess.requireThreadSummary")(function* (
+        summary: ThreadProjection.ThreadSummary,
+        input: ThreadAccessInput,
+      ) {
+        return yield* requireDecision(yield* authorizeThreadSummaryInternal(dependencies, summary, input))
+      }),
       ensureWorkspaceForCreate: Effect.fn("WorkspaceAccess.ensureWorkspaceForCreate")(function* (
         input: WorkspaceAccessInput,
       ) {
@@ -97,7 +117,7 @@ export const layer = Layer.effect(
       ) {
         if (userId === undefined) return summaries
         const decisions = yield* Effect.forEach(summaries, (summary) =>
-          authorizeThreadSummary(dependencies, summary, {
+          authorizeThreadSummaryInternal(dependencies, summary, {
             thread_id: summary.thread_id,
             user_id: userId,
             action: "read",
@@ -140,6 +160,22 @@ export const allowAllLayer = Layer.succeed(
           action: input.action,
         }),
       ),
+    authorizeThreadSummary: (summary, input) =>
+      Effect.succeed(
+        allow({
+          workspace_id: summary.workspace_id,
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          action: input.action,
+        }),
+      ),
+    requireThreadSummary: (summary, input) =>
+      Effect.succeed(
+        allow({
+          workspace_id: summary.workspace_id,
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          action: input.action,
+        }),
+      ),
     ensureWorkspaceForCreate: (input) => Effect.succeed(allow(input)),
     filterReadableThreads: (summaries) => Effect.succeed(summaries),
     filterDiscoverableThreads: (summaries) => Effect.succeed(summaries),
@@ -168,6 +204,22 @@ export const authorizeThread = Effect.fn("WorkspaceAccess.authorizeThread.call")
 export const requireThread = Effect.fn("WorkspaceAccess.requireThread.call")(function* (input: ThreadAccessInput) {
   const service = yield* Service
   return yield* service.requireThread(input)
+})
+
+export const authorizeThreadSummary = Effect.fn("WorkspaceAccess.authorizeThreadSummary.call")(function* (
+  summary: ThreadProjection.ThreadSummary,
+  input: ThreadAccessInput,
+) {
+  const service = yield* Service
+  return yield* service.authorizeThreadSummary(summary, input)
+})
+
+export const requireThreadSummary = Effect.fn("WorkspaceAccess.requireThreadSummary.call")(function* (
+  summary: ThreadProjection.ThreadSummary,
+  input: ThreadAccessInput,
+) {
+  const service = yield* Service
+  return yield* service.requireThreadSummary(summary, input)
 })
 
 export const ensureWorkspaceForCreate = Effect.fn("WorkspaceAccess.ensureWorkspaceForCreate.call")(function* (
@@ -222,15 +274,24 @@ const authorizeThreadFromProjection = (dependencies: Dependencies, input: Thread
         ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
       })
     }
-    return yield* authorizeThreadSummary(dependencies, summary, input)
+    return yield* authorizeThreadSummaryInternal(dependencies, summary, input)
   })
 
-const authorizeThreadSummary = (
+const authorizeThreadSummaryInternal = (
   dependencies: Dependencies,
   summary: ThreadProjection.ThreadSummary,
   input: ThreadAccessInput,
 ) =>
   Effect.gen(function* () {
+    if (input.thread_id !== summary.thread_id) {
+      return yield* new WorkspaceAccessError({
+        message: `Thread access summary ${summary.thread_id} does not match requested thread ${input.thread_id}`,
+        operation: "authorizeThreadSummary",
+        workspace_id: summary.workspace_id,
+        thread_id: input.thread_id,
+        ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+      })
+    }
     const workspaceInput: WorkspaceAccessInput = {
       workspace_id: summary.workspace_id,
       ...(input.user_id === undefined ? {} : { user_id: input.user_id }),

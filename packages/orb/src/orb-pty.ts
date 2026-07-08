@@ -174,8 +174,10 @@ export const layerFromEnv = (env: Record<string, string | undefined>) =>
 
 export const layer = layerFromEnv({})
 
-export const layerWithSystem = (system: Layer.Layer<System>, env: Record<string, string | undefined> = {}) =>
-  serviceLayerFromEnv(env).pipe(Layer.provide(system))
+export const layerWithSystem = <R>(
+  system: Layer.Layer<System, never, R>,
+  env: Record<string, string | undefined> = {},
+) => serviceLayerFromEnv(env).pipe(Layer.provide(system))
 
 export const testLayer = (implementation: Interface) => Layer.succeed(Service, Service.of(implementation))
 

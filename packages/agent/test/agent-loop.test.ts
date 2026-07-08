@@ -19,6 +19,7 @@ import {
 
 const threadId = Ids.ThreadId.make("thread_agent_loop")
 const workspaceId = Ids.WorkspaceId.make("workspace_agent_loop")
+const otherWorkspaceId = Ids.WorkspaceId.make("workspace_agent_loop_other")
 const userId = Ids.UserId.make("user_agent_loop")
 
 const configLayer = Config.layerFromValues({
@@ -195,6 +196,35 @@ describe("AgentLoop", () => {
 
     expect(started).toMatchObject({ data: { user_id: userId } })
     expect(message?.data.message.metadata).toEqual({ user_id: userId })
+  })
+
+  test("rejects existing event prefixes that do not match the turn workspace", async () => {
+    const layer = makeLayer([])
+    const hydratedThreadId = Ids.ThreadId.make("thread_agent_invalid_existing")
+    const error = await Effect.runPromise(
+      AgentLoop.runTurn({
+        thread_id: hydratedThreadId,
+        workspace_id: workspaceId,
+        content: "continue",
+        existing_events: [
+          {
+            id: Ids.EventId.make("invalid_existing_event_1"),
+            thread_id: hydratedThreadId,
+            sequence: 1,
+            version: 1,
+            created_at: 1,
+            type: "thread.created",
+            data: { workspace_id: otherWorkspaceId },
+          },
+        ],
+      }).pipe(Effect.flip, Effect.provide(layer)),
+    )
+
+    expect(error).toMatchObject({
+      _tag: "AgentLoopError",
+      operation: "validateExistingEvents",
+      thread_id: hydratedThreadId,
+    })
   })
 
   test("indexes completed turns through the detached memory hook", async () => {

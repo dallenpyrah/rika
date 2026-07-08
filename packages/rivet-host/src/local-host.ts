@@ -1,17 +1,74 @@
 import { BaseServiceLayer } from "@rika/tools"
+import { CompactionService, WorkspaceAccess } from "@rika/agent"
 import { Config, SecretRedactor } from "@rika/core"
-import { Client, Registry } from "@rivetkit/effect"
-import { Effect, Layer } from "effect"
+import { Client, Logger, Registry } from "@rivetkit/effect"
+import { Context, Effect, Layer, Scope } from "effect"
+import { existsSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { setup } from "rivetkit"
+import { configureBaseLogger } from "rivetkit/log"
 import * as HostConfig from "./host-config"
+import * as ThreadDirectory from "./thread-directory"
 import * as ThreadClient from "./thread-client"
 import { layer as threadActorLayer } from "./thread-live"
 
-export interface Options extends HostConfig.ResolveOptions {}
+export interface MetadataReadinessOptions {
+  readonly attempts?: number
+  readonly delayMillis?: number
+}
+
+export interface RawRegistry {
+  readonly start: () => void
+  readonly shutdown: () => Promise<void>
+  readonly parseConfig: () => {
+    readonly endpoint?: string
+    readonly namespace?: string
+    readonly token?: string
+  }
+}
+
+export type SetupRegistry = (options: Parameters<typeof setup>[0]) => RawRegistry
+
+export interface ProcessListing {
+  readonly command: string
+  readonly args: ReadonlyArray<string>
+}
+
+export type ProcessListingRunner = (listing: ProcessListing) => Promise<string | undefined>
+
+export interface Options extends HostConfig.ResolveOptions {
+  readonly workspaceAccessLayer?: Layer.Layer<WorkspaceAccess.Service, unknown>
+  readonly databaseMode?: BaseServiceLayer.DatabaseMode
+  readonly setupRegistry?: SetupRegistry
+  readonly metadataReadiness?: MetadataReadinessOptions
+  readonly processListingRunner?: ProcessListingRunner
+}
 
 export const defaultEndpoint = HostConfig.defaultLocalEndpoint
 
 export const endpointFromEnv = (env: Record<string, string | undefined> = process.env) =>
   env.RIKA_RIVET_ENDPOINT ?? env.RIVET_ENDPOINT ?? defaultEndpoint
+
+export const installedEngineBinaryPath = (executablePath = process.execPath) =>
+  join(
+    dirname(executablePath),
+    "..",
+    "share",
+    "rika",
+    "bin",
+    process.platform === "win32" ? "rivet-engine.exe" : "rivet-engine",
+  )
+
+export const engineBinaryPathFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+  executablePath = process.execPath,
+  exists: (path: string) => boolean = existsSync,
+) => {
+  const configured = env.RIVET_ENGINE_BINARY?.trim()
+  if (configured !== undefined && configured.length > 0) return configured
+  const installed = installedEngineBinaryPath(executablePath)
+  return exists(installed) ? installed : undefined
+}
 
 type ServiceLayerOutput = BaseServiceLayer.CommonOutput
 
@@ -20,11 +77,18 @@ type ServiceLayerError = BaseServiceLayer.Error
 export const serviceLayerFromEnv = (
   env: Record<string, string | undefined> = process.env,
   cwd = process.cwd(),
+  options: Pick<Options, "databaseMode"> = {},
 ): Layer.Layer<ServiceLayerOutput, ServiceLayerError> => {
   const configLayer = Config.layerFromEnv(env, cwd)
   const redactorLayer = SecretRedactor.layerFromEnv(env)
 
-  return BaseServiceLayer.fromEnv({ env, workspaceRoot: cwd, configLayer, redactorLayer }).agentLoopLayer
+  return BaseServiceLayer.fromEnv({
+    env,
+    workspaceRoot: cwd,
+    configLayer,
+    redactorLayer,
+    databaseMode: options.databaseMode ?? "memory",
+  }).agentLoopLayer
 }
 
 export const serviceLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError> = serviceLayerFromEnv()
@@ -34,10 +98,29 @@ export const supportLayer: Layer.Layer<ServiceLayerOutput, ServiceLayerError> = 
 export const supportLayerFromEnv = (
   env: Record<string, string | undefined> = process.env,
   cwd = process.cwd(),
-): Layer.Layer<ServiceLayerOutput, ServiceLayerError> => serviceLayerFromEnv(env, cwd)
+  options: Pick<Options, "databaseMode"> = {},
+): Layer.Layer<ServiceLayerOutput, ServiceLayerError> => serviceLayerFromEnv(env, cwd, options)
 
-export const actorsLayerFromEnv = (env: Record<string, string | undefined> = process.env, cwd = process.cwd()) =>
-  threadActorLayer.pipe(Layer.provide(supportLayerFromEnv(env, cwd)))
+const actorSupportLayerFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+  cwd = process.cwd(),
+  options: Options = {},
+) => {
+  const support = supportLayerFromEnv(env, cwd, options)
+  const compaction = CompactionService.layer.pipe(Layer.provideMerge(support))
+  return options.workspaceAccessLayer === undefined
+    ? Layer.mergeAll(support, compaction)
+    : Layer.mergeAll(support, compaction, options.workspaceAccessLayer)
+}
+
+export const actorsLayerFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+  cwd = process.cwd(),
+  options: Options = {},
+) =>
+  Layer.mergeAll(threadActorLayer, ThreadDirectory.actorLayer).pipe(
+    Layer.provide(actorSupportLayerFromEnv(env, cwd, options)),
+  )
 
 export const actorsLayer = () => actorsLayerFromEnv()
 
@@ -46,7 +129,25 @@ export const clientLayer = (options: Options = {}) =>
     HostConfig.resolveOptions(options).pipe(Effect.map((host) => Client.layer(HostConfig.toClientOptions(host)))),
   )
 
-export const threadClientLayer = (options: Options = {}) => ThreadClient.layer.pipe(Layer.provide(clientLayer(options)))
+export const clientLayerFromEnv = (env: Record<string, string | undefined> = process.env, options: Options = {}) =>
+  Layer.unwrap(
+    HostConfig.resolveOptions(options, env).pipe(Effect.map((host) => Client.layer(HostConfig.toClientOptions(host)))),
+  )
+
+export const threadClientLayer = (options: Options = {}) =>
+  ThreadClient.layer.pipe(
+    Layer.provideMerge(clientLayer(options)),
+    Layer.provideMerge(ThreadClient.liveConnectionLayer(options)),
+  )
+
+export const threadClientLayerFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+  options: Options = {},
+) =>
+  ThreadClient.layer.pipe(
+    Layer.provideMerge(clientLayerFromEnv(env, options)),
+    Layer.provideMerge(ThreadClient.liveConnectionLayerFromEnv(env, options)),
+  )
 
 export const layerFromEnv = (
   env: Record<string, string | undefined> = process.env,
@@ -56,11 +157,238 @@ export const layerFromEnv = (
   Layer.unwrap(
     HostConfig.resolveOptions(options, env).pipe(
       Effect.map((host) =>
-        Registry.serve(actorsLayerFromEnv(env, cwd)).pipe(
+        Registry.serve(actorsLayerFromEnv(env, cwd, options)).pipe(
           Layer.provide(Registry.layer(HostConfig.toRegistryOptions(host))),
         ),
       ),
     ),
   )
 
+export const managedLayerFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+  cwd = process.cwd(),
+  options: Options = {},
+) =>
+  Layer.fromBuild((_memoMap, scope) =>
+    Effect.gen(function* () {
+      const host = yield* HostConfig.resolveOptions(options, env)
+      const registryLayer = Registry.layer(HostConfig.toRegistryOptions(host))
+      const registryContext = yield* registryLayer.pipe(Layer.buildWithScope(scope))
+      const registry = Context.get(registryContext, Registry.Registry)
+      yield* actorsLayerFromEnv(env, cwd, options)
+        .pipe(
+          Layer.provideMerge(Logger.layerPino(registry.baseLogger)),
+          Layer.provideMerge(Layer.succeed(Registry.Registry, registry)),
+          Layer.buildWithScope(scope),
+        )
+        .pipe(Effect.asVoid)
+      configureBaseLogger(registry.baseLogger)
+      const setupRegistry = options.setupRegistry ?? setup
+      const processListingRunner = options.processListingRunner ?? runProcessListing
+      const enginePort = host.mode === "local" ? localEnginePort(host) : undefined
+      let readyEnginePids = new Set<number>()
+      const engineBinary = engineBinaryPathFromEnv(env)
+      const previousEngineBinary = process.env.RIVET_ENGINE_BINARY
+      const shouldRestoreEngineBinary = engineBinary !== undefined && previousEngineBinary !== engineBinary
+      if (shouldRestoreEngineBinary) {
+        process.env.RIVET_ENGINE_BINARY = engineBinary
+        yield* Scope.addFinalizer(
+          scope,
+          Effect.sync(() => {
+            if (previousEngineBinary === undefined) {
+              delete process.env.RIVET_ENGINE_BINARY
+            } else {
+              process.env.RIVET_ENGINE_BINARY = previousEngineBinary
+            }
+          }),
+        )
+      }
+      const enginePidsBefore =
+        enginePort === undefined
+          ? new Set<number>()
+          : yield* Effect.promise(() => rivetEnginePidsForPort(enginePort, processListingRunner))
+      const rawRegistry = setupRegistry({
+        use: Object.fromEntries(registry.rivetkitActors),
+        ...registrySetupOptions(host),
+        ...localEngineOptions(host),
+        logging: { baseLogger: registry.baseLogger },
+      })
+      yield* Effect.sync(() => rawRegistry.start())
+      yield* Scope.addFinalizer(
+        scope,
+        Effect.promise(async () => {
+          try {
+            await rawRegistry.shutdown()
+          } finally {
+            if (enginePort !== undefined) {
+              await terminateNewRivetEnginePids(enginePort, enginePidsBefore, readyEnginePids, processListingRunner)
+            }
+          }
+        }).pipe(Effect.ignore),
+      )
+      const rawConfig = rawRegistry.parseConfig()
+      if (rawConfig.endpoint !== undefined) {
+        yield* waitForMetadataEndpoint({
+          endpoint: rawConfig.endpoint,
+          ...(rawConfig.namespace === undefined ? {} : { namespace: rawConfig.namespace }),
+          ...(rawConfig.token === undefined ? {} : { token: rawConfig.token }),
+          ...(options.metadataReadiness?.attempts === undefined
+            ? {}
+            : { attempts: options.metadataReadiness.attempts }),
+          ...(options.metadataReadiness?.delayMillis === undefined
+            ? {}
+            : { delayMillis: options.metadataReadiness.delayMillis }),
+        })
+        if (enginePort !== undefined) {
+          readyEnginePids = yield* Effect.promise(() => rivetEnginePidsForPort(enginePort, processListingRunner))
+        }
+      }
+      return Context.empty()
+    }),
+  )
+
 export const layer = (options: Options = {}) => layerFromEnv(process.env, process.cwd(), options)
+
+export const waitForMetadataEndpoint = Effect.fn("LocalHost.waitForMetadataEndpoint")(function* (input: {
+  readonly endpoint: string
+  readonly namespace?: string
+  readonly token?: string
+  readonly attempts?: number
+  readonly delayMillis?: number
+}) {
+  yield* Effect.promise(async () => {
+    const attempts = input.attempts ?? 120
+    const delayMillis = input.delayMillis ?? 250
+    let lastError: unknown
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const url = new URL(`${input.endpoint.replace(/\/$/, "")}/metadata`)
+        if (input.namespace !== undefined) url.searchParams.set("namespace", input.namespace)
+        const response = await fetch(url, {
+          headers: input.token === undefined ? {} : { authorization: `Bearer ${input.token}` },
+        })
+        if (response.ok) return
+        lastError = new Error(`metadata readiness failed with status ${response.status}`)
+      } catch (error) {
+        lastError = error
+      }
+      await Bun.sleep(delayMillis)
+    }
+    if (lastError instanceof Error) throw lastError
+    throw new Error("metadata readiness timed out")
+  })
+})
+
+const terminateNewRivetEnginePids = async (
+  port: number,
+  before: ReadonlySet<number>,
+  ready: ReadonlySet<number>,
+  processListingRunner: ProcessListingRunner,
+) => {
+  const after = await rivetEnginePidsForPort(port, processListingRunner)
+  const targets = [...enginePidsToTerminate(before, ready, after)]
+  for (const pid of targets) {
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch {}
+  }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const remaining = await remainingPids(port, targets, processListingRunner)
+    if (remaining.length === 0) return
+    await Bun.sleep(100)
+  }
+  for (const pid of await remainingPids(port, targets, processListingRunner)) {
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {}
+  }
+}
+
+export const enginePidsToTerminate = (
+  before: ReadonlySet<number>,
+  ready: ReadonlySet<number>,
+  after: ReadonlySet<number>,
+) => new Set([...ready, ...after].filter((pid) => !before.has(pid)))
+
+const remainingPids = async (
+  port: number,
+  targets: ReadonlyArray<number>,
+  processListingRunner: ProcessListingRunner,
+) => {
+  const current = await rivetEnginePidsForPort(port, processListingRunner)
+  return targets.filter((pid) => current.has(pid))
+}
+
+export const rivetEnginePidsForPort = async (port: number, processListingRunner: ProcessListingRunner) => {
+  const enginePids = await rivetEnginePids(processListingRunner)
+  const portPids = await listeningPidsForTcpPort(port, processListingRunner)
+  return new Set([...enginePids].filter((pid) => portPids.has(pid)))
+}
+
+const rivetEnginePids = async (processListingRunner: ProcessListingRunner) => {
+  const output = await processListingRunner({ command: "ps", args: ["-axo", "pid=,command="] })
+  const pids = new Set<number>()
+  if (output === undefined) return pids
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(.+)$/.exec(line)
+    if (match === null) continue
+    const pid = Number(match[1])
+    const command = match[2]
+    if (!Number.isFinite(pid) || command === undefined) continue
+    if (command.includes("rivet-engine start")) pids.add(pid)
+  }
+  return pids
+}
+
+const listeningPidsForTcpPort = async (port: number, processListingRunner: ProcessListingRunner) => {
+  const output = await processListingRunner({
+    command: "lsof",
+    args: ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+  })
+  const pids = new Set<number>()
+  if (output === undefined) return pids
+  for (const line of output.split(/\r?\n/)) {
+    const pid = Number(line.trim())
+    if (Number.isFinite(pid)) pids.add(pid)
+  }
+  return pids
+}
+
+const runProcessListing: ProcessListingRunner = async (listing) => {
+  try {
+    const processList = Bun.spawn([listing.command, ...listing.args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    })
+    const output = await new Response(processList.stdout).text()
+    await processList.exited
+    return output
+  } catch {
+    return undefined
+  }
+}
+
+const registrySetupOptions = (host: HostConfig.Resolved): Registry.Options => {
+  if (host.mode !== "local") return HostConfig.toRegistryOptions(host)
+  return {
+    ...(host.token === undefined ? {} : { token: host.token }),
+    ...(host.namespace === undefined ? {} : { namespace: host.namespace }),
+    noWelcome: host.no_welcome,
+  }
+}
+
+const localEngineOptions = (host: HostConfig.Resolved) => {
+  if (host.mode !== "local") return {}
+  const endpoint = new URL(host.endpoint)
+  return {
+    startEngine: true,
+    engineHost: endpoint.hostname,
+    enginePort: localEnginePort(host),
+    noWelcome: host.no_welcome,
+  }
+}
+
+const localEnginePort = (host: HostConfig.Resolved) => {
+  const endpoint = new URL(host.endpoint)
+  return endpoint.port === "" ? 6420 : Number(endpoint.port)
+}

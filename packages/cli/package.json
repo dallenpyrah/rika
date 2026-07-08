@@ -27,6 +27,7 @@
     "@rika/orb": "workspace:*",
     "@rika/persistence": "workspace:*",
     "@rika/plugin": "workspace:*",
+    "@rika/rivet-host": "workspace:*",
     "@rika/schema": "workspace:*",
     "@rika/sdk": "workspace:*",
     "@rika/server": "workspace:*",

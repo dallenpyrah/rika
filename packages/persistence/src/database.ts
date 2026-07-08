@@ -5,9 +5,21 @@ import { Config } from "@rika/core"
 import { Context, Effect, Layer, Schema } from "effect"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
+import type { SQL } from "drizzle-orm"
+import { PGlite } from "@electric-sql/pglite"
+import postgres from "postgres"
 import { schema } from "./schema"
+import { applyPostgresIndexSchema } from "./postgres-index-schema"
 
-export type DrizzleDatabase = SQLiteBunDatabase<typeof schema>
+export type Dialect = "sqlite" | "postgres"
+
+export type DrizzleDatabase = SQLiteBunDatabase<typeof schema> & QueryMethods
+
+export interface QueryMethods {
+  readonly get: <T extends Record<string, unknown>>(query: SQL) => T | undefined
+  readonly all: <T extends Record<string, unknown>>(query: SQL) => T[]
+  readonly run: (query: SQL) => unknown
+}
 
 export class DatabaseError extends Schema.TaggedErrorClass<DatabaseError>()("DatabaseError", {
   message: Schema.String,
@@ -15,32 +27,95 @@ export class DatabaseError extends Schema.TaggedErrorClass<DatabaseError>()("Dat
 }) {}
 
 export interface Interface {
+  readonly dialect: Dialect
   readonly withDatabase: <A>(operation: (database: DrizzleDatabase) => A) => Effect.Effect<A, DatabaseError>
   readonly withDatabaseEffect: <A, E, R>(
     operation: (database: DrizzleDatabase) => Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | DatabaseError, R>
+  readonly queryGet: <T>(query: SQL) => Effect.Effect<T | undefined, DatabaseError>
+  readonly queryAll: <T>(query: SQL) => Effect.Effect<ReadonlyArray<T>, DatabaseError>
+  readonly queryRun: (query: SQL) => Effect.Effect<void, DatabaseError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@rika/persistence/Database") {}
 
+export const dialectFromUrl = (url: string | undefined): Dialect => {
+  if (url === undefined || url.length === 0) return "sqlite"
+  const normalized = url.trim().toLowerCase()
+  if (normalized.startsWith("postgres://") || normalized.startsWith("postgresql://")) return "postgres"
+  return "sqlite"
+}
+
 export const pathFromConfig = (config: Config.Values) => config.database_url ?? `${config.data_dir}/rika.sqlite`
+
+export const dialect = Effect.fn("Database.dialect")(function* () {
+  const database = yield* Service
+  return database.dialect
+})
 
 export const layerFromPath = (path: string) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
       const sqlite = yield* openSqlite(path)
-      const database = drizzle({ client: sqlite, schema })
-      return makeService(database)
+      const database = drizzle({ client: sqlite, schema }) as DrizzleDatabase
+      return Service.of(makeSqliteService(database))
     }),
   )
 
 export const memoryLayer = layerFromPath(":memory:")
 
+export const postgresMemoryLayer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const client = yield* Effect.acquireRelease(
+      Effect.tryPromise({
+        try: async () => {
+          const pglite = new PGlite()
+          await pglite.waitReady
+          await applyPostgresIndexSchema(pglite)
+          return pglite
+        },
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "open" }),
+      }),
+      (pglite) => Effect.promise(() => pglite.close()).pipe(Effect.ignore),
+    )
+    return Service.of(makePostgresPgliteService(client))
+  }),
+)
+
+export const layerFromUrl = (url: string) => {
+  if (dialectFromUrl(url) === "postgres") return layerFromPostgresUrl(url)
+  if (url === ":memory:" || url.startsWith("file::memory:")) return memoryLayer
+  const path = url.startsWith("file:") ? url.slice("file:".length) : url
+  return layerFromPath(path)
+}
+
+export const layerFromPostgresUrl = (url: string) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const client = yield* Effect.acquireRelease(
+        Effect.try({
+          try: () => postgres(url, { max: 1, prepare: false }),
+          catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "open" }),
+        }),
+        (sqlClient) => Effect.promise(() => sqlClient.end({ timeout: 5 })).pipe(Effect.ignore),
+      )
+      yield* Effect.tryPromise({
+        try: () => applyPostgresIndexSchema(client),
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "migrate" }),
+      })
+      return Service.of(makePostgresJsService(client))
+    }),
+  )
+
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const values = yield* config.get
+    const url = values.database_url
+    if (url !== undefined && dialectFromUrl(url) === "postgres") return layerFromPostgresUrl(url)
     return layerFromPath(pathFromConfig(values))
   }),
 )
@@ -59,14 +134,29 @@ export const withDatabaseEffect = Effect.fn("Database.withDatabaseEffect.call")(
   return yield* database.withDatabaseEffect(operation)
 })
 
-const makeService = (database: DrizzleDatabase) =>
-  Service.of({
+export const queryGet = Effect.fn("Database.queryGet.call")(function* <T>(query: SQL) {
+  const database = yield* Service
+  return yield* database.queryGet<T>(query)
+})
+
+export const queryAll = Effect.fn("Database.queryAll.call")(function* <T>(query: SQL) {
+  const database = yield* Service
+  return yield* database.queryAll<T>(query)
+})
+
+export const queryRun = Effect.fn("Database.queryRun.call")(function* (query: SQL) {
+  const database = yield* Service
+  return yield* database.queryRun(query)
+})
+
+const makeSqliteService = (database: DrizzleDatabase): Interface =>
+  ({
+    dialect: "sqlite",
     withDatabase: Effect.fn("Database.withDatabase")(function* <A>(operation: (database: DrizzleDatabase) => A) {
-      const result = yield* Effect.try({
+      return yield* Effect.try({
         try: () => operation(database),
         catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "withDatabase" }),
       })
-      return result
     }),
     withDatabaseEffect: Effect.fn("Database.withDatabaseEffect")(function* <A, E, R>(
       operation: (database: DrizzleDatabase) => Effect.Effect<A, E, R>,
@@ -77,7 +167,93 @@ const makeService = (database: DrizzleDatabase) =>
       })
       return yield* effect
     }),
-  })
+    queryGet: <T>(query: SQL) =>
+      Effect.try({
+        try: () => database.get(query) as T | undefined,
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryGet" }),
+      }),
+    queryAll: <T>(query: SQL) =>
+      Effect.try({
+        try: () => database.all(query) as T[],
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryAll" }),
+      }),
+    queryRun: (query: SQL) =>
+      Effect.try({
+        try: () => {
+          database.run(query)
+        },
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryRun" }),
+      }),
+  }) satisfies Interface
+
+const makePostgresPgliteService = (client: PGlite): Interface => {
+  const runQuery = async <T>(query: SQL): Promise<ReadonlyArray<T>> => {
+    const rendered = renderSql(query)
+    const result = await client.query<T>(rendered.text, rendered.params as never[])
+    return result.rows
+  }
+  return makeAsyncPostgresService(runQuery)
+}
+
+const makePostgresJsService = (client: postgres.Sql): Interface => {
+  const runQuery = async <T>(query: SQL): Promise<ReadonlyArray<T>> => {
+    const rendered = renderSql(query)
+    const rows = await client.unsafe(rendered.text, rendered.params as never[])
+    return rows as unknown as ReadonlyArray<T>
+  }
+  return makeAsyncPostgresService(runQuery)
+}
+
+const makeAsyncPostgresService = (runQuery: <T>(query: SQL) => Promise<ReadonlyArray<T>>): Interface => {
+  const sqliteOnly = (): never => {
+    throw new DatabaseError({
+      message: "Sync withDatabase is unavailable for the Postgres index; use queryGet/queryAll/queryRun",
+      operation: "withDatabase",
+    })
+  }
+  return {
+    dialect: "postgres",
+    withDatabase: Effect.fn("Database.withDatabase")(function* <A>(_operation: (database: DrizzleDatabase) => A) {
+      return sqliteOnly()
+    }),
+    withDatabaseEffect: Effect.fn("Database.withDatabaseEffect")(function* <A, E, R>(
+      _operation: (database: DrizzleDatabase) => Effect.Effect<A, E, R>,
+    ) {
+      return yield* Effect.fail(
+        new DatabaseError({
+          message: "Sync withDatabaseEffect is unavailable for the Postgres index; use queryGet/queryAll/queryRun",
+          operation: "withDatabaseEffect",
+        }),
+      ) as Effect.Effect<A, E | DatabaseError, R>
+    }),
+    queryGet: <T>(query: SQL) =>
+      Effect.tryPromise({
+        try: () => runQuery<T>(query),
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryGet" }),
+      }).pipe(Effect.map((rows) => rows[0])),
+    queryAll: <T>(query: SQL) =>
+      Effect.tryPromise({
+        try: () => runQuery<T>(query),
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryAll" }),
+      }),
+    queryRun: (query: SQL) =>
+      Effect.tryPromise({
+        try: async () => {
+          await runQuery(query)
+        },
+        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryRun" }),
+      }),
+  } satisfies Interface
+}
+
+const renderSql = (query: SQL): { readonly text: string; readonly params: ReadonlyArray<unknown> } => {
+  const rendered = query.toQuery({
+    escapeName: (name: string) => `"${name.replaceAll('"', '""')}"`,
+    escapeParam: (index: number) => `$${index + 1}`,
+    escapeString: (value: string) => `'${value.replaceAll("'", "''")}'`,
+  } as never)
+  return { text: rendered.sql, params: rendered.params }
+}
 
 const openSqlite = (path: string) =>
   Effect.acquireRelease(
