@@ -64,7 +64,7 @@ describe("ContextBudget", () => {
     )
 
     const used = Tokens.estimateMessages(ModelContext.messagesFromEvents([event]))
-    expect(state).toEqual({ used, usable: 180_000, fraction: used / 180_000 })
+    expect(state).toEqual({ used, usable: 380_000, fraction: used / 380_000 })
   })
 
   test("applies an explicit reserved token buffer to the usable budget", async () => {

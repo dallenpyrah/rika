@@ -29,6 +29,7 @@ import {
   snapshotFromState,
   stateFromEvents,
 } from "./thread-actor"
+import * as ThreadDirectory from "./thread-directory"
 
 const identityUserId = (identity: VerifiedUserIdentity | undefined) => identity?.user_id
 
@@ -74,6 +75,7 @@ export const layer: Layer.Layer<
     const workspaceAccess = yield* WorkspaceAccess.Service
     const agentLoop = yield* AgentLoop.Service
     const redactor = Option.getOrUndefined(yield* Effect.serviceOption(SecretRedactor.Service))
+    const directory = Option.getOrUndefined(yield* Effect.serviceOption(ThreadDirectory.Service))
     const database = rawRivetkitContext.db
     const mutationLock = yield* Semaphore.make(1)
     let turnFiber: { readonly token: symbol; readonly fiber: Fiber.Fiber<void, ThreadActorError> } | undefined
@@ -159,7 +161,13 @@ export const layer: Layer.Layer<
           stagedEvents = [...stagedEvents, event]
           stagedInserted.push(event)
         }
-        const inserted = yield* appendMirroredActorEvents(database, state, rawRivetkitContext, stagedInserted)
+        const inserted = yield* appendMirroredActorEvents(
+          database,
+          state,
+          rawRivetkitContext,
+          stagedInserted,
+          directory,
+        )
         const next = stateFromEvents(input.thread_id, stagedEvents)
         yield* State.set(state, next).pipe(Effect.orDie)
         if (shouldCancelHotTurnAfterMirror(hot, next, input.thread_id)) {
@@ -187,7 +195,7 @@ export const layer: Layer.Layer<
       })
 
     const append = (event: Event.Event) =>
-      appendActorEvent(database, state, rawRivetkitContext, event).pipe(
+      appendActorEvent(database, state, rawRivetkitContext, event, directory).pipe(
         Effect.mapError((error) => toActionError(error, "appendActorEvent", event.thread_id)),
       )
 
@@ -196,7 +204,6 @@ export const layer: Layer.Layer<
         const hot = yield* State.get(state).pipe(Effect.orDie)
         const hotActive = activeSnapshotFromState(hot, input.thread_id)
         if (hotActive !== undefined) {
-          yield* requireEnsureThreadWorkspace(input, hot.workspace_id)
           yield* requireHotActorAccess(workspaceAccess, input, hot, "read")
           return hotActive
         }
@@ -213,7 +220,6 @@ export const layer: Layer.Layer<
           )
           const next = mergeReplayWithHotState(hot, stateFromEvents(input.thread_id, events), input.thread_id)
           yield* State.set(state, next).pipe(Effect.orDie)
-          yield* requireEnsureThreadWorkspace(input, next.workspace_id)
           return snapshotFromState(next, input.thread_id)
         }
         const userId = identityUserId(input.identity)
@@ -626,20 +632,6 @@ const readActorEvents = (
       }),
   })
 
-const requireEnsureThreadWorkspace = (
-  input: EnsureThreadPayload,
-  existingWorkspaceId: Ids.WorkspaceId | undefined,
-): Effect.Effect<void, ThreadActorActionError> =>
-  existingWorkspaceId === undefined || existingWorkspaceId === input.workspace_id
-    ? Effect.void
-    : Effect.fail(
-        new ThreadActorActionError({
-          message: `Thread ${input.thread_id} already belongs to another workspace`,
-          operation: "EnsureThread",
-          thread_id: input.thread_id,
-        }),
-      )
-
 const latestActorSequence = (
   database: RawAccess,
   threadId: Ids.ThreadId,
@@ -665,6 +657,7 @@ const appendActorEvent = (
   state: State.State<ThreadActorState, Schema.SchemaError>,
   context: { readonly broadcast: (name: string, ...args: ReadonlyArray<unknown>) => void },
   input: Event.Event,
+  directory?: ThreadDirectory.Interface,
 ): Effect.Effect<Event.Event, ThreadActorActionError> =>
   Effect.gen(function* () {
     const sequence = (yield* latestActorSequence(database, input.thread_id)) + 1
@@ -700,6 +693,7 @@ const appendActorEvent = (
     })
     yield* State.update(state, (current) => applyEventToState(current, event)).pipe(Effect.orDie)
     yield* Effect.sync(() => context.broadcast("threadEvent", Codec.encode(Event.Event)(event)))
+    if (directory !== undefined) yield* directory.applyEvents([event]).pipe(Effect.ignore)
     return event
   })
 
@@ -708,6 +702,7 @@ const appendMirroredActorEvents = (
   state: State.State<ThreadActorState, Schema.SchemaError>,
   context: { readonly broadcast: (name: string, ...args: ReadonlyArray<unknown>) => void },
   events: ReadonlyArray<Event.Event>,
+  directory?: ThreadDirectory.Interface,
 ): Effect.Effect<ReadonlyArray<Event.Event>, ThreadActorActionError> =>
   Effect.gen(function* () {
     if (events.length === 0) return []
@@ -755,6 +750,7 @@ const appendMirroredActorEvents = (
       yield* State.update(state, (current) => applyEventToState(current, event)).pipe(Effect.orDie)
       yield* Effect.sync(() => context.broadcast("threadEvent", Codec.encode(Event.Event)(event)))
     }
+    if (directory !== undefined) yield* directory.applyEvents(events).pipe(Effect.ignore)
     return events
   })
 
@@ -1120,7 +1116,6 @@ export const runAgentLoopTurn: (
     ...(input.mode === undefined ? {} : { mode: input.mode }),
     ...(input.fast_mode === undefined ? {} : { fast_mode: input.fast_mode }),
     ...(input.cancelled === undefined ? {} : { cancelled: input.cancelled }),
-    ...(input.ide_context === undefined ? {} : { ide_context: input.ide_context }),
     ...(input.tool_access === undefined ? {} : { tool_access: input.tool_access }),
     ...(existingEvents.length === 0 ? {} : { existing_events: existingEvents }),
   }).pipe(Stream.runForEach((event) => append(event).pipe(Effect.asVoid)))

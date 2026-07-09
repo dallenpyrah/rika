@@ -8,9 +8,7 @@
     "rika": "./src/main.ts"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./backend-endpoint": "./src/backend-endpoint.ts",
-    "./local-backend": "./src/local-backend.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "build": "bun build ./src/main.ts --outdir dist --target bun --format esm --external @opentui/core-darwin-arm64 --external @opentui/core-darwin-x64 --external @opentui/core-linux-arm64 --external @opentui/core-linux-arm64-musl --external @opentui/core-linux-x64 --external @opentui/core-linux-x64-musl --external @opentui/core-win32-arm64 --external @opentui/core-win32-x64",
@@ -22,15 +20,11 @@
     "@effect/platform-node": "catalog:",
     "@rika/agent": "workspace:*",
     "@rika/core": "workspace:*",
-    "@rika/ide": "workspace:*",
     "@rika/llm": "workspace:*",
-    "@rika/orb": "workspace:*",
     "@rika/persistence": "workspace:*",
     "@rika/plugin": "workspace:*",
     "@rika/rivet-host": "workspace:*",
     "@rika/schema": "workspace:*",
-    "@rika/sdk": "workspace:*",
-    "@rika/server": "workspace:*",
     "@rika/tools": "workspace:*",
     "@rika/tui": "workspace:*",
     "effect": "catalog:"

@@ -19,8 +19,6 @@ import {
   Database,
   McpApprovalStore,
   Migration,
-  OrbStore,
-  ProjectStore,
   ThreadEventLog,
   ThreadMemoryStore,
   ThreadProjection,
@@ -57,7 +55,6 @@ export type StorageOutput =
   | IdGenerator.Service
   | McpApprovalStore.Service
   | Migration.Service
-  | ProjectStore.Service
   | SecretRedactor.Service
   | Settings.Service
   | ThreadEventLog.Service
@@ -85,7 +82,7 @@ export type BaseOutput =
 
 export type CommonOutput = BaseOutput | AgentLoop.Service
 
-export type Output = BaseOutput | AgentLoop.Service | OrbStore.Service | ThreadMemoryIndexer.Service
+export type Output = BaseOutput | AgentLoop.Service | ThreadMemoryIndexer.Service
 
 export type Error =
   | Config.ConfigError
@@ -95,9 +92,7 @@ export type Error =
   | McpApprovalStore.McpApprovalStoreError
   | McpClient.RunError
   | Migration.MigrationError
-  | OrbStore.OrbStoreError
   | PluginHost.RunError
-  | ProjectStore.ProjectStoreError
   | Settings.SettingsError
   | ThreadEventLog.ThreadEventLogError
   | ThreadMemoryStore.ThreadMemoryStoreError
@@ -106,7 +101,7 @@ export type Error =
 export const validateRuntimeEnv = Effect.fn("BaseServiceLayer.validateRuntimeEnv")(function* (
   input: RuntimeEnvValidationInput,
 ) {
-  const configEnv = {
+  const configEnv: Record<string, string | undefined> = {
     ...input.env,
     RIKA_WORKSPACE_ROOT: input.workspaceRoot,
   }
@@ -136,17 +131,6 @@ const componentsFromEnv = (options: Options) => {
   const mcpApprovalLayer = McpApprovalStore.layer.pipe(Layer.provideMerge(databaseLayer), Layer.provideMerge(timeLayer))
   const workspaceStoreLayer = WorkspaceStore.layer.pipe(Layer.provideMerge(databaseLayer))
   const memoryStoreLayer = ThreadMemoryStore.layer.pipe(Layer.provideMerge(databaseLayer))
-  const projectStoreLayer = ProjectStore.layer.pipe(
-    Layer.provideMerge(configLayer),
-    Layer.provideMerge(databaseLayer),
-    Layer.provideMerge(timeLayer),
-    Layer.provideMerge(IdGenerator.layer),
-  )
-  const orbStoreLayer = OrbStore.layer.pipe(
-    Layer.provideMerge(databaseLayer),
-    Layer.provideMerge(timeLayer),
-    Layer.provideMerge(IdGenerator.layer),
-  )
   const llmLayer = Live.layer(Live.optionsFromEnv(options.env)).pipe(
     Layer.provideMerge(configLayer),
     Layer.provideMerge(diagnosticsLayer),
@@ -164,7 +148,6 @@ const componentsFromEnv = (options: Options) => {
     mcpApprovalLayer,
     workspaceStoreLayer,
     memoryStoreLayer,
-    projectStoreLayer,
     Migration.layer,
     redactorLayer,
     settingsLayer,
@@ -181,7 +164,6 @@ const componentsFromEnv = (options: Options) => {
     diagnosticsLayer,
     embeddingsLayer,
     llmLayer,
-    orbStoreLayer,
     permissionConfig,
     pluginLayer,
     redactorLayer,
@@ -324,16 +306,12 @@ export const fromEnv = (options: Options) => {
   }
 }
 
-export const fromEnvWithOrbStoreAndMemoryIndexer = (options: Options) => {
+export const fromEnvWithMemoryIndexer = (options: Options) => {
   const preflightLayer = runtimeEnvPreflightLayer(options)
   const components = componentsFromEnv(options)
-  const storageLayer = Layer.mergeAll(components.storageCoreLayer, components.orbStoreLayer)
+  const storageLayer = components.storageCoreLayer
   const migratedStorageLayer = Layer.effectDiscard(Migration.migrate()).pipe(Layer.provideMerge(storageLayer))
-  const repairedStorageLayer = Layer.effectDiscard(OrbStore.repairUsageIntervals()).pipe(
-    Layer.provide(components.orbStoreLayer),
-    Layer.provideMerge(migratedStorageLayer),
-  )
-  const services = serviceLayersFromStorage(components, repairedStorageLayer)
+  const services = serviceLayersFromStorage(components, migratedStorageLayer)
   const baseLayer = Layer.mergeAll(services.commonBaseLayer, services.memoryIndexerLayer)
   const agentLoopLayer = AgentLoop.layer.pipe(Layer.provideMerge(baseLayer))
 
@@ -346,7 +324,7 @@ export const fromEnvWithOrbStoreAndMemoryIndexer = (options: Options) => {
     diagnosticsLayer: withRuntimeEnvPreflight(preflightLayer, components.diagnosticsLayer),
     embeddingsLayer: withRuntimeEnvPreflight(preflightLayer, components.embeddingsLayer),
     llmLayer: withRuntimeEnvPreflight(preflightLayer, components.llmLayer),
-    migratedStorageLayer: withRuntimeEnvPreflight(preflightLayer, repairedStorageLayer),
+    migratedStorageLayer: withRuntimeEnvPreflight(preflightLayer, migratedStorageLayer),
     pluginLayer: withRuntimeEnvPreflight(preflightLayer, services.pluginLayer),
     redactorLayer: withRuntimeEnvPreflight(preflightLayer, components.redactorLayer),
     settingsLayer: withRuntimeEnvPreflight(preflightLayer, components.settingsLayer),

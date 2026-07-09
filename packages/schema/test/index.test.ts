@@ -1,19 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Option, Schema } from "effect"
-import {
-  Artifact,
-  Codec,
-  ErrorEnvelope,
-  Event,
-  Ide,
-  Ids,
-  Message,
-  Orb,
-  PierreDiff,
-  Remote,
-  Tool,
-  Workspace,
-} from "../src/index"
+import { Artifact, Codec, ErrorEnvelope, Event, Ids, Message, PierreDiff, Tool, Workspace } from "../src/index"
 
 const now = 1_765_000_000_000
 const threadId = Ids.ThreadId.make("thread_1")
@@ -23,8 +10,6 @@ const eventId = Ids.EventId.make("event_1")
 const toolCallId = Ids.ToolCallId.make("tool_1")
 const artifactId = Ids.ArtifactId.make("artifact_1")
 const workspaceId = Ids.WorkspaceId.make("workspace_1")
-const orbId = Ids.OrbId.make("orb_1")
-const projectId = Ids.ProjectId.make("project_1")
 const userId = Ids.UserId.make("user_1")
 
 describe("Rika protocol schemas", () => {
@@ -139,19 +124,6 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(ErrorEnvelope.Envelope)(Codec.encode(ErrorEnvelope.Envelope)(error))).toEqual(error)
   })
 
-  test("round-trips orb final diff artifacts", () => {
-    const artifact: Artifact.Artifact = {
-      id: artifactId,
-      thread_id: threadId,
-      kind: "orb-final-diff",
-      title: "Orb final diff",
-      content: { files: [{ path: "README.md", status: "modified" }] },
-      created_at: now,
-    }
-
-    expect(Codec.decode(Artifact.Artifact)(Codec.encode(Artifact.Artifact)(artifact))).toEqual(artifact)
-  })
-
   test("round-trips verdict artifacts", () => {
     const artifact: Artifact.Artifact = {
       id: artifactId,
@@ -262,7 +234,7 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(event))).toEqual(event)
   })
 
-  test("round-trips user attribution and presence stream frames", () => {
+  test("round-trips user attribution", () => {
     const started: Event.Event = {
       id: Ids.EventId.make("event_turn_started_user"),
       thread_id: threadId,
@@ -292,16 +264,9 @@ describe("Rika protocol schemas", () => {
         }),
       },
     }
-    const presence: Remote.PresenceFrame = {
-      presence: {
-        thread_id: threadId,
-        users: [{ user_id: userId, state: "typing", last_seen: now }],
-      },
-    }
 
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(started))).toEqual(started)
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(message))).toEqual(message)
-    expect(Codec.decode(Remote.StreamFrame)(Codec.encode(Remote.StreamFrame)(presence))).toEqual(presence)
   })
 
   test("round-trips tool input delta events", () => {
@@ -455,235 +420,6 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Event.Event)(Codec.encode(Event.Event)(readWriteEvent))).toEqual(readWriteEvent)
   })
 
-  test("round-trips remote control API payloads", () => {
-    const remoteUserId = Ids.UserId.make("user_remote_payload")
-    const start: Remote.StartTurnRequest = {
-      thread_id: threadId,
-      workspace_id: workspaceId,
-      project_id: projectId,
-      content: "Ship remote control",
-      content_parts: [Message.text("Ship remote control")],
-      mode: "smart",
-      tool_access: "read-only",
-    }
-    const create: Remote.CreateThreadRequest = {
-      thread_id: threadId,
-      project_id: projectId,
-    }
-    const summary: Remote.ThreadSummary = {
-      thread_id: threadId,
-      workspace_id: workspaceId,
-      title_text: "Ship remote control",
-      latest_message_text: "Ship remote control",
-      diff: { additions: 2, modifications: 1, deletions: 1 },
-      context_tokens: 12_000,
-      context_window: 400_000,
-      archived: false,
-      visibility: "private",
-      created_at: now,
-      updated_at: now,
-    }
-    const preview: Remote.PreviewThreadRequest = {
-      thread_id: threadId,
-      limit: 160,
-    }
-    const compact: Remote.CompactThreadRequest = {
-      thread_id: threadId,
-      user_id: remoteUserId,
-    }
-    const setVisibility: Remote.SetThreadVisibilityRequest = {
-      thread_id: threadId,
-      user_id: remoteUserId,
-      visibility: "workspace",
-    }
-    const fork: Remote.ForkThreadRequest = {
-      thread_id: threadId,
-      at_turn: turnId,
-      user_id: remoteUserId,
-      title_text: "tournament:sdk/1",
-    }
-    const health: Remote.BackendHealth = {
-      status: "healthy",
-      url: "http://127.0.0.1:4587",
-      workspace_root: "/workspace/rika",
-      data_dir: "/workspace/rika/.rika",
-      backend_id: "test-backend",
-      pid: 123,
-      version: "0.0.0",
-    }
-    const publicHealth: Remote.PublicBackendHealth = { status: "ok" }
-    const subscription: Remote.SubscribeThreadEventsRequest = {
-      thread_id: threadId,
-      after_sequence: 1,
-    }
-
-    expect(Codec.decode(Remote.CreateThreadRequest)(Codec.encode(Remote.CreateThreadRequest)(create))).toEqual(create)
-    expect(Codec.decode(Remote.StartTurnRequest)(Codec.encode(Remote.StartTurnRequest)(start))).toEqual(start)
-    expect(Codec.decode(Remote.ThreadSummary)(Codec.encode(Remote.ThreadSummary)(summary))).toEqual(summary)
-    expect(Codec.decode(Remote.PreviewThreadRequest)(Codec.encode(Remote.PreviewThreadRequest)(preview))).toEqual(
-      preview,
-    )
-    expect(Codec.decode(Remote.CompactThreadRequest)(Codec.encode(Remote.CompactThreadRequest)(compact))).toEqual(
-      compact,
-    )
-    expect(
-      Codec.decode(Remote.SetThreadVisibilityRequest)(Codec.encode(Remote.SetThreadVisibilityRequest)(setVisibility)),
-    ).toEqual(setVisibility)
-    expect(
-      Codec.decode(Remote.SetThreadVisibilityBody)(
-        Codec.encode(Remote.SetThreadVisibilityBody)({ visibility: "workspace" }),
-      ),
-    ).toEqual({ visibility: "workspace" })
-    expect(Codec.decode(Remote.ForkThreadRequest)(Codec.encode(Remote.ForkThreadRequest)(fork))).toEqual(fork)
-    expect(Codec.decode(Remote.BackendHealth)(Codec.encode(Remote.BackendHealth)(health))).toEqual(health)
-    expect(Codec.decode(Remote.PublicBackendHealth)(Codec.encode(Remote.PublicBackendHealth)(publicHealth))).toEqual(
-      publicHealth,
-    )
-    expect(
-      Codec.decode(Remote.SubscribeThreadEventsRequest)(
-        Codec.encode(Remote.SubscribeThreadEventsRequest)(subscription),
-      ),
-    ).toEqual(subscription)
-    expect(Codec.decode(Remote.StreamFrame)(Codec.encode(Remote.StreamFrame)(summaryError(401)))).toEqual(
-      summaryError(401),
-    )
-  })
-
-  test("ThreadSummary decode defaults a missing visibility key to private", () => {
-    const withoutVisibility = {
-      thread_id: "thread_1",
-      workspace_id: "workspace_1",
-      diff: { additions: 0, modifications: 0, deletions: 0 },
-      archived: false,
-      created_at: now,
-      updated_at: now,
-    }
-    expect(Schema.decodeUnknownSync(Remote.ThreadSummary)(withoutVisibility).visibility).toEqual("private")
-    expect(Schema.decodeUnknownSync(Schema.Array(Remote.ThreadSummary))([withoutVisibility])[0]?.visibility).toEqual(
-      "private",
-    )
-  })
-
-  test("round-trips orb protocol payloads", () => {
-    const orb: Orb.OrbRecord = {
-      orb_id: orbId,
-      thread_id: threadId,
-      project_id: projectId,
-      sandbox_id: "sandbox_1",
-      status: "running",
-      base_commit: "abc123",
-      endpoint_url: "https://orb.example.test",
-      created_at: now,
-      last_active_at: now,
-    }
-    const project: Orb.ProjectRecord = {
-      project_id: projectId,
-      name: "demo",
-      repo_origin: "https://github.com/example/rika.git",
-      default_branch: "main",
-      template_id: null,
-      env: { RIKA_ENV: "test" },
-      secret_names: ["OPENAI_API_KEY"],
-      created_at: now,
-      updated_at: now,
-    }
-    const changes: Remote.OrbChangesResponse = {
-      base_commit: "abc123",
-      head_commit: "def456",
-      diff: "diff --git a/file b/file",
-      dirty: true,
-    }
-    const files: Remote.OrbFilesResponse = {
-      path: "src",
-      entries: [
-        { name: "index.ts", path: "src/index.ts", kind: "file", size: 42 },
-        { name: "components", path: "src/components", kind: "dir" },
-      ],
-    }
-    const textFile: Remote.OrbFileResponse = {
-      path: "src/index.ts",
-      kind: "text",
-      content: "export const value = 1\n",
-      truncated: false,
-    }
-    const binaryFile: Remote.OrbFileResponse = {
-      path: "image.bin",
-      kind: "binary",
-      binary: true,
-    }
-
-    expect(Schema.decodeUnknownSync(Orb.OrbRecord)(Schema.encodeSync(Orb.OrbRecord)(orb))).toEqual(orb)
-    expect(Schema.decodeUnknownSync(Orb.ProjectRecord)(Schema.encodeSync(Orb.ProjectRecord)(project))).toEqual(project)
-    expect(
-      Schema.decodeUnknownSync(Remote.OrbChangesResponse)(Schema.encodeSync(Remote.OrbChangesResponse)(changes)),
-    ).toEqual(changes)
-    expect(
-      Schema.decodeUnknownSync(Remote.OrbFilesResponse)(Schema.encodeSync(Remote.OrbFilesResponse)(files)),
-    ).toEqual(files)
-    expect(
-      Schema.decodeUnknownSync(Remote.OrbFileResponse)(Schema.encodeSync(Remote.OrbFileResponse)(textFile)),
-    ).toEqual(textFile)
-    expect(
-      Schema.decodeUnknownSync(Remote.OrbFileResponse)(Schema.encodeSync(Remote.OrbFileResponse)(binaryFile)),
-    ).toEqual(binaryFile)
-  })
-
-  test("round-trips project detail payloads without secret values", () => {
-    const project: Remote.ProjectDetail = {
-      project_id: projectId,
-      name: "demo",
-      repo_origin: "https://github.com/example/rika.git",
-      default_branch: "main",
-      template_id: null,
-      env: { NODE_ENV: "development" },
-      secret_names: ["OPENAI_API_KEY"],
-      created_at: now,
-      updated_at: now,
-    }
-
-    const encoded = Codec.encode(Remote.ProjectDetail)(project)
-    expect(Codec.decode(Remote.ProjectDetail)(encoded)).toEqual(project)
-    expect(JSON.stringify(encoded)).not.toContain("secret-value")
-  })
-
-  test("round-trips orb remote-control payloads", () => {
-    const create: Remote.CreateOrbThreadRequest = {
-      project_id: projectId,
-      thread_id: threadId,
-      mode: "deep1",
-    }
-    const summary: Remote.ThreadSummary = {
-      thread_id: threadId,
-      workspace_id: workspaceId,
-      diff: { additions: 0, modifications: 0, deletions: 0 },
-      orb_status: "running",
-      archived: false,
-      visibility: "private",
-      created_at: now,
-      updated_at: now,
-    }
-    const orbSummary: Remote.OrbSummary = {
-      orb_id: orbId,
-      thread_id: threadId,
-      project_id: projectId,
-      status: "running",
-      base_commit: "abc123",
-      created_at: now,
-      last_active_at: now,
-      running_minutes: 12,
-    }
-
-    expect(
-      Schema.decodeUnknownSync(Remote.CreateOrbThreadRequest)(Schema.encodeSync(Remote.CreateOrbThreadRequest)(create)),
-    ).toEqual(create)
-    expect(Schema.decodeUnknownSync(Remote.ThreadSummary)(Schema.encodeSync(Remote.ThreadSummary)(summary))).toEqual(
-      summary,
-    )
-    expect(Schema.decodeUnknownSync(Remote.OrbSummary)(Schema.encodeSync(Remote.OrbSummary)(orbSummary))).toEqual(
-      orbSummary,
-    )
-  })
-
   test("round-trips workspace membership payloads", () => {
     const membership: Workspace.Membership = {
       workspace_id: workspaceId,
@@ -701,54 +437,6 @@ describe("Rika protocol schemas", () => {
     expect(Codec.decode(Workspace.Membership)(Codec.encode(Workspace.Membership)(membership))).toEqual(membership)
     expect(Codec.decode(Workspace.AccessDecision)(Codec.encode(Workspace.AccessDecision)(decision))).toEqual(decision)
   })
-
-  test("round-trips IDE integration payloads", () => {
-    const clientId = Ids.IdeClientId.make("ide_schema_client")
-    const context: Ide.ContextSnapshot = {
-      workspace_roots: ["/workspace/rika"],
-      active_file: {
-        path: "packages/cli/src/runtime.ts",
-        language_id: "typescript",
-        selection: { range: { start_line: 10, end_line: 12 }, selected_text: "const mode = 'smart'" },
-      },
-      diagnostics: [
-        {
-          path: "packages/cli/src/runtime.ts",
-          severity: "warning",
-          message: "Unused symbol",
-          range: { start_line: 11, end_line: 11 },
-          source: "tsserver",
-        },
-      ],
-    }
-    const connect: Ide.ConnectRequest = {
-      client_id: clientId,
-      name: "Mock IDE",
-      workspace_roots: ["/workspace/rika"],
-      capabilities: ["active-context", "diagnostics", "navigation"],
-      initial_context: context,
-    }
-    const start: Remote.StartTurnRequest = {
-      thread_id: threadId,
-      workspace_id: workspaceId,
-      content: "Use the active editor context",
-      ide_context: context,
-    }
-    const openFile: Ide.OpenFileRequest = {
-      path: "packages/cli/src/runtime.ts",
-      range: { start_line: 10, end_line: 12 },
-      reason: "Show the selected code",
-      thread_id: threadId,
-    }
-
-    expect(Codec.decode(Ide.ConnectRequest)(Codec.encode(Ide.ConnectRequest)(connect))).toEqual(connect)
-    expect(Codec.decode(Remote.StartTurnRequest)(Codec.encode(Remote.StartTurnRequest)(start))).toEqual(start)
-    expect(Codec.decode(Ide.OpenFileRequest)(Codec.encode(Ide.OpenFileRequest)(openFile))).toEqual(openFile)
-  })
-})
-
-const summaryError = (status: number): Remote.ApiError => ({
-  error: { message: "Unauthorized", code: "unauthorized", details: { status } },
 })
 
 const fileDiff = (name: string, additions: number, deletions: number) => ({

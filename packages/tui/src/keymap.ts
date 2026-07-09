@@ -49,7 +49,6 @@ export type Action =
   | { readonly _tag: "ToggleDetails" }
   | { readonly _tag: "CycleReasoning" }
   | { readonly _tag: "ToggleFastMode" }
-  | { readonly _tag: "ToggleRemoteArm" }
   | { readonly _tag: "OpenEditor" }
   | { readonly _tag: "PasteImage" }
   | { readonly _tag: "ForceInterrupt" }
@@ -161,13 +160,6 @@ const actionDefinitions: ReadonlyArray<BindingDefinition> = [
     description: "Archive the current thread and quit",
     surfaces: ["input"],
     action: { _tag: "ArchiveQuit" },
-  },
-  {
-    id: "thread.newRemote",
-    defaultChord: "<leader> r",
-    description: "Toggle orb-backed thread creation",
-    surfaces: ["input"],
-    action: { _tag: "ToggleRemoteArm" },
   },
   {
     id: "palette.open",

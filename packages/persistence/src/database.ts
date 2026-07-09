@@ -6,12 +6,9 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
 import type { SQL } from "drizzle-orm"
-import { PGlite } from "@electric-sql/pglite"
-import postgres from "postgres"
 import { schema } from "./schema"
-import { applyPostgresIndexSchema } from "./postgres-index-schema"
 
-export type Dialect = "sqlite" | "postgres"
+export type Dialect = "sqlite"
 
 export type DrizzleDatabase = SQLiteBunDatabase<typeof schema> & QueryMethods
 
@@ -40,9 +37,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@rika/persistence/Database") {}
 
 export const dialectFromUrl = (url: string | undefined): Dialect => {
-  if (url === undefined || url.length === 0) return "sqlite"
-  const normalized = url.trim().toLowerCase()
-  if (normalized.startsWith("postgres://") || normalized.startsWith("postgresql://")) return "postgres"
+  void url
   return "sqlite"
 }
 
@@ -65,57 +60,29 @@ export const layerFromPath = (path: string) =>
 
 export const memoryLayer = layerFromPath(":memory:")
 
-export const postgresMemoryLayer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const client = yield* Effect.acquireRelease(
-      Effect.tryPromise({
-        try: async () => {
-          const pglite = new PGlite()
-          await pglite.waitReady
-          await applyPostgresIndexSchema(pglite)
-          return pglite
-        },
-        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "open" }),
-      }),
-      (pglite) => Effect.promise(() => pglite.close()).pipe(Effect.ignore),
-    )
-    return Service.of(makePostgresPgliteService(client))
-  }),
-)
-
 export const layerFromUrl = (url: string) => {
-  if (dialectFromUrl(url) === "postgres") return layerFromPostgresUrl(url)
+  if (isPostgresUrl(url)) {
+    return Layer.effect(
+      Service,
+      Effect.fail(new DatabaseError({ message: "Rika local persistence only supports SQLite", operation: "open" })),
+    )
+  }
   if (url === ":memory:" || url.startsWith("file::memory:")) return memoryLayer
   const path = url.startsWith("file:") ? url.slice("file:".length) : url
   return layerFromPath(path)
 }
-
-export const layerFromPostgresUrl = (url: string) =>
-  Layer.effect(
-    Service,
-    Effect.gen(function* () {
-      const client = yield* Effect.acquireRelease(
-        Effect.try({
-          try: () => postgres(url, { max: 1, prepare: false }),
-          catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "open" }),
-        }),
-        (sqlClient) => Effect.promise(() => sqlClient.end({ timeout: 5 })).pipe(Effect.ignore),
-      )
-      yield* Effect.tryPromise({
-        try: () => applyPostgresIndexSchema(client),
-        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "migrate" }),
-      })
-      return Service.of(makePostgresJsService(client))
-    }),
-  )
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const values = yield* config.get
     const url = values.database_url
-    if (url !== undefined && dialectFromUrl(url) === "postgres") return layerFromPostgresUrl(url)
+    if (url !== undefined && isPostgresUrl(url)) {
+      return Layer.effect(
+        Service,
+        Effect.fail(new DatabaseError({ message: "Rika local persistence only supports SQLite", operation: "open" })),
+      )
+    }
     return layerFromPath(pathFromConfig(values))
   }),
 )
@@ -186,75 +153,6 @@ const makeSqliteService = (database: DrizzleDatabase): Interface =>
       }),
   }) satisfies Interface
 
-const makePostgresPgliteService = (client: PGlite): Interface => {
-  const runQuery = async <T>(query: SQL): Promise<ReadonlyArray<T>> => {
-    const rendered = renderSql(query)
-    const result = await client.query<T>(rendered.text, rendered.params as never[])
-    return result.rows
-  }
-  return makeAsyncPostgresService(runQuery)
-}
-
-const makePostgresJsService = (client: postgres.Sql): Interface => {
-  const runQuery = async <T>(query: SQL): Promise<ReadonlyArray<T>> => {
-    const rendered = renderSql(query)
-    const rows = await client.unsafe(rendered.text, rendered.params as never[])
-    return rows as unknown as ReadonlyArray<T>
-  }
-  return makeAsyncPostgresService(runQuery)
-}
-
-const makeAsyncPostgresService = (runQuery: <T>(query: SQL) => Promise<ReadonlyArray<T>>): Interface => {
-  const sqliteOnly = (): never => {
-    throw new DatabaseError({
-      message: "Sync withDatabase is unavailable for the Postgres index; use queryGet/queryAll/queryRun",
-      operation: "withDatabase",
-    })
-  }
-  return {
-    dialect: "postgres",
-    withDatabase: Effect.fn("Database.withDatabase")(function* <A>(_operation: (database: DrizzleDatabase) => A) {
-      return sqliteOnly()
-    }),
-    withDatabaseEffect: Effect.fn("Database.withDatabaseEffect")(function* <A, E, R>(
-      _operation: (database: DrizzleDatabase) => Effect.Effect<A, E, R>,
-    ) {
-      return yield* Effect.fail(
-        new DatabaseError({
-          message: "Sync withDatabaseEffect is unavailable for the Postgres index; use queryGet/queryAll/queryRun",
-          operation: "withDatabaseEffect",
-        }),
-      ) as Effect.Effect<A, E | DatabaseError, R>
-    }),
-    queryGet: <T>(query: SQL) =>
-      Effect.tryPromise({
-        try: () => runQuery<T>(query),
-        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryGet" }),
-      }).pipe(Effect.map((rows) => rows[0])),
-    queryAll: <T>(query: SQL) =>
-      Effect.tryPromise({
-        try: () => runQuery<T>(query),
-        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryAll" }),
-      }),
-    queryRun: (query: SQL) =>
-      Effect.tryPromise({
-        try: async () => {
-          await runQuery(query)
-        },
-        catch: (cause) => new DatabaseError({ message: describeCause(cause), operation: "queryRun" }),
-      }),
-  } satisfies Interface
-}
-
-const renderSql = (query: SQL): { readonly text: string; readonly params: ReadonlyArray<unknown> } => {
-  const rendered = query.toQuery({
-    escapeName: (name: string) => `"${name.replaceAll('"', '""')}"`,
-    escapeParam: (index: number) => `$${index + 1}`,
-    escapeString: (value: string) => `'${value.replaceAll("'", "''")}'`,
-  } as never)
-  return { text: rendered.sql, params: rendered.params }
-}
-
 const openSqlite = (path: string) =>
   Effect.acquireRelease(
     Effect.try({
@@ -279,6 +177,11 @@ const configureSqlite = (sqlite: BunSqliteDatabase, path: string) => {
   sqlite.exec("PRAGMA busy_timeout = 5000")
   if (path !== ":memory:") sqlite.exec("PRAGMA journal_mode = WAL")
   sqlite.exec("PRAGMA synchronous = NORMAL")
+}
+
+const isPostgresUrl = (url: string) => {
+  const normalized = url.trim().toLowerCase()
+  return normalized.startsWith("postgres://") || normalized.startsWith("postgresql://")
 }
 
 const describeCause = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))

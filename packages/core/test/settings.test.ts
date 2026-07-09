@@ -15,17 +15,12 @@ describe("Settings", () => {
     await writeFile(
       join(home, ".config", "rika", "settings.json"),
       JSON.stringify({
-        "orb.template": "user-template",
-        "orb.idleTimeoutSeconds": 111,
-        "project.default": "user-project",
         "user.name": "user-name",
       }),
     )
     await writeFile(
       join(workspace, ".rika", "settings.json"),
       JSON.stringify({
-        "orb.template": "workspace-template",
-        "project.default": "workspace-project",
         "user.name": "workspace-name",
       }),
     )
@@ -37,8 +32,6 @@ describe("Settings", () => {
             Settings.layerFromEnv(
               {
                 HOME: home,
-                RIKA_ORB_TEMPLATE: "env-template",
-                RIKA_ORB_IDLE_TIMEOUT: "42",
                 RIKA_USER: "env-name",
               },
               workspace,
@@ -48,13 +41,6 @@ describe("Settings", () => {
       )
 
       expect(snapshot.values).toEqual({
-        orb: {
-          template: "env-template",
-          idleTimeoutSeconds: 42,
-        },
-        project: {
-          default: "workspace-project",
-        },
         user: {
           name: "env-name",
         },
@@ -72,9 +58,6 @@ describe("Settings", () => {
         },
       })
       expect(snapshot.sources).toMatchObject({
-        "orb.template": "env",
-        "orb.idleTimeoutSeconds": "env",
-        "project.default": "workspace",
         "user.name": "env",
         "mode.default": "default",
         "memory.autoContext": "default",
@@ -103,11 +86,6 @@ describe("Settings", () => {
       )
 
       expect(snapshot.values).toEqual({
-        orb: {
-          template: "rika-orb",
-          idleTimeoutSeconds: 300,
-        },
-        project: {},
         user: {
           name: userInfo().username,
         },
@@ -125,8 +103,6 @@ describe("Settings", () => {
         },
       })
       expect(snapshot.sources).toMatchObject({
-        "orb.template": "default",
-        "orb.idleTimeoutSeconds": "default",
         "mode.default": "default",
         "memory.autoContext": "default",
         "telemetry.enabled": "default",
@@ -227,7 +203,6 @@ describe("Settings", () => {
     await writeFile(
       join(home, ".config", "rika", "settings.json"),
       JSON.stringify({
-        "orb.idleTimeoutSeconds": 111,
         "compaction.reserved": 222,
       }),
     )
@@ -270,7 +245,6 @@ describe("Settings", () => {
         "telemetry.enabled": "sometimes",
         "memory.autoContext": "sometimes",
         "compaction.reserved": -1,
-        "orb.template": "kept-template",
         mcpServers: {},
         "rika.mcpServers": {},
         "unknown.key": true,
@@ -282,7 +256,6 @@ describe("Settings", () => {
         Settings.snapshot.pipe(Effect.provide(Settings.layerFromEnv({ HOME: home }, workspace))),
       )
 
-      expect(snapshot.values.orb.template).toBe("kept-template")
       expect(snapshot.values.mode.default).toBe("smart")
       expect(snapshot.values.compaction).toEqual({})
       expect(snapshot.values.telemetry.enabled).toBe(true)

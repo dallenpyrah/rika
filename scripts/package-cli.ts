@@ -20,26 +20,17 @@ const rivetHostEntry = new URL("index.js", rivetHostShareDir)
 const rivetHostNodeModulesDir = new URL("node_modules/", rivetHostShareDir)
 const migrationsDir = new URL("packages/persistence/drizzle/", root)
 const artifact = new URL(artifactName, outDir)
+const compiledArtifact = artifactPlatform === "win32" ? artifact : new URL(`${artifactName}.bin`, outDir)
 
-const nativeTargets = [
-  "@opentui/core-darwin-arm64",
-  "@opentui/core-darwin-x64",
-  "@opentui/core-linux-arm64",
-  "@opentui/core-linux-arm64-musl",
-  "@opentui/core-linux-x64",
-  "@opentui/core-linux-x64-musl",
-  "@opentui/core-win32-arm64",
-  "@opentui/core-win32-x64",
-]
-const bundledNative = nativeTargets.filter((name) => matchesArtifactTarget(name) && isResolvable(name))
-const externalNative = nativeTargets.filter((name) => !bundledNative.includes(name))
-const externalFlags = externalNative.flatMap((name) => ["--external", name])
 const enginePath = resolveEnginePath(artifactPlatform, artifactArch)
 const packagedEnginePath =
   enginePath === undefined
     ? undefined
     : `dist/share/rika/bin/${artifactPlatform === "win32" ? "rivet-engine.exe" : "rivet-engine"}`
 const rivetkitSidecarPackages = resolveRivetkitSidecarPackages(artifactPlatform, artifactArch, artifactTarget)
+const opentuiExternalFlags = nonTargetOpentuiNativePackageNames(artifactPlatform, artifactArch, artifactTarget).flatMap(
+  (name) => ["--external", name],
+)
 
 const manifest = {
   name: "rika",
@@ -56,17 +47,8 @@ const manifest = {
     ...(packagedEnginePath === undefined ? {} : { engine: packagedEnginePath }),
   },
   native: {
-    bundled: bundledNative,
-    external: externalNative,
     rivetkit_sidecar: rivetkitSidecarPackages.map((entry) => entry.name),
   },
-}
-
-if (bundledNative.length === 0) {
-  console.warn(
-    `[package-cli] no @opentui/core native package resolved for ${artifactPlatform}-${artifactArch}; ` +
-      "the packaged binary will fail to launch the TUI. Run `bun install` on the target platform.",
-  )
 }
 
 if (import.meta.main) {
@@ -75,36 +57,21 @@ if (import.meta.main) {
   await $`mkdir -p ${drizzleShareDir.pathname}`
   await $`cp -R ${migrationsDir.pathname}. ${drizzleShareDir.pathname}`
   await $`mkdir -p ${rivetHostShareDir.pathname}`
-  await $`bun build packages/rivet-host/src/index.ts --target bun --format esm --outfile ${rivetHostEntry.pathname}`
+  await $`bun build packages/rivet-host/src/index.ts --target bun --format esm --outfile ${rivetHostEntry.pathname} --packages bundle`
   for (const entry of rivetkitSidecarPackages) {
     await copyPackageToSidecar(entry)
   }
   await $`mkdir -p ${engineShareDir.pathname}`
   await $`cp ${enginePath} ${engineSharePath.pathname}`
   await $`chmod 755 ${engineSharePath.pathname}`
-  await $`bun build --compile --compile-autoload-package-json packages/cli/src/main.ts ${compileTargetFlags(artifactTarget)} ${externalFlags} --outfile ${artifact.pathname}`
+  await $`bun build --compile --compile-autoload-package-json packages/cli/src/main.ts ${compileTargetFlags(artifactTarget)} ${opentuiExternalFlags} --outfile ${compiledArtifact.pathname}`
+  if (artifactPlatform !== "win32") {
+    await Bun.write(artifact, unixLauncher(artifactName))
+    await $`chmod 755 ${artifact.pathname}`
+  }
   await Bun.write(new URL(`${artifactName}.json`, outDir), `${JSON.stringify(manifest, null, 2)}\n`)
 
   console.log(JSON.stringify(manifest))
-}
-
-function isResolvable(name: string): boolean {
-  for (const base of [rootDir, bunNodeModulesDir]) {
-    try {
-      Bun.resolveSync(name, base)
-      return true
-    } catch {
-      continue
-    }
-  }
-  return false
-}
-
-function matchesArtifactTarget(name: string): boolean {
-  if (artifactPlatform === "darwin") return name === `@opentui/core-darwin-${artifactArch}`
-  if (artifactPlatform === "win32") return name === `@opentui/core-win32-${artifactArch}`
-  if (artifactPlatform === "linux") return name === `@opentui/core-linux-${artifactArch}`
-  return false
 }
 
 function readPackageJson(value: unknown) {
@@ -115,6 +82,35 @@ function readPackageJson(value: unknown) {
 
 function compileTargetFlags(target: string | undefined) {
   return target === undefined ? [] : ["--target", target]
+}
+
+function unixLauncher(name: string) {
+  return `#!/usr/bin/env sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SHARE_DIR="$SCRIPT_DIR/../share/rika"
+if [ -z "\${RIKA_DATA_DIR:-}" ]; then
+  RIKA_DATA_DIR="\${HOME:-.}/.rika"
+  export RIKA_DATA_DIR
+fi
+if [ -z "\${RIVET_LOG_LEVEL:-}" ]; then
+  RIVET_LOG_LEVEL="silent"
+  export RIVET_LOG_LEVEL
+fi
+if [ -z "\${RIVETKIT_STORAGE_PATH:-}" ]; then
+  RIVETKIT_STORAGE_PATH="$RIKA_DATA_DIR/rivetkit"
+  export RIVETKIT_STORAGE_PATH
+fi
+if [ -z "\${RIVET_ENGINE_BINARY:-}" ] && [ -x "$SHARE_DIR/bin/rivet-engine" ]; then
+  RIVET_ENGINE_BINARY="$SHARE_DIR/bin/rivet-engine"
+  export RIVET_ENGINE_BINARY
+fi
+if [ -d "$SHARE_DIR/rivet-host/node_modules" ]; then
+  NODE_PATH="$SHARE_DIR/rivet-host/node_modules\${NODE_PATH:+:$NODE_PATH}"
+  export NODE_PATH
+fi
+exec "$SCRIPT_DIR/${name}.bin" "$@"
+`
 }
 
 export function resolveEnginePath(platform: string, arch: string): string {
@@ -181,6 +177,39 @@ export function platformNapiPackageName(
   if (platform === "linux") return `@rivetkit/rivetkit-napi-linux-${arch}-${target?.includes("musl") ? "musl" : "gnu"}`
   if (platform === "win32" && arch === "x64") return "@rivetkit/rivetkit-napi-win32-x64-msvc"
   return undefined
+}
+
+export function opentuiNativePackageName(
+  platform: string,
+  arch: string,
+  target: string | undefined,
+): string | undefined {
+  if (platform === "darwin") return `@opentui/core-darwin-${arch}`
+  if (platform === "linux") return `@opentui/core-linux-${arch}${target?.includes("musl") ? "-musl" : ""}`
+  if (platform === "win32") return `@opentui/core-win32-${arch}`
+  return undefined
+}
+
+export function opentuiNativePackageNames(): ReadonlyArray<string> {
+  return [
+    "@opentui/core-darwin-arm64",
+    "@opentui/core-darwin-x64",
+    "@opentui/core-linux-arm64",
+    "@opentui/core-linux-arm64-musl",
+    "@opentui/core-linux-x64",
+    "@opentui/core-linux-x64-musl",
+    "@opentui/core-win32-arm64",
+    "@opentui/core-win32-x64",
+  ]
+}
+
+export function nonTargetOpentuiNativePackageNames(
+  platform: string,
+  arch: string,
+  target: string | undefined,
+): ReadonlyArray<string> {
+  const targetPackage = opentuiNativePackageName(platform, arch, target)
+  return opentuiNativePackageNames().filter((name) => name !== targetPackage)
 }
 
 export function resolvePackageDirectory(name: string): string | undefined {

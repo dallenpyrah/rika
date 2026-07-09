@@ -2,6 +2,7 @@ import { OpenAiClient, OpenAiEmbeddingModel } from "@effect/ai-openai"
 import { Effect, Context, Layer, Redacted, Schema } from "effect"
 import { EmbeddingModel } from "effect/unstable/ai"
 import { FetchHttpClient } from "effect/unstable/http"
+import * as Live from "./live"
 import * as OpenAi from "./openai"
 
 export interface Options {
@@ -61,9 +62,10 @@ export const defaultApiKeyEnv = "RIKA_EMBEDDINGS_API_KEY"
 export const defaultBatchSize = 128
 
 export const optionsFromEnv = (env: Record<string, string | undefined>, options: EnvOptions = {}): Options => {
+  const apiUrl = Live.modelProviderBaseUrlFromEnv(env)
   const embeddingsKey = nonEmpty(env.RIKA_EMBEDDINGS_API_KEY)
   if (embeddingsKey !== undefined)
-    return { apiKey: Redacted.make(embeddingsKey, { label: defaultApiKeyEnv }), apiKeyEnv: defaultApiKeyEnv }
+    return { apiKey: Redacted.make(embeddingsKey, { label: defaultApiKeyEnv }), apiKeyEnv: defaultApiKeyEnv, apiUrl }
 
   const sharedKey = nonEmpty(env.RIKA_API_KEY)
   if (options.openaiConfigured === true && sharedKey !== undefined) {
@@ -71,6 +73,7 @@ export const optionsFromEnv = (env: Record<string, string | undefined>, options:
       apiKey: Redacted.make(sharedKey, { label: OpenAi.defaultApiKeyEnv }),
       apiKeyEnv: defaultApiKeyEnv,
       fallbackApiKeyEnv: OpenAi.defaultApiKeyEnv,
+      apiUrl,
     }
   }
 

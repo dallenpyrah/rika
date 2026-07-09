@@ -14,12 +14,12 @@ One pure model, one native adapter, one loop:
 - `src/keymap.ts` — pure effective-keymap construction and `resolve(context, pending, key, keymap?)` mapping keys and space-separated chord sequences to `Action`s. No I/O.
 - `src/palette.ts` — pure command registry (`category` + `action` + slash `command`) and `filter`.
 - `src/keys.ts` — `Key` type + `fromOpenTui` (alt = meta || option).
-- `src/ticker.ts` — `Ticker.Service`, a fixed-interval `Stream<void>` driving spinner/orb animation.
+- `src/ticker.ts` — `Ticker.Service`, a fixed-interval `Stream<void>` driving spinner animation.
 - `src/backend.ts` — shared `SessionBackend` contract plus pure thread option formatting, preview shaping, and command result types. Session implementations conform to this interface.
 - `src/controller.ts` — the only place with control flow. A merged `Queue<AppEvent>` (keys, ticks, model events, resizes) drained sequentially. Per-turn streams are fully contained: a turn failure renders a notice and the loop continues — it never drops to the shell. Turn lifecycle: submit-while-idle forks a turn fiber; submit-while-busy enqueues; Esc-Esc interrupts the fiber and discards queued steering messages; Enter-Enter steers; Ctrl+C Ctrl+C quits.
 - `src/controller.ts` keeps model event batching time-windowed because it is UI render cadence after durable event ordering, not agent event coalescing.
 - `src/adapter.ts` — the ONLY module that touches OpenTUI. Owns the `CliRenderer` + a `Surface` renderable tree, exposes `render(state)`, `keys`, `resizes`. A memory layer records states + replays scripted keys for tests.
-- `src/session.ts` / `src/remote-session.ts` — local (`AgentLoop.streamTurn`) and remote (`@rika/sdk`) backends behind `SessionBackend`, both driven by `controller.run`. Default interactive runtime is remote/shared-backend; keep the local seam for ephemeral sessions and tests.
+- The CLI package owns the local RivetKit-backed `SessionBackend` adapter and drives `controller.run`. TUI package code stays UI-only and does not import Rivet, Drizzle, provider SDKs, or CLI process output.
 
 ## Amp visual rules (must hold)
 
@@ -29,7 +29,7 @@ One pure model, one native adapter, one loop:
 - User messages: a heavy green left bar with green text. Assistant messages: flat markdown.
 - Cards are single lines: `<status icon> <dim title> <faint meta> ▸` (▸ collapsed, ▾ expanded). `context.resolved` is hidden. Raw `{"tool_call":…}` assistant JSON is hidden.
 - No top header. Cost (2 decimals, dim) — mode (colored) sits on the top-right input border; cwd (dim) on the bottom-right; the activity spinner + label sit in a cutout on the bottom-left border.
-- Mode accent colors: deep = green, smart = blue, rush = amber. The mode label, activity spinner, and welcome orb are tinted by the active mode and recolor on switch.
+- Mode accent colors: deep = green, smart = blue, rush = amber. The mode label, activity spinner, and welcome mark are tinted by the active mode and recolor on switch.
 - Mode switching (Ctrl+S) is only allowed before a thread is active; Amp locks it once active.
 - Input box: rounded, a few rows tall (`minHeight`), real cursor, `?` shortcuts help rendered inside it.
 - Command palette (Ctrl+O): centered, `>` filter line, right-aligned dim `category` + bright `action`, full-width amber selected bar.
@@ -45,7 +45,7 @@ One pure model, one native adapter, one loop:
 
 Rika uses Effect AI native tool calls. Provider tool parameter deltas arrive as typed tool events, not assistant text. The TUI renders assistant text only from `model.stream.chunk` and renders tools only from `tool.call.*` events; any JSON tool-call scrubber is a legacy migration guard, not correctness logic.
 
-Remote sessions submit turns through `submitTurn` and render all transcript changes from `subscribeThreadEvents`. The initiating TUI must not double-apply its own turn events from a submission response. Keep `last_sequence` explicit when loading, switching, and opening threads so subscription catch-up starts from the durable event boundary.
+The local Rivet backend submits turns through `submitTurn` and renders transcript changes from `subscribeThreadEvents`. The initiating TUI must not double-apply its own turn events from a submission response. Keep `last_sequence` explicit when loading, switching, and opening threads so subscription catch-up starts from the actor event boundary.
 
 ## Testing and verification
 

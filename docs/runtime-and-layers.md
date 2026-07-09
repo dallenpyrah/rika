@@ -6,10 +6,10 @@ Rika composes runtime dependencies with Effect layers. Domain code depends on se
 
 - Use `Layer.mergeAll(...)` to assemble independent services for an entrypoint or test harness.
 - Use `Layer.provide(...)` when one implementation depends on another service layer.
-- Keep raw clients behind adapter services; domain-facing services expose Rika interfaces, not SDK handles.
+- Keep raw clients behind adapter services; domain-facing services expose Rika interfaces, not raw library handles.
 - Use scoped layers when a service owns resources that must be finalized.
 - Keep runtime wrappers at process boundaries. Package internals should return `Effect` values rather than running them.
-- Select local vs remote Rivet hosting through `HostConfig` and official `@rivetkit/effect` layers; do not fork actor contracts by deployment mode.
+- Keep Rivet hosting local through `HostConfig` and official `@rivetkit/effect` layers; do not fork actor contracts by runtime mode.
 
 ## Current core services
 

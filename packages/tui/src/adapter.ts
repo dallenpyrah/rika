@@ -589,7 +589,6 @@ export class Surface {
     if (state.palette.open) {
       const filtered = Palette.filter(state.palette.query, state.mode, state.fast_mode, {
         threadActive: ViewState.hasActivity(state),
-        orbBackedThread: ViewState.hasActiveOrb(state),
       })
       const selected = Math.min(state.palette.selected, Math.max(0, filtered.length - 1))
       const width = 80
@@ -1028,10 +1027,7 @@ const modeLabelChunks = (state: ViewState.ViewState): TextChunk[] => {
 
 const modeIndicatorContent = (state: ViewState.ViewState): StyledText => {
   const chunks: TextChunk[] = [fg(color.text)(" ")]
-  const presence = ViewState.presenceStatusLabel(state)
   if (state.cost_usd > 0) chunks.push(fg(color.dim)(`${costLabel(state.cost_usd)} `), fg(color.faint)("— "))
-  if (state.remoteArm.enabled) chunks.push(fg(color.green)("[orb] "), fg(color.faint)("— "))
-  if (presence !== undefined) chunks.push(fg(color.green)(`${presence} `), fg(color.faint)("— "))
   if (state.context_usage !== undefined)
     chunks.push(
       fg(contextUsageColor(state.context_usage))(ViewState.contextUsageLabel(state.context_usage)),
@@ -1424,8 +1420,7 @@ const threadSwitcherRow = (
   width: number,
 ): TextRenderable => {
   const stats = threadDiffText(thread.diff)
-  const orbStatus = thread.orb_status === undefined ? "" : ` [orb:${thread.orb_status}]`
-  const suffix = `${stats.length > 0 ? ` ${stats}` : ""}${orbStatus}${thread.updated_label.length > 0 ? ` ${thread.updated_label}` : ""}${thread.archived ? " [archived]" : ""}`
+  const suffix = `${stats.length > 0 ? ` ${stats}` : ""}${thread.updated_label.length > 0 ? ` ${thread.updated_label}` : ""}${thread.archived ? " [archived]" : ""}`
   const titleWidth = Math.max(8, width - suffix.length)
   const title = truncate(thread.title, titleWidth).padEnd(titleWidth)
   const plain = `${title}${suffix}`.slice(0, width).padEnd(width)
@@ -1442,7 +1437,6 @@ const threadSwitcherRow = (
     chunks.push(fg(color.dim)(" "))
     chunks.push(...threadDiffChunks(thread.diff))
   }
-  if (thread.orb_status !== undefined) chunks.push(fg(color.dim)(` [orb:${thread.orb_status}]`))
   if (thread.updated_label.length > 0) chunks.push(fg(color.dim)(` ${thread.updated_label}`))
   if (thread.archived) chunks.push(fg(color.dim)(" [archived]"))
   return new TextRenderable(renderer, {
@@ -1680,13 +1674,13 @@ const welcomeBlock = (renderer: CliRenderer, phase: number, mode: ViewState.View
     alignItems: "center",
   })
   row.add(new BoxRenderable(renderer, { flexGrow: 1, flexShrink: 1 }))
-  row.add(selectableText(renderer, { content: orb(phase, mode), flexShrink: 0 }))
+  row.add(selectableText(renderer, { content: welcomeMark(phase, mode), flexShrink: 0 }))
   const right = new BoxRenderable(renderer, { flexGrow: 1, flexShrink: 1, flexDirection: "row" })
   right.add(
     selectableText(renderer, {
       marginLeft: 4,
       flexShrink: 0,
-      content: t`${fg(welcomeColor(mode))("Welcome to Amp")}\n\n\n${fg(color.text)("ctrl+o")} ${fg(color.dim)("for commands")}\n${fg(color.text)("?")} ${fg(color.dim)("for shortcuts")}`,
+      content: t`${fg(welcomeColor(mode))("Welcome to Rika")}\n\n\n${fg(color.text)("ctrl+o")} ${fg(color.dim)("for commands")}\n${fg(color.text)("?")} ${fg(color.dim)("for shortcuts")}`,
     }),
   )
   row.add(right)
@@ -1695,17 +1689,17 @@ const welcomeBlock = (renderer: CliRenderer, phase: number, mode: ViewState.View
 
 const welcomeColor = (mode: ViewState.ViewState["mode"]): string => (isDeepMode(mode) ? "#55d6a6" : modeColor(mode))
 
-const ampOrbFrame = (rows: ReadonlyArray<string>): ReadonlyArray<string> => [
+const welcomeMarkFrame = (rows: ReadonlyArray<string>): ReadonlyArray<string> => [
   "                                        ",
   "                                        ",
   "                                        ",
-  ...rows.map(shiftOrbRow),
+  ...rows.map(shiftWelcomeMarkRow),
 ]
 
-const shiftOrbRow = (row: string): string => ` ${row}`.slice(0, 40)
+const shiftWelcomeMarkRow = (row: string): string => ` ${row}`.slice(0, 40)
 
-const ampOrbFrames = [
-  ampOrbFrame([
+const welcomeMarkFrames = [
+  welcomeMarkFrame([
     "            •••••••••••••               ",
     "         ••••••••••●●••••••••           ",
     "      •••••●●●●●●●●•••••••••••••        ",
@@ -1725,7 +1719,7 @@ const ampOrbFrames = [
     "         ••••••••••••••••••••           ",
     "             ···········•               ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "             ••••••••••••               ",
     "         ••••••••••••••••••••           ",
     "      ••●●•••••●●●•••••••••••••         ",
@@ -1745,7 +1739,7 @@ const ampOrbFrames = [
     "         •••••••••••••••••••            ",
     "              ·········•                ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "              ••••••••••                ",
     "          ••••••••••••••••••            ",
     "       ●●••••••●●●•••••••••••••         ",
@@ -1765,7 +1759,7 @@ const ampOrbFrames = [
     "          ••••••••••••••••••            ",
     "               ·······•                 ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "               ••••••••                 ",
     "          ••●●••••••••••••••            ",
     "       •••••••••••••••••••••••          ",
@@ -1785,7 +1779,7 @@ const ampOrbFrames = [
     "          ·················             ",
     "                ·····•                  ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "                ••••••                  ",
     "          •••••••••••••••••             ",
     "       •••••••••••••••••••••••          ",
@@ -1805,7 +1799,7 @@ const ampOrbFrames = [
     "          •···············•             ",
     "                 ••••                   ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "                •••••                   ",
     "           ••●●••••••••••••             ",
     "        ••••••••••••••••••••••          ",
@@ -1825,7 +1819,7 @@ const ampOrbFrames = [
     "          •···············•             ",
     "                  ••                    ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "                ••••••                  ",
     "          •••••••••••••••••             ",
     "        •●●•••••••••••••••••••          ",
@@ -1845,7 +1839,7 @@ const ampOrbFrames = [
     "          •···············•             ",
     "                 •••                    ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "               ••••••••                 ",
     "          ••••••••••••••••••            ",
     "       •••••••••••••••••••••••          ",
@@ -1865,7 +1859,7 @@ const ampOrbFrames = [
     "          ·················             ",
     "                ·····•                  ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "              ••••••••••                ",
     "         •••••••••••••••••••            ",
     "       ••••••••••••••••••••••••         ",
@@ -1885,7 +1879,7 @@ const ampOrbFrames = [
     "         •••••••••••••••••••            ",
     "              •·······•                 ",
   ]),
-  ampOrbFrame([
+  welcomeMarkFrame([
     "            •••••••••••••               ",
     "        •••••●●●●●●••••••••••           ",
     "      •••●●●●•••••••••••••••••••        ",
@@ -1907,8 +1901,8 @@ const ampOrbFrames = [
   ]),
 ] as const
 
-const orb = (phase: number, mode: ViewState.ViewState["mode"]): StyledText => {
-  const pattern = ampOrbFrames[(phase + 5) % ampOrbFrames.length] ?? ampOrbFrames[0]
+const welcomeMark = (phase: number, mode: ViewState.ViewState["mode"]): StyledText => {
+  const pattern = welcomeMarkFrames[(phase + 5) % welcomeMarkFrames.length] ?? welcomeMarkFrames[0]
   const chunks: TextChunk[] = []
   for (let r = 0; r < pattern.length; r += 1) {
     if (r > 0) chunks.push(fg(color.text)("\n"))
@@ -1916,7 +1910,7 @@ const orb = (phase: number, mode: ViewState.ViewState["mode"]): StyledText => {
       if (glyph === " ") {
         chunks.push(fg(color.text)(" "))
       } else {
-        const [red, green, blue] = orbColor((r - 1) / 17, mode)
+        const [red, green, blue] = welcomeMarkColor((r - 1) / 17, mode)
         chunks.push(fg(`#${hex2(red)}${hex2(green)}${hex2(blue)}`)(glyph))
       }
     }
@@ -1924,7 +1918,7 @@ const orb = (phase: number, mode: ViewState.ViewState["mode"]): StyledText => {
   return new StyledText(chunks)
 }
 
-const orbColor = (row: number, mode: ViewState.ViewState["mode"]): readonly [number, number, number] => {
+const welcomeMarkColor = (row: number, mode: ViewState.ViewState["mode"]): readonly [number, number, number] => {
   if (!isDeepMode(mode)) return modeRgb(mode)
   const clamped = Math.max(0, Math.min(1, row))
   const top = [92, 225, 152] as const

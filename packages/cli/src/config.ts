@@ -2,7 +2,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname } from "node:path"
 import { Config, Settings } from "@rika/core"
-import * as Keymap from "@rika/tui/keymap"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as Args from "./args"
 import * as Output from "./output"
@@ -47,8 +46,7 @@ export const layerFromInput = (input: Input) =>
         const output = yield* Output.Service
         const system = input.system ?? liveSystem
         if (command.action === "list") return yield* executeList(input, output)
-        if (command.action === "edit") return yield* executeEdit(command, input, output, system)
-        return yield* executeKeymap(input, output)
+        return yield* executeEdit(command, input, output, system)
       }),
     }),
   )
@@ -89,15 +87,6 @@ const executeList = (
       ...Settings.entries(snapshot),
     ]
     yield* output.stdout(formatJson({ entries, warnings: snapshot.warnings }))
-    return 0
-  })
-
-const executeKeymap = (input: Input, output: Output.Interface): Effect.Effect<number, Settings.SettingsError> =>
-  Effect.gen(function* () {
-    const workspaceRoot = input.env.RIKA_WORKSPACE_ROOT ?? input.cwd
-    const snapshot = yield* Settings.loadSnapshotFromEnv(input.env, workspaceRoot)
-    const keymap = Keymap.effectiveKeymap({ entries: snapshot.values.keymap, sources: snapshot.keymapSources })
-    yield* output.stdout(formatJson({ entries: keymap.entries, warnings: [...snapshot.warnings, ...keymap.warnings] }))
     return 0
   })
 

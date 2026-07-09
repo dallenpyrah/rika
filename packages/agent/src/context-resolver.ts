@@ -2,10 +2,9 @@ import { readdir, readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { Config, Settings, StringArray } from "@rika/core"
-import { IdeBridge } from "@rika/ide"
 import { Embeddings } from "@rika/llm"
 import { ThreadMemoryStore } from "@rika/persistence"
-import { Common, Event, Ide, Ids } from "@rika/schema"
+import { Common, Event, Ids } from "@rika/schema"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import * as ThreadService from "./thread-service"
 import * as WorkspaceIdentity from "./workspace-identity"
@@ -25,7 +24,6 @@ export const ResolveInput = Schema.Struct({
   turn_id: Ids.TurnId,
   content: Schema.String,
   history: Schema.optional(Schema.Array(Event.Event)),
-  ide_context: Schema.optional(Ide.ContextSnapshot),
   max_content_chars: Schema.optional(Schema.Int),
 }).annotate({ identifier: "Rika.Agent.ContextResolver.ResolveInput" })
 
@@ -129,11 +127,7 @@ const makeService = (
         input.content,
       )
       const memoryEntries = yield* resolveAutoMemoryEntries(workspaceRoot, threadService, memory, input)
-      const ideEntries = input.ide_context === undefined ? [] : IdeBridge.contextEntries(input.ide_context)
-      const entries = dedupeEntries([...guidanceEntries, ...mentionEntries, ...memoryEntries, ...ideEntries]).slice(
-        0,
-        maxEntries,
-      )
+      const entries = dedupeEntries([...guidanceEntries, ...mentionEntries, ...memoryEntries]).slice(0, maxEntries)
       const rendered = renderEntries(entries, maxContentChars)
       return {
         entries,
@@ -144,7 +138,6 @@ const makeService = (
           image_mentions: mentions.images.length,
           thread_references: mentions.threads.length,
           relevant_paths: relevantPaths.length,
-          ide_context: input.ide_context !== undefined,
           truncated: rendered.length >= maxContentChars,
         },
       }

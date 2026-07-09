@@ -5,16 +5,13 @@ import { parseThreadSearchQuery, resolveDateFilter } from "../src/thread-search-
 describe("Thread search query parser", () => {
   test("parses text terms, quoted phrases, and filters", () => {
     expect(
-      parseThreadSearchQuery(
-        'auth "race fix" file:src/**/*.ts after:7d before:2026-07-01 archived:false project:backend',
-      ),
+      parseThreadSearchQuery('auth "race fix" file:src/**/*.ts after:7d before:2026-07-01 archived:false'),
     ).toEqual({
       terms: ["auth", "race fix"],
       file_globs: ["src/**/*.ts"],
       after: { _tag: "relative", amount: 7, unit: "d" },
       before: { _tag: "absolute", value: "2026-07-01" },
       archived: false,
-      project: "backend",
     })
   })
 

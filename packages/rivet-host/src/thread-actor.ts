@@ -1,8 +1,13 @@
 import { Action, Actor } from "@rivetkit/effect"
 import { AgentLoop, WorkspaceAccess } from "@rika/agent"
 import { Database, ThreadEventLog, ThreadProjection, WorkspaceStore } from "@rika/persistence"
-import { Event, Ide, Ids, Message, Remote, Tool } from "@rika/schema"
+import { Event, Ids, Message, Tool } from "@rika/schema"
 import { Schema } from "effect"
+
+export const AgentMode = Schema.Literals(["rush", "smart", "deep1", "deep2", "deep3"]).annotate({
+  identifier: "Rika.RivetHost.ThreadActor.AgentMode",
+})
+export type AgentMode = typeof AgentMode.Type
 
 export const TurnStatus = Schema.Literals(["idle", "active", "completed", "failed"]).annotate({
   identifier: "Rika.RivetHost.ThreadActor.TurnStatus",
@@ -62,12 +67,17 @@ export const StartTurnPayload = Schema.Struct({
   identity: Schema.optional(VerifiedUserIdentity),
   content: Schema.String,
   content_parts: Schema.optional(Schema.Array(Message.ContentPart)),
-  mode: Schema.optional(Remote.AgentMode),
+  mode: Schema.optional(AgentMode),
   fast_mode: Schema.optional(Schema.Boolean),
   cancelled: Schema.optional(Schema.Boolean),
-  ide_context: Schema.optional(Ide.ContextSnapshot),
   tool_access: Schema.optional(Tool.TurnToolAccess),
 }).annotate({ identifier: "Rika.RivetHost.ThreadActor.StartTurnPayload" })
+
+export interface StartTurnResult extends Schema.Schema.Type<typeof StartTurnResult> {}
+export const StartTurnResult = Schema.Struct({
+  thread_id: Ids.ThreadId,
+  accepted: Schema.Literal(true),
+}).annotate({ identifier: "Rika.RivetHost.ThreadActor.StartTurnResult" })
 
 export interface ThreadIdPayload extends Schema.Schema.Type<typeof ThreadIdPayload> {}
 export const ThreadIdPayload = Schema.Struct({
@@ -176,7 +186,7 @@ export const EnsureThread = Action.make("EnsureThread", {
 
 export const StartTurn = Action.make("StartTurn", {
   payload: StartTurnPayload,
-  success: Remote.StartTurnResponse,
+  success: StartTurnResult,
   error: ThreadActorError,
 })
 

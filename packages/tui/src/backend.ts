@@ -1,6 +1,5 @@
 import { Config } from "@rika/core"
-import { TournamentService } from "@rika/agent"
-import { Event, Ids, Message, Orb, Remote, Tool } from "@rika/schema"
+import { Event, Ids, Message, Tool } from "@rika/schema"
 import { Effect, Stream } from "effect"
 import * as ViewState from "./view-state"
 
@@ -16,7 +15,6 @@ export interface LoadedThread {
   readonly thread_id: Ids.ThreadId
   readonly state: ViewState.ViewState
   readonly last_sequence?: number
-  readonly active_orb?: ViewState.ActiveOrb
 }
 
 export interface TurnRequest {
@@ -34,25 +32,11 @@ export interface TurnRequest {
 export interface ThreadEventsRequest {
   readonly thread_id: Ids.ThreadId
   readonly after_sequence?: number
-  readonly user_id?: Ids.UserId
-  readonly onPresence?: (presence: Remote.PresencePayload) => void
-}
-
-export interface PresenceRequest {
-  readonly thread_id: Ids.ThreadId
-  readonly user_id: Ids.UserId
-  readonly state: Remote.PresenceState
 }
 
 export interface CancelRequest {
   readonly thread_id: Ids.ThreadId
   readonly turn_id: Ids.TurnId
-}
-
-export interface TournamentRequest {
-  readonly thread_id: Ids.ThreadId
-  readonly message: string
-  readonly branch_count: number
 }
 
 export interface PreviewInput {
@@ -90,31 +74,7 @@ export interface ThreadOption {
   readonly preview: string
   readonly updated_label: string
   readonly archived: boolean
-  readonly orb_status?: Orb.OrbStatus
   readonly diff?: ViewState.ThreadDiffStats
-}
-
-export interface ProjectOption {
-  readonly project_id: Ids.ProjectId
-  readonly name: string
-  readonly repo_origin: string
-}
-
-export interface CreateProjectInput {
-  readonly name: string
-  readonly repo_origin: string
-}
-
-export interface CreateOrbThreadInput {
-  readonly project_id: Ids.ProjectId
-  readonly workspace_path: string
-  readonly mode: Config.Mode
-}
-
-export interface CreatedOrbThread {
-  readonly thread_id: Ids.ThreadId
-  readonly workspace_id: Ids.WorkspaceId
-  readonly active_orb?: ViewState.ActiveOrb
 }
 
 export interface ThreadOptionInput {
@@ -123,7 +83,6 @@ export interface ThreadOptionInput {
   readonly latest_message_text?: string
   readonly updated_at?: number
   readonly archived?: boolean
-  readonly orb_status?: Orb.OrbStatus
   readonly diff?: ViewState.ThreadDiffStats
 }
 
@@ -138,7 +97,6 @@ export const threadOption = (input: ThreadOptionInput): ThreadOption => {
     preview,
     updated_label: input.updated_at === undefined ? "" : ageLabel(input.updated_at),
     archived: input.archived ?? false,
-    ...(input.orb_status === undefined ? {} : { orb_status: input.orb_status }),
     ...(input.diff === undefined || isEmptyDiff(input.diff) ? {} : { diff: input.diff }),
   }
 }
@@ -148,13 +106,8 @@ export interface SessionBackend<E> {
   readonly streamTurn: (input: TurnRequest) => Stream.Stream<Event.Event, E>
   readonly submitTurn?: (input: TurnRequest) => Effect.Effect<void, E>
   readonly subscribeThreadEvents?: (input: ThreadEventsRequest) => Stream.Stream<Event.Event, E>
-  readonly setThreadPresence?: (input: PresenceRequest) => Effect.Effect<void, E>
   readonly cancelTurn: (input: CancelRequest) => Effect.Effect<void, E>
-  readonly runTournament?: (input: TournamentRequest) => Effect.Effect<TournamentService.TournamentResult, E>
   readonly runCommand: (context: CommandContext, command: string) => Effect.Effect<CommandResult, E>
-  readonly listProjects?: (input: { readonly workspace_path: string }) => Effect.Effect<ReadonlyArray<ProjectOption>, E>
-  readonly createProject?: (input: CreateProjectInput) => Effect.Effect<ProjectOption, E>
-  readonly createOrbThread?: (input: CreateOrbThreadInput) => Effect.Effect<CreatedOrbThread, E>
   readonly listThreads: (input: {
     readonly workspace_path: string
     readonly workspace_id: Ids.WorkspaceId

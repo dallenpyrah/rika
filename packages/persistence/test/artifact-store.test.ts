@@ -63,7 +63,7 @@ describe("ArtifactStore", () => {
   test("resolves omitted workspace ids for workspace scoped lists across stored artifact kinds", async () => {
     const workspaceId = Ids.WorkspaceId.make("workspace_artifact_kind")
     const threadId = Ids.ThreadId.make("thread_artifact_kind")
-    const kinds = ["review", "verdict", "orb-final-diff", "other"] as const
+    const kinds = ["review", "verdict", "file", "other"] as const
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {

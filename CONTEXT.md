@@ -28,16 +28,12 @@ _Avoid_: Prompt stuffing, hidden instructions, implicit context
 The filesystem and repository context where a thread is allowed to inspect and modify code.
 _Avoid_: Project, cwd, folder
 
-**Project**:
-An orb provisioning profile that binds a repository origin to default branch, sandbox template, environment variables, and secret names.
-_Avoid_: Workspace, checkout, folder
-
 **Workspace Membership**:
-A durable association between a user and a workspace that grants hosted read/write access, with an owner role for administrative actions.
+A durable association between a local user identity and a workspace for thread visibility checks.
 _Avoid_: ACL row, permission record, team user
 
 **Workspace Access Decision**:
-The explicit allow/deny result produced before a hosted user reads or writes a workspace, thread, or artifact.
+The explicit allow/deny result produced before a local identity reads or writes a workspace, thread, or artifact.
 _Avoid_: Auth check, permission boolean, guard
 
 **Agent Mode**:
@@ -108,46 +104,14 @@ _Avoid_: Repo visibility, permission role, publication state
 The active runtime owner for one thread's orchestration, hot state, model loop, and tool execution queue.
 _Avoid_: Session process, worker, server object
 
-**Rivet Host Mode**:
-The deployment choice that selects local or remote Rivet actor hosting while preserving the same Thread Actor contract.
-_Avoid_: Actor API variant, cloud mode, runtime fork
-
-**Hosted Control Plane**:
-A remote service that owns hosted orb records, workspace authorization, thread fan-out, and orb lifecycle calls while preserving the local `OrbManager` and Remote Control contracts.
-_Avoid_: Cloud mode, hosted backend, remote singleton
+**Local Rivet Host**:
+The in-process RivetKit registry and local Rivet engine that run Rika actors on localhost with file-system storage.
+_Avoid_: Cloud mode, hosted backend, deployment target
 
 **Interactive Session**:
 A terminal UI run that renders thread events, accepts prompts and command-palette commands, and delegates turns to the agent loop. Interactive sessions are adapters over durable threads, not a separate source of truth.
 _Avoid_: Terminal state, chat UI, REPL transcript
 
-**Shared Local Backend**:
-The per-workspace local remote-control process reused by interactive sessions and local development clients. It owns local API access to durable threads while clients render through subscriptions.
-_Avoid_: TUI backend, web server, hidden singleton
-
 **Live Thread Subscription**:
 The long-lived stream of thread events a client consumes after opening a thread. It starts after a known event sequence, catches up from the event log, then continues with live notifications.
 _Avoid_: Turn response stream, websocket state, UI cache
-
-**Thread Presence**:
-The ephemeral per-thread active/typing snapshot emitted beside live thread events. Presence is keyed by self-asserted user identity, expires by heartbeat TTL, and is not durable thread history.
-_Avoid_: Event log member state, workspace authorization, chat roster
-
-**Foldkit Web UI**:
-The local browser client for Rika threads, built with Foldkit and rendered from the same remote-control subscription path as interactive sessions.
-_Avoid_: React app, dashboard, separate frontend state
-
-**IDE Client**:
-An editor-side participant connected to Rika for one or more workspaces. It can supply editor context and receive requests to reveal code without becoming the thread's source of truth.
-_Avoid_: Editor plugin, IDE session, frontend
-
-**IDE Context**:
-The user-visible editor state supplied by an IDE client for a turn, including open workspace roots, active file, selection, and diagnostics.
-_Avoid_: Editor state, workspace snapshot, hidden prompt
-
-**Navigation Request**:
-A request for an IDE client to reveal a file or range for the user. It is advisory UI steering, not a workspace mutation.
-_Avoid_: Open-file command, editor action, jump
-
-**Remote Control**:
-The API surface that lets external clients, IDEs, CLIs, or SDK users inspect and steer active Rika threads.
-_Avoid_: Webhook, daemon API, RPC

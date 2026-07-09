@@ -2,13 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { sql } from "drizzle-orm"
 import { Common, Event, Ids } from "@rika/schema"
-import { cp, mkdtemp, readdir, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { ArtifactStore, Database, Migration, ThreadEventLog } from "../src/index"
+import { Database, Migration, ThreadEventLog } from "../src/index"
 
 const layer = Layer.mergeAll(Database.memoryLayer, Migration.layer, ThreadEventLog.layer)
-const artifactWorkspaceBackfillMigration = "20260706000000_artifacts_workspace_backfill"
 
 describe("Migration", () => {
   test("applies committed migrations at runtime", async () => {
@@ -61,48 +57,70 @@ describe("Migration", () => {
     expect(rows.after).toEqual([{ thread_id: historicalThreadId, path: "packages/server/src/search.ts" }])
   })
 
-  test("backfills legacy NULL artifact workspace ids from thread projections", async () => {
-    const priorMigrations = await migrationsFolderWithout(artifactWorkspaceBackfillMigration)
-    try {
-      const databaseLayer = Database.memoryLayer
-      const artifactLayer = ArtifactStore.layer.pipe(Layer.provideMerge(databaseLayer))
-      const testLayer = Layer.mergeAll(databaseLayer, artifactLayer)
-      const workspaceId = Ids.WorkspaceId.make("migration_workspace_artifact_backfill")
-      const threadId = Ids.ThreadId.make("migration_thread_artifact_backfill")
-      const artifactId = Ids.ArtifactId.make("migration_artifact_workspace_backfill")
+  test("tolerates existing local tables from older migration stacks", async () => {
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Database.withDatabase((database) =>
+          database.transaction(() => {
+            database.run(
+              sql.raw(
+                "CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash text NOT NULL, created_at numeric, name text, applied_at TEXT)",
+              ),
+            )
+            database.run(
+              sql.raw(
+                "INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES ('old-hash', 1782591185000, '20260627201305_mature_dragon_lord', '2026-07-07T20:21:16.360Z')",
+              ),
+            )
+            database.run(
+              sql.raw(
+                "CREATE TABLE thread_projections (`thread_id` text PRIMARY KEY, `workspace_id` text NOT NULL, `user_id` text, `latest_message_id` text, `latest_message_role` text, `latest_message_text` text, `latest_message_created_at` integer, `active_turn_id` text, `active_turn_status` text, `archived` integer DEFAULT 0 NOT NULL, `last_sequence` integer NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL)",
+              ),
+            )
+            database.run(
+              sql.raw(
+                "INSERT INTO thread_projections (`thread_id`, `workspace_id`, `archived`, `last_sequence`, `created_at`, `updated_at`) VALUES ('legacy-thread', 'legacy-workspace', 0, 1, 1, 1)",
+              ),
+            )
+            database.run(
+              sql.raw(
+                "CREATE TABLE artifacts (`id` text PRIMARY KEY, `thread_id` text NOT NULL, `turn_id` text, `kind` text NOT NULL, `title` text, `content` text NOT NULL, `metadata` text, `created_at` integer NOT NULL)",
+              ),
+            )
+            database.run(
+              sql.raw(
+                "INSERT INTO artifacts (`id`, `thread_id`, `kind`, `content`, `created_at`) VALUES ('legacy-artifact', 'legacy-thread', 'text', 'legacy', 1)",
+              ),
+            )
+          }),
+        )
+        yield* Migration.migrate()
+        return yield* Database.withDatabase((database) => ({
+          tables: database.all<{ name: string }>(
+            sql`select name from sqlite_master where type = 'table' order by name`,
+          ),
+          artifact_columns: database.all<{ name: string }>(sql.raw("PRAGMA table_info(artifacts)")),
+          projection_columns: database.all<{ name: string }>(sql.raw("PRAGMA table_info(thread_projections)")),
+          artifact: database.get<{ workspace_id: string | null }>(
+            sql`select workspace_id from artifacts where id = 'legacy-artifact'`,
+          ),
+        }))
+      }).pipe(Effect.provide(layer)),
+    )
 
-      const result = await Effect.runPromise(
-        Effect.gen(function* () {
-          yield* Migration.migrate().pipe(Effect.provide(Migration.layerFromFolder(priorMigrations)))
-          yield* Database.withDatabase((database) => {
-            database.run(sql`
-              insert into thread_projections (thread_id, workspace_id, last_sequence, created_at, updated_at)
-              values (${threadId}, ${workspaceId}, 1, ${historicalCreatedAt}, ${historicalCreatedAt})
-            `)
-            database.run(sql`
-              insert into artifacts (id, thread_id, workspace_id, kind, title, content, created_at)
-              values (${artifactId}, ${threadId}, null, 'other', 'Legacy trust', '{"legacy":true}', ${historicalCreatedAt})
-            `)
-          })
-          const before = yield* ArtifactStore.listAll({ workspace_id: workspaceId, kind: "other" })
-          yield* Migration.migrate().pipe(Effect.provide(Migration.layerFromFolder(Migration.sourceMigrationsFolder)))
-          const after = yield* ArtifactStore.listAll({ workspace_id: workspaceId, kind: "other" })
-          return { before, after }
-        }).pipe(Effect.provide(testLayer)),
-      )
-
-      expect(result.before).toEqual([])
-      expect(result.after).toHaveLength(1)
-      expect(result.after[0]).toMatchObject({
-        id: artifactId,
-        thread_id: threadId,
-        workspace_id: workspaceId,
-        kind: "other",
-        title: "Legacy trust",
-      })
-    } finally {
-      await rm(priorMigrations, { recursive: true, force: true })
-    }
+    expect(state.tables.map((table) => table.name)).toEqual(expect.arrayContaining(["artifacts", "thread_events"]))
+    expect(state.artifact_columns.map((column) => column.name)).toContain("workspace_id")
+    expect(state.projection_columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "title_text",
+        "diff_additions",
+        "last_context_tokens",
+        "last_model",
+        "last_user_id",
+        "visibility",
+      ]),
+    )
+    expect(state.artifact?.workspace_id).toBe("legacy-workspace")
   })
 
   test("resolves source, configured, and installed migration folders", () => {
@@ -113,18 +131,6 @@ describe("Migration", () => {
     expect(Migration.installedMigrationsFolder("/opt/rika/bin/rika")).toBe("/opt/rika/share/rika/drizzle")
   })
 })
-
-const migrationsFolderWithout = async (...excluded: ReadonlyArray<string>) => {
-  const target = await mkdtemp(join(tmpdir(), "rika-migrations-"))
-  const excludedNames = new Set(excluded)
-  const names = await readdir(Migration.sourceMigrationsFolder)
-  await Promise.all(
-    names
-      .filter((name) => !excludedNames.has(name))
-      .map((name) => cp(join(Migration.sourceMigrationsFolder, name), join(target, name), { recursive: true })),
-  )
-  return target
-}
 
 const historicalThreadId = Ids.ThreadId.make("migration_thread_file_backfill")
 const historicalTurnId = Ids.TurnId.make("migration_turn_file_backfill")

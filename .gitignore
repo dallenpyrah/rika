@@ -5,6 +5,7 @@ build/
 coverage/
 .turbo/
 .rika/
+.claude/
 .env
 .env.*
 *.db

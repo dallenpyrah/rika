@@ -12,46 +12,29 @@ export interface Command {
 
 export interface Visibility {
   readonly threadActive?: boolean
-  readonly orbBackedThread?: boolean
 }
 
 const leadingCommands: ReadonlyArray<Command> = [
   { id: "thread-switch", category: "thread", action: "switch", hint: "switch threads", command: "/switch-thread" },
   {
-    id: "orb-toggle",
-    category: "orb",
-    action: "toggle",
-    hint: "toggle orb-backed thread creation",
-    command: "/orb toggle",
-    key: "Ctrl+X R",
-  },
-  {
-    id: "project-select",
-    category: "project",
-    action: "select",
-    hint: "choose the project for the next orb-backed thread",
-    command: "/project select",
-  },
-  {
-    id: "project-create",
-    category: "project",
-    action: "create",
-    hint: "create a project for orb-backed threads",
-    command: "/project create",
-  },
-  {
-    id: "amp-relaunch",
-    category: "amp",
+    id: "rika-relaunch",
+    category: "rika",
     action: "relaunch (quit & reopen)",
     hint: "restart the interactive session",
     command: "/relaunch",
   },
-  { id: "amp-help", category: "amp", action: "help", hint: "show help", command: "/help" },
-  { id: "amp-welcome", category: "amp", action: "show welcome", hint: "show the welcome surface", command: "/welcome" },
-  { id: "amp-credits", category: "amp", action: "end credits", hint: "show credits", command: "/credits" },
-  { id: "amp-version", category: "amp", action: "show version", hint: "show version", command: "/version" },
-  { id: "amp-doctor", category: "amp", action: "doctor", hint: "check local Rika setup", command: "/doctor" },
-  { id: "amp-quit", category: "amp", action: "quit", hint: "leave Rika", command: "/exit", key: "Ctrl+C Ctrl+C" },
+  { id: "rika-help", category: "rika", action: "help", hint: "show help", command: "/help" },
+  {
+    id: "rika-welcome",
+    category: "rika",
+    action: "show welcome",
+    hint: "show the welcome surface",
+    command: "/welcome",
+  },
+  { id: "rika-credits", category: "rika", action: "end credits", hint: "show credits", command: "/credits" },
+  { id: "rika-version", category: "rika", action: "show version", hint: "show version", command: "/version" },
+  { id: "rika-doctor", category: "rika", action: "doctor", hint: "check local Rika setup", command: "/doctor" },
+  { id: "rika-quit", category: "rika", action: "quit", hint: "leave Rika", command: "/exit", key: "Ctrl+C Ctrl+C" },
   {
     id: "ast-grep-outline-status",
     category: "ast-grep",
@@ -79,30 +62,6 @@ const trailingCommands: ReadonlyArray<Command> = [
 
 export const commands: ReadonlyArray<Command> = [...leadingCommands, ...trailingCommands]
 
-const orbLifecycleCommands: ReadonlyArray<Command> = [
-  {
-    id: "orb-pause",
-    category: "orb",
-    action: "pause",
-    hint: "pause the active orb-backed thread",
-    command: "/orb pause",
-  },
-  {
-    id: "orb-resume",
-    category: "orb",
-    action: "resume",
-    hint: "resume the active orb-backed thread",
-    command: "/orb resume",
-  },
-  {
-    id: "orb-kill",
-    category: "orb",
-    action: "kill",
-    hint: "kill the active orb-backed thread",
-    command: "/orb kill",
-  },
-]
-
 const threadLifecycleCommands: ReadonlyArray<Command> = [
   {
     id: "thread-compact",
@@ -117,13 +76,6 @@ const threadLifecycleCommands: ReadonlyArray<Command> = [
     action: "fork",
     hint: "copy this conversation into a new thread",
     command: "/fork",
-  },
-  {
-    id: "thread-tournament",
-    category: "thread",
-    action: "tournament",
-    hint: "compare read-only branch answers",
-    command: "/tournament",
   },
   {
     id: "thread-visibility",
@@ -151,7 +103,6 @@ export const commandsFor = (
   const available = [
     ...leadingCommands,
     ...(visibility.threadActive === true ? threadLifecycleCommands : []),
-    ...(visibility.orbBackedThread === true ? orbLifecycleCommands : []),
     ...trailingCommands,
   ]
   return isFastEligible(mode) ? [...available, speedCommand(fastMode)] : available

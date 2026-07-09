@@ -80,12 +80,6 @@ export const layer = Layer.succeed(
   Service,
   Service.of({
     apply: Effect.fn("ThreadProjection.apply")(function* (event: Event.Event) {
-      const dialect = yield* Database.dialect()
-      if (dialect === "postgres") {
-        return yield* applyEventOnIndex(event).pipe(
-          Effect.mapError((cause) => toError(cause, "apply", event.thread_id)),
-        )
-      }
       return yield* Database.withDatabaseEffect((database) =>
         Effect.try({
           try: () => ProjectionWriter.applyEvent(database, event),
@@ -94,15 +88,6 @@ export const layer = Layer.succeed(
       )
     }),
     rebuild: Effect.fn("ThreadProjection.rebuild")(function* () {
-      const dialect = yield* Database.dialect()
-      if (dialect === "postgres") {
-        return yield* Effect.fail(
-          new ThreadProjectionError({
-            message: "Postgres index rebuild requires actor event replay into the projection, not a central thread_events log",
-            operation: "rebuild",
-          }),
-        )
-      }
       return yield* Database.withDatabaseEffect((database) =>
         Effect.try({
           try: () => ProjectionWriter.rebuildProjection(database),
@@ -111,13 +96,6 @@ export const layer = Layer.succeed(
       )
     }),
     clear: Effect.fn("ThreadProjection.clear")(function* () {
-      const dialect = yield* Database.dialect()
-      if (dialect === "postgres") {
-        return yield* Database.queryRun(sql`delete from thread_files`).pipe(
-          Effect.andThen(Database.queryRun(sql`delete from thread_projections`)),
-          Effect.mapError((cause) => toError(cause, "clear")),
-        )
-      }
       return yield* Database.withDatabaseEffect((database) =>
         Effect.try({
           try: () => ProjectionWriter.clearProjection(database),
@@ -158,69 +136,6 @@ export const layer = Layer.succeed(
     }),
   }),
 )
-
-const applyEventOnIndex = (event: Event.Event) =>
-  Effect.gen(function* () {
-    const row = yield* Database.queryGet<ProjectionSequenceRow>(
-      sql`select last_sequence from thread_projections where thread_id = ${event.thread_id}`,
-    )
-    if (row === undefined) {
-      if (event.type !== "thread.created") {
-        return yield* Effect.fail(
-          new ThreadProjectionError({
-            message: `Cannot apply ${event.type} before thread.created for thread ${event.thread_id}`,
-            operation: "apply",
-            thread_id: event.thread_id,
-          }),
-        )
-      }
-      if (event.sequence !== 1) {
-        return yield* Effect.fail(
-          new ThreadProjectionError({
-            message: `Expected first projection sequence 1 for thread ${event.thread_id}, received ${event.sequence}`,
-            operation: "apply",
-            thread_id: event.thread_id,
-          }),
-        )
-      }
-      yield* Database.queryRun(sql`
-        insert into thread_projections (
-          thread_id, workspace_id, user_id, last_user_id, title_text, archived, visibility, last_sequence, created_at, updated_at
-        ) values (
-          ${event.thread_id},
-          ${event.data.workspace_id},
-          ${event.data.user_id ?? null},
-          ${event.data.user_id ?? null},
-          ${event.data.title_text ?? null},
-          0,
-          'private',
-          ${event.sequence},
-          ${event.created_at},
-          ${event.created_at}
-        )
-      `)
-      return
-    }
-    const lastSequence = Number(row.last_sequence)
-    if (event.sequence <= lastSequence) return
-    if (event.sequence !== lastSequence + 1) {
-      return yield* Effect.fail(
-        new ThreadProjectionError({
-          message: `Expected projection sequence ${lastSequence + 1} for thread ${event.thread_id}, received ${event.sequence}`,
-          operation: "apply",
-          thread_id: event.thread_id,
-        }),
-      )
-    }
-    yield* Database.queryRun(sql`
-      update thread_projections set last_sequence = ${event.sequence}, updated_at = ${event.created_at}
-      where thread_id = ${event.thread_id}
-    `)
-  })
-
-interface ProjectionSequenceRow {
-  readonly last_sequence: number | string
-}
 
 export const apply = Effect.fn("ThreadProjection.apply.call")(function* (event: Event.Event) {
   const projection = yield* Service

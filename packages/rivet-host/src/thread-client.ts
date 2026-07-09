@@ -1,4 +1,4 @@
-import { Cause, Context, Duration, Effect, Layer, Option, Queue, Stream } from "effect"
+import { Cause, Context, Duration, Effect, Layer, Option, Queue, Schedule, Stream } from "effect"
 import { Client as RivetClient, RivetError } from "@rivetkit/effect"
 import { Event } from "@rika/schema"
 import { createClient } from "rivetkit/client"
@@ -137,8 +137,6 @@ const liveConnectionLayerFromResolved = (resolved: Effect.Effect<HostConfig.Reso
         Effect.sync(() =>
           createClient({
             endpoint: host.endpoint,
-            ...(host.token === undefined ? {} : { token: host.token }),
-            ...(host.namespace === undefined ? {} : { namespace: host.namespace }),
           }),
         ),
         (rawClient) => Effect.promise(() => rawClient.dispose()).pipe(Effect.orDie),
@@ -261,6 +259,8 @@ const retryTransientRivetErrorsLoop = <A, E, R>(
 const missingLiveConnectionError = () =>
   RivetError.fromUnknown(new Error("ThreadClient live connection layer is required"))
 
+const catchUpPollInterval = "500 millis"
+
 const threadEventsFromSignals = (
   accessor: {
     readonly getOrCreate: (id: GetEventsPayload["thread_id"]) => {
@@ -270,7 +270,10 @@ const threadEventsFromSignals = (
   input: GetEventsPayload,
   signals: Stream.Stream<void, RunError>,
 ): Stream.Stream<Event.Event, RunError> =>
-  signals.pipe(
+  Stream.merge(
+    signals,
+    Stream.fromSchedule(Schedule.fixed(catchUpPollInterval)).pipe(Stream.map(() => undefined)),
+  ).pipe(
     Stream.mapAccumEffect(
       () => input.after_sequence ?? 0,
       (latest) =>

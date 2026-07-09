@@ -1,6 +1,6 @@
 import { Config } from "@rika/core"
 import { ModelInfo } from "@rika/llm"
-import { Common, Event, Ids, Message, Orb, Remote } from "@rika/schema"
+import { Common, Event, Ids, Message } from "@rika/schema"
 import { isAbsolute, relative } from "node:path"
 
 export type Activity = "idle" | "thinking" | "streaming" | "running-tools" | "failed"
@@ -15,11 +15,6 @@ export interface ThreadMessage {
   readonly role: Message.Role
   readonly text: string
   readonly user_id?: Ids.UserId
-}
-
-export interface PresenceUser {
-  readonly user_id: Ids.UserId
-  readonly state: Remote.PresenceState
 }
 
 export interface Card {
@@ -46,14 +41,8 @@ export interface Input {
   readonly mode: Config.Mode
   readonly user_id?: Ids.UserId
   readonly events?: ReadonlyArray<Event.Event>
-  readonly active_orb?: ActiveOrb
   readonly context_tokens?: number
   readonly context_window?: number
-}
-
-export interface ActiveOrb {
-  readonly orb_id: Ids.OrbId
-  readonly status: Orb.OrbStatus
 }
 
 export interface InputBuffer {
@@ -120,7 +109,6 @@ export interface ThreadSwitcherItem {
   readonly preview: string
   readonly updated_label: string
   readonly archived: boolean
-  readonly orb_status?: Orb.OrbStatus
   readonly diff?: ThreadDiffStats
   readonly preview_state: ThreadSwitcherPreview
 }
@@ -130,11 +118,6 @@ export interface ThreadSwitcherState {
   readonly query: string
   readonly selected: number
   readonly items: ReadonlyArray<ThreadSwitcherItem>
-}
-
-export interface RemoteArmState {
-  readonly enabled: boolean
-  readonly project_name?: string
 }
 
 export type ContextUsageTone = "normal" | "warning" | "danger"
@@ -148,7 +131,6 @@ export interface ContextUsage {
 
 export interface ViewState {
   readonly thread_id: Ids.ThreadId
-  readonly active_orb?: ActiveOrb
   readonly workspace_path: string
   readonly git_branch?: string
   readonly mode: Config.Mode
@@ -185,9 +167,7 @@ export interface ViewState {
   readonly modepicker: ModePickerState
   readonly filepicker: FilePickerState
   readonly threadswitcher: ThreadSwitcherState
-  readonly remoteArm: RemoteArmState
   readonly shortcuts_open: boolean
-  readonly presence: ReadonlyArray<PresenceUser>
   readonly context_usage?: ContextUsage
 }
 
@@ -205,7 +185,6 @@ const closedPalette: PaletteState = { open: false, query: "", selected: 0 }
 const closedModePicker: ModePickerState = { open: false, selected: 0 }
 const closedFilePicker: FilePickerState = { open: false, query: "", selected: 0, kind: "file", items: [] }
 const closedThreadSwitcher: ThreadSwitcherState = { open: false, query: "", selected: 0, items: [] }
-const remoteArmDefault: RemoteArmState = { enabled: false }
 const hiddenThinking: ThinkingState = { text: "", visible: false }
 
 const interactionDefaults = {
@@ -223,10 +202,8 @@ const interactionDefaults = {
   modepicker: closedModePicker,
   filepicker: closedFilePicker,
   threadswitcher: closedThreadSwitcher,
-  remoteArm: remoteArmDefault,
   palette_open: false,
   shortcuts_open: false,
-  presence: [] as ReadonlyArray<PresenceUser>,
 }
 
 export const initial = (input: Input): ViewState =>
@@ -240,7 +217,6 @@ const modeDefaultEffort = deepModeTier
 const initialSeed = (input: Input): ViewState => ({
   thread_id: input.thread_id,
   ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
-  ...(input.active_orb === undefined ? {} : { active_orb: input.active_orb }),
   workspace_path: input.workspace_path,
   mode: input.mode,
   cost_usd: 0,
@@ -371,13 +347,6 @@ export const hasActivity = (state: ViewState): boolean => state.entries.length >
 
 export const modeLocked = (state: ViewState): boolean => state.active || hasActivity(state)
 
-export const hasActiveOrb = (state: ViewState): boolean => state.active_orb !== undefined
-
-export const withActiveOrb = (state: ViewState, activeOrb: ActiveOrb): ViewState => ({
-  ...state,
-  active_orb: activeOrb,
-})
-
 export const contextUsageLabel = (usage: ContextUsage): string => `ctx ${usage.percent}%`
 
 export const withThread = (
@@ -386,7 +355,6 @@ export const withThread = (
     readonly thread_id: Ids.ThreadId
     readonly events: ReadonlyArray<Event.Event>
     readonly notice?: string
-    readonly active_orb?: ActiveOrb
     readonly context_tokens?: number
     readonly context_window?: number
   },
@@ -396,7 +364,6 @@ export const withThread = (
     workspace_path: state.workspace_path,
     mode: state.mode,
     ...(state.user_id === undefined ? {} : { user_id: state.user_id }),
-    ...(input.active_orb === undefined ? {} : { active_orb: input.active_orb }),
     ...(input.context_tokens === undefined ? {} : { context_tokens: input.context_tokens }),
     ...(input.context_window === undefined ? {} : { context_window: input.context_window }),
   })
@@ -407,7 +374,6 @@ export const withThread = (
       mode: state.mode,
       ...(state.user_id === undefined ? {} : { user_id: state.user_id }),
       events: input.events,
-      ...(input.active_orb === undefined ? {} : { active_orb: input.active_orb }),
       ...(input.context_tokens === undefined ? {} : { context_tokens: input.context_tokens }),
       ...(input.context_window === undefined ? {} : { context_window: input.context_window }),
     },
@@ -436,40 +402,6 @@ export const withPalette = (state: ViewState): ViewState => ({
   shortcuts_open: false,
   notice: `Command palette: /threads, /relaunch, /help, /welcome, /credits, /version, /exit, /ast-grep, /mcp, /mode rush, /mode smart, /mode deep1, /mode deep2, /mode deep3`,
 })
-
-export const toggleRemoteArm = (state: ViewState): ViewState => ({
-  ...state,
-  remoteArm: { ...state.remoteArm, enabled: !state.remoteArm.enabled },
-})
-
-export const withRemoteProject = (state: ViewState, projectName: string): ViewState => ({
-  ...state,
-  remoteArm: { ...state.remoteArm, project_name: projectName },
-})
-
-export const withRemoteArm = (state: ViewState, remoteArm: RemoteArmState): ViewState => ({
-  ...state,
-  remoteArm,
-})
-
-export const withPresence = (state: ViewState, presence: Remote.PresencePayload): ViewState => {
-  if (presence.thread_id !== state.thread_id) return state
-  return {
-    ...state,
-    presence: presence.users
-      .filter((user) => state.user_id === undefined || user.user_id !== state.user_id)
-      .map((user) => ({ user_id: user.user_id, state: user.state })),
-  }
-}
-
-export const presenceStatusLabel = (state: ViewState): string | undefined => {
-  if (state.presence.length === 0) return undefined
-  const typing = state.presence.find((user) => user.state === "typing")
-  if (typing !== undefined) return `◈ ${typing.user_id} is typing…`
-  const first = state.presence[0]
-  if (first === undefined) return undefined
-  return state.presence.length === 1 ? `◈ ${first.user_id}` : `◈ ${first.user_id} +${state.presence.length - 1}`
-}
 
 export const messageDisplayText = (state: ViewState, message: ThreadMessage): string =>
   message.role === "user" &&

@@ -4,8 +4,6 @@ import { join } from "node:path"
 import { Config as EffectConfig, ConfigProvider, Context, Effect, Layer, Option, Result, Schema } from "effect"
 import * as EnvConfig from "./env-config"
 
-const defaultOrbTemplate = "rika-orb"
-const defaultOrbIdleTimeoutSeconds = 300
 const defaultMode = "smart"
 export const defaultTelemetryEndpoint = "http://127.0.0.1:27686"
 
@@ -18,9 +16,6 @@ export const SettingSource = Schema.Literals(["env", "workspace", "user", "defau
 export type SettingSource = typeof SettingSource.Type
 
 export const SettingKey = Schema.Literals([
-  "orb.template",
-  "orb.idleTimeoutSeconds",
-  "project.default",
   "user.name",
   "mode.default",
   "compaction.auto",
@@ -37,9 +32,6 @@ export const SettingKey = Schema.Literals([
 export type SettingKey = typeof SettingKey.Type
 
 export const settingKeys: ReadonlyArray<SettingKey> = [
-  "orb.template",
-  "orb.idleTimeoutSeconds",
-  "project.default",
   "user.name",
   "mode.default",
   "compaction.auto",
@@ -55,9 +47,6 @@ export const settingKeys: ReadonlyArray<SettingKey> = [
 const opaqueSettingKeys = ["rika.mcpServers", "mcpServers"] as const
 
 export const envNameByKey: Record<SettingKey, string> = {
-  "orb.template": "RIKA_ORB_TEMPLATE",
-  "orb.idleTimeoutSeconds": "RIKA_ORB_IDLE_TIMEOUT",
-  "project.default": "RIKA_ORB_PROJECT",
   "user.name": "RIKA_USER",
   "mode.default": "RIKA_MODE",
   "compaction.auto": "RIKA_COMPACTION_AUTO",
@@ -83,13 +72,6 @@ export interface Entry {
 }
 
 export interface Values {
-  readonly orb: {
-    readonly template: string
-    readonly idleTimeoutSeconds: number
-  }
-  readonly project: {
-    readonly default?: string
-  }
   readonly user: {
     readonly name: string
   }
@@ -164,11 +146,6 @@ export const loadSnapshotFromEnv = (env: Record<string, string | undefined>, wor
   Effect.flatMap(loadFiles(env.HOME ?? homedir(), workspaceRoot), (loaded) => resolve(env, loaded))
 
 export const defaultValues = (): Values => ({
-  orb: {
-    template: defaultOrbTemplate,
-    idleTimeoutSeconds: defaultOrbIdleTimeoutSeconds,
-  },
-  project: {},
   user: {
     name: defaultUserName(),
   },
@@ -302,9 +279,6 @@ const validateRecord = (
 }
 
 interface ParsedEnv {
-  readonly orbTemplate: string | undefined
-  readonly orbIdleTimeoutSeconds: number | undefined
-  readonly projectDefault: string | undefined
   readonly userName: string | undefined
   readonly modeDefault: Mode | undefined
   readonly compactionAuto: boolean | undefined
@@ -330,14 +304,6 @@ const resolve = (
 ): Effect.Effect<Snapshot, SettingsError> =>
   Effect.gen(function* () {
     const parsedEnv = yield* parseEnv(env)
-    const template = resolveString("orb.template", parsedEnv.orbTemplate, loaded, defaultOrbTemplate)
-    const idleTimeoutSeconds = resolvePositiveInteger(
-      "orb.idleTimeoutSeconds",
-      parsedEnv.orbIdleTimeoutSeconds,
-      loaded,
-      defaultOrbIdleTimeoutSeconds,
-    )
-    const projectDefault = resolveOptionalString("project.default", parsedEnv.projectDefault, loaded)
     const userName = resolveString("user.name", parsedEnv.userName, loaded, defaultUserName())
     const modeDefault = resolveMode("mode.default", parsedEnv.modeDefault, loaded, defaultMode)
     const compactionAuto = resolveBooleanOption("compaction.auto", parsedEnv.compactionAuto, loaded)
@@ -369,11 +335,6 @@ const resolve = (
 
     return {
       values: {
-        orb: {
-          template: template.value,
-          idleTimeoutSeconds: idleTimeoutSeconds.value,
-        },
-        project: projectDefault.value === undefined ? {} : { default: projectDefault.value },
         user: {
           name: userName.value,
         },
@@ -397,9 +358,6 @@ const resolve = (
         },
       },
       sources: {
-        "orb.template": template.source,
-        "orb.idleTimeoutSeconds": idleTimeoutSeconds.source,
-        "project.default": projectDefault.source,
         "user.name": userName.source,
         "mode.default": modeDefault.source,
         "compaction.auto": compactionAuto.source,
@@ -419,9 +377,6 @@ const resolve = (
 const parseEnv = (env: Record<string, string | undefined>): Effect.Effect<ParsedEnv, SettingsError> => {
   const provider = EnvConfig.providerFromEnv(env, { booleanKeys: booleanEnvKeys })
   return Effect.all({
-    orbTemplate: optionalString(env, provider, "RIKA_ORB_TEMPLATE"),
-    orbIdleTimeoutSeconds: optionalPositiveInteger(env, provider, "RIKA_ORB_IDLE_TIMEOUT"),
-    projectDefault: optionalString(env, provider, "RIKA_ORB_PROJECT"),
     userName: optionalString(env, provider, "RIKA_USER"),
     modeDefault: optionalEnv(env, provider, "RIKA_MODE", EnvConfig.literals(modes, "RIKA_MODE")),
     compactionAuto: optionalEnv(env, provider, "RIKA_COMPACTION_AUTO", EnvConfig.boolean("RIKA_COMPACTION_AUTO")),
@@ -452,15 +407,6 @@ const optionalString = (
   provider: ConfigProvider.ConfigProvider,
   key: string,
 ) => optionalEnv(env, provider, key, EnvConfig.string(key)).pipe(Effect.map(validString))
-
-const optionalPositiveInteger = (
-  env: Record<string, string | undefined>,
-  provider: ConfigProvider.ConfigProvider,
-  key: string,
-) =>
-  EnvConfig.optionalDecimalInteger(provider, key, { minimum: 1 }).pipe(
-    Effect.mapError(() => invalidEnvSetting(env, key)),
-  )
 
 const optionalNonNegativeInteger = (
   env: Record<string, string | undefined>,
@@ -500,16 +446,6 @@ const resolveString = (
     source: "default",
   })
 
-const resolveOptionalString = (
-  key: SettingKey,
-  envValue: string | undefined,
-  loaded: LoadedSettings,
-): ResolvedValue<string | undefined> =>
-  resolvePrecedence(validString(envValue), validString(loaded.workspace[key]), validString(loaded.user[key]), {
-    value: undefined,
-    source: "default",
-  })
-
 const resolveMode = (
   key: SettingKey,
   envValue: Mode | undefined,
@@ -520,22 +456,6 @@ const resolveMode = (
     value: fallback,
     source: "default",
   })
-
-const resolvePositiveInteger = (
-  key: SettingKey,
-  envValue: number | undefined,
-  loaded: LoadedSettings,
-  fallback: number,
-): ResolvedValue<number> =>
-  resolvePrecedence(
-    envValue,
-    validPositiveIntegerSetting(loaded.workspace[key]),
-    validPositiveIntegerSetting(loaded.user[key]),
-    {
-      value: fallback,
-      source: "default",
-    },
-  )
 
 const resolveNonNegativeIntegerOption = (
   key: SettingKey,
@@ -574,13 +494,9 @@ const resolveBoolean = (
   })
 
 const validateSettingValue = (key: SettingKey, value: unknown): Result.Result<unknown, string> => {
-  if (key === "orb.template" || key === "project.default" || key === "user.name" || key === "telemetry.endpoint") {
+  if (key === "user.name" || key === "telemetry.endpoint") {
     const string = validString(value)
     return string === undefined ? Result.fail(`Setting ${key} must be a non-empty string.`) : Result.succeed(string)
-  }
-  if (key === "orb.idleTimeoutSeconds") {
-    const integer = validPositiveIntegerSetting(value)
-    return integer === undefined ? Result.fail(`Setting ${key} must be a positive integer.`) : Result.succeed(integer)
   }
   if (key === "mode.default") {
     const mode = validMode(value)
@@ -630,9 +546,6 @@ const validateKeymap = (
 }
 
 const valueForKey = (values: Values, key: SettingKey): SettingValue => {
-  if (key === "orb.template") return values.orb.template
-  if (key === "orb.idleTimeoutSeconds") return values.orb.idleTimeoutSeconds
-  if (key === "project.default") return values.project.default ?? null
   if (key === "user.name") return values.user.name
   if (key === "mode.default") return values.mode.default
   if (key === "compaction.auto") return values.compaction.auto ?? null
@@ -684,9 +597,6 @@ const validMode = (value: unknown): Mode | undefined => {
 }
 
 const validBooleanSetting = (value: unknown) => (typeof value === "boolean" ? value : undefined)
-
-const validPositiveIntegerSetting = (value: unknown) =>
-  typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined
 
 const validNonNegativeIntegerSetting = (value: unknown) =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined

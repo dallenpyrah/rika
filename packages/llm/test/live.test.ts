@@ -2,6 +2,19 @@ import { describe, expect, test } from "bun:test"
 import { Live } from "../src/index"
 
 describe("Live provider options", () => {
+  test("defaults model traffic to the local provider base URL", () => {
+    expect(Live.optionsFromEnv({})).toEqual({
+      openai: {
+        apiKeyEnv: "RIKA_API_KEY",
+        apiUrl: Live.defaultModelProviderBaseUrl,
+      },
+      anthropic: {
+        apiKeyEnv: "RIKA_API_KEY",
+        apiUrl: "http://127.0.0.1:8317",
+      },
+    })
+  })
+
   test("adapts a single OpenAI-compatible base URL for Anthropic's Effect AI client", () => {
     expect(Live.optionsFromEnv({ RIKA_BASE_URL: "http://127.0.0.1:8317/v1" })).toEqual({
       openai: {
@@ -11,6 +24,19 @@ describe("Live provider options", () => {
       anthropic: {
         apiKeyEnv: "RIKA_API_KEY",
         apiUrl: "http://127.0.0.1:8317",
+      },
+    })
+  })
+
+  test("uses a configured model provider base URL", () => {
+    expect(Live.optionsFromEnv({ RIKA_BASE_URL: "https://models.example.test/v1" })).toEqual({
+      openai: {
+        apiKeyEnv: "RIKA_API_KEY",
+        apiUrl: "https://models.example.test/v1",
+      },
+      anthropic: {
+        apiKeyEnv: "RIKA_API_KEY",
+        apiUrl: "https://models.example.test",
       },
     })
   })

@@ -45,7 +45,7 @@
 - Keep review checks read-only by default. `.agents/checks/*.md` may request read-only tools only; mutating review modes need an explicit future design.
 - Keep skill discovery behind `SkillRegistry.Service`; show descriptions broadly but load full skill instructions only after explicit selection.
 - Persist canonical facts through `ThreadEventLog` and apply rebuildable state through `ThreadProjection`.
-- Keep hosted access checks in `WorkspaceAccess`; persistence only stores memberships.
+- Keep local workspace access checks in `WorkspaceAccess`; persistence only stores memberships.
 - Use streams, queues, and fibers for event streaming boundaries; do not introduce module-level runtime state.
 
 ## For AI Agents

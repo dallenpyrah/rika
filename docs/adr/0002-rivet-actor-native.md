@@ -16,17 +16,16 @@ Issue #104 requires a foundational inversion: the ThreadActor **is** the thread.
 2. **Single-writer monotonic sequence** is owned by the actor. Cross-process append races disappear.
 3. **Streaming turns run inside the actor** via the reused `AgentLoop.streamTurn`. Each emitted event is appended to actor c.db and broadcast as `threadEvent`.
 4. **Live subscription is native Rivet** (`.connect().on("threadEvent")`) plus typed `GetEvents(after_sequence)` catch-up for late joiners and reconnect.
-5. **Postgres (or local SQLite) is a cross-cutting index/read-model**, never the per-thread event source. Tables: memberships, projects, orbs, artifacts, thread_projections, user_tokens, memory chunks.
-6. **Product backend path is the Rivet edge.** Remote-control is not a selectable product backend. HTTP/SDK NDJSON remains an adapter for local-dev/in-orb compatibility.
+5. **Local SQLite is a cross-cutting index/read-model**, never the per-thread event source. Tables: workspace memberships, artifacts, thread projections, MCP approvals, and memory chunks.
+6. **Product backend path is the local Rivet actor host.** There is no remote-control, SDK/server, orb, hosted, or web adapter surface in the local-only product.
 7. **AgentLoop working database on the actor host is memory-mode** so central DB rows cannot become the durable event authority during turns.
 
 ## Consequences
 
-- Simplifies interruption, multi-subscriber tails, and hosted scaling around single-writer actors.
-- Requires dialect-aware index persistence (SQLite local, Postgres hosted).
-- Clients must reconnect and resume from sequence cursors under Railway WebSocket duration limits.
-- Compatibility RemoteControl modules may remain as test adapters until deleted; they are not product entry points.
+- Simplifies interruption and local subscriptions around single-writer actors.
+- Keeps index persistence SQLite-only.
+- Clients reconnect and resume from sequence cursors against the local actor host.
 
 ## Implementation location
 
-Actor implementation lives under `packages/rivet-host` (`thread-actor.ts`, `thread-live.ts`, `native-edge.ts`, `thread-client.ts`). Package name `packages/thread-actor` from early spike planning is not required; outcomes matter more than that path.
+Actor implementation lives under `packages/rivet-host` (`thread-actor.ts`, `thread-live.ts`, `thread-client.ts`). Package name `packages/thread-actor` from early spike planning is not required; outcomes matter more than that path.

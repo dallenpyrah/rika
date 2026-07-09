@@ -79,9 +79,9 @@ export const layer = Layer.effect(
       }),
       workspaceHasMembers: Effect.fn("WorkspaceStore.workspaceHasMembers")(function* (workspaceId: Ids.WorkspaceId) {
         return yield* databaseService
-          .queryGet<{ readonly count: number | string }>(
-            sql`select count(*) as count from workspace_memberships where workspace_id = ${workspaceId}`,
-          )
+          .queryGet<{
+            readonly count: number | string
+          }>(sql`select count(*) as count from workspace_memberships where workspace_id = ${workspaceId}`)
           .pipe(
             Effect.map((row) => Number(row?.count ?? 0) !== 0),
             Effect.mapError((cause) => toError(cause, "workspaceHasMembers", workspaceId)),

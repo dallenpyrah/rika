@@ -25,6 +25,7 @@ describe("OpenAI Effect AI layer", () => {
     expect(OpenAi.requestConfigFromRikaRequest(request)).toEqual({
       model: "gpt-test",
       store: false,
+      strictJsonSchema: false,
       temperature: 0.2,
       reasoning: { effort: "low" },
     })
@@ -38,6 +39,7 @@ describe("OpenAI Effect AI layer", () => {
     expect(OpenAi.requestConfigFromRikaRequest({ ...request, service_tier: "priority" })).toEqual({
       model: "gpt-test",
       store: false,
+      strictJsonSchema: false,
       temperature: 0.2,
       reasoning: { effort: "low" },
       service_tier: "priority",

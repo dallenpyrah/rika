@@ -1,8 +1,8 @@
 import { Config, Diagnostics, IdGenerator, StringArray, Time } from "@rika/core"
 import { ModelInfo } from "@rika/llm"
-import { Database, ProjectStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Common, Event, Ids, Message } from "@rika/schema"
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Context, Effect, Layer, Schema } from "effect"
 import * as ThreadDigest from "./thread-digest"
 import * as ThreadSearchQuery from "./thread-search-query"
 
@@ -144,7 +144,6 @@ export type Error =
   | ThreadForkError
   | Config.ConfigError
   | Database.DatabaseError
-  | ProjectStore.ProjectStoreError
   | ThreadEventLog.ThreadEventLogError
   | ThreadProjection.ThreadProjectionError
 
@@ -170,7 +169,6 @@ interface Dependencies {
   readonly database: Database.Interface
   readonly eventLog: ThreadEventLog.Interface
   readonly projection: ThreadProjection.Interface
-  readonly projectStore?: ProjectStore.Interface
   readonly idGenerator: IdGenerator.Interface
   readonly time: Time.Interface
   readonly diagnostics: Diagnostics.Interface
@@ -183,7 +181,6 @@ export const layer = Layer.effect(
     const database = yield* Database.Service
     const eventLog = yield* ThreadEventLog.Service
     const projection = yield* ThreadProjection.Service
-    const projectStore = Option.getOrUndefined(yield* Effect.serviceOption(ProjectStore.Service))
     const idGenerator = yield* IdGenerator.Service
     const time = yield* Time.Service
     const diagnostics = yield* Diagnostics.Service
@@ -192,7 +189,6 @@ export const layer = Layer.effect(
       database,
       eventLog,
       projection,
-      ...(projectStore === undefined ? {} : { projectStore }),
       idGenerator,
       time,
       diagnostics,
@@ -491,15 +487,6 @@ const searchThreads = (dependencies: Dependencies, input: SearchInput) =>
   Effect.gen(function* () {
     const parsed = ThreadSearchQuery.parseThreadSearchQuery(input.query ?? "")
     const now = yield* dependencies.time.nowMillis
-    const projectWorkspaceId = yield* resolveProjectWorkspaceId(dependencies, parsed.project)
-    if (parsed.project !== undefined && projectWorkspaceId === undefined) return []
-    if (
-      input.workspace_id !== undefined &&
-      projectWorkspaceId !== undefined &&
-      input.workspace_id !== projectWorkspaceId
-    ) {
-      return []
-    }
     const fileThreadIds = yield* matchingFileThreadIds(dependencies, parsed.file_globs, input.thread_ids)
     if (parsed.file_globs.length > 0 && fileThreadIds !== undefined && fileThreadIds.size === 0) return []
     const threadIds = combineThreadIds(input.thread_ids, fileThreadIds)
@@ -508,9 +495,7 @@ const searchThreads = (dependencies: Dependencies, input: SearchInput) =>
     const candidateInput: SearchInput = {
       ...(input.query === undefined ? {} : { query: input.query }),
       ...(includeArchived === undefined ? {} : { include_archived: includeArchived }),
-      ...(projectWorkspaceId === undefined && input.workspace_id === undefined
-        ? {}
-        : { workspace_id: projectWorkspaceId ?? input.workspace_id }),
+      ...(input.workspace_id === undefined ? {} : { workspace_id: input.workspace_id }),
       ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
       ...resolvedBound("after", input.after, parsed.after, now),
       ...resolvedBound("before", input.before, parsed.before, now),
@@ -674,13 +659,6 @@ const searchableFields = (summary: ThreadSummary, events: ReadonlyArray<Event.Ev
     ...ThreadDigest.toolEntries(events),
     ...events.map((event) => JSON.stringify(event.metadata ?? {})),
   ]).filter((value) => value.length > 0)
-
-const resolveProjectWorkspaceId = (dependencies: Dependencies, projectName: string | undefined) =>
-  Effect.gen(function* () {
-    if (projectName === undefined || dependencies.projectStore === undefined) return undefined
-    const project = yield* dependencies.projectStore.getByName(projectName)
-    return project === undefined ? undefined : Ids.WorkspaceId.make(`project:${project.project_id}`)
-  })
 
 const matchingFileThreadIds = (
   dependencies: Dependencies,

@@ -53,15 +53,11 @@ describe("LocalHost", () => {
     expect(pids).toEqual(new Set([101]))
   })
 
-  test("waits for Rivet metadata readiness with namespace and token", async () => {
-    const seen: Array<{ authorization: string | undefined; namespace: string | null }> = []
+  test("waits for Rivet metadata readiness", async () => {
+    const seen: Array<string | undefined> = []
     let attempts = 0
     const server = createServer((request, response) => {
-      const url = new URL(request.url ?? "/", "http://127.0.0.1")
-      seen.push({
-        authorization: request.headers.authorization,
-        namespace: url.searchParams.get("namespace"),
-      })
+      seen.push(request.url)
       attempts += 1
       if (attempts === 1) {
         response.writeHead(503, { "content-type": "application/json" })
@@ -87,17 +83,12 @@ describe("LocalHost", () => {
       await Effect.runPromise(
         LocalHost.waitForMetadataEndpoint({
           endpoint,
-          namespace: "test-namespace",
-          token: "metadata-token",
           attempts: 3,
           delayMillis: 1,
         }),
       )
 
-      expect(seen).toEqual([
-        { authorization: "Bearer metadata-token", namespace: "test-namespace" },
-        { authorization: "Bearer metadata-token", namespace: "test-namespace" },
-      ])
+      expect(seen).toEqual(["/metadata", "/metadata"])
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)))

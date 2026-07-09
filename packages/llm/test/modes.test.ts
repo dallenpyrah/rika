@@ -12,9 +12,9 @@ describe("LLM modes", () => {
     })
     expect(Modes.defaultModes.smart).toMatchObject({
       name: "smart",
-      provider: "anthropic",
-      model_preferences: ["claude-opus-4-8"],
-      reasoning_effort: "max",
+      provider: "openai",
+      model_preferences: ["gpt-5.5"],
+      reasoning_effort: "high",
       tool_policy: "standard",
       intent: "balanced",
     })
@@ -44,8 +44,8 @@ describe("LLM modes", () => {
 
   test("defines specialized model profiles", () => {
     expect(Modes.defaultProfiles.search).toMatchObject({
-      provider: "anthropic",
-      model_preferences: ["claude-sonnet-4-6"],
+      provider: "openai",
+      model_preferences: ["gpt-5.5"],
       reasoning_effort: "low",
     })
     expect(Modes.defaultProfiles.oracle).toMatchObject({

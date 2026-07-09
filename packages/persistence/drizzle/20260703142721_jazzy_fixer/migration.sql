@@ -1,1 +1,0 @@
-ALTER TABLE `thread_projections` ADD `last_user_id` text;

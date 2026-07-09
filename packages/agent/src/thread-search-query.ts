@@ -22,7 +22,6 @@ export interface ParsedThreadSearchQuery {
   readonly after?: DateFilter
   readonly before?: DateFilter
   readonly archived?: boolean
-  readonly project?: string
 }
 
 export const parseThreadSearchQuery = (query: string): ParsedThreadSearchQuery => {
@@ -31,7 +30,6 @@ export const parseThreadSearchQuery = (query: string): ParsedThreadSearchQuery =
   let after: DateFilter | undefined
   let before: DateFilter | undefined
   let archived: boolean | undefined
-  let project: string | undefined
 
   for (const token of scanTokens(query)) {
     const parsed = parseFilter(token)
@@ -45,8 +43,6 @@ export const parseThreadSearchQuery = (query: string): ParsedThreadSearchQuery =
       before = parsed.value
     } else if (parsed.key === "archived") {
       archived = parsed.value
-    } else {
-      project = parsed.value
     }
   }
 
@@ -56,7 +52,6 @@ export const parseThreadSearchQuery = (query: string): ParsedThreadSearchQuery =
     ...(after === undefined ? {} : { after }),
     ...(before === undefined ? {} : { before }),
     ...(archived === undefined ? {} : { archived }),
-    ...(project === undefined ? {} : { project }),
   }
 }
 
@@ -88,7 +83,6 @@ const parseFilter = (
   | { readonly key: "after"; readonly value: DateFilter }
   | { readonly key: "before"; readonly value: DateFilter }
   | { readonly key: "archived"; readonly value: boolean }
-  | { readonly key: "project"; readonly value: string }
   | undefined => {
   const index = token.indexOf(":")
   if (index <= 0) return undefined
@@ -96,7 +90,6 @@ const parseFilter = (
   const value = token.slice(index + 1).trim()
   if (value.length === 0) return undefined
   if (key === "file") return { key, value }
-  if (key === "project") return { key, value }
   if (key === "after" || key === "before") {
     const date = parseDateFilter(value)
     return date === undefined ? undefined : { key, value: date }

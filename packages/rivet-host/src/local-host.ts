@@ -4,9 +4,9 @@ import { Config, SecretRedactor } from "@rika/core"
 import { Client, Logger, Registry } from "@rivetkit/effect"
 import { Context, Effect, Layer, Scope } from "effect"
 import { existsSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { setup } from "rivetkit"
-import { configureBaseLogger } from "rivetkit/log"
+import { homedir } from "node:os"
+import { delimiter, dirname, join } from "node:path"
+import type { setup as setupType } from "rivetkit"
 import * as HostConfig from "./host-config"
 import * as ThreadDirectory from "./thread-directory"
 import * as ThreadClient from "./thread-client"
@@ -27,7 +27,7 @@ export interface RawRegistry {
   }
 }
 
-export type SetupRegistry = (options: Parameters<typeof setup>[0]) => RawRegistry
+export type SetupRegistry = (options: Parameters<typeof setupType>[0]) => RawRegistry
 
 export interface ProcessListing {
   readonly command: string
@@ -47,7 +47,7 @@ export interface Options extends HostConfig.ResolveOptions {
 export const defaultEndpoint = HostConfig.defaultLocalEndpoint
 
 export const endpointFromEnv = (env: Record<string, string | undefined> = process.env) =>
-  env.RIKA_RIVET_ENDPOINT ?? env.RIVET_ENDPOINT ?? defaultEndpoint
+  env.RIKA_RIVET_ENDPOINT ?? defaultEndpoint
 
 export const installedEngineBinaryPath = (executablePath = process.execPath) =>
   join(
@@ -58,6 +58,9 @@ export const installedEngineBinaryPath = (executablePath = process.execPath) =>
     "bin",
     process.platform === "win32" ? "rivet-engine.exe" : "rivet-engine",
   )
+
+export const installedRivetHostNodeModulesPath = (executablePath = process.execPath) =>
+  join(dirname(executablePath), "..", "share", "rika", "rivet-host", "node_modules")
 
 export const engineBinaryPathFromEnv = (
   env: Record<string, string | undefined> = process.env,
@@ -118,9 +121,12 @@ export const actorsLayerFromEnv = (
   cwd = process.cwd(),
   options: Options = {},
 ) =>
-  Layer.mergeAll(threadActorLayer, ThreadDirectory.actorLayer).pipe(
-    Layer.provide(actorSupportLayerFromEnv(env, cwd, options)),
-  )
+  Layer.mergeAll(
+    threadActorLayer.pipe(
+      Layer.provideMerge(ThreadDirectory.liveLayer.pipe(Layer.provideMerge(clientLayerFromEnv(env, options)))),
+    ),
+    ThreadDirectory.actorLayer,
+  ).pipe(Layer.provide(actorSupportLayerFromEnv(env, cwd, options)))
 
 export const actorsLayer = () => actorsLayerFromEnv()
 
@@ -148,6 +154,11 @@ export const threadClientLayerFromEnv = (
     Layer.provideMerge(clientLayerFromEnv(env, options)),
     Layer.provideMerge(ThreadClient.liveConnectionLayerFromEnv(env, options)),
   )
+
+export const threadDirectoryLiveLayerFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+  options: Options = {},
+) => ThreadDirectory.liveLayer.pipe(Layer.provideMerge(clientLayerFromEnv(env, options)))
 
 export const layerFromEnv = (
   env: Record<string, string | undefined> = process.env,
@@ -182,10 +193,8 @@ export const managedLayerFromEnv = (
           Layer.buildWithScope(scope),
         )
         .pipe(Effect.asVoid)
-      configureBaseLogger(registry.baseLogger)
-      const setupRegistry = options.setupRegistry ?? setup
       const processListingRunner = options.processListingRunner ?? runProcessListing
-      const enginePort = host.mode === "local" ? localEnginePort(host) : undefined
+      const enginePort = localEnginePort(host)
       let readyEnginePids = new Set<number>()
       const engineBinary = engineBinaryPathFromEnv(env)
       const previousEngineBinary = process.env.RIVET_ENGINE_BINARY
@@ -203,10 +212,14 @@ export const managedLayerFromEnv = (
           }),
         )
       }
-      const enginePidsBefore =
-        enginePort === undefined
-          ? new Set<number>()
-          : yield* Effect.promise(() => rivetEnginePidsForPort(enginePort, processListingRunner))
+      yield* withTemporaryProcessEnv(localStorageEnv(env, cwd), scope)
+      const setupRegistry =
+        options.setupRegistry ?? (yield* Effect.promise(() => import("rivetkit").then((module) => module.setup)))
+      const configureBaseLogger = yield* Effect.promise(() =>
+        import("rivetkit/log").then((module) => module.configureBaseLogger),
+      )
+      configureBaseLogger(registry.baseLogger)
+      const enginePidsBefore = yield* Effect.promise(() => rivetEnginePidsForPort(enginePort, processListingRunner))
       const rawRegistry = setupRegistry({
         use: Object.fromEntries(registry.rivetkitActors),
         ...registrySetupOptions(host),
@@ -220,9 +233,7 @@ export const managedLayerFromEnv = (
           try {
             await rawRegistry.shutdown()
           } finally {
-            if (enginePort !== undefined) {
-              await terminateNewRivetEnginePids(enginePort, enginePidsBefore, readyEnginePids, processListingRunner)
-            }
+            await terminateNewRivetEnginePids(enginePort, enginePidsBefore, readyEnginePids, processListingRunner)
           }
         }).pipe(Effect.ignore),
       )
@@ -230,8 +241,6 @@ export const managedLayerFromEnv = (
       if (rawConfig.endpoint !== undefined) {
         yield* waitForMetadataEndpoint({
           endpoint: rawConfig.endpoint,
-          ...(rawConfig.namespace === undefined ? {} : { namespace: rawConfig.namespace }),
-          ...(rawConfig.token === undefined ? {} : { token: rawConfig.token }),
           ...(options.metadataReadiness?.attempts === undefined
             ? {}
             : { attempts: options.metadataReadiness.attempts }),
@@ -239,9 +248,7 @@ export const managedLayerFromEnv = (
             ? {}
             : { delayMillis: options.metadataReadiness.delayMillis }),
         })
-        if (enginePort !== undefined) {
-          readyEnginePids = yield* Effect.promise(() => rivetEnginePidsForPort(enginePort, processListingRunner))
-        }
+        readyEnginePids = yield* Effect.promise(() => rivetEnginePidsForPort(enginePort, processListingRunner))
       }
       return Context.empty()
     }),
@@ -251,8 +258,6 @@ export const layer = (options: Options = {}) => layerFromEnv(process.env, proces
 
 export const waitForMetadataEndpoint = Effect.fn("LocalHost.waitForMetadataEndpoint")(function* (input: {
   readonly endpoint: string
-  readonly namespace?: string
-  readonly token?: string
   readonly attempts?: number
   readonly delayMillis?: number
 }) {
@@ -263,10 +268,7 @@ export const waitForMetadataEndpoint = Effect.fn("LocalHost.waitForMetadataEndpo
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const url = new URL(`${input.endpoint.replace(/\/$/, "")}/metadata`)
-        if (input.namespace !== undefined) url.searchParams.set("namespace", input.namespace)
-        const response = await fetch(url, {
-          headers: input.token === undefined ? {} : { authorization: `Bearer ${input.token}` },
-        })
+        const response = await fetch(url)
         if (response.ok) return
         lastError = new Error(`metadata readiness failed with status ${response.status}`)
       } catch (error) {
@@ -369,16 +371,12 @@ const runProcessListing: ProcessListingRunner = async (listing) => {
 }
 
 const registrySetupOptions = (host: HostConfig.Resolved): Registry.Options => {
-  if (host.mode !== "local") return HostConfig.toRegistryOptions(host)
   return {
-    ...(host.token === undefined ? {} : { token: host.token }),
-    ...(host.namespace === undefined ? {} : { namespace: host.namespace }),
     noWelcome: host.no_welcome,
   }
 }
 
 const localEngineOptions = (host: HostConfig.Resolved) => {
-  if (host.mode !== "local") return {}
   const endpoint = new URL(host.endpoint)
   return {
     startEngine: true,
@@ -392,3 +390,39 @@ const localEnginePort = (host: HostConfig.Resolved) => {
   const endpoint = new URL(host.endpoint)
   return endpoint.port === "" ? 6420 : Number(endpoint.port)
 }
+
+const localStorageEnv = (env: Record<string, string | undefined>, cwd: string) => {
+  const workspaceRoot = env.RIKA_WORKSPACE_ROOT ?? cwd
+  const dataDir = env.RIKA_DATA_DIR ?? join(env.HOME ?? homedir(), ".rika")
+  const storagePath = env.RIVETKIT_STORAGE_PATH ?? join(dataDir, "rivetkit")
+  const sidecarNodeModulesPath = installedRivetHostNodeModulesPath()
+  const localEnv: Record<string, string> = {
+    RIKA_WORKSPACE_ROOT: workspaceRoot,
+    RIKA_DATA_DIR: dataDir,
+    RIVETKIT_STORAGE_PATH: storagePath,
+  }
+  if (env.RIVET__FILE_SYSTEM__PATH !== undefined) localEnv.RIVET__FILE_SYSTEM__PATH = env.RIVET__FILE_SYSTEM__PATH
+  if (existsSync(sidecarNodeModulesPath)) localEnv.NODE_PATH = withNodePath(env.NODE_PATH, sidecarNodeModulesPath)
+  return localEnv
+}
+
+const withNodePath = (current: string | undefined, sidecar: string) =>
+  current === undefined || current.length === 0 ? sidecar : `${sidecar}${delimiter}${current}`
+
+const withTemporaryProcessEnv = (env: Record<string, string>, scope: Scope.Scope) =>
+  Effect.gen(function* () {
+    const previous = new Map<string, string | undefined>()
+    for (const [key, value] of Object.entries(env)) {
+      previous.set(key, process.env[key])
+      process.env[key] = value
+    }
+    yield* Scope.addFinalizer(
+      scope,
+      Effect.sync(() => {
+        for (const [key, value] of previous) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }),
+    )
+  })

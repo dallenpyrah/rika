@@ -2,16 +2,7 @@ import { Schema } from "effect"
 import { JsonValue, Metadata, TimestampMillis } from "./common"
 import { ArtifactId, ThreadId, TurnId, WorkspaceId } from "./ids"
 
-export const Kind = Schema.Literals([
-  "patch",
-  "image",
-  "research",
-  "review",
-  "verdict",
-  "file",
-  "orb-final-diff",
-  "other",
-]).annotate({
+export const Kind = Schema.Literals(["patch", "image", "research", "review", "verdict", "file", "other"]).annotate({
   identifier: "Rika.ArtifactKind",
 })
 export type Kind = typeof Kind.Type

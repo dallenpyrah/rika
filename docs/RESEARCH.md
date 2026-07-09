@@ -12,7 +12,7 @@ Rika should eventually cover the core Amp product surface:
 - Built-in tools plus subagents, skills, Oracle/Librarian/Painter-like specialty tools, and code review checks.
 - MCP servers with trust/approval boundaries.
 - TypeScript plugins that register events, tools, commands, UI, permissions, custom modes, and custom subagents.
-- Interactive CLI/TUI, non-interactive execute mode, streaming JSON, SDK, remote control, and IDE integration seams.
+- Interactive CLI/TUI, non-interactive execute mode, and streaming JSON.
 
 ## Local Reference Repos
 
@@ -40,7 +40,7 @@ Use Pi as the reference for extension-first agent customization:
 - LLM integration should compose `effect/unstable/ai` and official Effect AI provider packages, starting with `@effect/ai-openai`; Rika should not hand-roll provider HTTP/SSE adapters.
 - Rivet hosts actors from day one.
 - Drizzle stores durable facts and migrations.
-- A thread actor owns hot runtime state for one thread, but Drizzle's append-only event log remains canonical.
+- A thread actor owns hot runtime state and the canonical per-thread actor event log. Drizzle-backed SQLite stores rebuildable local indexes and support records.
 - Projections can be rebuilt from events and should not become a second source of truth.
 
 ## Persistence Research

@@ -1,19 +1,11 @@
 import { Config } from "@rika/core"
-import { Event, Ids, Message, Remote } from "@rika/schema"
+import { Event, Ids, Message } from "@rika/schema"
 import { Cause, Duration, Effect, Fiber, Queue, Schedule, Schema, Stream } from "effect"
 import type { Dirent } from "node:fs"
 import { stat } from "node:fs/promises"
 import { readdir, readFile } from "node:fs/promises"
 import { extname, join, relative } from "node:path"
-import { splitCommand, splitFirst } from "./backend"
-import type {
-  CommandResult,
-  PresenceRequest,
-  ProjectOption,
-  SessionBackend,
-  ThreadOption,
-  TurnRequest,
-} from "./backend"
+import type { CommandResult, SessionBackend, ThreadOption, TurnRequest } from "./backend"
 import * as Adapter from "./adapter"
 import * as Keymap from "./keymap"
 import * as Keys from "./keys"
@@ -44,7 +36,6 @@ type AppEvent =
   | { readonly _tag: "Ui"; readonly action: Adapter.Action }
   | { readonly _tag: "Tick" }
   | { readonly _tag: "ModelBatch"; readonly events: ReadonlyArray<Event.Event> }
-  | { readonly _tag: "Presence"; readonly presence: Remote.PresencePayload }
   | { readonly _tag: "ThreadPreviewLoaded"; readonly thread_id: Ids.ThreadId; readonly preview: ViewState.ViewState }
   | { readonly _tag: "ThreadPreviewFailed"; readonly thread_id: Ids.ThreadId; readonly message: string }
   | { readonly _tag: "ThreadEventsFailed"; readonly message: string }
@@ -56,7 +47,6 @@ type SubmittedTurn = Pick<TurnRequest, "content" | "content_parts">
 
 const modelEventBatchSize = 64
 const modelEventBatchWindow = "16 millis"
-const typingHeartbeatTicks = 40
 
 const threadSubscriptionRetrySchedule = Schedule.exponential("250 millis", 2).pipe(
   Schedule.modifyDelay((_error, delay) => Effect.succeed(Duration.min(delay, Duration.seconds(5)))),
@@ -108,8 +98,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
       let currentTurnId: Ids.TurnId | undefined
       let activeThreadId: Ids.ThreadId | undefined
       let lastSequence = loaded.last_sequence ?? 0
-      let typingCooldownTicks = 0
-      let typingAnnounced = false
 
       const queue = yield* Queue.unbounded<AppEvent, Cause.Done>()
       const render = () => deps.renderer.render(state)
@@ -131,8 +119,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
                 subscribe({
                   thread_id: nextThreadId,
                   after_sequence: lastSequence,
-                  ...(userId === undefined ? {} : { user_id: userId }),
-                  onPresence: (presence) => Queue.offerUnsafe(queue, { _tag: "Presence", presence }),
                 }),
               ),
             ).pipe(
@@ -215,187 +201,8 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
           }
         })
 
-      const toggleRemoteArm = () => {
-        const next = ViewState.toggleRemoteArm(state)
-        state = ViewState.withNotice(
-          next,
-          next.remoteArm.enabled ? "Orb-backed thread creation armed." : "Orb-backed thread creation disarmed.",
-        )
-      }
-
-      const loadProjects = (): Effect.Effect<ReadonlyArray<ProjectOption>> =>
-        deps.backend.listProjects === undefined
-          ? Effect.sync(() => {
-              state = ViewState.withNotice(state, "Project commands are unavailable in this backend.")
-              return []
-            })
-          : deps.backend.listProjects({ workspace_path: workspacePath }).pipe(
-              Effect.catchCause((cause: Cause.Cause<E>) =>
-                Effect.sync(() => {
-                  state = ViewState.withNotice(state, `Project list failed: ${errorMessage(Cause.squash(cause))}`)
-                  return []
-                }),
-              ),
-            )
-
-      const selectProject = (projectName: string | undefined) =>
-        Effect.gen(function* () {
-          const projects = yield* loadProjects()
-          if (deps.backend.listProjects === undefined) return
-          if (projectName === undefined || projectName.trim().length === 0) {
-            const names = projects.map((project) => project.name).join(", ")
-            state = ViewState.withNotice(
-              state,
-              names.length === 0 ? "No projects found." : `Projects: ${names}. Use /project select <name>.`,
-            )
-            return
-          }
-          const project = projects.find(
-            (candidate) => candidate.name === projectName || candidate.project_id === projectName,
-          )
-          state =
-            project === undefined
-              ? ViewState.withNotice(state, `Project not found: ${projectName}`)
-              : ViewState.withNotice(
-                  ViewState.withRemoteProject(state, project.name),
-                  `Project selected: ${project.name}`,
-                )
-        })
-
-      const createProject = (projectName: string | undefined) =>
-        Effect.gen(function* () {
-          if (deps.backend.createProject === undefined) {
-            state = ViewState.withNotice(state, "Project creation is unavailable in this backend.")
-            return
-          }
-          if (projectName === undefined || projectName.trim().length === 0) {
-            state = ViewState.withNotice(state, "Usage: /project create <name>")
-            return
-          }
-          const repoOrigin = yield* currentGitRemoteOrigin(workspacePath).pipe(
-            Effect.catchCause((cause) =>
-              Effect.sync(() => {
-                state = ViewState.withNotice(state, `Git origin lookup failed: ${errorMessage(Cause.squash(cause))}`)
-                return undefined
-              }),
-            ),
-          )
-          if (repoOrigin === undefined) return
-          const project = yield* deps.backend.createProject({ name: projectName, repo_origin: repoOrigin }).pipe(
-            Effect.catchCause((cause: Cause.Cause<E>) =>
-              Effect.sync(() => {
-                state = ViewState.withNotice(state, `Project creation failed: ${errorMessage(Cause.squash(cause))}`)
-                return undefined
-              }),
-            ),
-          )
-          if (project === undefined) return
-          state = ViewState.withNotice(
-            ViewState.withRemoteProject(state, project.name),
-            `Project created: ${project.name}`,
-          )
-        })
-
-      const provisionOrbThread = () =>
-        Effect.gen(function* () {
-          if (!state.remoteArm.enabled) return false
-          if (active) {
-            state = ViewState.withNotice(state, "Finish or interrupt the current turn before creating an orb thread.")
-            return true
-          }
-          if (deps.backend.createOrbThread === undefined) {
-            state = ViewState.withNotice(state, "Orb-backed thread creation is unavailable in this backend.")
-            return true
-          }
-          const selectedProjectName = state.remoteArm.project_name
-          if (selectedProjectName === undefined) {
-            state = ViewState.withNotice(state, "Select a project before creating an orb-backed thread.")
-            return true
-          }
-          const projects = yield* loadProjects()
-          const project = projects.find(
-            (candidate) => candidate.name === selectedProjectName || candidate.project_id === selectedProjectName,
-          )
-          if (project === undefined) {
-            state = ViewState.withNotice(state, `Project not found: ${selectedProjectName}`)
-            return true
-          }
-          state = ViewState.withSystemCard(state, {
-            id: "orb-provisioning",
-            title: "Orb provisioning",
-            subtitle: project.name,
-          })
-          yield* render()
-          const created = yield* deps.backend
-            .createOrbThread({ project_id: project.project_id, workspace_path: workspacePath, mode })
-            .pipe(
-              Effect.catchCause((cause: Cause.Cause<E>) =>
-                Effect.sync(() => {
-                  state = ViewState.withNotice(state, `Orb provisioning failed: ${errorMessage(Cause.squash(cause))}`)
-                  return undefined
-                }),
-              ),
-            )
-          if (created === undefined) return true
-          const previousBranch = state.git_branch
-          let next = ViewState.withThread(state, {
-            thread_id: created.thread_id,
-            events: [],
-            notice: `Orb-backed thread ready: ${project.name}`,
-            ...(created.active_orb === undefined ? {} : { active_orb: created.active_orb }),
-          })
-          next = ViewState.withRemoteArm(next, { enabled: false, project_name: project.name })
-          if (previousBranch !== undefined) next = ViewState.withGitBranch(next, previousBranch)
-          state = ViewState.withSystemCard(next, {
-            id: "orb-provisioning",
-            title: "Orb provisioned",
-            subtitle: project.name,
-          })
-          threadId = created.thread_id
-          workspaceId = created.workspace_id
-          typingCooldownTicks = 0
-          typingAnnounced = false
-          lastSequence = 0
-          yield* restartThreadEvents(threadId)
-          return true
-        })
-
-      const runLocalSlash = (command: string) =>
-        Effect.gen(function* () {
-          const [name, argument] = splitCommand(command)
-          if (name === "/orb") {
-            if (argument === "toggle") {
-              toggleRemoteArm()
-              return true
-            }
-            if (argument === "pause" || argument === "resume" || argument === "kill") return false
-            state = ViewState.withNotice(state, "Usage: /orb toggle|pause|resume|kill")
-            return true
-          }
-          if (name === "/project") {
-            const [operation, value] = splitFirst(argument ?? "")
-            if (operation === "select") {
-              yield* selectProject(value)
-              return true
-            }
-            if (operation === "create") {
-              yield* createProject(value)
-              return true
-            }
-            state = ViewState.withNotice(state, "Usage: /project select <name> or /project create <name>")
-            return true
-          }
-          if (name === "/new") return yield* provisionOrbThread()
-          return false
-        })
-
       const runSlash = (command: string) =>
         Effect.gen(function* () {
-          const handled = yield* runLocalSlash(command)
-          if (handled) {
-            yield* render()
-            return
-          }
           if (command.startsWith("/thread ")) {
             state = ViewState.beginConnecting(state)
             yield* render()
@@ -487,7 +294,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
           const raw = submitted.content
           const trimmed = raw.trim()
           state = ViewState.clearInput(state)
-          yield* syncTypingPresence()
           if (trimmed.length === 0) {
             yield* render()
             return
@@ -619,7 +425,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
                 -1,
                 Palette.filter(state.palette.query, state.mode, state.fast_mode, {
                   threadActive: ViewState.hasActivity(state),
-                  orbBackedThread: ViewState.hasActiveOrb(state),
                 }).length,
               )
               break
@@ -629,7 +434,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
                 1,
                 Palette.filter(state.palette.query, state.mode, state.fast_mode, {
                   threadActive: ViewState.hasActivity(state),
-                  orbBackedThread: ViewState.hasActiveOrb(state),
                 }).length,
               )
               break
@@ -642,7 +446,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
             case "PaletteRun": {
               const command = Palette.at(state.palette.query, state.palette.selected, state.mode, state.fast_mode, {
                 threadActive: ViewState.hasActivity(state),
-                orbBackedThread: ViewState.hasActiveOrb(state),
               })
               state = ViewState.closePalette(state)
               if (command !== undefined) {
@@ -687,9 +490,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
                 ? ViewState.toggleFastMode(state)
                 : ViewState.withNotice(state, "Fast speed is only available in rush and deep modes.")
               break
-            case "ToggleRemoteArm":
-              toggleRemoteArm()
-              break
             case "OpenEditor": {
               const edited = yield* deps.renderer.editExternally(ViewState.submitText(state))
               state = ViewState.insertText(ViewState.clearInput(state), edited)
@@ -711,7 +511,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
             case "Steer": {
               const steering = ViewState.submitText(state).trim()
               state = ViewState.clearInput(state)
-              yield* syncTypingPresence()
               if (steering.length > 0) state = ViewState.enqueueMessage(state, steering)
               state = ViewState.promoteSelectedOrNextQueued(state)
               break
@@ -757,32 +556,7 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
               yield* maybeShutdown()
               return
           }
-          yield* syncTypingPresence()
           yield* render()
-        })
-
-      const setPresence = (presenceState: PresenceRequest["state"]) =>
-        userId === undefined || deps.backend.setThreadPresence === undefined
-          ? Effect.void
-          : deps.backend
-              .setThreadPresence({ thread_id: threadId, user_id: userId, state: presenceState })
-              .pipe(Effect.catchCause(() => Effect.void))
-
-      const syncTypingPresence = () =>
-        Effect.gen(function* () {
-          const pendingInput = ViewState.submitText(state).trim().length > 0
-          if (!pendingInput) {
-            if (typingAnnounced) {
-              yield* setPresence("active")
-              typingAnnounced = false
-            }
-            typingCooldownTicks = 0
-            return
-          }
-          if (typingCooldownTicks > 0) return
-          yield* setPresence("typing")
-          typingAnnounced = true
-          typingCooldownTicks = typingHeartbeatTicks
         })
 
       const handleThreadSwitcherKey = (key: Keys.Key) =>
@@ -941,8 +715,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
           switch (appEvent._tag) {
             case "Tick":
               state = ViewState.tickSpinner(state)
-              if (typingCooldownTicks > 0) typingCooldownTicks -= 1
-              yield* syncTypingPresence()
               yield* render()
               return
             case "Resize":
@@ -981,10 +753,6 @@ export const run = <E>(deps: Dependencies<E>, input: RunInput): Effect.Effect<nu
                 yield* drainQueuedTurn()
                 yield* maybeShutdown()
               }
-              yield* render()
-              return
-            case "Presence":
-              state = ViewState.withPresence(state, appEvent.presence)
               yield* render()
               return
             case "ThreadPreviewLoaded":
@@ -1246,26 +1014,6 @@ const resolveGitBranch = (root: string): Effect.Effect<string | undefined> =>
     }
   })
 
-const currentGitRemoteOrigin = (root: string): Effect.Effect<string, Error> =>
-  Effect.tryPromise({
-    try: async () => {
-      const subprocess = Bun.spawn(["git", "remote", "get-url", "origin"], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      const [exitCode, stdout, stderr] = await Promise.all([
-        subprocess.exited,
-        new Response(subprocess.stdout).text(),
-        new Response(subprocess.stderr).text(),
-      ])
-      const origin = stdout.trim()
-      if (exitCode !== 0 || origin.length === 0) throw new Error(stderr.trim() || "origin remote is not configured")
-      return origin
-    },
-    catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
-  })
-
 const firstUserMessage = (state: ViewState.ViewState): string => {
   const entry = state.entries.find((item) => item.kind === "message" && item.message.role === "user")
   if (entry === undefined || entry.kind !== "message") return ""
@@ -1279,7 +1027,6 @@ const threadSwitcherItem = (option: ThreadOption): ViewState.ThreadSwitcherItem 
   preview: option.preview,
   updated_label: option.updated_label,
   archived: option.archived,
-  ...(option.orb_status === undefined ? {} : { orb_status: option.orb_status }),
   ...(option.diff === undefined ? {} : { diff: option.diff }),
   preview_state: { status: "unloaded" },
 })

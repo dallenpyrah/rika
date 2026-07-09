@@ -1,8 +1,8 @@
 import { EnvConfig } from "@rika/core"
 import type { Client, Registry } from "@rivetkit/effect"
-import { Config as EffectConfig, ConfigProvider, Context, Effect, Layer, Option, Schema } from "effect"
+import { ConfigProvider, Context, Effect, Layer, Schema } from "effect"
 
-export const HostMode = Schema.Literals(["local", "remote"]).annotate({
+export const HostMode = Schema.Literals(["local"]).annotate({
   identifier: "Rika.RivetHost.HostConfig.HostMode",
 })
 export type HostMode = typeof HostMode.Type
@@ -11,19 +11,12 @@ export interface Resolved extends Schema.Schema.Type<typeof Resolved> {}
 export const Resolved = Schema.Struct({
   mode: HostMode,
   endpoint: Schema.String,
-  token: Schema.optional(Schema.String),
-  namespace: Schema.optional(Schema.String),
   no_welcome: Schema.Boolean,
-  runner_version: Schema.optional(Schema.String),
 }).annotate({ identifier: "Rika.RivetHost.HostConfig.Resolved" })
 
 export interface ResolveOptions {
-  readonly mode?: HostMode
   readonly endpoint?: string
-  readonly token?: string
-  readonly namespace?: string
   readonly noWelcome?: boolean
-  readonly runnerVersion?: string
 }
 
 export class HostConfigError extends Schema.TaggedErrorClass<HostConfigError>()("HostConfigError", {
@@ -61,55 +54,25 @@ export const resolveOptions = Effect.fn("HostConfig.resolveOptions")(function* (
   env: Record<string, string | undefined> = process.env,
 ) {
   const provider = EnvConfig.providerFromEnv(env, { booleanKeys: ["RIKA_RIVET_NO_WELCOME"] })
-  const mode = options.mode ?? (yield* parseModeFromEnv(env, provider))
-  const configuredEndpoint = options.endpoint ?? env.RIKA_RIVET_ENDPOINT ?? env.RIVET_ENDPOINT
-  if (mode === "remote" && configuredEndpoint === undefined) {
-    return yield* new HostConfigError({
-      message: "Remote Rivet hosting requires RIKA_RIVET_ENDPOINT or RIVET_ENDPOINT",
-      key: "RIKA_RIVET_ENDPOINT",
-    })
-  }
+  const configuredEndpoint = options.endpoint ?? env.RIKA_RIVET_ENDPOINT
   const endpoint = configuredEndpoint ?? defaultLocalEndpoint
-  const token = optionString(options.token ?? env.RIKA_RIVET_TOKEN ?? env.RIVET_TOKEN)
-  const namespace = optionString(options.namespace ?? env.RIKA_RIVET_NAMESPACE ?? env.RIVET_NAMESPACE)
-  const runnerVersion = optionString(options.runnerVersion ?? env.RIVET_RUNNER_VERSION)
+  yield* validateLocalEndpoint(endpoint)
   const noWelcome = options.noWelcome ?? (yield* noWelcomeFromEnv(provider))
   return {
-    mode,
+    mode: "local" as const,
     endpoint,
-    ...(Option.isNone(token) ? {} : { token: token.value }),
-    ...(Option.isNone(namespace) ? {} : { namespace: namespace.value }),
     no_welcome: noWelcome,
-    ...(Option.isNone(runnerVersion) ? {} : { runner_version: runnerVersion.value }),
   }
 })
 
 export const toRegistryOptions = (host: Resolved): Registry.Options => ({
   endpoint: host.endpoint,
-  ...(host.token === undefined ? {} : { token: host.token }),
-  ...(host.namespace === undefined ? {} : { namespace: host.namespace }),
   noWelcome: host.no_welcome,
 })
 
 export const toClientOptions = (host: Resolved): Client.Options => ({
   endpoint: host.endpoint,
-  ...(host.token === undefined ? {} : { token: host.token }),
-  ...(host.namespace === undefined ? {} : { namespace: host.namespace }),
 })
-
-const parseModeFromEnv = (env: Record<string, string | undefined>, provider: ConfigProvider.ConfigProvider) =>
-  EffectConfig.literals(["local", "remote"], "RIKA_RIVET_HOST")
-    .pipe(EffectConfig.withDefault("local"))
-    .parse(provider)
-    .pipe(
-      Effect.mapError(
-        () =>
-          new HostConfigError({
-            message: `Invalid RIKA_RIVET_HOST ${env.RIKA_RIVET_HOST ?? ""}`,
-            key: "RIKA_RIVET_HOST",
-          }),
-      ),
-    )
 
 const noWelcomeFromEnv = (provider: ConfigProvider.ConfigProvider) =>
   EnvConfig.optional(provider, EnvConfig.boolean("RIKA_RIVET_NO_WELCOME")).pipe(
@@ -123,5 +86,18 @@ const noWelcomeFromEnv = (provider: ConfigProvider.ConfigProvider) =>
     ),
   )
 
-const optionString = (value: string | undefined) =>
-  value === undefined || value.length === 0 ? Option.none<string>() : Option.some(value)
+const validateLocalEndpoint = (endpoint: string) =>
+  Effect.try({
+    try: () => {
+      const url = new URL(endpoint)
+      if (url.protocol !== "http:") throw new Error("Rika local Rivet endpoint must use http")
+      if (!localHostnames.has(url.hostname)) throw new Error("Rika local Rivet endpoint must point at localhost")
+    },
+    catch: (cause) =>
+      new HostConfigError({
+        message: cause instanceof Error ? cause.message : String(cause),
+        key: "RIKA_RIVET_ENDPOINT",
+      }),
+  })
+
+const localHostnames = new Set(["127.0.0.1", "localhost", "[::1]", "::1"])

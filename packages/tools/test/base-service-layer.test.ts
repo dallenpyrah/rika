@@ -37,6 +37,18 @@ describe("BaseServiceLayer", () => {
       await rm(validRoot, { recursive: true, force: true })
     }
   })
+
+  test("accepts configured model provider base URLs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-base-layer-model-base-url-"))
+
+    try {
+      const result = await runConfig(root, { RIKA_BASE_URL: "https://models.example.test/v1" }, false)
+
+      expect(result).toMatchObject({ default_mode: "smart" })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 const runConfig = async (

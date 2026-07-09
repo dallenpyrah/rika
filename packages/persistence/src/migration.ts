@@ -1,16 +1,9 @@
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { Context, Effect, Layer, Schema } from "effect"
-import { migrate as migrateDatabase } from "drizzle-orm/bun-sqlite/migrator"
 import { sql } from "drizzle-orm"
-import {
-  DatabaseError,
-  Service as DatabaseService,
-  dialect as databaseDialect,
-  queryRun,
-  withDatabaseEffect,
-} from "./database"
-import { postgresIndexSchemaSql } from "./postgres-index-schema"
+import { migrate as migrateDatabase } from "drizzle-orm/bun-sqlite/migrator"
+import { DatabaseError, Service as DatabaseService, withDatabaseEffect, type DrizzleDatabase } from "./database"
 import * as ThreadFileProjection from "./thread-file-projection"
 
 export const sourceMigrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url))
@@ -42,22 +35,12 @@ export const layerFromFolder = (migrationsFolder = defaultMigrationsFolder) =>
     Service,
     Service.of({
       migrate: Effect.fn("Migration.migrate")(function* () {
-        const dialect = yield* databaseDialect()
-        if (dialect === "postgres") {
-          return yield* migratePostgresIndex().pipe(
-            Effect.mapError(
-              (cause) =>
-                new MigrationError({
-                  message: describeCause(cause),
-                  migrations_folder: "postgres-index-schema",
-                }),
-            ),
-          )
-        }
         return yield* withDatabaseEffect((database) =>
           Effect.try({
             try: () => {
+              repairCollapsedLocalMigrationCompatibility(database)
               migrateDatabase(database, { migrationsFolder })
+              backfillArtifactWorkspaces(database)
               ThreadFileProjection.backfillThreadFiles(database)
             },
             catch: (cause) =>
@@ -75,17 +58,76 @@ export const migrate = Effect.fn("Migration.migrate.call")(function* () {
   return yield* migration.migrate()
 })
 
-const migratePostgresIndex = () =>
-  Effect.gen(function* () {
-    for (const statement of splitSqlStatements(postgresIndexSchemaSql)) {
-      yield* queryRun(sql.raw(statement))
-    }
-  })
-
-const splitSqlStatements = (script: string) =>
-  script
-    .split(";")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
-
 const describeCause = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+
+type ColumnRepair = {
+  readonly table: string
+  readonly column: string
+  readonly definition: string
+}
+
+const collapsedMigrationColumnRepairs: ReadonlyArray<ColumnRepair> = [
+  { table: "artifacts", column: "workspace_id", definition: "text" },
+  { table: "thread_projections", column: "title_text", definition: "text" },
+  { table: "thread_projections", column: "diff_additions", definition: "integer DEFAULT 0 NOT NULL" },
+  { table: "thread_projections", column: "diff_modifications", definition: "integer DEFAULT 0 NOT NULL" },
+  { table: "thread_projections", column: "diff_deletions", definition: "integer DEFAULT 0 NOT NULL" },
+  { table: "thread_projections", column: "last_context_tokens", definition: "integer" },
+  { table: "thread_projections", column: "last_model", definition: "text" },
+  { table: "thread_projections", column: "last_user_id", definition: "text" },
+  { table: "thread_projections", column: "visibility", definition: "text DEFAULT 'private' NOT NULL" },
+]
+
+const repairCollapsedLocalMigrationCompatibility = (database: DrizzleDatabase) => {
+  const columnsByTable = new Map<string, Set<string>>()
+  for (const repair of collapsedMigrationColumnRepairs) {
+    if (!tableExists(database, repair.table)) continue
+    if (!columnsByTable.has(repair.table)) columnsByTable.set(repair.table, existingColumns(database, repair.table))
+    const columns = columnsByTable.get(repair.table)!
+    if (!columns.has(repair.column)) {
+      database.run(
+        sql.raw(
+          `ALTER TABLE ${quoteIdentifier(repair.table)} ADD ${quoteIdentifier(repair.column)} ${repair.definition}`,
+        ),
+      )
+      columns.add(repair.column)
+    }
+  }
+}
+
+const existingColumns = (database: DrizzleDatabase, table: string) => {
+  if (!tableExists(database, table)) return new Set<string>()
+  return new Set(
+    database.all<{ name: string }>(sql.raw(`PRAGMA table_info(${quoteIdentifier(table)})`)).map((row) => row.name),
+  )
+}
+
+const tableExists = (database: DrizzleDatabase, table: string) =>
+  database.get<{ name: string }>(sql`select name from sqlite_master where type = 'table' and name = ${table}`) !==
+  undefined
+
+const backfillArtifactWorkspaces = (database: DrizzleDatabase) => {
+  if (!tableExists(database, "artifacts") || !tableExists(database, "thread_projections")) return
+  const artifactColumns = existingColumns(database, "artifacts")
+  const projectionColumns = existingColumns(database, "thread_projections")
+  if (!artifactColumns.has("workspace_id") || !projectionColumns.has("workspace_id")) return
+  database.run(
+    sql.raw(`UPDATE artifacts
+SET workspace_id = (
+  SELECT thread_projections.workspace_id
+  FROM thread_projections
+  WHERE thread_projections.thread_id = artifacts.thread_id
+)
+WHERE workspace_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM thread_projections
+    WHERE thread_projections.thread_id = artifacts.thread_id
+  )`),
+  )
+}
+
+const quoteIdentifier = (value: string) => {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error(`Invalid SQLite identifier: ${value}`)
+  return `\`${value}\``
+}

@@ -1,31 +1,17 @@
-import { existsSync } from "node:fs"
-import { ThreadService, TournamentService } from "@rika/agent"
-import { Embeddings } from "@rika/llm"
-import { Database, OrbStore, ThreadImport, ThreadMemoryStore, ThreadProjection } from "@rika/persistence"
-import { Client } from "@rika/sdk"
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { IdGenerator } from "@rika/core"
+import { ThreadClient, ThreadDirectory } from "@rika/rivet-host"
+import { Event, Ids } from "@rika/schema"
+import { ThreadProjection } from "@rika/persistence"
+import { Context, Effect, Layer, Schema } from "effect"
 import * as Args from "./args"
-import * as Input from "./input"
 import * as Output from "./output"
-import * as Tournament from "./tournament"
 
 export class ThreadsError extends Schema.TaggedErrorClass<ThreadsError>()("ThreadsError", {
   message: Schema.String,
   action: Args.ThreadAction,
 }) {}
 
-export type RunError =
-  | Database.DatabaseError
-  | ThreadService.Error
-  | TournamentService.RunError
-  | OrbStore.OrbStoreError
-  | ThreadMemoryStore.ThreadMemoryStoreError
-  | ThreadProjection.ThreadProjectionError
-  | Embeddings.EmbeddingsProviderError
-  | Embeddings.EmbeddingsValidationError
-  | Client.SdkError
-  | Input.InputError
-  | ThreadsError
+export type RunError = ThreadClient.RunError | ThreadDirectory.ThreadDirectoryError | ThreadsError
 
 export interface Interface {
   readonly executeCommand: (command: Args.ThreadCommand) => Effect.Effect<number, RunError>
@@ -33,150 +19,85 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/cli/Threads") {}
 
-export class RemoteClient extends Context.Service<RemoteClient, Client.Interface>()("@rika/cli/Threads/RemoteClient") {}
-
-export const remoteClientLayer = (client: Client.Interface) => Layer.succeed(RemoteClient, RemoteClient.of(client))
-
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const output = yield* Output.Service
-    const input = yield* Input.Service
-    const database = yield* Database.Service
-    const threads = yield* ThreadService.Service
-    const projection = yield* ThreadProjection.Service
-    const tournament = yield* Effect.serviceOption(TournamentService.Service)
-    const orbs = yield* OrbStore.Service
-    const remoteClient = yield* Effect.serviceOption(RemoteClient)
-    const embeddings = Option.getOrUndefined(yield* Effect.serviceOption(Embeddings.Service))
-    const memoryStore = Option.getOrUndefined(yield* Effect.serviceOption(ThreadMemoryStore.Service))
+    const threadClient = yield* ThreadClient.Service
+    const directory = yield* ThreadDirectory.Service
+    const idGenerator = yield* IdGenerator.Service
 
     return Service.of({
       executeCommand: Effect.fn("Cli.Threads.executeCommand")(function* (command: Args.ThreadCommand) {
         switch (command.action) {
           case "list": {
-            const summaries = yield* threads.list(listInput(command))
-            const enriched = yield* Effect.forEach(summaries, (summary) => withOrbStatus(orbs, summary))
-            yield* output.stdout(formatJson(enriched))
+            const summaries = yield* listSummaries(directory, command)
+            yield* output.stdout(formatJson(summaries))
             return 0
           }
           case "search": {
-            if (command.semantic === true) {
-              const semantic = yield* semanticSearch({
-                command,
-                output,
-                threads,
-                ...(embeddings === undefined ? {} : { embeddings }),
-                ...(memoryStore === undefined ? {} : { memoryStore }),
-              })
-              if (semantic !== undefined) {
-                yield* output.stdout(formatJson(semantic))
-                return 0
-              }
-            }
-            const results = yield* threads.search(searchInput(command))
-            yield* output.stdout(formatJson(results))
+            const summaries = yield* listSummaries(directory, command)
+            const query = command.query?.toLowerCase() ?? ""
+            const results = summaries.filter((summary) => summaryMatches(summary, query))
+            yield* output.stdout(formatJson(limit(results, command.limit)))
             return 0
           }
           case "archive": {
-            const summary = yield* threads.archive({ thread_id: yield* requireThreadId(command) })
-            yield* output.stdout(formatJson(summary))
+            const snapshot = yield* threadClient.archiveThread({ thread_id: yield* requireThreadId(command) })
+            yield* output.stdout(formatJson(snapshot))
             return 0
           }
           case "unarchive": {
-            const summary = yield* threads.unarchive({ thread_id: yield* requireThreadId(command) })
-            yield* output.stdout(formatJson(summary))
+            const snapshot = yield* threadClient.unarchiveThread({ thread_id: yield* requireThreadId(command) })
+            yield* output.stdout(formatJson(snapshot))
             return 0
           }
           case "visibility": {
-            const visibility = yield* requireVisibility(command)
-            const summary = yield* threads.setVisibility({
+            const snapshot = yield* threadClient.setVisibility({
               thread_id: yield* requireThreadId(command),
-              visibility,
+              visibility: yield* requireVisibility(command),
             })
-            yield* output.stdout(formatJson(summary))
+            yield* output.stdout(formatJson(snapshot))
             return 0
           }
           case "compact": {
-            const remote = Option.getOrUndefined(remoteClient)
-            if (remote === undefined) {
-              return yield* new ThreadsError({
-                message: "Thread compaction requires the shared backend client",
-                action: command.action,
-              })
-            }
-            const event = yield* remote.compactThread(yield* requireThreadId(command))
+            const event = yield* threadClient.compactThread({ thread_id: yield* requireThreadId(command) })
             yield* output.stdout(formatJson(event))
             return 0
           }
           case "fork": {
-            const summary = yield* threads.fork({
-              thread_id: yield* requireThreadId(command),
+            const sourceThreadId = yield* requireThreadId(command)
+            const forkThreadId = Ids.ThreadId.make(yield* idGenerator.next("thread"))
+            const snapshot = yield* threadClient.forkThread({
+              thread_id: sourceThreadId,
+              fork_thread_id: forkThreadId,
+              import_identity: { _tag: "VerifiedUserIdentity", user_id: localUserId },
               ...(command.at_turn === undefined ? {} : { at_turn: command.at_turn }),
             })
-            yield* output.stdout(formatJson(summary.thread_id))
-            return 0
-          }
-          case "tournament": {
-            const tournamentRunner = Option.getOrUndefined(tournament)
-            if (tournamentRunner === undefined) {
-              return yield* new ThreadsError({
-                message: "Thread tournament requires the local tournament runner",
-                action: command.action,
-              })
-            }
-            const message = yield* tournamentMessage(input, command)
-            const result = yield* tournamentRunner.run({
-              thread_id: yield* requireThreadId(command),
-              message,
-              branch_count: command.branch_count ?? 3,
-              ...(command.modes === undefined ? {} : { modes: command.modes }),
-              ...(command.rubric === undefined ? {} : { rubric: command.rubric }),
-            })
-            yield* output.stdout(Tournament.formatResult(result))
+            yield* output.stdout(formatJson(snapshot))
             return 0
           }
           case "share": {
-            const exported = yield* threads.share({ thread_id: yield* requireThreadId(command) })
-            yield* output.stdout(formatJson(exported))
+            const events = yield* threadClient.getEvents({
+              thread_id: yield* requireThreadId(command),
+              after_sequence: 0,
+            })
+            yield* output.stdout(formatJson({ events }))
             return 0
           }
           case "reference": {
-            const reference = yield* threads.reference({
+            const events = yield* threadClient.getEvents({
               thread_id: yield* requireThreadId(command),
-              ...(command.query === undefined ? {} : { query: command.query }),
+              after_sequence: 0,
             })
-            yield* output.stdout(formatJson(reference))
+            yield* output.stdout(formatJson(referenceFromEvents(events, command.query)))
             return 0
           }
-          case "delete": {
-            yield* threads.deleteThread({ thread_id: yield* requireThreadId(command) })
-            return 0
-          }
-          case "rebuild-projection": {
-            yield* projection.rebuild().pipe(Effect.provideService(Database.Service, database))
-            yield* output.stdout(formatJson({ rebuilt: true }))
-            return 0
-          }
-          case "import": {
-            const sourceDataDir = yield* requireSourceDataDir(command)
-            const sourcePath = `${sourceDataDir}/rika.sqlite`
-            if (!existsSync(sourcePath)) {
-              return yield* new ThreadsError({
-                message: `Source database not found: ${sourcePath}`,
-                action: command.action,
-              })
-            }
-            const imported = yield* database.withDatabase((db) => ThreadImport.importFromSqlite(db, sourcePath))
-            yield* projection.rebuild().pipe(Effect.provideService(Database.Service, database))
-            yield* output.stdout(formatJson({ ...imported, rebuilt: true }))
-            return 0
-          }
+          case "delete":
+          case "rebuild-projection":
+          case "import":
+            return yield* unsupported(command)
         }
-        return yield* new ThreadsError({
-          message: "Unsupported thread action",
-          action: command.action,
-        })
       }),
     })
   }),
@@ -193,106 +114,49 @@ export const formatError = (error: RunError) => {
   return `Rika failed: ${String(error)}`
 }
 
+const localUserId = Ids.UserId.make("local")
+
+const listSummaries = (directory: ThreadDirectory.Interface, command: Args.ThreadCommand) =>
+  directory.listThreads().pipe(
+    Effect.map((summaries) =>
+      limit(
+        summaries.filter((summary) => command.include_archived === true || !summary.archived),
+        command.limit,
+      ),
+    ),
+  )
+
 const requireThreadId = (command: Args.ThreadCommand) =>
   command.thread_id === undefined
     ? Effect.fail(new ThreadsError({ message: `Thread id is required for ${command.action}`, action: command.action }))
     : Effect.succeed(command.thread_id)
-
-const requireSourceDataDir = (command: Args.ThreadCommand) =>
-  command.source_data_dir === undefined
-    ? Effect.fail(
-        new ThreadsError({ message: "Source data directory is required for import", action: command.action }),
-      )
-    : Effect.succeed(command.source_data_dir)
 
 const requireVisibility = (command: Args.ThreadCommand) =>
   command.visibility === undefined
     ? Effect.fail(new ThreadsError({ message: "Thread visibility is required", action: command.action }))
     : Effect.succeed(command.visibility)
 
-const listInput = (command: Args.ThreadCommand): ThreadService.ListInput => ({
-  ...(command.include_archived === undefined ? {} : { include_archived: command.include_archived }),
-  ...(command.limit === undefined ? {} : { limit: command.limit }),
-})
+const unsupported = (command: Args.ThreadCommand) =>
+  Effect.fail(
+    new ThreadsError({
+      message: `Thread action ${command.action} is not available in local actor-native mode`,
+      action: command.action,
+    }),
+  )
 
-const searchInput = (command: Args.ThreadCommand): ThreadService.SearchInput => ({
-  ...(command.query === undefined ? {} : { query: command.query }),
-  ...(command.include_archived === undefined ? {} : { include_archived: command.include_archived }),
-  ...(command.limit === undefined ? {} : { limit: command.limit }),
-})
-
-interface SemanticSearchInput {
-  readonly command: Args.ThreadCommand
-  readonly output: Output.Interface
-  readonly threads: ThreadService.Interface
-  readonly embeddings?: Embeddings.Interface
-  readonly memoryStore?: ThreadMemoryStore.Interface
+const summaryMatches = (summary: ThreadProjection.ThreadSummary, query: string) => {
+  if (query.length === 0) return true
+  return [summary.thread_id, summary.title_text, summary.latest_message_text]
+    .filter((value): value is string => value !== undefined)
+    .some((value) => value.toLowerCase().includes(query))
 }
 
-interface SemanticSearchResult {
-  readonly summary: ThreadService.ThreadSummary
-  readonly score: number
-  readonly matched: ReadonlyArray<string>
-}
+const referenceFromEvents = (events: ReadonlyArray<Event.Event>, query: string | undefined) => ({
+  query: query ?? null,
+  events,
+})
 
-const semanticSearch = (
-  input: SemanticSearchInput,
-): Effect.Effect<ReadonlyArray<SemanticSearchResult> | undefined, RunError> =>
-  Effect.gen(function* () {
-    if (input.embeddings === undefined || input.memoryStore === undefined) {
-      yield* input.output.stderr(
-        "Semantic thread search unavailable: embeddings are not configured; using lexical search",
-      )
-      return undefined
-    }
-    const query = input.command.query?.trim() ?? ""
-    const embedded = yield* input.embeddings.embed([query]).pipe(
-      Effect.map((vectors) => vectors[0]),
-      Effect.map((vector) =>
-        vector === undefined
-          ? { _tag: "unavailable" as const, reason: "embedding provider returned no vector" }
-          : { _tag: "available" as const, vector },
-      ),
-      Effect.catchTag("EmbeddingsUnavailable", (error) =>
-        Effect.succeed({ _tag: "unavailable" as const, reason: error.message }),
-      ),
-    )
-    if (embedded._tag === "unavailable") {
-      yield* input.output.stderr(`Semantic thread search unavailable: ${embedded.reason}; using lexical search`)
-      return undefined
-    }
-    const rows = yield* input.memoryStore.search(embedded.vector, {
-      limit: input.command.limit ?? 20,
-    })
-    const seen = new Set<string>()
-    const results: Array<SemanticSearchResult> = []
-    for (const row of rows) {
-      if (seen.has(row.chunk.thread_id)) continue
-      const record = yield* input.threads
-        .preview({ thread_id: row.chunk.thread_id, limit: 1 })
-        .pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (record === undefined) continue
-      if (input.command.include_archived !== true && record.summary.archived) continue
-      seen.add(row.chunk.thread_id)
-      results.push({
-        summary: record.summary,
-        score: row.score,
-        matched: [row.chunk.text.slice(0, 160)],
-      })
-    }
-    return results
-  })
-
-const tournamentMessage = (input: Input.Interface, command: Args.ThreadCommand) =>
-  command.message === undefined
-    ? Effect.fail(new ThreadsError({ message: "Tournament message is required", action: command.action }))
-    : command.message === "-"
-      ? input.readAll.pipe(Effect.map((value) => value.trimEnd()))
-      : Effect.succeed(command.message)
-
-const withOrbStatus = (orbs: OrbStore.Interface, summary: ThreadService.ThreadSummary) =>
-  orbs
-    .getByThread(summary.thread_id)
-    .pipe(Effect.map((orb) => (orb === undefined ? summary : { ...summary, orb_status: orb.status })))
+const limit = <A>(values: ReadonlyArray<A>, count: number | undefined) =>
+  count === undefined ? values : values.slice(0, count)
 
 const formatJson = (value: unknown) => JSON.stringify(value)

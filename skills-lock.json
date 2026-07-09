@@ -1,11 +1,107 @@
 {
   "version": 1,
   "skills": {
+    "ai-agent": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "ai-agent/SKILL.md",
+      "computedHash": "59f5916acd711abe8c8efc3c1ff89d9069a8b15665484b462b121e42f83525e6"
+    },
+    "ai-agent-workspace": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "ai-agent-workspace/SKILL.md",
+      "computedHash": "29471323f352581f1e565c4630827de4f945211d2311ab312adbd35047d2540e"
+    },
+    "chat-room": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "chat-room/SKILL.md",
+      "computedHash": "066f1b532a028238dfd8e491689ad43aa258aed3d26fb93b430fc4444ccbb018"
+    },
+    "collaborative-text-editor": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "collaborative-text-editor/SKILL.md",
+      "computedHash": "3fb3015f23b5584fdea99cb666652e3321864d19e1824bd0f7535f5348c334d4"
+    },
+    "cron-jobs": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "cron-jobs/SKILL.md",
+      "computedHash": "eafb493d65451c84a71ef477141cbf3e6aca7fddfd9125f0ac89a2eafbd5f7ab"
+    },
+    "live-cursors": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "live-cursors/SKILL.md",
+      "computedHash": "e236b8f22737c9e2c80199ea5aa98a48885844254abeab3e5f37e1978ffbb4dd"
+    },
     "motel-debug": {
       "source": "kitlangton/motel",
       "sourceType": "github",
       "skillPath": "skills/motel-debug/SKILL.md",
       "computedHash": "5c2d76bf6c6118380750ab4cd91317b16781d39361169dee095a85e057a38d82"
+    },
+    "multiplayer-game": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "multiplayer-game/SKILL.md",
+      "computedHash": "a7c62288200ae926a993fc5bb903ca9c18114f2e743f4d395461d29e7e97f6e9"
+    },
+    "per-tenant-database": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "per-tenant-database/SKILL.md",
+      "computedHash": "8835227082a37a9afebb87fef34faa92ce6e2d2c7ec1beb54a0aac44e698d379"
+    },
+    "rivetkit": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "rivetkit/SKILL.md",
+      "computedHash": "a50c61deda8b5f92a47e107b3da98af0fbde21b68d00b698385fb48157ee6333"
+    },
+    "rivetkit-client-javascript": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "rivetkit-client-javascript/SKILL.md",
+      "computedHash": "4fd8d03d0ad0c6a0333e2543c42c092188bd1ac6d6ca70d4f23d9b6431851a83"
+    },
+    "rivetkit-client-react": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "rivetkit-client-react/SKILL.md",
+      "computedHash": "305aa095f3b4783822286b6153d4efa39b98af023030cf1bf7fd8eaf4ad0d5a1"
+    },
+    "rivetkit-client-rust": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "rivetkit-client-rust/SKILL.md",
+      "computedHash": "639dea440d1a8696ed8155553b370d684f3d911c823f943427faa4fafde2db70"
+    },
+    "rivetkit-client-swift": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "rivetkit-client-swift/SKILL.md",
+      "computedHash": "93d0b7a9761641760459e88de045853a967fc0dd0dacc68755a0c98973166d2e"
+    },
+    "rivetkit-client-swiftui": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "rivetkit-client-swiftui/SKILL.md",
+      "computedHash": "1e55bb650766d6218eefea9093de84f7def6e71290033d94c6a9400ea2da014c"
+    },
+    "sandbox-agent": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "skills/sandbox-agent/SKILL.md",
+      "computedHash": "52d74874f6b15618028981bff02054e392b52e2416396dd384f48ac75d769a58"
+    },
+    "vpc-air-gapped": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "skillPath": "vpc-air-gapped/SKILL.md",
+      "computedHash": "87f047558f00b086d3ae58c2f0bce79aa870178897ded56cb67d0eef63b340dd"
     }
   }
 }

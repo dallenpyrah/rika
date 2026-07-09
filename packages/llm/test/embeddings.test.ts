@@ -45,4 +45,24 @@ describe("Embeddings", () => {
     })
     expect(options.apiKey === undefined ? undefined : Redacted.value(options.apiKey)).toBe("shared")
   })
+
+  test("embeddings use the generic model provider base URL", () => {
+    expect(
+      Embeddings.optionsFromEnv({
+        RIKA_EMBEDDINGS_API_KEY: "embeddings-key",
+        RIKA_BASE_URL: "https://models.example.test/v1",
+      }),
+    ).toMatchObject({
+      apiUrl: "https://models.example.test/v1",
+    })
+
+    expect(
+      Embeddings.optionsFromEnv(
+        { RIKA_API_KEY: "shared-key", RIKA_BASE_URL: "https://models.example.test/v1" },
+        { openaiConfigured: true },
+      ),
+    ).toMatchObject({
+      apiUrl: "https://models.example.test/v1",
+    })
+  })
 })

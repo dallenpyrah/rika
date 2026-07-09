@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Config, Diagnostics, IdGenerator, SecretRedactor, Time } from "@rika/core"
-import { Database, Migration, ProjectStore, ThreadEventLog, ThreadProjection } from "@rika/persistence"
+import { Database, Migration, ThreadEventLog, ThreadProjection } from "@rika/persistence"
 import { Artifact, Common, Event, Ids, Message } from "@rika/schema"
 import { Effect, Layer } from "effect"
 import { ThreadService } from "../src/index"
@@ -25,18 +25,11 @@ const timeLayer = Time.fixedLayer(now)
 const idLayer = IdGenerator.sequenceLayer(1)
 const redactorLayer = SecretRedactor.layer
 const diagnosticsLayer = Diagnostics.memoryLayer([]).pipe(Layer.provideMerge(redactorLayer))
-const projectStoreLayer = ProjectStore.layer.pipe(
-  Layer.provideMerge(configLayer),
-  Layer.provideMerge(databaseLayer),
-  Layer.provideMerge(timeLayer),
-  Layer.provideMerge(idLayer),
-)
 
 const services = Layer.mergeAll(
   configLayer,
   databaseLayer,
   Migration.layer,
-  projectStoreLayer,
   ThreadEventLog.layer,
   ThreadProjection.layer,
   timeLayer,
@@ -144,7 +137,7 @@ describe("ThreadService", () => {
     expect(result.fullSearch.map((item) => item.summary.thread_id)).toEqual([hiddenThreadId])
   })
 
-  test("search consumes file, archived, project, and relative time filters from the query string", async () => {
+  test("search consumes file, archived, workspace, and relative time filters from the query string", async () => {
     const activeThreadId = Ids.ThreadId.make("thread_service_search_active")
     const archivedThreadId = Ids.ThreadId.make("thread_service_search_archived")
     const staleThreadId = Ids.ThreadId.make("thread_service_search_stale")
@@ -155,23 +148,18 @@ describe("ThreadService", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         yield* Migration.migrate()
-        const project = yield* ProjectStore.create({
-          name: "backend",
-          repo_origin: "https://github.com/example/backend.git",
-        })
-        const projectWorkspaceId = Ids.WorkspaceId.make(`project:${project.project_id}`)
         for (const event of [
-          searchThreadCreated(activeThreadId, projectWorkspaceId, recent, "active"),
+          searchThreadCreated(activeThreadId, workspaceId, recent, "active"),
           toolRequestedForThread(activeThreadId, 2, recent, "packages/server/src/search.ts", "active"),
           searchMessageAdded(activeThreadId, 3, recent, "needle active", "active"),
-          searchThreadCreated(archivedThreadId, projectWorkspaceId, recent, "archived"),
+          searchThreadCreated(archivedThreadId, workspaceId, recent, "archived"),
           toolRequestedForThread(archivedThreadId, 2, recent, "packages/server/src/search.ts", "archived"),
           searchMessageAdded(archivedThreadId, 3, recent, "needle archived", "archived"),
           threadArchivedForThread(archivedThreadId, 4, recent, "archived"),
-          searchThreadCreated(staleThreadId, projectWorkspaceId, stale, "stale"),
+          searchThreadCreated(staleThreadId, workspaceId, stale, "stale"),
           toolRequestedForThread(staleThreadId, 2, stale, "packages/server/src/search.ts", "stale"),
           searchMessageAdded(staleThreadId, 3, stale, "needle stale", "stale"),
-          searchThreadCreated(otherWorkspaceThreadId, workspaceId, recent, "other"),
+          searchThreadCreated(otherWorkspaceThreadId, Ids.WorkspaceId.make("workspace_other"), recent, "other"),
           toolRequestedForThread(otherWorkspaceThreadId, 2, recent, "packages/server/src/search.ts", "other"),
           searchMessageAdded(otherWorkspaceThreadId, 3, recent, "needle other", "other"),
         ]) {
@@ -179,7 +167,8 @@ describe("ThreadService", () => {
         }
 
         const filtered = yield* ThreadService.search({
-          query: "needle file:packages/server/**/*.ts archived:false after:7d project:backend",
+          query: "needle file:packages/server/**/*.ts archived:false after:7d",
+          workspace_id: workspaceId,
         })
         const archived = yield* ThreadService.search({
           query: "needle archived:true",

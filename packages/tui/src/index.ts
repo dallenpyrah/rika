@@ -4,8 +4,6 @@ export * as Controller from "./controller"
 export * as Keymap from "./keymap"
 export * as Keys from "./keys"
 export * as Palette from "./palette"
-export * as RemoteSession from "./remote-session"
-export * as Session from "./session"
 export * as Ticker from "./ticker"
 export * as ViewState from "./view-state"
 

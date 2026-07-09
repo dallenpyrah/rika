@@ -15,11 +15,8 @@
     "typecheck": "bun tsc --noEmit"
   },
   "dependencies": {
-    "@rika/agent": "workspace:*",
     "@rika/core": "workspace:*",
     "@rika/llm": "workspace:*",
-    "@rika/persistence": "workspace:*",
-    "@rika/sdk": "workspace:*",
     "@rika/schema": "workspace:*",
     "@opentui/core": "0.4.2",
     "@pierre/diffs": "1.2.11",

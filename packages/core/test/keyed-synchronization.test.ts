@@ -45,7 +45,7 @@ describe("KeyedSemaphore", () => {
         const releaseFirst = yield* Deferred.make<void>()
         const first = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "first-enter"]).pipe(
             Effect.andThen(Deferred.succeed(firstEntered, undefined)),
             Effect.andThen(Deferred.await(releaseFirst)),
@@ -55,7 +55,7 @@ describe("KeyedSemaphore", () => {
         yield* Deferred.await(firstEntered)
         const second = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "second-enter"]).pipe(
             Effect.andThen(Deferred.succeed(secondEntered, undefined)),
             Effect.andThen(Ref.update(events, (items) => [...items, "second-exit"])),
@@ -85,7 +85,7 @@ describe("KeyedSemaphore", () => {
         const secondEntered = yield* Deferred.make<void>()
         const first = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb-a",
+          "thread-a",
           Ref.update(events, (items) => [...items, "first-enter"]).pipe(
             Effect.andThen(Deferred.succeed(firstEntered, undefined)),
             Effect.andThen(Deferred.await(secondEntered)),
@@ -95,7 +95,7 @@ describe("KeyedSemaphore", () => {
         yield* Deferred.await(firstEntered)
         const second = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb-b",
+          "thread-b",
           Ref.update(events, (items) => [...items, "second-enter"]).pipe(
             Effect.andThen(Deferred.succeed(secondEntered, undefined)),
             Effect.andThen(Ref.update(events, (items) => [...items, "second-exit"])),
@@ -121,9 +121,9 @@ describe("KeyedSemaphore", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const locks = yield* KeyedSemaphore.make<string>()
-        yield* KeyedSemaphore.withPermit(locks, "orb", Effect.void)
+        yield* KeyedSemaphore.withPermit(locks, "thread", Effect.void)
         const beforeRemove = yield* semaphoreCount(locks)
-        yield* KeyedSemaphore.remove(locks, "orb")
+        yield* KeyedSemaphore.remove(locks, "thread")
         const afterRemove = yield* semaphoreCount(locks)
         return { beforeRemove, afterRemove }
       }),
@@ -143,7 +143,7 @@ describe("KeyedSemaphore", () => {
         const releaseFirst = yield* Deferred.make<void>()
         const first = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "first-enter"]).pipe(
             Effect.andThen(Deferred.succeed(firstEntered, undefined)),
             Effect.andThen(Deferred.await(releaseFirst)),
@@ -153,7 +153,7 @@ describe("KeyedSemaphore", () => {
         yield* Deferred.await(firstEntered)
         const second = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "second-enter"]).pipe(
             Effect.andThen(Deferred.succeed(secondEntered, undefined)),
             Effect.andThen(Ref.update(events, (items) => [...items, "second-exit"])),
@@ -161,7 +161,7 @@ describe("KeyedSemaphore", () => {
         ).pipe(Effect.forkChild)
         yield* Effect.yieldNow
         yield* Effect.yieldNow
-        yield* KeyedSemaphore.remove(locks, "orb")
+        yield* KeyedSemaphore.remove(locks, "thread")
         const sizeAfterRemove = yield* semaphoreCount(locks)
         const secondEnteredBeforeRelease = yield* Deferred.isDone(secondEntered)
         yield* Deferred.succeed(releaseFirst, undefined)
@@ -188,17 +188,19 @@ describe("KeyedSemaphore", () => {
         const releaseFirst = yield* Deferred.make<void>()
         const first = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Deferred.succeed(firstEntered, undefined).pipe(Effect.andThen(Deferred.await(releaseFirst))),
         ).pipe(Effect.forkChild)
         yield* Deferred.await(firstEntered)
-        const second = yield* KeyedSemaphore.withPermit(locks, "orb", Deferred.succeed(secondEntered, undefined)).pipe(
-          Effect.forkChild,
-        )
-        yield* waitForInUse(locks, "orb", 2)
+        const second = yield* KeyedSemaphore.withPermit(
+          locks,
+          "thread",
+          Deferred.succeed(secondEntered, undefined),
+        ).pipe(Effect.forkChild)
+        yield* waitForInUse(locks, "thread", 2)
         yield* Fiber.interrupt(second)
         const secondEnteredBeforeInterrupt = yield* Deferred.isDone(secondEntered)
-        yield* KeyedSemaphore.remove(locks, "orb")
+        yield* KeyedSemaphore.remove(locks, "thread")
         const sizeBeforeActiveRelease = yield* semaphoreCount(locks)
         yield* Deferred.succeed(releaseFirst, undefined)
         yield* Fiber.join(first)
@@ -227,7 +229,7 @@ describe("KeyedSemaphore", () => {
         const releaseThird = yield* Deferred.make<void>()
         const first = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "first-enter"]).pipe(
             Effect.andThen(Deferred.succeed(firstEntered, undefined)),
             Effect.andThen(Deferred.await(releaseFirst)),
@@ -238,19 +240,19 @@ describe("KeyedSemaphore", () => {
         const second = yield* Effect.gen(function* () {
           yield* KeyedSemaphore.withPermit(
             locks,
-            "orb",
+            "thread",
             Ref.update(events, (items) => [...items, "second-enter"]).pipe(
               Effect.andThen(Deferred.succeed(secondEntered, undefined)),
               Effect.andThen(Deferred.await(releaseSecond)),
               Effect.andThen(Ref.update(events, (items) => [...items, "second-exit"])),
             ),
           )
-          yield* KeyedSemaphore.remove(locks, "orb")
+          yield* KeyedSemaphore.remove(locks, "thread")
           yield* Deferred.succeed(secondRemoved, undefined)
         }).pipe(Effect.forkChild)
         const third = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "third-enter"]).pipe(
             Effect.andThen(Deferred.succeed(thirdEntered, undefined)),
             Effect.andThen(Deferred.await(releaseThird)),
@@ -266,7 +268,7 @@ describe("KeyedSemaphore", () => {
         yield* Deferred.await(thirdEntered)
         const fourth = yield* KeyedSemaphore.withPermit(
           locks,
-          "orb",
+          "thread",
           Ref.update(events, (items) => [...items, "fourth-enter"]).pipe(
             Effect.andThen(Deferred.succeed(fourthEntered, undefined)),
             Effect.andThen(Ref.update(events, (items) => [...items, "fourth-exit"])),

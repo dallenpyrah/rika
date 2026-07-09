@@ -355,6 +355,55 @@ describe("ThreadClient", () => {
     expect(disposed).toBe(true)
   })
 
+  test("polls typed catch-up when a live broadcast signal is missed", async () => {
+    const first = event(1)
+    const second = event(2)
+    let calls = 0
+    const getEventsInputs: Array<ThreadActor.GetEventsPayload> = []
+    const layer = ThreadClient.layer.pipe(
+      Layer.provideMerge(
+        fakeClientLayerWithHandlers({
+          getEvents: (payload) => {
+            calls += 1
+            getEventsInputs.push(payload)
+            const visible = calls === 1 ? [first] : [first, second]
+            return Effect.succeed(visible.filter((current) => current.sequence > (payload.after_sequence ?? 0)))
+          },
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(
+          ThreadClient.LiveConnection,
+          ThreadClient.LiveConnection.of({
+            subscribe: () => Stream.make(undefined),
+          }),
+        ),
+      ),
+    )
+
+    const collected = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fiber = yield* ThreadClient.subscribeEvents({ thread_id: threadId, after_sequence: 0 }).pipe(
+            Stream.take(2),
+            Stream.runCollect,
+            Effect.provide(layer),
+            Effect.forkScoped({ startImmediately: true }),
+          )
+          yield* Effect.yieldNow
+          yield* TestClock.adjust("500 millis")
+          return yield* Fiber.join(fiber)
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
+    )
+
+    expect(collected.map((current) => current.sequence)).toEqual([1, 2])
+    expect(getEventsInputs).toEqual([
+      { thread_id: threadId, after_sequence: 0 },
+      { thread_id: threadId, after_sequence: 1 },
+    ])
+  })
+
   test("fails subscribeEvents instead of silently polling when the live connection is missing", async () => {
     let getEventsCalls = 0
     const exit = await Effect.runPromise(

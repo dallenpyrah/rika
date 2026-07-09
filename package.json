@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "rika",
-  "description": "Effect-native coding agent operating system inspired by Amp Code",
+  "description": "Local Effect-native coding agent CLI on RivetKit actors",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.14",
@@ -14,31 +14,21 @@
     "format:check": "prettier --check .",
     "install:local": "bun run scripts/install-release.ts",
     "lint": "oxlint . && ast-grep scan",
-    "orb:template": "bun run scripts/build-orb-template.ts",
-    "orb:template:contract": "bun test scripts/orb-template.test.ts",
-    "orb:template:smoke": "bun run scripts/orb-template-smoke.ts",
     "package": "bun run scripts/package-cli.ts",
     "package:smoke": "bun run scripts/package-smoke.ts",
-    "parity:burst-compare": "bun run scripts/parity-burst-compare.ts",
-    "parity:diff": "bun run scripts/parity-pixel-diff.ts",
-    "parity:startup-burst-capture": "bun run scripts/parity-startup-burst-capture.ts",
-    "parity:startup-measure": "bun run scripts/parity-startup-measure.ts",
     "update:local": "bun run scripts/install-release.ts",
     "test": "bun turbo test",
-    "typecheck": "bun turbo typecheck",
-    "web:dev": "bun run --cwd apps/web dev"
+    "typecheck": "bun turbo typecheck"
   },
   "workspaces": {
     "packages": [
-      "packages/*",
-      "apps/*"
+      "packages/*"
     ],
     "catalog": {
       "@ast-grep/cli": "0.44.0",
       "@effect/ai-openai": "4.0.0-beta.90",
       "@effect/ai-anthropic": "4.0.0-beta.90",
       "@effect/opentelemetry": "4.0.0-beta.90",
-      "@effect/platform-bun": "4.0.0-beta.90",
       "@effect/platform-node": "4.0.0-beta.90",
       "@effect/sql-sqlite-bun": "4.0.0-beta.90",
       "@opentelemetry/api": "1.9.1",
@@ -55,25 +45,15 @@
       "@tsconfig/bun": "1.0.9",
       "@types/bun": "1.3.13",
       "@types/node": "24.12.2",
-      "@foldkit/ui": "0.120.0",
-      "@tailwindcss/vite": "4.3.2",
-      "class-variance-authority": "0.7.1",
-      "clsx": "2.1.1",
       "drizzle-kit": "1.0.0-rc.2",
       "drizzle-orm": "1.0.0-rc.2",
-      "e2b": "2.31.0",
       "effect": "4.0.0-beta.90",
-      "foldkit": "0.120.0",
       "oxlint": "1.60.0",
       "oxlint-tsgolint": "0.21.0",
       "prettier": "3.6.2",
       "rivetkit": "2.3.2",
-      "tailwind-merge": "3.6.0",
-      "tailwindcss": "4.3.2",
       "turbo": "2.8.13",
-      "typescript": "5.8.2",
-      "vite": "8.1.2",
-      "@foldkit/vite-plugin": "0.10.0"
+      "typescript": "5.8.2"
     }
   },
   "trustedDependencies": [

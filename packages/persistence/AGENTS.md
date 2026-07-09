@@ -1,67 +1,46 @@
-<!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-06-27 | Updated: 2026-06-27 -->
-
 # Persistence Package
 
 ## Purpose
 
 `packages/persistence/` owns Drizzle-backed local SQLite adapters, migrations, and durable storage services. It is the only package where raw Drizzle and `bun:sqlite` handles are allowed.
 
-## Key Files
+## Key files
 
-| File                              | Purpose                                                              |
-| --------------------------------- | -------------------------------------------------------------------- |
-| `drizzle.config.ts`               | Drizzle Kit configuration for local SQLite migration generation.     |
-| `drizzle/`                        | Committed generated SQL migrations and Drizzle metadata.             |
-| `src/artifact-store.ts`           | Durable artifact persistence for review runs and future outputs.     |
-| `src/database.ts`                 | Effect `Database` service and SQLite connection layers.              |
-| `src/mcp-approval-store.ts`       | Durable workspace MCP command-server approval records.               |
-| `src/migration.ts`                | Effect `Migration` service for runtime migration application.        |
-| `src/schema/event-log.ts`         | Drizzle schema for the canonical event log tables.                   |
-| `src/schema/index.ts`             | Schema exports consumed by Drizzle Kit and services.                 |
-| `src/thread-event-log.ts`         | Canonical append-only thread event log service.                      |
-| `src/thread-projection.ts`        | Rebuildable thread list/latest message/active turn/diff projections. |
-| `src/workspace-store.ts`          | Durable workspace membership persistence for hosted access.          |
-| `test/database.test.ts`           | Database layer replacement tests.                                    |
-| `test/artifact-store.test.ts`     | Artifact put/get/list persistence tests.                             |
-| `test/migration.test.ts`          | Runtime migration service tests.                                     |
-| `test/mcp-approval-store.test.ts` | MCP approval idempotency and listing tests.                          |
-| `test/schema/event-log.test.ts`   | Event log schema tests.                                              |
-| `test/thread-event-log.test.ts`   | Event append, ordering, idempotency, and restart tests.              |
-| `test/thread-projection.test.ts`  | Projection apply and rebuild tests.                                  |
-| `test/workspace-store.test.ts`    | Workspace membership persistence and scoping tests.                  |
+| File                        | Purpose                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| `drizzle.config.ts`         | Drizzle Kit configuration for local SQLite migration generation.                |
+| `drizzle/`                  | Committed generated SQL migrations and Drizzle metadata.                        |
+| `src/artifact-store.ts`     | Durable artifact persistence.                                                   |
+| `src/database.ts`           | Effect `Database` service and SQLite connection layers.                         |
+| `src/mcp-approval-store.ts` | Durable workspace MCP command-server approval records.                          |
+| `src/migration.ts`          | Effect `Migration` service for runtime migration application.                   |
+| `src/schema/event-log.ts`   | Drizzle schema for local durable tables.                                        |
+| `src/schema/index.ts`       | Schema exports consumed by Drizzle Kit and services.                            |
+| `src/thread-event-log.ts`   | Local append-only thread event log for non-actor compatibility and projections. |
+| `src/thread-projection.ts`  | Rebuildable thread list/latest message/active turn/diff projections.            |
+| `src/workspace-store.ts`    | Durable local workspace membership persistence.                                 |
 
-## Current Standards
+## Current standards
 
+- SQLite is the only supported persistence dialect.
 - Keep Drizzle schema field names snake_case so column names do not need string remapping.
 - Expose persistence behavior through Effect services and layers.
 - Prefer `Database.memoryLayer` in tests; use file-backed `layerFromPath` only when testing file-specific SQLite behavior.
 - Generated SQL migrations in `drizzle/` are committed. Do not hand-edit Drizzle metadata unless repairing a broken migration intentionally.
 - Raw Drizzle handles may be used only inside this package.
-- `ThreadEventLog` is canonical. `ThreadProjection` tables are disposable and must rebuild from `thread_events` only.
-- Projection summaries may include UI-facing conveniences such as active turn state and diff stats, but they must remain rebuildable from event payloads.
-- `WorkspaceStore` owns durable user/workspace memberships. Access decisions live above this package.
+- `ThreadEventLog` and actor c.db logs are canonical for their respective paths. `ThreadProjection` tables are disposable and rebuildable.
+- Do not add Postgres, PGlite, FoundationDB, projects, orbs, user-token hosting, or hosted-control-plane stores.
 
-## For AI Agents
+## For AI agents
 
 - Read `../../docs/persistence.md` before changing schema, migrations, or persistence services.
 - Read `../../docs/effect-module-conventions.md` before adding a new persistence service.
-- Keep repository/domain services above this adapter boundary so future remote storage can swap in without UI or actor changes.
+- Keep repository/domain services above this adapter boundary so storage can be tested with memory or file-backed SQLite layers.
 
-## Testing And Verification
+## Testing and verification
 
 - `bun run db:generate` from this package or from the repo root after schema changes.
 - `bun run db:migrate` from this package or from the repo root to apply committed migrations locally.
-- `bun run lint` from this package or `bun run lint` from the repo root.
-- `bun run typecheck` from this package or `bun run typecheck` from the repo root.
-- `bun run test` from this package or `bun run test` from the repo root.
-
-## Skills Index
-
-<!-- AGENTS-SKILLS-START -->
-
-[Skills Index]|local: ../../.agents/skills|IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning. When a task matches a skill, read its SKILL.md and follow it.|relevant:{add-effect-service}
-
-<!-- AGENTS-SKILLS-END -->
-
-<!-- MANUAL: Add human-maintained notes below this line. They are preserved by deep-init. -->
+- `bun run lint` from this package or from the repo root.
+- `bun run typecheck` from this package or from the repo root.
+- `bun run test` from this package or from the repo root.

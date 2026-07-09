@@ -17,32 +17,23 @@ describe("HostConfig", () => {
     })
   })
 
-  test("resolves remote endpoint, token, namespace, and runner version from env", async () => {
+  test("resolves an explicit local endpoint override", async () => {
     const host = await Effect.runPromise(
       HostConfig.resolveOptions(
         {},
         {
-          RIKA_RIVET_HOST: "remote",
-          RIKA_RIVET_ENDPOINT: "https://rivet.example.com",
-          RIKA_RIVET_TOKEN: "secret",
-          RIKA_RIVET_NAMESPACE: "team",
-          RIVET_RUNNER_VERSION: "build-123",
+          RIKA_RIVET_ENDPOINT: "http://localhost:7000",
         },
       ),
     )
 
     expect(host).toEqual({
-      mode: "remote",
-      endpoint: "https://rivet.example.com",
-      token: "secret",
-      namespace: "team",
+      mode: "local",
+      endpoint: "http://localhost:7000",
       no_welcome: true,
-      runner_version: "build-123",
     })
     expect(HostConfig.toClientOptions(host)).toEqual({
-      endpoint: "https://rivet.example.com",
-      token: "secret",
-      namespace: "team",
+      endpoint: "http://localhost:7000",
     })
   })
 
@@ -52,9 +43,17 @@ describe("HostConfig", () => {
     expect(host.no_welcome).toBe(false)
   })
 
-  test("requires an explicit endpoint in remote mode", async () => {
+  test("rejects non-local endpoints", async () => {
     const error = await Effect.runPromise(
-      HostConfig.resolveOptions({}, { RIKA_RIVET_HOST: "remote" }).pipe(Effect.flip),
+      HostConfig.resolveOptions({}, { RIKA_RIVET_ENDPOINT: "https://rivet.example.com" }).pipe(Effect.flip),
+    )
+
+    expect(error).toMatchObject({ key: "RIKA_RIVET_ENDPOINT" })
+  })
+
+  test("rejects all-interface bind addresses", async () => {
+    const error = await Effect.runPromise(
+      HostConfig.resolveOptions({}, { RIKA_RIVET_ENDPOINT: "http://0.0.0.0:6420" }).pipe(Effect.flip),
     )
 
     expect(error).toMatchObject({ key: "RIKA_RIVET_ENDPOINT" })

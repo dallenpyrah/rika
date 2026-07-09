@@ -1,9 +1,0 @@
-{
-  "$schema": "https://foldcn.dev/schema/components.json",
-  "css": "src/styles.css",
-  "baseColor": "neutral",
-  "aliases": {
-    "ui": "src/components/ui",
-    "lib": "src/lib"
-  }
-}

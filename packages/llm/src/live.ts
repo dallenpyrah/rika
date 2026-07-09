@@ -10,20 +10,27 @@ export interface Options {
   readonly anthropic?: Anthropic.Options
 }
 
+export const defaultModelProviderBaseUrl = "http://127.0.0.1:8317/v1"
+
 export const optionsFromEnv = (env: Record<string, string | undefined>): Options => {
-  const apiUrl = env.RIKA_BASE_URL === undefined || env.RIKA_BASE_URL.length === 0 ? undefined : env.RIKA_BASE_URL
-  const anthropicApiUrl = apiUrl === undefined ? undefined : stripTrailingV1(apiUrl)
+  const apiUrl = modelProviderBaseUrlFromEnv(env)
+  const anthropicApiUrl = stripTrailingV1(apiUrl)
 
   return {
     openai: {
       apiKeyEnv: "RIKA_API_KEY",
-      ...(apiUrl === undefined ? {} : { apiUrl }),
+      apiUrl,
     },
     anthropic: {
       apiKeyEnv: "RIKA_API_KEY",
-      ...(anthropicApiUrl === undefined ? {} : { apiUrl: anthropicApiUrl }),
+      apiUrl: anthropicApiUrl,
     },
   }
+}
+
+export const modelProviderBaseUrlFromEnv = (env: Record<string, string | undefined>): string => {
+  const configured = env.RIKA_BASE_URL?.trim()
+  return configured === undefined || configured.length === 0 ? defaultModelProviderBaseUrl : configured
 }
 
 export const stripTrailingV1 = (apiUrl: string): string => {

@@ -23,6 +23,7 @@ export const requestConfigFromRikaRequest = (
   return {
     model: request.model,
     store,
+    strictJsonSchema: false,
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     ...(reasoningEffort === undefined ? {} : { reasoning: { effort: reasoningEffort } }),
     ...(store && request.metadata !== undefined ? { metadata: request.metadata } : {}),
@@ -112,7 +113,7 @@ const textEncoder = new TextEncoder()
 const encodeText = (text: string): Uint8Array => textEncoder.encode(text)
 
 export const languageModelLayer = (options: Options = {}) =>
-  OpenAiLanguageModel.model(options.model ?? Modes.defaultModel, { store: false })
+  OpenAiLanguageModel.model(options.model ?? Modes.defaultModel, { store: false, strictJsonSchema: false })
 
 export const provider = (options: Options = {}) =>
   Provider.make({

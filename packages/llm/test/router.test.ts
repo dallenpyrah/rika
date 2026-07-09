@@ -37,9 +37,9 @@ describe("LLM Router", () => {
 
     expect(routed).toMatchObject({
       mode: "smart",
-      provider: "anthropic",
-      model: "claude-opus-4-8",
-      reasoning_effort: "max",
+      provider: "openai",
+      model: "gpt-5.5",
+      reasoning_effort: "high",
       messages,
     })
   })
@@ -66,7 +66,7 @@ describe("LLM Router", () => {
   })
 
   test("resolves fast mode to the priority service tier for OpenAI modes", async () => {
-    for (const mode of ["rush", "deep1", "deep2", "deep3"] as const) {
+    for (const mode of ["rush", "smart", "deep1", "deep2", "deep3"] as const) {
       const routed = await Effect.runPromise(
         Router.route({ mode, messages, fast_mode: true }).pipe(Effect.provide(routerLayer)),
       )
@@ -76,7 +76,9 @@ describe("LLM Router", () => {
 
   test("does not set a service tier for non-OpenAI modes or when fast mode is off", async () => {
     const smart = await Effect.runPromise(
-      Router.route({ mode: "smart", messages, fast_mode: true }).pipe(Effect.provide(routerLayer)),
+      Router.route({ mode: "smart", provider: "anthropic", messages, fast_mode: true }).pipe(
+        Effect.provide(routerLayer),
+      ),
     )
     expect(smart).not.toHaveProperty("service_tier")
 

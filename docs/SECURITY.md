@@ -1,18 +1,17 @@
 # Security Reference
 
-Rika is a local-first coding agent that can inspect files, run commands, edit code, load plugins, call MCP servers, and serve a remote-control API. Treat it like a developer shell with model-driven automation.
+Rika is a local-only coding agent CLI that can inspect files, run commands, edit code, load plugins, and call MCP servers. Treat it like a developer shell with model-driven automation.
 
 ## Trust model
 
-| Surface             | Default trust posture                                               |
-| ------------------- | ------------------------------------------------------------------- |
-| Workspace files     | Untrusted input to the model unless explicitly trusted by the user. |
-| Shell/tool calls    | Powerful local actions routed through `ToolExecutor` and policy.    |
-| Plugins             | Trusted local TypeScript. MVP plugins are **not sandboxed**.        |
-| MCP command servers | Untrusted executable code until approved by fingerprint and cwd.    |
-| Remote MCP servers  | External services; credentials stay in config.                      |
-| Remote-control API  | Localhost-first; bearer token required when configured.             |
-| Rivet actors        | Runtime ownership boundary; durable truth remains the event log.    |
+| Surface             | Default trust posture                                                  |
+| ------------------- | ---------------------------------------------------------------------- |
+| Workspace files     | Untrusted input to the model unless explicitly trusted by the user.    |
+| Shell/tool calls    | Powerful local actions routed through `ToolExecutor` and policy.       |
+| Plugins             | Trusted local TypeScript. MVP plugins are **not sandboxed**.           |
+| MCP command servers | Untrusted executable code until approved by fingerprint and cwd.       |
+| Remote MCP servers  | External services; credentials stay in config.                         |
+| Rivet actors        | Runtime ownership boundary; actor-local event logs own active threads. |
 
 ## Tools and permissions
 
@@ -20,7 +19,7 @@ Tool calls run through `ToolExecutor.Service`; plugins and MCP tools do not bypa
 
 `guarded_files` is a best-effort argument-path guard. It resolves path-like tool input strings against the workspace root before matching configured patterns, including symlinked directories, but it does not parse arbitrary shell command text. The plugin loader's workspace-scoped trust record and source hash verification are the security boundary for plugin execution.
 
-Subagents default to `RIKA_SUBAGENT_TOOLS=readonly` in local processes. `RIKA_SUBAGENT_TOOLS=full` gives subagents the standard tool surface except the recursive `task` tool; every subagent tool call still goes through `ToolExecutor.Service` and `PermissionPolicy.Service`. Orb servers are launched with full subagent tools because the workspace is already inside the sandbox boundary.
+Subagents default to `RIKA_SUBAGENT_TOOLS=readonly` in local processes. `RIKA_SUBAGENT_TOOLS=full` gives subagents the standard tool surface except the recursive `task` tool; every subagent tool call still goes through `ToolExecutor.Service` and `PermissionPolicy.Service`.
 
 The centralized `PermissionPolicy.Service` supports four decisions for every tool call:
 
@@ -44,22 +43,19 @@ Secrets should enter through environment/config boundaries:
 
 - `RIKA_API_KEY`
 - `RIKA_EMBEDDINGS_API_KEY`
-- `RIKA_RIVET_TOKEN` / `RIVET_TOKEN`
 - remote MCP headers/tokens when configured
-- remote-control bearer token
 
 Rika should not persist raw secret values into thread events, artifacts, plugin trust records, or doctor output. `rika doctor` reports only whether secrets are configured.
 
 Thread memory sends completed-turn digest text to the configured embedding provider and persists the digest text plus embedding bytes in the local SQLite database.
 
-## Shared local backend
+## Local Rivet runtime
 
-Interactive TUI windows share one local backend per workspace/data directory by default. The backend connection record lives under `RIKA_DATA_DIR` and includes a bearer token used by local SDK clients. Rika writes that record as a private file, `rika doctor` redacts the token, and normal UI output never prints it.
+Rika starts a local RivetKit actor host and keeps actor access on localhost. `RIKA_RIVET_ENDPOINT` may override the endpoint, but it must resolve to a local HTTP endpoint. Actor-local `c.db` event logs own active thread history; local SQLite stores cross-thread indexes, artifacts, approvals, and memory.
 
-- Treat the shared backend token like a local session secret.
-- Delete a stale backend record or run `rika doctor` if a workspace appears disconnected after a crash.
-- Set `RIKA_BACKEND_URL` / `RIKA_BACKEND_TOKEN` only for backends you trust.
-- Use `--ephemeral` for isolated in-process tests when sharing would hide a bug.
+- Treat `RIKA_DATA_DIR` as sensitive local developer data.
+- Use `--ephemeral` for isolated in-process tests when persisted local state would hide a bug.
+- Do not expose the local Rivet endpoint to untrusted networks.
 
 ## Plugins
 
@@ -83,21 +79,9 @@ Workspace command MCP servers require explicit approval before spawn. Approval i
 
 `rika skills add` clones Git sources and copies validated skill directories into project or user skill roots. Installed skills are prompt instructions and optional resources, not executable code by themselves. Treat their contents as untrusted workspace context until explicitly loaded; any bundled `mcp.json` still follows MCP approval before command-server execution. Provenance is recorded in `skills-lock.json` with source, commit, install time, scope, and directory.
 
-## Remote control and hosted workspaces
-
-The HTTP server can require `Authorization: Bearer <token>`. That bearer token gates remote API access. `user_id` is a self-asserted participant identity for attribution, turn-conflict display, and presence; it is not an authorization secret and must not be treated as proof of workspace membership.
-
-- Requests without `user_id` keep local-first behavior.
-- Requests with `user_id` stamp attribution where the schema supports it.
-- Presence uses `user_id` for ephemeral active/typing snapshots and is not persisted.
-- The first identified user to create an empty hosted workspace becomes owner.
-- Workspace membership remains durable security data, but remote-control routes must not infer access control from `user_id` alone.
-
-Remote control grants thread steering, not unrestricted filesystem access. Keep local filesystem mutation behind normal tools/policy.
-
 ## Persistence and recovery
 
-The append-only event log is canonical. Projections and actor hot state are rebuildable. Workspace membership data is security-sensitive and should be backed up before hosted deployments.
+Actor-local append-only event logs are canonical for active threads. Projections and actor hot state are rebuildable. The local SQLite database and Rivet storage directory should be backed up before destructive local maintenance.
 
 Operational minimum:
 
@@ -115,7 +99,7 @@ Coverage currently includes:
 - Workspace membership/access-control tests.
 - Plugin trust, verification, and rollback tests.
 - Doctor output secret-redaction tests.
-- Remote-control token and user-scope tests.
+- Local Rivet endpoint validation tests.
 
 ## Reporting issues
 

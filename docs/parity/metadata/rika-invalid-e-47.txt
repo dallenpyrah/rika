@@ -1,2 +1,0 @@
-Error: error: unknown option '-e'
-[=0u[<u[?25h

@@ -1,7 +1,7 @@
 import { Config, Diagnostics, IdGenerator, Time } from "@rika/core"
 import { Errors, Provider, Router, Tokens } from "@rika/llm"
 import { Database, ThreadEventLog, ThreadProjection } from "@rika/persistence"
-import { Common, ErrorEnvelope, Event, Ide, Ids, Message, Tool } from "@rika/schema"
+import { Common, ErrorEnvelope, Event, Ids, Message, Tool } from "@rika/schema"
 import { Cause, Context, Effect, Layer, Option, Queue, Schema, Stream } from "effect"
 import { AiError, Prompt } from "effect/unstable/ai"
 import * as CompactionService from "./compaction-service"
@@ -26,7 +26,6 @@ export const RunTurnInput = Schema.Struct({
   mode: Schema.optional(Config.Mode),
   fast_mode: Schema.optional(Schema.Boolean),
   cancelled: Schema.optional(Schema.Boolean),
-  ide_context: Schema.optional(Ide.ContextSnapshot),
   tool_access: Schema.optional(Tool.TurnToolAccess),
   existing_events: Schema.optional(Schema.Array(Event.Event)),
 }).annotate({ identifier: "Rika.Agent.AgentLoop.RunTurnInput" })
@@ -280,7 +279,6 @@ const runTurnBody = (dependencies: Dependencies, input: RunTurnInput, emit: Emit
       turn_id: turnId,
       content: input.content,
       history: [...existingEvents, ...appendedEvents],
-      ...(input.ide_context === undefined ? {} : { ide_context: input.ide_context }),
     })
     yield* append(yield* makeContextResolved(dependencies, input.thread_id, turnId, resolvedContext, sequence + 1))
     const skillSelection = yield* dependencies.skillRegistry.selectForPrompt({ content: input.content })
