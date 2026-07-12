@@ -14,6 +14,7 @@ import {
   subagentHandoffTargets,
 } from "./agent-profiles"
 import * as MediaAnalyzer from "./media-analyzer"
+import * as RelayCompat from "./relay-compat"
 import { definitions, idFor } from "./workflow-definitions"
 
 export interface LayerOptions<AdditionalTools extends Record<string, Tool.Any> = {}> {
@@ -191,12 +192,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
   Layer.effect(
     Service,
     Effect.gen(function* () {
-      const client = yield* Client.Service
+      const client = RelayCompat.extend(yield* Client.Service)
       return Service.of({
         createFanOut: Effect.fn("ExecutionBackend.createFanOut")(function* (input) {
           const state = yield* client
             .createChildFanOut({
-              fan_out_id: Ids.ChildFanOutId.make(input.fanOutId),
+              fan_out_id: input.fanOutId,
               parent_execution_id: executionId(input.parentTurnId),
               children: input.children.map((child) => {
                 const profile = child.profile ?? "Task"
@@ -220,15 +221,13 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           return mapFanOut(state)
         }),
         inspectFanOut: Effect.fn("ExecutionBackend.inspectFanOut")(function* (fanOutId) {
-          const result = yield* client
-            .inspectChildFanOut({ fan_out_id: Ids.ChildFanOutId.make(fanOutId) })
-            .pipe(Effect.mapError(error))
+          const result = yield* client.inspectChildFanOut({ fan_out_id: fanOutId }).pipe(Effect.mapError(error))
           return result.fan_out === undefined ? undefined : mapFanOut(result.fan_out)
         }),
         cancelFanOut: Effect.fn("ExecutionBackend.cancelFanOut")(function* (fanOutId, cancelledAt, reason) {
           const result = yield* client
             .cancelChildFanOut({
-              fan_out_id: Ids.ChildFanOutId.make(fanOutId),
+              fan_out_id: fanOutId,
               cancelled_at: cancelledAt,
               ...(reason === undefined ? {} : { reason }),
             })
@@ -543,16 +542,10 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
 export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(options: LayerOptions<AdditionalTools>) =>
   Layer.unwrap(
     Effect.promise(() => import("@relayfx/sdk/sqlite")).pipe(
-      Effect.map(
-        ({
-          ChildFanOutRuntime,
-          LanguageModelService,
-          RunnerRuntime,
-          SchemaRegistry,
-          SQLite,
-          ToolRuntime,
-          WorkflowDefinitionRuntime,
-        }) => {
+      Effect.map((sqliteModule) => {
+        const { LanguageModelService, RunnerRuntime, SchemaRegistry, SQLite, ToolRuntime } = sqliteModule
+        const { ChildFanOutRuntime, WorkflowDefinitionRuntime } = RelayCompat.legacyRuntimes(sqliteModule)
+        {
           const toolkit = toolkitFor(options)
           const handlerLayer =
             options.additionalHandlerLayer === undefined
@@ -618,12 +611,15 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               }),
             )
           }
+          if (!RelayCompat.hasFanOutWorkflowRuntimes(sqliteModule, SQLite)) {
+            return layerFromClient(options).pipe(Layer.provide(runnerClientLayer))
+          }
           const fanOutHandlers = Layer.effect(
             ChildFanOutRuntime.HandlerService,
             Client.Service.pipe(
               Effect.map((client) =>
                 ChildFanOutRuntime.HandlerService.of({
-                  execute: (child, fanOutState, idempotencyKey) =>
+                  execute: (child: any, fanOutState: any, idempotencyKey: string) =>
                     Effect.gen(function* () {
                       const startedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
                       const metadata = agentMetadata(options.compaction)
@@ -655,7 +651,7 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                       })
                       return yield* childResult(client, String(child.child_execution_id))
                     }),
-                  cancel: (childExecutionId) =>
+                  cancel: (childExecutionId: any) =>
                     client
                       .cancelExecution({
                         execution_id: Ids.ExecutionId.make(String(childExecutionId)),
@@ -666,14 +662,17 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               ),
             ),
           ).pipe(Layer.provide(runnerClientLayer))
-          const fanOutLayer = SQLite.childFanOutLayer({ filename: options.filename }, fanOutHandlers)
+          const fanOutLayer = RelayCompat.legacyLayers(SQLite).childFanOutLayer(
+            { filename: options.filename },
+            fanOutHandlers,
+          )
           const workflowHandlers = Layer.effect(
             WorkflowDefinitionRuntime.HandlerService,
             Effect.gen(function* () {
               const client = yield* Client.Service
               const childFanOut = yield* ChildFanOutRuntime.Service
               return WorkflowDefinitionRuntime.HandlerService.of({
-                child: (parentId, operation) => {
+                child: (parentId: any, operation: any) => {
                   const childId = Ids.ChildExecutionId.make(`child:${parentId}:${operation.id}`)
                   const grounded = "address_id" in operation
                   return client
@@ -690,54 +689,56 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                       Effect.map((result) => result.output),
                     )
                 },
-                approval: (_parentId, operation) => Effect.succeed({ approved: true, prompt: operation.prompt }),
-                timer: (_parentId, operation) => Effect.sleep(`${operation.duration_ms} millis`),
+                approval: (_parentId: any, operation: any) =>
+                  Effect.succeed({ approved: true, prompt: operation.prompt }),
+                timer: (_parentId: any, operation: any) => Effect.sleep(`${operation.duration_ms} millis`),
                 branch: () => Effect.succeed(true),
-                structuredCompletion: (_schema, value) => Effect.succeed(value ?? null),
-                createChildFanOut: (definition) => childFanOut.create(definition),
+                structuredCompletion: (_schema: any, value: any) => Effect.succeed(value ?? null),
+                createChildFanOut: (definition: any) => childFanOut.create(definition),
                 admitChildFanOut: () => Effect.void,
                 inspectChildFanOut: childFanOut.inspect,
               })
             }),
           ).pipe(Layer.provide(runnerClientLayer), Layer.provide(fanOutLayer))
-          const workflowLayer = SQLite.workflowLayer({ filename: options.filename }, workflowHandlers)
+          const workflowLayer = RelayCompat.legacyLayers(SQLite).workflowLayer(
+            { filename: options.filename },
+            workflowHandlers,
+          )
           const runtimeLayer = Layer.mergeAll(runnerLayer, fanOutLayer, workflowLayer)
           const hostBoundClientLayer = Layer.unwrap(
             Effect.gen(function* () {
               const runtimeContext = yield* Layer.build(runtimeLayer)
               const clientContext = yield* Layer.build(Client.layerFromRuntime).pipe(Effect.provide(runtimeContext))
               const client = Context.get(clientContext, Client.Service)
-              const childFanOutRuntime = Context.get(runtimeContext, ChildFanOutRuntime.Service)
-              return Layer.succeed(
-                Client.Service,
-                Client.Service.of({
-                  ...client,
-                  createChildFanOut: (input) =>
-                    childFanOutRuntime
-                      .create(input)
-                      .pipe(Effect.mapError((cause) => new Client.ClientError({ message: String(cause) }))),
-                  inspectChildFanOut: (input) =>
-                    childFanOutRuntime.inspect(input.fan_out_id).pipe(
-                      Effect.map((state) => ({ fan_out: state ?? null })),
+              const childFanOutRuntime: any = Context.get(runtimeContext, ChildFanOutRuntime.Service)
+              const extended: RelayCompat.ExtendedClient = {
+                ...RelayCompat.extend(client),
+                createChildFanOut: (input: any) =>
+                  childFanOutRuntime
+                    .create(input)
+                    .pipe(Effect.mapError((cause) => new Client.ClientError({ message: String(cause) }))),
+                inspectChildFanOut: (input: any) =>
+                  childFanOutRuntime.inspect(input.fan_out_id).pipe(
+                    Effect.map((state) => ({ fan_out: state ?? null })),
+                    Effect.mapError((cause) => new Client.ClientError({ message: String(cause) })),
+                  ),
+                cancelChildFanOut: (input: any) =>
+                  childFanOutRuntime
+                    .cancel(input.fan_out_id, input.cancelled_at, input.reason ?? "child fan-out cancelled")
+                    .pipe(
+                      Effect.flatMap((state) =>
+                        state === undefined
+                          ? Effect.fail(new BackendError({ message: `Child fan-out not found: ${input.fan_out_id}` }))
+                          : Effect.succeed({ fan_out: state }),
+                      ),
                       Effect.mapError((cause) => new Client.ClientError({ message: String(cause) })),
                     ),
-                  cancelChildFanOut: (input) =>
-                    childFanOutRuntime
-                      .cancel(input.fan_out_id, input.cancelled_at, input.reason ?? "child fan-out cancelled")
-                      .pipe(
-                        Effect.flatMap((state) =>
-                          state === undefined
-                            ? Effect.fail(new BackendError({ message: `Child fan-out not found: ${input.fan_out_id}` }))
-                            : Effect.succeed({ fan_out: state }),
-                        ),
-                        Effect.mapError((cause) => new Client.ClientError({ message: String(cause) })),
-                      ),
-                }),
-              )
+              }
+              return Layer.succeed(Client.Service, Client.Service.of(extended))
             }),
           )
           return layerFromClient(options).pipe(Layer.provide(hostBoundClientLayer))
-        },
-      ),
+        }
+      }),
     ),
   )

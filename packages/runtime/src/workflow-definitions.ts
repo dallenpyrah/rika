@@ -1,4 +1,5 @@
-import { Ids, Workflow } from "@relayfx/sdk"
+import { Ids } from "@relayfx/sdk"
+import * as RelayCompat from "./relay-compat"
 import { Schema } from "effect"
 
 const Operation = Schema.Union([
@@ -79,13 +80,13 @@ export const DynamicDefinition = Schema.Struct({
 })
 export type DynamicDefinition = typeof DynamicDefinition.Type
 
-const operationId = (value: string) => Ids.WorkflowOperationId.make(value)
-const workflowId = (value: string) => Ids.WorkflowDefinitionId.make(`rika:${value}:v1`)
+const operationId = (value: string) => value
+const workflowId = (value: string) => `rika:${value}:v1`
 const addressId = Ids.AddressId.make("address:rika")
 
-export const compile = (input: DynamicDefinition): Workflow.RegisterDefinitionPayload => {
+export const compile = (input: DynamicDefinition): RelayCompat.WorkflowDefinitionPayload => {
   const definition = Schema.decodeUnknownSync(DynamicDefinition)(input)
-  const operations: Workflow.DefinitionV2["operations"] = definition.operations.map((operation) => {
+  const operations: Array<RelayCompat.WorkflowOperationShape> = definition.operations.map((operation) => {
     const id = operationId(operation.id)
     switch (operation.kind) {
       case "sequence":
@@ -226,5 +227,5 @@ const research: DynamicDefinition = {
   ],
 }
 
-export const definitions: ReadonlyArray<Workflow.RegisterDefinitionPayload> = [compile(delivery), compile(research)]
+export const definitions: ReadonlyArray<RelayCompat.WorkflowDefinitionPayload> = [compile(delivery), compile(research)]
 export const idFor = workflowId

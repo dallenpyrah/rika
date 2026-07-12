@@ -9,6 +9,7 @@ import { Effect, Layer, Redacted, Ref, Schedule, Stream } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
+import * as RelayCompat from "../src/relay-compat"
 
 const native = vi.hoisted(() => ({ client: undefined as Client.Interface | undefined, results: [] as Array<unknown> }))
 
@@ -25,17 +26,26 @@ vi.mock("@relayfx/sdk", async (importOriginal) => {
 })
 
 vi.mock("@relayfx/sdk/sqlite", async () => {
-  const runtime = await import("../../../node_modules/@relayfx/sdk/node_modules/@relayfx/runtime/src/index.ts")
-  const schema = await import("../../../node_modules/@relayfx/sdk/node_modules/@relayfx/schema/src/index.ts")
   const { Context: EffectContext, Effect: NativeEffect, Layer: NativeLayer } = await import("effect")
-  const fanOutService = runtime.ChildFanOutRuntime.Service.of({
+  class FanOutRuntimeService extends EffectContext.Service<FanOutRuntimeService, any>()(
+    "rika-test/ChildFanOutRuntime",
+  ) {}
+  class FanOutHandlerService extends EffectContext.Service<FanOutHandlerService, any>()(
+    "rika-test/ChildFanOutHandlers",
+  ) {}
+  class WorkflowHandlerService extends EffectContext.Service<WorkflowHandlerService, any>()(
+    "rika-test/WorkflowHandlers",
+  ) {}
+  const ChildFanOutRuntimeMock = { Service: FanOutRuntimeService, HandlerService: FanOutHandlerService }
+  const WorkflowDefinitionRuntimeMock = { HandlerService: WorkflowHandlerService }
+  const fanOutService = FanOutRuntimeService.of({
     create: (definition: unknown) => (native.results.push(["create", definition]), NativeEffect.succeed(definition)),
     inspect: (id: unknown) => (native.results.push(["inspect", id]), NativeEffect.succeed(undefined)),
     cancel: (id: unknown) => (native.results.push(["cancelFan", id]), NativeEffect.succeed(undefined)),
   } as never)
   return {
-    ChildFanOutRuntime: runtime.ChildFanOutRuntime,
-    WorkflowDefinitionRuntime: runtime.WorkflowDefinitionRuntime,
+    ChildFanOutRuntime: ChildFanOutRuntimeMock,
+    WorkflowDefinitionRuntime: WorkflowDefinitionRuntimeMock,
     LanguageModelService: { layer: () => NativeLayer.empty },
     RunnerRuntime: { layerWithServices: () => NativeLayer.empty },
     SchemaRegistry: { layer: () => NativeLayer.empty },
@@ -43,18 +53,18 @@ vi.mock("@relayfx/sdk/sqlite", async () => {
     SQLite: {
       layer: () => NativeLayer.empty,
       childFanOutLayer: (_options: unknown, handlers: Layer.Layer<unknown>) =>
-        Layer.succeed(runtime.ChildFanOutRuntime.Service, fanOutService).pipe(
+        Layer.succeed(FanOutRuntimeService, fanOutService).pipe(
           Layer.tap(() =>
             Layer.build(handlers).pipe(
               Effect.flatMap((context) => {
-                const handler = EffectContext.get(context, runtime.ChildFanOutRuntime.HandlerService) as unknown as {
+                const handler = EffectContext.get(context, FanOutHandlerService) as unknown as {
                   execute: (...args: Array<unknown>) => Effect.Effect<unknown>
                   cancel: (...args: Array<unknown>) => Effect.Effect<unknown>
                 }
                 const child = {
                   child_execution_id: "child:native",
                   address_id: "address:rika",
-                  input: [schema.Content.text("work")],
+                  input: [{ type: "text" as const, text: "work" }],
                   metadata: { source: "test" },
                 }
                 return Effect.all([
@@ -70,10 +80,7 @@ vi.mock("@relayfx/sdk/sqlite", async () => {
         Layer.effectDiscard(
           Layer.build(handlers).pipe(
             Effect.flatMap((context) => {
-              const handler = EffectContext.get(
-                context,
-                runtime.WorkflowDefinitionRuntime.HandlerService,
-              ) as unknown as {
+              const handler = EffectContext.get(context, WorkflowHandlerService) as unknown as {
                 child: (...args: Array<unknown>) => Effect.Effect<unknown>
                 approval: (...args: Array<unknown>) => Effect.Effect<unknown>
                 timer: (...args: Array<unknown>) => Effect.Effect<unknown>
@@ -134,7 +141,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["startExecutionByAgentDefinition"]>[0]>>([])
   const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["replayExecution"]>[0]>>([])
   const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["cancelExecution"]>[0]>>([])
-  const implementation: Client.Interface = {
+  const implementation: RelayCompat.ExtendedClient = {
     registerAgent: (input) =>
       Ref.update(registrations, (values) => [...values, input]).pipe(
         Effect.as({
@@ -213,23 +220,40 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     inspectChildFanOut: unused,
     cancelChildFanOut: unused,
     registerWorkflowDefinition: unused,
-    getWorkflowDefinitionRevision: unused,
-    listWorkflowDefinitionRevisions: unused,
     startWorkflowRun: unused,
     inspectWorkflowRun: unused,
     cancelWorkflowRun: unused,
-    replayWorkflowRun: unused,
     claimEnvelopeReady: unused,
     ackEnvelopeReady: unused,
     releaseEnvelopeReady: unused,
     createSchedule: unused,
     cancelSchedule: unused,
     listSchedules: unused,
+    registerEntityKind: unused,
+    getOrCreateEntity: unused,
+    getEntity: unused,
+    destroyEntity: unused,
+    listEntities: unused,
+    getEntityState: unused,
+    putEntityState: unused,
+    deleteEntityState: unused,
+    listEntityState: unused,
+    listInboxMessages: unused,
+    askEntity: unused,
+    awaitWait: unused,
+    subscribeTopic: unused,
+    unsubscribeTopic: unused,
+    publishTopic: unused,
+    listTopicSubscriptions: unused,
+    getPresence: unused,
+    streamSession: () => Stream.empty,
+    watchExecutions: () => Stream.empty,
+    watchPresence: () => Stream.empty,
   }
   return { implementation, registrations, starts, replays, cancellations }
 })
 
-const provideBackend = (implementation: Client.Interface, includeThreadTools = false) =>
+const provideBackend = (implementation: RelayCompat.ExtendedClient, includeThreadTools = false) =>
   Effect.provide(
     RelayExecutionBackend.layerFromClient({
       selection,

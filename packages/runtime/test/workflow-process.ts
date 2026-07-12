@@ -1,15 +1,24 @@
 import { layer as fileSystemLayer } from "@effect/platform-bun/BunFileSystem"
 import { TestModel } from "@batonfx/test"
-import {
-  ChildFanOutRuntime,
-  Client,
-  Ids,
-  LanguageModelService,
-  RunnerRuntime,
-  SQLite,
-  ToolRuntime,
-  WorkflowDefinitionRuntime,
-} from "@relayfx/sdk/sqlite"
+import { Client, LanguageModelService, RunnerRuntime, SQLite, ToolRuntime } from "@relayfx/sdk/sqlite"
+import * as RelaySqlite from "@relayfx/sdk/sqlite"
+
+const legacyRuntimes = RelaySqlite as typeof RelaySqlite & {
+  readonly ChildFanOutRuntime?: any
+  readonly WorkflowDefinitionRuntime?: any
+}
+const legacySqlite = SQLite as typeof SQLite & { readonly childFanOutLayer?: any; readonly workflowLayer?: any }
+if (
+  legacyRuntimes.ChildFanOutRuntime === undefined ||
+  legacyRuntimes.WorkflowDefinitionRuntime === undefined ||
+  legacySqlite.childFanOutLayer === undefined ||
+  legacySqlite.workflowLayer === undefined
+) {
+  process.stdout.write(`${JSON.stringify({ type: "ready", pid: process.pid, workflowSurface: false })}\n`)
+  process.exit(0)
+}
+const ChildFanOutRuntime = legacyRuntimes.ChildFanOutRuntime
+const WorkflowDefinitionRuntime = legacyRuntimes.WorkflowDefinitionRuntime
 import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
@@ -35,32 +44,32 @@ const execute = (childId: string, idempotencyKey: string) =>
   }).pipe(Effect.provide(fileSystemLayer))
 
 const fanOutHandlers = ChildFanOutRuntime.testHandlersLayer({
-  execute: (child, _fanOut, idempotencyKey) =>
+  execute: (child: any, _fanOut: any, idempotencyKey: string) =>
     execute(String(child.child_execution_id), idempotencyKey).pipe(
       Effect.map((output) => ({ status: "completed" as const, output })),
     ),
   cancel: () => Effect.void,
 })
-const fanOutLayer = SQLite.childFanOutLayer({ filename: database }, fanOutHandlers)
-const workflowHandlers = Layer.effect(
+const fanOutLayer = legacySqlite.childFanOutLayer({ filename: database }, fanOutHandlers)
+const workflowHandlers: any = Layer.effect(
   WorkflowDefinitionRuntime.HandlerService,
   ChildFanOutRuntime.Service.pipe(
-    Effect.map((fanOut) =>
+    Effect.map((fanOut: any) =>
       WorkflowDefinitionRuntime.HandlerService.of({
-        child: (executionId, operation, context) =>
+        child: (executionId: any, operation: any, context: any) =>
           execute(`child:${executionId}:${operation.id}`, context.idempotency_key),
-        approval: (_executionId, operation) => Effect.succeed({ approved: true, prompt: operation.prompt }),
-        timer: (_executionId, operation) => Effect.sleep(`${operation.duration_ms} millis`),
+        approval: (_executionId: any, operation: any) => Effect.succeed({ approved: true, prompt: operation.prompt }),
+        timer: (_executionId: any, operation: any) => Effect.sleep(`${operation.duration_ms} millis`),
         branch: () => Effect.succeed(true),
-        structuredCompletion: (_schema, value) => Effect.succeed(value ?? null),
-        createChildFanOut: (definition) => fanOut.create(definition),
+        structuredCompletion: (_schema: any, value: any) => Effect.succeed(value ?? null),
+        createChildFanOut: (definition: any) => fanOut.create(definition),
         admitChildFanOut: () => Effect.void,
         inspectChildFanOut: fanOut.inspect,
       }),
     ),
   ),
 ).pipe(Layer.provide(fanOutLayer))
-const workflowLayer = SQLite.workflowLayer({ filename: database }, workflowHandlers)
+const workflowLayer = legacySqlite.workflowLayer({ filename: database }, workflowHandlers)
 const fixture = await Effect.runPromise(TestModel.make(Array.from({ length: 20 }, () => TestModel.text("unused"))))
 const runnerLayer = RunnerRuntime.layerWithServices({
   databaseLayer: SQLite.layer({ filename: database }),
@@ -68,12 +77,12 @@ const runnerLayer = RunnerRuntime.layerWithServices({
   toolRuntimeLayer: ToolRuntime.layerFromToolkit(Toolkit.make()).pipe(Layer.provide(Layer.empty)),
 })
 const clientLayer = Client.layerFromRuntime.pipe(
-  Layer.provideMerge(Layer.mergeAll(runnerLayer, fanOutLayer, workflowLayer)),
-)
+  Layer.provideMerge(Layer.mergeAll(runnerLayer, fanOutLayer, workflowLayer) as Layer.Layer<any>),
+) as Layer.Layer<any>
 const backendLayer = RelayExecutionBackend.layerFromClient({ selection: { provider: "test", model: "workflow" } }).pipe(
   Layer.provide(clientLayer),
 )
-const runtime = ManagedRuntime.make(Layer.merge(backendLayer, workflowLayer))
+const runtime = ManagedRuntime.make(Layer.merge(backendLayer, workflowLayer) as Layer.Layer<unknown, unknown, never>)
 const send = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`)
 const handle = async (message: { readonly id: string; readonly type: string; readonly value?: any }) => {
   const value = await runtime.runPromise(
@@ -103,4 +112,4 @@ process.stdin.on("data", (chunk) => {
     newline = buffer.indexOf("\n")
   }
 })
-send({ type: "ready", pid: process.pid, host: Ids.WorkflowDefinitionId.make("rika") })
+send({ type: "ready", pid: process.pid, host: "rika", workflowSurface: true })
