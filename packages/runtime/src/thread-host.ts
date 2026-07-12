@@ -53,16 +53,17 @@ export const handlerLayer = (registry: RegistryInterface) =>
     promote_turn: ({ threadId }) => registry.promote(threadId).pipe(Effect.map((promoted) => ({ promoted }))),
   })
 
+export const waitToolName = "wait_for_messages"
+
 export const pendingThreadIds = (prompt: Prompt.Prompt): ReadonlyArray<string> => {
-  const last = prompt.content.findLast((message) => message.role === "user")
-  if (last === undefined) return []
-  const text = last.content
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
+  const last = prompt.content.at(-1)
+  if (last === undefined || last.role !== "tool") return []
+  const batch = last.content.findLast((part) => part.type === "tool-result" && part.name === waitToolName)
+  if (batch === undefined || batch.type !== "tool-result") return []
+  const text = JSON.stringify(batch.result ?? null)
   const ids = new Set<string>()
-  for (const match of text.matchAll(/\{[^{}]*"kind"\s*:\s*"pending-turn"[^{}]*\}/g)) {
-    const payload = parseJson(match[0])
+  for (const match of text.matchAll(/\{\\?"kind\\?"\s*:\s*\\?"pending-turn\\?"[^{}]*\}/g)) {
+    const payload = parseJson(match[0].replaceAll('\\"', '"'))
     if (payload !== undefined && typeof payload.thread_id === "string" && payload.thread_id.length > 0) {
       ids.add(payload.thread_id)
     }
@@ -98,10 +99,18 @@ const respond = (
 ): Effect.Effect<Array<Response.PartEncoded>> =>
   Effect.gen(function* () {
     const request = yield* Ref.getAndUpdate(counter, (value) => value + 1)
-    const lastMessage = options.prompt.content.at(-1)
-    const threadIds = lastMessage?.role === "user" ? pendingThreadIds(options.prompt) : []
+    const threadIds = pendingThreadIds(options.prompt)
     if (threadIds.length === 0) {
-      return [{ type: "text", text: "parked" }, finish("stop")]
+      return [
+        {
+          type: "tool-call",
+          id: `wait-${request}`,
+          name: waitToolName,
+          params: {},
+          providerExecuted: false,
+        },
+        finish("tool-calls"),
+      ]
     }
     return [
       ...threadIds.map(

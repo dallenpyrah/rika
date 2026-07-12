@@ -460,3 +460,28 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
     60_000,
   )
 }
+
+test("thread host entity wakes on a delivered promotion and invokes the registered promoter", async () => {
+  const program = withBackend([], (_fixture) =>
+    Effect.gen(function* () {
+      const backend = yield* ExecutionBackend.Service
+      const promoted: Array<string> = []
+      yield* backend.registerTurnPromoter!((threadId) =>
+        Effect.sync(() => {
+          promoted.push(threadId)
+          return 1
+        }),
+      )
+      yield* backend.ensureThreadHost!("thread-host-native", 1)
+      yield* backend.ensureThreadHost!("thread-host-native", 2)
+      yield* backend.notifyThreadHost!("thread-host-native", "turn-native-1", 3)
+      yield* backend.notifyThreadHost!("thread-host-native", "turn-native-1", 4)
+      yield* Effect.suspend(() =>
+        promoted.length > 0 ? Effect.void : Effect.fail(new Error("promoter not invoked yet")),
+      ).pipe(Effect.retry({ schedule: Schedule.spaced(Duration.millis(100)), times: 100 }))
+      return promoted
+    }),
+  )
+  const promoted = await Effect.runPromise(program as Effect.Effect<Array<string>>)
+  expect(promoted).toEqual(["thread-host-native"])
+}, 60_000)

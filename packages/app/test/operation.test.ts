@@ -481,6 +481,76 @@ describe("Operation", () => {
     }),
   )
 
+  it.effect("promotes queued turns through the thread host when the backend supports it", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
+      const events = yield* Ref.make<ReadonlyArray<Operation.InteractiveEvent>>([])
+      const dispatch = (event: Operation.InteractiveEvent) =>
+        Effect.runSync(Ref.update(events, (all) => [...all, event]))
+      const ensured = yield* Ref.make<ReadonlyArray<readonly [string, number]>>([])
+      const notified = yield* Ref.make<ReadonlyArray<readonly [string, string | undefined]>>([])
+      const promoters = yield* Ref.make<ReadonlyArray<ExecutionBackend.TurnPromoter>>([])
+      const started = yield* Ref.make<ReadonlyArray<string>>([])
+      const thread: Thread.Thread = {
+        id: Thread.ThreadId.make("hosted"),
+        workspace: "/work",
+        title: "Hosted",
+        labels: [],
+        pinned: false,
+        archived: false,
+        createdAt: 1,
+        updatedAt: 1,
+      }
+      const hostedBackend = ExecutionBackend.Service.of({
+        ...backend,
+        start: (input) =>
+          Ref.update(started, (all) => [...all, input.turnId]).pipe(
+            Effect.as({ turnId: input.turnId, status: "completed" as const, events: [] }),
+          ),
+        ensureThreadHost: (threadId, createdAt) =>
+          Ref.update(ensured, (all) => [...all, [threadId, createdAt] as const]),
+        notifyThreadHost: (threadId, turnId) => Ref.update(notified, (all) => [...all, [threadId, turnId] as const]),
+        registerTurnPromoter: (promoter) => Ref.update(promoters, (all) => [...all, promoter]),
+      })
+      const layer = Operation.productLayer({
+        repositoryLayer: ThreadRepository.memoryLayer([thread]),
+        turnRepositoryLayer: TurnRepository.memoryLayer([
+          {
+            id: Turn.TurnId.make("busy"),
+            threadId: thread.id,
+            prompt: "active",
+            status: "running",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ]),
+        backendLayer: Layer.succeed(ExecutionBackend.Service, hostedBackend),
+        defaultWorkspace: "/work",
+        makeThreadId: Effect.succeed(thread.id),
+        makeTurnId: Effect.succeed(Turn.TurnId.make("queued-turn")),
+        interactive: (_, session) => Ref.update(sessions, (all) => [...all, session]),
+      })
+      yield* Effect.gen(function* () {
+        const operation = yield* Operation.Service
+        yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
+      }).pipe(Effect.provide(layer))
+      const session = (yield* Ref.get(sessions))[0]
+      if (session === undefined) return yield* Effect.die("missing session")
+      yield* session.selectThread("hosted", dispatch)
+      yield* session.submit("while busy", dispatch)
+      expect(yield* Ref.get(started)).not.toContain("queued-turn")
+      expect(yield* Ref.get(ensured)).toHaveLength(1)
+      expect((yield* Ref.get(ensured))[0]?.[0]).toBe("hosted")
+      expect(yield* Ref.get(notified)).toEqual([["hosted", "queued-turn"]])
+      expect((yield* Ref.get(promoters)).length).toBeGreaterThan(0)
+      const queueEvents = (yield* Ref.get(events)).filter((event) => event._tag === "QueueChanged")
+      expect(queueEvents.length).toBeGreaterThan(0)
+      const promoter = (yield* Ref.get(promoters))[0]
+      if (promoter === undefined) return yield* Effect.die("missing promoter")
+      expect(yield* promoter("missing-thread")).toBe(0)
+    }),
+  )
+
   it.effect("dispatches successful interactive queue and control callbacks", () =>
     Effect.gen(function* () {
       const thread: Thread.Thread = {

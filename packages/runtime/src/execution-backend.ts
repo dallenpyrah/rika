@@ -1,7 +1,7 @@
 import { Agent, type Compaction, ModelRegistry, ModelResilience, type Permissions } from "@batonfx/core"
 import { Catalog as ToolCatalog, ParallelSearch, ReadWebPage, Runtime as RikaToolRuntime } from "@rika/tools"
 import { Client, Content, type Entity, type Execution, Ids } from "@relayfx/sdk"
-import { Context, Effect, Layer, Option, Redacted, Stream } from "effect"
+import { Context, Duration, Effect, Layer, Option, Redacted, Schedule, Semaphore, Stream } from "effect"
 import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai"
 import { FetchHttpClient } from "effect/unstable/http"
 import { BackendError, Event, type PromptPart, Service, Status } from "./execution-contract"
@@ -243,7 +243,8 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
     Service,
     Effect.gen(function* () {
       const client = RelayCompat.extend(yield* Client.Service)
-      const registry = Option.getOrUndefined(yield* Effect.serviceOption(ThreadHost.Registry)) ?? (yield* ThreadHost.makeRegistry)
+      const registry =
+        Option.getOrUndefined(yield* Effect.serviceOption(ThreadHost.Registry)) ?? (yield* ThreadHost.makeRegistry)
       const hostInstances = new Map<string, Entity.Instance>()
       const hostReady = yield* Effect.cached(
         Effect.gen(function* () {
@@ -254,9 +255,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               model: ThreadHost.hostSelection,
               toolkit: ThreadHost.toolkit,
             }),
-            permissions: [],
+            permissions: [
+              { name: "relay.inbox.wait", value: true },
+              { name: "relay.inbox.send", value: true },
+            ],
             max_wait_turns: ThreadHost.hostMaxWaitTurns,
-            metadata: { steering_enabled: false },
+            metadata: { steering_enabled: false, inbox_enabled: true },
           })
           yield* client.registerEntityKind({
             kind: ThreadHost.entityKind,
@@ -268,41 +272,97 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           })
         }),
       )
+      const hostGate = yield* Semaphore.make(1)
+      const entityFor = Effect.fn("ExecutionBackend.entityFor")(function* (threadId: string, now: number) {
+        yield* client
+          .getOrCreateEntity({
+            kind: ThreadHost.entityKind,
+            key: Ids.EntityKey.make(threadId),
+            metadata: { rika_thread_id: threadId },
+            created_at: now,
+          })
+          .pipe(Effect.forkDetach)
+        return yield* Effect.gen(function* () {
+          const found = yield* client.getEntity({ kind: ThreadHost.entityKind, key: Ids.EntityKey.make(threadId) })
+          if (found === undefined || found.status !== "active") {
+            return yield* Effect.fail(
+              new Client.ClientError({ message: `Thread host for ${threadId} is not active yet` }),
+            )
+          }
+          return found
+        }).pipe(Effect.retry({ schedule: Schedule.spaced(Duration.millis(50)), times: 100 }))
+      })
       const hostInstance = Effect.fn("ExecutionBackend.hostInstance")(function* (threadId: string, now: number) {
         yield* hostReady
         const cached = hostInstances.get(threadId)
         if (cached !== undefined && cached.status === "active") return cached
-        const instance = yield* client.getOrCreateEntity({
-          kind: ThreadHost.entityKind,
-          key: Ids.EntityKey.make(threadId),
-          metadata: { rika_thread_id: threadId },
-          created_at: now,
-        })
+        const instance = yield* entityFor(threadId, now)
         hostInstances.set(threadId, instance)
         return instance
+      })
+      const awaitParkedHost = Effect.fn("ExecutionBackend.awaitParkedHost")(function* (
+        threadId: string,
+        instance: Entity.Instance,
+        now: number,
+      ) {
+        const outcome = yield* Effect.gen(function* () {
+          const inspection = yield* client.inspectExecution(instance.execution_id)
+          if (
+            inspection.status === "completed" ||
+            inspection.status === "failed" ||
+            inspection.status === "cancelled"
+          ) {
+            return "terminal" as const
+          }
+          if (inspection.waiting_on.length === 0) {
+            return yield* Effect.fail(
+              new Client.ClientError({ message: `Thread host for ${threadId} is not parked yet` }),
+            )
+          }
+          return "parked" as const
+        }).pipe(
+          Effect.retry({ schedule: Schedule.spaced(Duration.millis(50)), times: 100 }),
+          Effect.orElseSucceed(() => "unknown" as const),
+        )
+        if (outcome !== "terminal") return instance
+        yield* client.destroyEntity({
+          kind: ThreadHost.entityKind,
+          key: Ids.EntityKey.make(threadId),
+          reason: "thread host execution ended; recreating a fresh generation",
+          destroyed_at: now,
+        })
+        hostInstances.delete(threadId)
+        const recreated = yield* entityFor(threadId, now)
+        hostInstances.set(threadId, recreated)
+        return recreated
       })
       return Service.of({
         ensureThreadHost: Effect.fn("ExecutionBackend.ensureThreadHost")(function* (threadId, createdAt) {
           yield* hostInstance(threadId, createdAt).pipe(Effect.mapError(error))
         }),
         notifyThreadHost: Effect.fn("ExecutionBackend.notifyThreadHost")(function* (threadId, turnId, now) {
-          yield* Effect.gen(function* () {
-            const instance = yield* hostInstance(threadId, now)
-            yield* client.send({
-              from: addressId,
-              to: instance.address_id,
-              content: [
-                Content.text(
-                  JSON.stringify({
-                    kind: "pending-turn",
-                    thread_id: threadId,
-                    ...(turnId === undefined ? {} : { turn_id: turnId }),
-                  }),
-                ),
-              ],
-              idempotency_key: turnId === undefined ? `rika:nudge:${threadId}:${now}` : `rika:turn:${turnId}`,
-            })
-          }).pipe(Effect.mapError(error))
+          yield* hostGate
+            .withPermits(1)(
+              Effect.gen(function* () {
+                const created = yield* hostInstance(threadId, now)
+                const instance = yield* awaitParkedHost(threadId, created, now)
+                yield* client.send({
+                  from: addressId,
+                  to: instance.address_id,
+                  content: [
+                    Content.text(
+                      JSON.stringify({
+                        kind: "pending-turn",
+                        thread_id: threadId,
+                        ...(turnId === undefined ? {} : { turn_id: turnId }),
+                      }),
+                    ),
+                  ],
+                  idempotency_key: turnId === undefined ? `rika:nudge:${threadId}:${now}` : `rika:turn:${turnId}`,
+                })
+              }),
+            )
+            .pipe(Effect.mapError(error))
         }),
         registerTurnPromoter: (promoter) => registry.register(promoter),
         createFanOut: Effect.fn("ExecutionBackend.createFanOut")(function* (input) {
@@ -750,7 +810,10 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               return Layer.succeed(Client.Service, Client.Service.of(extended))
             }),
           )
-          return layerFromClient(options).pipe(Layer.provide(hostBoundClientLayer), Layer.provide(promoterRegistryLayer))
+          return layerFromClient(options).pipe(
+            Layer.provide(hostBoundClientLayer),
+            Layer.provide(promoterRegistryLayer),
+          )
         }
       }
     }),

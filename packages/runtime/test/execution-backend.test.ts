@@ -814,7 +814,6 @@ describe("ExecutionBackend Relay client adapter", () => {
     Effect.gen(function* () {
       const fixture = yield* makeClient()
       const kinds: Array<unknown> = []
-      const created: Array<unknown> = []
       const sent: Array<Record<string, unknown>> = []
       Object.assign(fixture.implementation, {
         registerEntityKind: (input: unknown) =>
@@ -823,17 +822,32 @@ describe("ExecutionBackend Relay client adapter", () => {
             return input
           }),
         getOrCreateEntity: (input: { readonly key: string }) =>
-          Effect.sync(() => {
-            created.push(input)
-            return {
-              kind: "rika-thread",
-              key: input.key,
-              address_id: `address:entity:${input.key}`,
-              execution_id: `execution:entity:${input.key}`,
-              generation: 0,
-              status: "active",
-              created_at: 1,
-            }
+          Effect.succeed({
+            kind: "rika-thread",
+            key: input.key,
+            address_id: `address:entity:${input.key}`,
+            execution_id: `execution:entity:${input.key}`,
+            generation: 0,
+            status: "active",
+            created_at: 1,
+          }),
+        getEntity: (input: { readonly key: string }) =>
+          Effect.succeed({
+            kind: "rika-thread",
+            key: input.key,
+            address_id: `address:entity:${input.key}`,
+            execution_id: `execution:entity:${input.key}`,
+            generation: 0,
+            status: "active",
+            created_at: 1,
+          }),
+        inspectExecution: (executionId: string) =>
+          Effect.succeed({
+            execution_id: executionId,
+            status: "waiting",
+            waiting_on: [{ wait_id: "wait:inbox:host", mode: "event", created_at: 1 }],
+            pending_tool_calls: [],
+            child_runs: [],
           }),
         send: (input: Record<string, unknown>) =>
           Effect.sync(() => {
@@ -866,7 +880,6 @@ describe("ExecutionBackend Relay client adapter", () => {
           metadata: { product: "rika" },
         },
       ])
-      expect(created).toHaveLength(1)
       expect(sent).toHaveLength(2)
       expect(sent[0]).toMatchObject({
         from: "address:rika",

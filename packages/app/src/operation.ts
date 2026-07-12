@@ -658,7 +658,7 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
           )
           const { thread, isNewThread, turn } = admitted
           if (turn.status === "queued") {
-            yield* drainQueued(thread, dispatch)
+            yield* promoteThread(thread, turn.id, dispatch)
             return
           }
           dispatch({ _tag: "TurnStarted", threadId: thread.id, turn })
@@ -685,7 +685,7 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
           if (outcome._tag === "Failure") {
             yield* turns.setStatus(turn.id, "failed", turn.lastCursor, yield* Clock.currentTimeMillis)
             dispatch({ _tag: "ExecutionFailed", threadId: thread.id, turnId: turn.id, message: String(outcome.cause) })
-            yield* drainQueued(thread, dispatch)
+            yield* promoteThread(thread, undefined, dispatch)
             return
           }
           const result = outcome.value
@@ -693,7 +693,7 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
             dispatch({ _tag: "ExecutionEventReceived", threadId: thread.id, turnId: turn.id, event })
           yield* turns.setStatus(turn.id, result.status, result.events.at(-1)?.cursor, yield* Clock.currentTimeMillis)
           if (result.status === "completed") {
-            yield* drainQueued(thread, dispatch)
+            yield* promoteThread(thread, undefined, dispatch)
             if (isNewThread) yield* titleThread(thread, prompt, dispatch)
             return
           }
@@ -705,7 +705,7 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
               turnId: turn.id,
               message: `Execution ${result.status}`,
             })
-          yield* drainQueued(thread, dispatch)
+          yield* promoteThread(thread, undefined, dispatch)
         })
         yield* program.pipe(
           Effect.provide(selectedExecutionDependencies),
@@ -747,8 +747,10 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
       ) {
         const turns = yield* TurnRepository.Service
         const backend = yield* ExecutionBackend.Service
+        let claimed = 0
         let promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
         while (promoted !== undefined) {
+          claimed += 1
           const promotedTurn = promoted
           dispatch({ _tag: "TurnStarted", threadId: thread.id, turn: promotedTurn })
           yield* queueChanged(thread.id, dispatch)
@@ -793,9 +795,43 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
           promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
         }
         yield* queueChanged(thread.id, dispatch)
+        return claimed
       })
       const drainQueued = (thread: Thread.Thread, dispatch: (event: InteractiveEvent) => void) =>
         queueDrain.withPermits(1)(drainQueuedUnlocked(thread, dispatch))
+      const promoterFor =
+        (dispatch: (event: InteractiveEvent) => void) =>
+        (threadId: string): Effect.Effect<number> =>
+          Effect.gen(function* () {
+            const threads = yield* ThreadRepository.Service
+            const thread = yield* threads.get(Thread.ThreadId.make(threadId))
+            if (thread === undefined) return 0
+            return yield* drainQueued(thread, dispatch)
+          }).pipe(
+            Effect.provide(Layer.merge(dependencies, defaultBackendLayer)),
+            Effect.scoped,
+            Effect.catch(() => Effect.succeed(0)),
+          )
+      const promoteThread = Effect.fn("Operation.interactive.promoteThread")(function* (
+        thread: Thread.Thread,
+        turnId: Turn.TurnId | undefined,
+        dispatch: (event: InteractiveEvent) => void,
+      ) {
+        const backend = yield* ExecutionBackend.Service
+        if (
+          backend.ensureThreadHost === undefined ||
+          backend.notifyThreadHost === undefined ||
+          backend.registerTurnPromoter === undefined
+        ) {
+          yield* drainQueued(thread, dispatch)
+          return
+        }
+        yield* backend.registerTurnPromoter(promoterFor(dispatch))
+        const now = yield* Clock.currentTimeMillis
+        yield* backend.ensureThreadHost(thread.id, now)
+        yield* backend.notifyThreadHost(thread.id, turnId === undefined ? undefined : String(turnId), now)
+        yield* queueChanged(thread.id, dispatch)
+      })
       const active = Effect.fn("Operation.interactive.active")(function* () {
         const thread = yield* Ref.get(interactiveThread)
         if (thread === undefined) return yield* Effect.fail(new Error("No thread selected"))
@@ -833,7 +869,7 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
               result.events.at(-1)?.cursor ?? turn.lastCursor,
               yield* Clock.currentTimeMillis,
             )
-            if (isTerminalStatus(result.status)) yield* drainQueued(thread, dispatch)
+            if (isTerminalStatus(result.status)) yield* promoteThread(thread, undefined, dispatch)
             else if (result.status !== "waiting" && result.status !== "running" && result.status !== "queued")
               dispatch({
                 _tag: "ExecutionFailed",
@@ -1076,7 +1112,7 @@ export const productLayer = <ThreadError, TurnError, BackendError>(
                 yield* Clock.currentTimeMillis,
               )
               dispatch({ _tag: "ExecutionControlled", threadId: turn.threadId, turnId: turn.id, action: "cancelled" })
-              if (isTerminalStatus(result.status)) yield* drainQueued(thread, dispatch)
+              if (isTerminalStatus(result.status)) yield* promoteThread(thread, undefined, dispatch)
             }),
           ),
         resolvePermission: (waitId, kind, decision, dispatch) =>

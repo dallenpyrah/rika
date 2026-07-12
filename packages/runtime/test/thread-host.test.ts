@@ -1,48 +1,76 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer } from "effect"
-import { LanguageModel, Prompt } from "effect/unstable/ai"
+import { Effect, Layer, Schema } from "effect"
+import { LanguageModel, Prompt, Tool, Toolkit } from "effect/unstable/ai"
 import * as ThreadHost from "../src/thread-host"
 
 const promptWith = (messages: ReadonlyArray<Prompt.MessageEncoded>) => Prompt.make(messages)
 
-const pendingText = (threadId: string, turnId: string) =>
-  JSON.stringify({ kind: "pending-turn", thread_id: threadId, turn_id: turnId })
+const pendingPayload = (threadId: string, turnId: string) => ({
+  kind: "pending-turn",
+  thread_id: threadId,
+  turn_id: turnId,
+})
+
+const waitBatch = (payloads: ReadonlyArray<Record<string, unknown>>) => ({
+  status: "messages",
+  messages: payloads.map((payload, sequence) => ({
+    sequence,
+    from: "address:rika",
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+  })),
+})
+
+const waitResultMessage = (result: unknown): Prompt.MessageEncoded => ({
+  role: "tool",
+  content: [
+    {
+      type: "tool-result",
+      id: "wait-0",
+      name: ThreadHost.waitToolName,
+      isFailure: false,
+      result,
+    },
+  ],
+})
+
+const waitTool = Tool.make(ThreadHost.waitToolName, {
+  description: "test stand-in for the relay inbox wait",
+  parameters: Schema.Struct({}),
+  success: Schema.Unknown,
+})
 
 describe("ThreadHost", () => {
-  it.effect("parses pending thread ids from the final user message only", () =>
+  it.effect("parses pending thread ids from the latest wait result", () =>
     Effect.sync(() => {
       const prompt = promptWith([
-        { role: "user", content: [{ type: "text", text: pendingText("thread-old", "turn-old") }] },
-        { role: "assistant", content: [{ type: "text", text: "parked" }] },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: pendingText("thread-a", "turn-1") },
-            { type: "text", text: pendingText("thread-a", "turn-2") },
-            { type: "text", text: pendingText("thread-b", "turn-3") },
-            { type: "text", text: "not json" },
-          ],
-        },
+        { role: "user", content: [{ type: "text", text: "create" }] },
+        waitResultMessage(
+          waitBatch([
+            pendingPayload("thread-a", "turn-1"),
+            pendingPayload("thread-a", "turn-2"),
+            pendingPayload("thread-b", "turn-3"),
+          ]),
+        ),
       ])
       expect(ThreadHost.pendingThreadIds(prompt)).toEqual(["thread-a", "thread-b"])
     }),
   )
 
-  it.effect("returns no thread ids without a user message or payloads", () =>
+  it.effect("returns no thread ids without a trailing wait result", () =>
     Effect.sync(() => {
       expect(ThreadHost.pendingThreadIds(promptWith([]))).toEqual([])
       expect(
-        ThreadHost.pendingThreadIds(promptWith([{ role: "user", content: [{ type: "text", text: "hello" }] }])),
+        ThreadHost.pendingThreadIds(
+          promptWith([{ role: "user", content: [{ type: "text", text: JSON.stringify(pendingPayload("t", "x")) }] }]),
+        ),
       ).toEqual([])
       expect(
-        ThreadHost.pendingThreadIds(
-          promptWith([{ role: "user", content: [{ type: "text", text: '{"kind":"pending-turn","thread_id":""}' }] }]),
-        ),
+        ThreadHost.pendingThreadIds(promptWith([waitResultMessage({ status: "timed_out", messages: [] })])),
       ).toEqual([])
     }),
   )
 
-  it.effect("promotes a pending batch through promote_turn and parks otherwise", () =>
+  it.effect("waits for messages, promotes the delivered batch, and waits again", () =>
     Effect.gen(function* () {
       const registry = yield* ThreadHost.makeRegistry
       const promoted: Array<string> = []
@@ -52,26 +80,27 @@ describe("ThreadHost", () => {
           return 2
         }),
       )
+      const batch = waitBatch([pendingPayload("thread-a", "turn-1")])
+      const toolkit = Toolkit.make(ThreadHost.promoteTurnTool, waitTool)
+      const handlers = toolkit.toLayer({
+        promote_turn: ({ threadId }) => registry.promote(threadId).pipe(Effect.map((count) => ({ promoted: count }))),
+        [ThreadHost.waitToolName]: () => Effect.succeed(batch),
+      })
       const registration = yield* ThreadHost.hostRegistration
-      const provideModel = Effect.provide(Layer.merge(registration.layer, ThreadHost.handlerLayer(registry)))
-      const busy = yield* LanguageModel.generateText({
-        prompt: promptWith([{ role: "user", content: [{ type: "text", text: pendingText("thread-a", "turn-1") }] }]),
-        toolkit: ThreadHost.toolkit,
+      const provideModel = Effect.provide(Layer.merge(registration.layer, handlers))
+      const parked = yield* LanguageModel.generateText({
+        prompt: promptWith([{ role: "user", content: [{ type: "text", text: "create" }] }]),
+        toolkit,
       }).pipe(provideModel)
-      expect(busy.toolCalls).toHaveLength(1)
-      expect(busy.toolCalls[0]?.name).toBe("promote_turn")
-      expect(busy.toolCalls[0]?.params).toEqual({ threadId: "thread-a" })
-      expect(busy.toolResults[0]?.result).toEqual({ promoted: 2 })
+      expect(parked.toolCalls.map((call) => call.name)).toEqual([ThreadHost.waitToolName])
+      const woken = yield* LanguageModel.generateText({
+        prompt: promptWith([{ role: "user", content: [{ type: "text", text: "create" }] }, waitResultMessage(batch)]),
+        toolkit,
+      }).pipe(provideModel)
+      expect(woken.toolCalls.map((call) => call.name)).toEqual(["promote_turn"])
+      expect(woken.toolCalls[0]?.params).toEqual({ threadId: "thread-a" })
+      expect(woken.toolResults[0]?.result).toEqual({ promoted: 2 })
       expect(promoted).toEqual(["thread-a"])
-      const idle = yield* LanguageModel.generateText({
-        prompt: promptWith([
-          { role: "user", content: [{ type: "text", text: pendingText("thread-a", "turn-1") }] },
-          { role: "assistant", content: [{ type: "text", text: "working" }] },
-        ]),
-        toolkit: ThreadHost.toolkit,
-      }).pipe(provideModel)
-      expect(idle.toolCalls).toHaveLength(0)
-      expect(idle.text).toBe("parked")
     }),
   )
 
@@ -91,6 +120,4 @@ describe("ThreadHost", () => {
       expect(promoted).toEqual(["thread-a", "thread-b"])
     }),
   )
-
-
 })
