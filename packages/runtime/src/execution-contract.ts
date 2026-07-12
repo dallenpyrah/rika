@@ -1,0 +1,182 @@
+import { Context, Effect, Schema } from "effect"
+
+export const Status = Schema.Literals(["accepted", "queued", "running", "waiting", "completed", "failed", "cancelled"])
+export type Status = typeof Status.Type
+
+export const Event = Schema.Struct({
+  cursor: Schema.String,
+  sequence: Schema.Number,
+  type: Schema.String,
+  createdAt: Schema.Number,
+  text: Schema.optionalKey(Schema.String),
+  content: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  data: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+})
+export type Event = typeof Event.Type
+
+export type PromptPart =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image"; readonly mediaType: string; readonly data: string; readonly filename?: string }
+
+export interface StartInput {
+  readonly threadId: string
+  readonly turnId: string
+  readonly prompt: string
+  readonly promptParts?: ReadonlyArray<PromptPart>
+  readonly startedAt: number
+  readonly extensionPin?: ExecutionExtensionPin
+  readonly reasoningEffort?: string
+  readonly fastMode?: boolean
+  readonly onEvent?: (event: Event) => void
+}
+
+export interface ExecutionExtensionPin {
+  readonly generation: string
+  readonly sourceDigest: string
+  readonly configFingerprint: string
+  readonly toolSchemaDigest: string
+  readonly mcpFingerprint: string
+  readonly resolvedContextDigest: string
+}
+
+export type AgentProfile = "Oracle" | "Librarian" | "Painter" | "Review" | "ReadThread" | "Task"
+
+export type JoinPolicy = "all" | "first-success" | "quorum" | "best-effort"
+export interface FanOutInput {
+  readonly parentTurnId: string
+  readonly fanOutId: string
+  readonly children: ReadonlyArray<{
+    readonly childId: string
+    readonly profile?: AgentProfile
+    readonly prompt: string
+  }>
+  readonly maxConcurrency: number
+  readonly join: JoinPolicy
+  readonly quorum?: number
+  readonly createdAt: number
+}
+export interface FanOutInspection {
+  readonly fanOutId: string
+  readonly parentTurnId: string
+  readonly state: "joining" | "satisfied" | "failed" | "cancelled"
+  readonly maxConcurrency: number
+  readonly join: JoinPolicy
+  readonly members: ReadonlyArray<{
+    readonly childId: string
+    readonly ordinal: number
+    readonly state: Status
+    readonly output?: unknown
+    readonly error?: string
+  }>
+}
+export interface ChildProjection {
+  readonly parentTurnId: string
+  readonly fanOutId: string
+  readonly childId: string
+  readonly ordinal: number
+  readonly state: Status
+  readonly output?: unknown
+  readonly error?: string
+}
+export interface WorkflowInspection {
+  readonly runId: string
+  readonly workflow: string
+  readonly revision: number
+  readonly digest: string
+  readonly status: "running" | "completed" | "failed" | "cancelled"
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+export interface InvokeChildInput {
+  readonly parentTurnId: string
+  readonly childId: string
+  readonly profile: AgentProfile
+  readonly prompt: string
+}
+
+export interface ChildEvent {
+  readonly parentTurnId: string
+  readonly childId: string
+  readonly profile: AgentProfile
+  readonly type: "accepted"
+}
+
+export interface Result {
+  readonly turnId: string
+  readonly status: Status
+  readonly events: ReadonlyArray<Event>
+}
+
+export interface Inspection {
+  readonly turnId: string
+  readonly status: Status
+  readonly lastCursor?: string
+  readonly waits: ReadonlyArray<{ readonly id: string; readonly mode: string; readonly createdAt: number }>
+  readonly pendingTools: ReadonlyArray<{
+    readonly callId: string
+    readonly name: string
+    readonly input: unknown
+    readonly requestedAt: number
+  }>
+  readonly children: ReadonlyArray<{ readonly executionId: string; readonly status: Status }>
+}
+
+export interface Approval {
+  readonly waitId: string
+  readonly callId: string
+  readonly toolName: string
+  readonly input: unknown
+  readonly requestedAt: number
+}
+
+export class BackendError extends Schema.TaggedErrorClass<BackendError>()("ExecutionBackendError", {
+  message: Schema.String,
+}) {}
+
+export interface Interface {
+  readonly invokeChild: (input: InvokeChildInput) => Effect.Effect<ChildEvent, BackendError>
+  readonly createFanOut: (input: FanOutInput) => Effect.Effect<FanOutInspection, BackendError>
+  readonly inspectFanOut: (fanOutId: string) => Effect.Effect<FanOutInspection | undefined, BackendError>
+  readonly cancelFanOut: (
+    fanOutId: string,
+    cancelledAt: number,
+    reason?: string,
+  ) => Effect.Effect<FanOutInspection, BackendError>
+  readonly registerWorkflows: () => Effect.Effect<
+    ReadonlyArray<{ readonly name: string; readonly revision: number; readonly digest: string }>,
+    BackendError
+  >
+  readonly startWorkflow: (
+    name: string,
+    runId: string,
+    revision?: number,
+  ) => Effect.Effect<WorkflowInspection, BackendError>
+  readonly inspectWorkflow: (runId: string) => Effect.Effect<WorkflowInspection | undefined, BackendError>
+  readonly cancelWorkflow: (runId: string) => Effect.Effect<WorkflowInspection | undefined, BackendError>
+  readonly start: (input: StartInput) => Effect.Effect<Result, BackendError>
+  readonly follow?: (
+    turnId: string,
+    afterCursor: string | undefined,
+    onEvent?: (event: Event) => void,
+  ) => Effect.Effect<Result, BackendError>
+  readonly replay: (turnId: string, afterCursor?: string) => Effect.Effect<Result, BackendError>
+  readonly cancel: (turnId: string, cancelledAt: number) => Effect.Effect<Result, BackendError>
+  readonly inspect: (turnId: string) => Effect.Effect<Inspection | undefined, BackendError>
+  readonly steer: (turnId: string, text: string, createdAt: number) => Effect.Effect<void, BackendError>
+  readonly listApprovals: (turnId: string) => Effect.Effect<ReadonlyArray<Approval>, BackendError>
+  readonly resolveToolApproval: (
+    waitId: string,
+    approved: boolean,
+    resolvedAt: number,
+    comment?: string,
+  ) => Effect.Effect<void, BackendError>
+  readonly resolvePermission: (
+    waitId: string,
+    answer: "Approved" | "Denied" | "Always",
+    resolvedAt: number,
+    reason?: string,
+  ) => Effect.Effect<void, BackendError>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@rika/runtime/ExecutionBackend") {}

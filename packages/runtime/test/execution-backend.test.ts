@@ -1,0 +1,874 @@
+import { describe, expect, it } from "@effect/vitest"
+import * as BunServices from "@effect/platform-bun/BunServices"
+import { vi } from "vitest"
+import { ModelResilience } from "@batonfx/core"
+import { TestModel } from "@batonfx/test"
+import { Client, Content, Execution, Ids } from "@relayfx/sdk"
+import { ThreadTools } from "@rika/tools"
+import { Effect, Layer, Redacted, Ref, Schedule, Stream } from "effect"
+import { Toolkit } from "effect/unstable/ai"
+import * as ExecutionBackend from "../src/execution-contract"
+import * as RelayExecutionBackend from "../src/execution-backend"
+
+const native = vi.hoisted(() => ({ client: undefined as Client.Interface | undefined, results: [] as Array<unknown> }))
+
+vi.mock("@relayfx/sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@relayfx/sdk")>()
+  const { Layer: EffectLayer } = await import("effect")
+  return {
+    ...actual,
+    Client: {
+      ...actual.Client,
+      layerFromRuntime: EffectLayer.suspend(() => actual.Client.testLayer(native.client!)),
+    },
+  }
+})
+
+vi.mock("@relayfx/sdk/sqlite", async () => {
+  const runtime = await import("../../../node_modules/@relayfx/sdk/node_modules/@relayfx/runtime/src/index.ts")
+  const schema = await import("../../../node_modules/@relayfx/sdk/node_modules/@relayfx/schema/src/index.ts")
+  const { Context: EffectContext, Effect: NativeEffect, Layer: NativeLayer } = await import("effect")
+  const fanOutService = runtime.ChildFanOutRuntime.Service.of({
+    create: (definition: unknown) => (native.results.push(["create", definition]), NativeEffect.succeed(definition)),
+    inspect: (id: unknown) => (native.results.push(["inspect", id]), NativeEffect.succeed(undefined)),
+    cancel: (id: unknown) => (native.results.push(["cancelFan", id]), NativeEffect.succeed(undefined)),
+  } as never)
+  return {
+    ChildFanOutRuntime: runtime.ChildFanOutRuntime,
+    WorkflowDefinitionRuntime: runtime.WorkflowDefinitionRuntime,
+    LanguageModelService: { layer: () => NativeLayer.empty },
+    RunnerRuntime: { layerWithServices: () => NativeLayer.empty },
+    SchemaRegistry: { layer: () => NativeLayer.empty },
+    ToolRuntime: { layerFromToolkit: () => NativeLayer.empty },
+    SQLite: {
+      layer: () => NativeLayer.empty,
+      childFanOutLayer: (_options: unknown, handlers: Layer.Layer<unknown>) =>
+        Layer.succeed(runtime.ChildFanOutRuntime.Service, fanOutService).pipe(
+          Layer.tap(() =>
+            Layer.build(handlers).pipe(
+              Effect.flatMap((context) => {
+                const handler = EffectContext.get(context, runtime.ChildFanOutRuntime.HandlerService) as unknown as {
+                  execute: (...args: Array<unknown>) => Effect.Effect<unknown>
+                  cancel: (...args: Array<unknown>) => Effect.Effect<unknown>
+                }
+                const child = {
+                  child_execution_id: "child:native",
+                  address_id: "address:rika",
+                  input: [schema.Content.text("work")],
+                  metadata: { source: "test" },
+                }
+                return Effect.all([
+                  handler.execute(child as never, { fan_out_id: "fan:native" } as never, "key"),
+                  handler.cancel("child:native" as never),
+                ]).pipe(Effect.tap((values) => Effect.sync(() => native.results.push(...values))))
+              }),
+              Effect.scoped,
+            ),
+          ),
+        ),
+      workflowLayer: (_options: unknown, handlers: Layer.Layer<unknown>) =>
+        Layer.effectDiscard(
+          Layer.build(handlers).pipe(
+            Effect.flatMap((context) => {
+              const handler = EffectContext.get(
+                context,
+                runtime.WorkflowDefinitionRuntime.HandlerService,
+              ) as unknown as {
+                child: (...args: Array<unknown>) => Effect.Effect<unknown>
+                approval: (...args: Array<unknown>) => Effect.Effect<unknown>
+                timer: (...args: Array<unknown>) => Effect.Effect<unknown>
+                branch: (...args: Array<unknown>) => Effect.Effect<unknown>
+                structuredCompletion: (...args: Array<unknown>) => Effect.Effect<unknown>
+                createChildFanOut: (...args: Array<unknown>) => Effect.Effect<unknown>
+                admitChildFanOut: (...args: Array<unknown>) => Effect.Effect<unknown>
+                inspectChildFanOut: (...args: Array<unknown>) => Effect.Effect<unknown>
+              }
+              return Effect.all([
+                handler.child(
+                  "execution:parent" as never,
+                  { id: "grounded", address_id: "address:other", preset_name: "Task", input: { a: 1 } } as never,
+                ),
+                handler.child("execution:parent" as never, { id: "default", input: undefined } as never),
+                handler.approval("execution:parent" as never, { prompt: "approve" } as never),
+                handler.timer("execution:parent" as never, { duration_ms: 0 } as never),
+                handler.branch(),
+                handler.structuredCompletion({} as never, undefined),
+                handler.structuredCompletion({} as never, { ok: true }),
+                handler.createChildFanOut({ fan_out_id: "fan:workflow" } as never),
+                handler.admitChildFanOut({} as never),
+                handler.inspectChildFanOut("fan:workflow" as never),
+              ]).pipe(Effect.tap((values) => Effect.sync(() => native.results.push(...values))))
+            }),
+            Effect.scoped,
+          ),
+        ),
+    },
+  }
+})
+
+const selection = { provider: "test", model: "model" }
+const unused = () => Effect.die("unused client method")
+const clientFailure = (message: string) => new Client.ClientError({ message })
+const relayEvent = (
+  type: Execution.ExecutionEvent["type"],
+  sequence: number,
+  content?: Execution.ExecutionEvent["content"],
+): Execution.ExecutionEvent => ({
+  id: Ids.EventId.make(`event:${sequence}`),
+  execution_id: Ids.ExecutionId.make("execution:turn-a"),
+  type,
+  sequence,
+  cursor: `cursor-${sequence}`,
+  ...(content === undefined ? {} : { content }),
+  created_at: sequence * 10,
+})
+
+const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (options?: {
+  readonly startStatus?: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"
+  readonly streamEvents?: ReadonlyArray<Execution.ExecutionEvent>
+  readonly replayEvents?: ReadonlyArray<Execution.ExecutionEvent>
+  readonly cancelStatus?: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"
+  readonly fail?: "start" | "replay" | "cancel"
+}) {
+  const registrations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["registerAgent"]>[0]>>([])
+  const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["startExecutionByAgentDefinition"]>[0]>>([])
+  const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["replayExecution"]>[0]>>([])
+  const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["cancelExecution"]>[0]>>([])
+  const implementation: Client.Interface = {
+    registerAgent: (input) =>
+      Ref.update(registrations, (values) => [...values, input]).pipe(
+        Effect.as({
+          record: {
+            id: input.id,
+            current_revision: 1,
+            definition: { name: "rika", model: selection, tool_names: [], permissions: [] },
+            created_at: 0,
+            updated_at: 0,
+          },
+        }),
+      ),
+    registerAgentDefinition: unused,
+    getAgentDefinition: unused,
+    listAgentDefinitions: unused,
+    listAgentDefinitionRevisions: unused,
+    getSkillDefinition: unused,
+    listSkillDefinitions: unused,
+    listSkillDefinitionRevisions: unused,
+    registerAddressBookRoute: unused,
+    getAddressBookRoute: unused,
+    listAddressBookRoutes: unused,
+    startExecution: unused,
+    startExecutionByAddress: unused,
+    startExecutionByAgentDefinition: (input) =>
+      Ref.update(starts, (values) => [...values, input]).pipe(
+        Effect.andThen(
+          options?.fail === "start"
+            ? Effect.fail(clientFailure("start failed"))
+            : Effect.succeed({
+                execution_id: input.execution_id ?? Ids.ExecutionId.make("execution:fallback"),
+                status: options?.startStatus ?? "running",
+              }),
+        ),
+      ),
+    cancelExecution: (input) =>
+      Ref.update(cancellations, (values) => [...values, input]).pipe(
+        Effect.andThen(
+          options?.fail === "cancel"
+            ? Effect.fail(clientFailure("cancel failed"))
+            : Effect.succeed({ execution_id: input.execution_id, status: options?.cancelStatus ?? "running" }),
+        ),
+      ),
+    steer: unused,
+    getExecution: unused,
+    inspectExecution: unused,
+    listExecutions: unused,
+    listSessions: unused,
+    getSession: unused,
+    listWaits: unused,
+    replayExecution: (input) =>
+      Ref.update(replays, (values) => [...values, input]).pipe(
+        Effect.andThen(
+          options?.fail === "replay"
+            ? Effect.fail(clientFailure("replay failed"))
+            : Effect.succeed({ events: options?.replayEvents ?? [] }),
+        ),
+      ),
+    listRunners: unused,
+    routeExecution: unused,
+    send: unused,
+    streamExecution: () => Stream.fromIterable(options?.streamEvents ?? []),
+    wake: unused,
+    listPendingApprovals: unused,
+    resolveToolApproval: unused,
+    resolvePermission: unused,
+    listPendingToolCalls: unused,
+    fulfillToolCall: unused,
+    claimToolWork: unused,
+    completeToolWork: unused,
+    releaseToolWork: unused,
+    listToolAttempts: unused,
+    submitInboundEnvelope: unused,
+    spawnChildRun: unused,
+    createChildFanOut: unused,
+    inspectChildFanOut: unused,
+    cancelChildFanOut: unused,
+    registerWorkflowDefinition: unused,
+    getWorkflowDefinitionRevision: unused,
+    listWorkflowDefinitionRevisions: unused,
+    startWorkflowRun: unused,
+    inspectWorkflowRun: unused,
+    cancelWorkflowRun: unused,
+    replayWorkflowRun: unused,
+    claimEnvelopeReady: unused,
+    ackEnvelopeReady: unused,
+    releaseEnvelopeReady: unused,
+    createSchedule: unused,
+    cancelSchedule: unused,
+    listSchedules: unused,
+  }
+  return { implementation, registrations, starts, replays, cancellations }
+})
+
+const provideBackend = (implementation: Client.Interface, includeThreadTools = false) =>
+  Effect.provide(
+    RelayExecutionBackend.layerFromClient({
+      selection,
+      ...(includeThreadTools ? { additionalToolkit: ThreadTools.toolkit } : {}),
+    }).pipe(Layer.provide(Client.testLayer(implementation))),
+  )
+
+const provideConfiguredBackend = (
+  implementation: Client.Interface,
+  options: Parameters<typeof RelayExecutionBackend.layerFromClient>[0],
+) =>
+  Effect.provide(RelayExecutionBackend.layerFromClient(options).pipe(Layer.provide(Client.testLayer(implementation))))
+
+describe("ExecutionBackend Relay client adapter", () => {
+  it.effect("registers the deterministic agent, starts the deterministic execution, and converts text events", () =>
+    Effect.gen(function* () {
+      const streamEvents = [
+        relayEvent("model.output.delta", 1, [
+          Content.text("hello "),
+          { type: "structured", value: { n: 1 } },
+          Content.text("world"),
+        ]),
+        relayEvent("model.output.delta", 2, []),
+        relayEvent("execution.completed", 3),
+        relayEvent("model.output.delta", 4, [Content.text("ignored")]),
+      ]
+      const fixture = yield* makeClient({ startStatus: "queued", streamEvents })
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 100 })
+      }).pipe(provideBackend(fixture.implementation, true))
+      const registrations = yield* Ref.get(fixture.registrations)
+      const starts = yield* Ref.get(fixture.starts)
+      expect(registrations[0]?.id).toBe("agent:rika")
+      expect(registrations[0]?.address).toBe("address:rika")
+      const registration = registrations[0]
+      if (registration === undefined || !("agent" in registration)) return yield* Effect.die("Missing Baton agent")
+      expect(Object.keys(registration.agent.toolkit.tools)).toEqual([
+        "find_files",
+        "grep",
+        "read_file",
+        "create_file",
+        "edit_file",
+        "apply_patch",
+        "shell",
+        "shell_command_status",
+        "git_status",
+        "web_search",
+        "read_web_page",
+        "view_media",
+        "find_thread",
+        "read_thread",
+      ])
+      expect(registration.metadata?.multi_agent_enabled).toBe(true)
+      expect(registration.permissions).toContainEqual({ name: "relay.child_run.spawn", value: true })
+      expect(registration.handoff_targets).toEqual([
+        { name: "oracle", preset_name: "Oracle" },
+        { name: "librarian", preset_name: "Librarian" },
+        { name: "review", preset_name: "Review" },
+        { name: "read_thread", preset_name: "ReadThread" },
+        { name: "task", preset_name: "Task" },
+      ])
+      expect(starts[0]).toMatchObject({
+        root_address_id: "address:rika",
+        session_id: "session:thread-a",
+        agent_id: "agent:rika",
+        idempotency_key: "turn-a",
+        execution_id: "execution:turn-a",
+        started_at: 100,
+        completed_at: 100,
+        input: [Content.text("prompt")],
+      })
+      expect(result.status).toBe("completed")
+      expect(result.events).toEqual([
+        {
+          cursor: "cursor-1",
+          sequence: 1,
+          type: "model.output.delta",
+          createdAt: 10,
+          text: "hello world",
+          content: [Content.text("hello "), { type: "structured", value: { n: 1 } }, Content.text("world")],
+        },
+        { cursor: "cursor-2", sequence: 2, type: "model.output.delta", createdAt: 20, content: [] },
+        { cursor: "cursor-3", sequence: 3, type: "execution.completed", createdAt: 30 },
+      ])
+    }),
+  )
+
+  it.effect("sends ordered image content to Relay and Baton", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
+      yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        yield* backend.start({
+          threadId: "thread-image",
+          turnId: "turn-image",
+          prompt: "before [Image 1] after",
+          promptParts: [
+            { type: "text", text: "before " },
+            { type: "image", mediaType: "image/png", data: "cG5n", filename: "shot.png" },
+            { type: "text", text: " after" },
+          ],
+          startedAt: 1,
+        })
+      }).pipe(provideBackend(fixture.implementation))
+      expect((yield* Ref.get(fixture.starts))[0]?.input).toEqual([
+        Content.text("before "),
+        { type: "blob-reference", uri: "data:image/png;base64,cG5n", media_type: "image/png", filename: "shot.png" },
+        Content.text(" after"),
+      ])
+    }),
+  )
+
+  it.effect.each(["execution.completed", "execution.failed", "execution.cancelled"] as const)(
+    "terminates the start stream at %s",
+    (type) =>
+      Effect.gen(function* () {
+        const fixture = yield* makeClient({ streamEvents: [relayEvent(type, 1), relayEvent("model.output.delta", 2)] })
+        const result = yield* Effect.gen(function* () {
+          const backend = yield* ExecutionBackend.Service
+          return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+        }).pipe(provideBackend(fixture.implementation))
+        expect(result.events.map((value) => value.type)).toEqual([type])
+      }),
+  )
+
+  it.effect.each(["queued", "running"] as const)(
+    "derives terminal completion after Relay starts with status %s",
+    (status) =>
+      Effect.gen(function* () {
+        const fixture = yield* makeClient({ startStatus: status, streamEvents: [relayEvent("execution.completed", 1)] })
+        const result = yield* Effect.gen(function* () {
+          const backend = yield* ExecutionBackend.Service
+          return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+        }).pipe(provideBackend(fixture.implementation))
+        expect(result.status).toBe("completed")
+      }),
+  )
+
+  it.effect("returns waiting with replayed events when Relay suspends on a wait", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({
+        startStatus: "waiting",
+        replayEvents: [relayEvent("model.output.delta", 1), relayEvent("wait.created", 2)],
+        streamEvents: [],
+      })
+      const seen: Array<string> = []
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return yield* backend.start({
+          threadId: "thread-a",
+          turnId: "turn-a",
+          prompt: "prompt",
+          startedAt: 1,
+          onEvent: (item) => seen.push(item.type),
+        })
+      }).pipe(provideBackend(fixture.implementation))
+      expect(result.status).toBe("waiting")
+      expect(result.events.map((value) => value.type)).toEqual(["model.output.delta", "wait.created"])
+      expect(seen).toEqual(["model.output.delta", "wait.created"])
+    }),
+  )
+
+  it.effect.each(["completed", "failed", "cancelled"] as const)(
+    "streams terminal executions started with status %s so events arrive incrementally",
+    (status) =>
+      Effect.gen(function* () {
+        const fixture = yield* makeClient({
+          startStatus: status,
+          streamEvents: [
+            relayEvent("model.output.delta", 1),
+            relayEvent(`execution.${status}` as Execution.ExecutionEvent["type"], 2),
+          ],
+        })
+        const seen: Array<string> = []
+        const result = yield* Effect.gen(function* () {
+          const backend = yield* ExecutionBackend.Service
+          return yield* backend.start({
+            threadId: "thread-a",
+            turnId: "turn-a",
+            prompt: "prompt",
+            startedAt: 1,
+            onEvent: (item) => seen.push(item.type),
+          })
+        }).pipe(provideBackend(fixture.implementation))
+        expect(result.status).toBe(status)
+        expect(result.events.map((value) => value.type)).toEqual(["model.output.delta", `execution.${status}`])
+        expect(seen).toEqual(["model.output.delta", `execution.${status}`])
+      }),
+  )
+
+  it.effect("selects the effort and fast variant registration per start", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
+      yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        yield* backend.start({
+          threadId: "thread-variant",
+          turnId: "turn-variant",
+          prompt: "prompt",
+          startedAt: 1,
+          reasoningEffort: "xhigh",
+          fastMode: true,
+        })
+      }).pipe(provideBackend(fixture.implementation))
+      const registered = (yield* Ref.get(fixture.registrations)).at(-1) as
+        | { agent?: { model?: { registrationKey?: string } } }
+        | undefined
+      expect(registered?.agent?.model?.registrationKey).toBe("effort:xhigh:fast")
+      expect(RelayExecutionBackend.modelVariantKey("high", false)).toBe("effort:high")
+    }),
+  )
+
+  it.effect("registers compaction, budget, and permission policy options", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
+      const permissionPolicy = [{ tool: "shell", action: "deny" }] as never
+      yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+      }).pipe(
+        provideConfiguredBackend(fixture.implementation, {
+          selection,
+          compaction: { contextWindow: 10_000, reserveTokens: 500, keepRecentTokens: 2_000 },
+          tokenBudget: 8_000,
+          permissionPolicy,
+        }),
+      )
+      expect((yield* Ref.get(fixture.registrations))[0]).toMatchObject({
+        permission_rules: permissionPolicy,
+        token_budget: 8_000,
+        metadata: {
+          steering_enabled: true,
+          compaction_enabled: true,
+          compaction_context_window: 10_000,
+          compaction_reserve_tokens: 500,
+          compaction_keep_recent_tokens: 2_000,
+        },
+      })
+    }),
+  )
+
+  it.effect("registers compaction defaults without optional token overrides", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
+      yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+      }).pipe(provideConfiguredBackend(fixture.implementation, { selection, compaction: {} }))
+
+      expect((yield* Ref.get(fixture.registrations))[0]).toMatchObject({
+        metadata: { steering_enabled: true, compaction_enabled: true },
+      })
+    }),
+  )
+
+  it.effect.each([
+    ["execution.completed", "completed"],
+    ["execution.failed", "failed"],
+    ["execution.cancelled", "cancelled"],
+    ["wait.created", "waiting"],
+    ["model.output.delta", "running"],
+  ] as const)("derives replay status %s as %s", ([type, status]) =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ replayEvents: [relayEvent(type, 1)] })
+      const results = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return [yield* backend.replay("turn-a"), yield* backend.replay("turn-a", "cursor-0")]
+      }).pipe(provideBackend(fixture.implementation))
+      const replays = yield* Ref.get(fixture.replays)
+      expect(results.map((result) => result.status)).toEqual([status, status])
+      expect(replays).toEqual([
+        { execution_id: "execution:turn-a" },
+        { execution_id: "execution:turn-a", after_cursor: "cursor-0" },
+      ])
+    }),
+  )
+
+  it.effect("derives terminal replay status when a late model event follows it", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({
+        replayEvents: [relayEvent("execution.cancelled", 1), relayEvent("model.output.completed", 2)],
+      })
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return yield* backend.replay("turn-a")
+      }).pipe(provideBackend(fixture.implementation))
+      expect(result.status).toBe("cancelled")
+    }),
+  )
+
+  it.effect("cancels with deterministic payload and returns the accepted status and replayed events", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({
+        cancelStatus: "queued",
+        replayEvents: [relayEvent("execution.cancelled", 1)],
+      })
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return yield* backend.cancel("turn-a", 50)
+      }).pipe(provideBackend(fixture.implementation))
+      expect(yield* Ref.get(fixture.cancellations)).toEqual([{ execution_id: "execution:turn-a", cancelled_at: 50 }])
+      expect(result.status).toBe("queued")
+      expect(result.events.map((value) => value.type)).toEqual(["execution.cancelled"])
+    }),
+  )
+
+  it.effect.each(["start", "replay", "cancel"] as const)("maps %s client failures to BackendError", (operation) =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ fail: operation })
+      const failure = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        if (operation === "start")
+          return yield* Effect.flip(
+            backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "p", startedAt: 1 }),
+          )
+        if (operation === "replay") return yield* Effect.flip(backend.replay("turn-a"))
+        return yield* Effect.flip(backend.cancel("turn-a", 2))
+      }).pipe(provideBackend(fixture.implementation))
+      expect(failure._tag).toBe("ExecutionBackendError")
+      expect(failure.message).toContain(`${operation} failed`)
+    }),
+  )
+
+  it.effect("adapts fan-out, workflow, child, inspection, steering, and approval operations", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient()
+      const calls: Array<[string, unknown]> = []
+      const fanOut = {
+        fan_out_id: "fan-1",
+        parent_execution_id: "execution:parent-1",
+        state: "running",
+        max_concurrency: 2,
+        join: { _tag: "quorum", count: 1 },
+        members: [
+          { child_execution_id: "child:one", ordinal: 0, state: "completed", output: "done" },
+          { child_execution_id: "child:two", ordinal: 1, state: "failed", error: "bad" },
+        ],
+      }
+      const workflow = {
+        execution_id: "workflow:run-1",
+        pin: {
+          workflow_definition_id: "rika:delivery:v1",
+          workflow_definition_revision: 2,
+          workflow_definition_digest: "digest",
+        },
+        status: "running",
+        created_at: 10,
+        updated_at: 20,
+      }
+      Object.assign(fixture.implementation, {
+        createChildFanOut: (input: unknown) => (calls.push(["createFanOut", input]), Effect.succeed(fanOut)),
+        inspectChildFanOut: (input: unknown) => (
+          calls.push(["inspectFanOut", input]),
+          Effect.succeed({ fan_out: fanOut })
+        ),
+        cancelChildFanOut: (input: unknown) => (
+          calls.push(["cancelFanOut", input]),
+          Effect.succeed({ fan_out: fanOut })
+        ),
+        registerWorkflowDefinition: (input: { definition: { name: string } }) =>
+          Effect.succeed({
+            record: { definition: input.definition, revision: 1, digest: `digest-${input.definition.name}` },
+          }),
+        startWorkflowRun: (input: unknown) => (calls.push(["startWorkflow", input]), Effect.succeed(workflow)),
+        inspectWorkflowRun: (input: unknown) => (calls.push(["inspectWorkflow", input]), Effect.succeed(workflow)),
+        cancelWorkflowRun: (input: unknown) => (calls.push(["cancelWorkflow", input]), Effect.succeed(workflow)),
+        spawnChildRun: (input: unknown) => (calls.push(["child", input]), Effect.succeed({})),
+        getExecution: () => Effect.succeed({ status: "waiting" }),
+        inspectExecution: () =>
+          Effect.succeed({
+            status: "waiting",
+            last_event_cursor: "last",
+            waiting_on: [{ wait_id: "wait-1", mode: "external", created_at: 1 }],
+            pending_tool_calls: [
+              { tool_call_id: "call-1", tool_name: "shell", input: { command: "pwd" }, requested_at: 2 },
+            ],
+            child_runs: [{ child_execution_id: "child:one", status: "completed" }],
+          }),
+        steer: (input: unknown) => (calls.push(["steer", input]), Effect.succeed({})),
+        listPendingApprovals: () =>
+          Effect.succeed({
+            approvals: [{ wait_id: "wait-1", tool_call_id: "call-1", tool_name: "shell", input: {}, requested_at: 3 }],
+          }),
+        resolveToolApproval: (input: unknown) => (calls.push(["approval", input]), Effect.succeed({})),
+        resolvePermission: (input: unknown) => (calls.push(["permission", input]), Effect.succeed({})),
+      })
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return {
+          fan: yield* backend.createFanOut({
+            fanOutId: "fan-1",
+            parentTurnId: "parent-1",
+            children: [
+              { childId: "one", prompt: "a", profile: "Oracle" },
+              { childId: "two", prompt: "b" },
+            ],
+            maxConcurrency: 2,
+            join: "quorum",
+            quorum: 1,
+            createdAt: 1,
+          }),
+          inspectedFan: yield* backend.inspectFanOut("fan-1"),
+          cancelledFan: yield* backend.cancelFanOut("fan-1", 4, "stop"),
+          registrations: yield* backend.registerWorkflows(),
+          startedWorkflow: yield* backend.startWorkflow("delivery", "run-1", 2),
+          inspectedWorkflow: yield* backend.inspectWorkflow("run-1"),
+          cancelledWorkflow: yield* backend.cancelWorkflow("run-1"),
+          child: yield* backend.invokeChild({
+            parentTurnId: "parent-1",
+            childId: "one",
+            profile: "Task",
+            prompt: "work",
+          }),
+          inspection: yield* backend.inspect("parent-1"),
+          approvals: yield* backend.listApprovals("parent-1"),
+          steer: yield* backend.steer("parent-1", "continue", 5),
+          approval: yield* backend.resolveToolApproval("wait-1", true, 6, "ok"),
+          permission: yield* backend.resolvePermission("wait-1", "Approved", 7, "safe"),
+        }
+      }).pipe(provideBackend(fixture.implementation))
+      expect(result.fan).toMatchObject({ fanOutId: "fan-1", parentTurnId: "parent-1", join: "quorum" })
+      expect(result.fan.members).toEqual([
+        { childId: "one", ordinal: 0, state: "completed", output: "done" },
+        { childId: "two", ordinal: 1, state: "failed", error: "bad" },
+      ])
+      expect(result.registrations.map((value) => value.name)).toEqual(["delivery", "research-synthesis"])
+      expect(result.startedWorkflow).toMatchObject({ runId: "run-1", workflow: "delivery", revision: 2 })
+      expect(result.child).toEqual({ parentTurnId: "parent-1", childId: "one", profile: "Task", type: "accepted" })
+      expect(result.inspection).toMatchObject({ status: "waiting", lastCursor: "last" })
+      expect(result.approvals[0]).toMatchObject({ waitId: "wait-1", callId: "call-1" })
+      expect(calls).toHaveLength(10)
+    }),
+  )
+
+  it.effect("covers absent optional adapter results and payload fields", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient()
+      const calls: Array<unknown> = []
+      Object.assign(fixture.implementation, {
+        inspectChildFanOut: () => Effect.succeed({ fan_out: undefined }),
+        cancelChildFanOut: (input: unknown) => {
+          calls.push(input)
+          return Effect.succeed({
+            fan_out: {
+              fan_out_id: "fan",
+              parent_execution_id: "child:parent",
+              state: "cancelled",
+              max_concurrency: 1,
+              join: { _tag: "all" },
+              members: [],
+            },
+          })
+        },
+        inspectWorkflowRun: () => Effect.succeed(undefined),
+        cancelWorkflowRun: () => Effect.succeed(undefined),
+        startWorkflowRun: (input: unknown) => {
+          calls.push(input)
+          return Effect.succeed({
+            execution_id: "workflow:r",
+            pin: {
+              workflow_definition_id: "rika:research-synthesis:v1",
+              workflow_definition_revision: 1,
+              workflow_definition_digest: "d",
+            },
+            status: "queued",
+            created_at: 1,
+            updated_at: 1,
+          })
+        },
+        getExecution: () => Effect.succeed(undefined),
+        resolveToolApproval: (input: unknown) => (calls.push(input), Effect.succeed({})),
+        resolvePermission: (input: unknown) => (calls.push(input), Effect.succeed({})),
+      })
+      const values = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return [
+          yield* backend.inspectFanOut("missing"),
+          yield* backend.cancelFanOut("fan", 1),
+          yield* backend.startWorkflow("research-synthesis", "r"),
+          yield* backend.inspectWorkflow("r"),
+          yield* backend.cancelWorkflow("r"),
+          yield* backend.inspect("missing"),
+          yield* backend.resolveToolApproval("wait", false, 2),
+          yield* backend.resolvePermission("wait", "Denied", 3),
+        ]
+      }).pipe(provideBackend(fixture.implementation))
+      expect(values[0]).toBeUndefined()
+      expect(values[1]).toMatchObject({ parentTurnId: "child:parent", join: "all" })
+      expect(values[3]).toBeUndefined()
+      expect(values[4]).toBeUndefined()
+      expect(values[5]).toBeUndefined()
+      expect(calls).toContainEqual({ fan_out_id: "fan", cancelled_at: 1 })
+      expect(calls).toContainEqual({ wait_id: "wait", approved: false, resolved_at: 2 })
+      expect(calls).toContainEqual({ wait_id: "wait", answer: "Denied", resolved_at: 3 })
+    }),
+  )
+
+  it.effect("covers every join payload and child-prefixed execution identifiers", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({
+        replayEvents: [relayEvent("model.output.delta", 1, [{ type: "text", text: "" }])],
+      })
+      const inputs: Array<unknown> = []
+      Object.assign(fixture.implementation, {
+        createChildFanOut: (input: unknown) => {
+          inputs.push(input)
+          return Effect.succeed({
+            fan_out_id: "fan",
+            parent_execution_id: "execution:p",
+            state: "running",
+            max_concurrency: 1,
+            join: { _tag: "all" },
+            members: [],
+          })
+        },
+        getExecution: () => Effect.succeed({ status: "running" }),
+        inspectExecution: () =>
+          Effect.succeed({ status: "running", waiting_on: [], pending_tool_calls: [], child_runs: [] }),
+      })
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        for (const join of ["all", "first-success", "best-effort"] as const) {
+          yield* backend.createFanOut({
+            fanOutId: `fan-${join}`,
+            parentTurnId: "p",
+            children: [],
+            maxConcurrency: 1,
+            join,
+            createdAt: 1,
+          })
+        }
+        yield* backend.createFanOut({
+          fanOutId: "fan-quorum-default",
+          parentTurnId: "p",
+          children: [],
+          maxConcurrency: 1,
+          join: "quorum",
+          createdAt: 1,
+        })
+        return {
+          replay: yield* backend.replay("child:already-prefixed"),
+          inspection: yield* backend.inspect("p"),
+        }
+      }).pipe(provideBackend(fixture.implementation))
+      expect(inputs).toHaveLength(4)
+      expect(result.replay.events[0]).not.toHaveProperty("text")
+      expect(result.inspection).not.toHaveProperty("lastCursor")
+    }),
+  )
+
+  it("builds remote tool options with and without credentials", () => {
+    const key = Redacted.make("secret")
+    expect(RelayExecutionBackend.remoteToolOptions(undefined)).toEqual({})
+    expect(RelayExecutionBackend.remoteToolOptions(key)).toEqual({ apiKey: key })
+  })
+
+  it.effect("constructs the public runtime layer lazily", () =>
+    Effect.gen(function* () {
+      const model = yield* TestModel.make([])
+      expect(
+        RelayExecutionBackend.layer({
+          filename: ":memory:",
+          workspace: "/tmp",
+          registration: model.registration,
+          selection: model.selection,
+        }),
+      ).toBeDefined()
+    }),
+  )
+
+  it.effect.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ] as const)("builds the runtime layer with resilience=%s and extension handlers=%s", ([resilience, extensions]) =>
+    Effect.gen(function* () {
+      const model = yield* TestModel.make([])
+      const fixture = yield* makeClient({
+        replayEvents: [
+          relayEvent("model.output.completed", 1, [Content.text("fallback")]),
+          relayEvent("execution.completed", 2, [Content.text("done")]),
+        ],
+      })
+      Object.assign(fixture.implementation, {
+        getExecution: () => Effect.succeed({ status: "completed" }),
+        spawnChildRun: () => Effect.succeed({}),
+      })
+      native.client = fixture.implementation
+      native.results.length = 0
+      const result = yield* Layer.build(
+        RelayExecutionBackend.layer({
+          filename: ":memory:",
+          workspace: "/tmp",
+          registration: model.registration,
+          selection: model.selection,
+          ...(resilience ? { modelResilience: ModelResilience.make({ retrySchedule: Schedule.recurs(0) }) } : {}),
+          ...(extensions ? { additionalToolkit: Toolkit.make(), additionalHandlerLayer: Layer.empty } : {}),
+        }),
+      ).pipe(Effect.provide(BunServices.layer), Effect.scoped, Effect.exit)
+      expect(result._tag).toBe("Success")
+      expect(native.results).toContainEqual({ status: "completed", output: [Content.text("done")] })
+      expect(native.results).toContainEqual({ approved: true, prompt: "approve" })
+      expect(native.results).toContainEqual(null)
+      expect(native.results).toContainEqual({ ok: true })
+    }),
+  )
+
+  it.effect("registers fan-out children without model-facing subagent tools", () =>
+    Effect.gen(function* () {
+      const model = yield* TestModel.make([])
+      const fixture = yield* makeClient({
+        replayEvents: [
+          relayEvent("model.output.completed", 1, [Content.text("fallback")]),
+          relayEvent("execution.completed", 2, [Content.text("done")]),
+        ],
+      })
+      Object.assign(fixture.implementation, {
+        getExecution: () => Effect.succeed({ status: "completed" }),
+        spawnChildRun: () => Effect.succeed({}),
+      })
+      native.client = fixture.implementation
+      native.results.length = 0
+      yield* Layer.build(
+        RelayExecutionBackend.layer({
+          filename: ":memory:",
+          workspace: "/tmp",
+          registration: model.registration,
+          selection: model.selection,
+        }),
+      ).pipe(Effect.provide(BunServices.layer), Effect.scoped)
+      const registrations = yield* Ref.get(fixture.registrations)
+      expect(registrations.length).toBeGreaterThan(0)
+      for (const registration of registrations) {
+        const typed = registration as { metadata?: Record<string, unknown>; handoff_targets?: unknown }
+        expect(typed.metadata?.multi_agent_enabled).not.toBe(true)
+        expect(typed.handoff_targets).toBeUndefined()
+      }
+    }),
+  )
+})

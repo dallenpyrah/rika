@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@rika/persistence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./database": "./src/product-database.ts",
+    "./repository": "./src/thread-repository.ts",
+    "./thread": "./src/thread-schema.ts",
+    "./turn": "./src/turn-schema.ts",
+    "./turn-repository": "./src/turn-repository.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir dist --target bun --format esm --external effect --external 'effect/*' --external '@effect/*'",
+    "lint": "bun --cwd ../.. oxlint packages/persistence/src packages/persistence/test",
+    "test": "bun --cwd ../.. vitest run packages/persistence/test/thread-repository.test.ts packages/persistence/test/turn-repository.test.ts && bun test ./test/sqlite.integration.test.ts",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/sql-sqlite-bun": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

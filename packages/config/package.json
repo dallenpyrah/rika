@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@rika/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir dist --target bun --format esm --external effect --external 'effect/*'",
+    "lint": "bun --cwd ../.. oxlint packages/config/src packages/config/test",
+    "test": "bun --cwd ../.. vitest run packages/config/test",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@rika/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "rika": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/main.ts --outdir dist --target bun --format esm --external @opentui/core-darwin-arm64 --external @opentui/core-darwin-x64 --external @opentui/core-linux-arm64 --external @opentui/core-linux-arm64-musl --external @opentui/core-linux-x64 --external @opentui/core-linux-x64-musl --external @opentui/core-win32-arm64 --external @opentui/core-win32-x64",
+    "lint": "bun --cwd ../.. oxlint apps/rika/src apps/rika/test",
+    "start": "bun ./src/main.ts",
+    "test": "bun --cwd ../.. vitest run apps/rika/test --passWithNoTests --exclude apps/rika/test/*.native.test.ts && bun test ./test/*.native.test.ts",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@batonfx/providers": "catalog:",
+    "@effect/ai-openai-compat": "4.0.0-beta.93",
+    "@effect/platform-bun": "catalog:",
+    "@ff-labs/fff-node": "^0.9.6",
+    "@opentui/core": "catalog:",
+    "@rika/app": "workspace:*",
+    "@rika/config": "workspace:*",
+    "@rika/extensions": "workspace:*",
+    "@rika/persistence": "workspace:*",
+    "@rika/runtime": "workspace:*",
+    "@rika/tools": "workspace:*",
+    "@rika/tui": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "optionalDependencies": {
+    "@opentui/core-darwin-arm64": "catalog:",
+    "@opentui/core-darwin-x64": "catalog:",
+    "@opentui/core-linux-arm64": "catalog:",
+    "@opentui/core-linux-arm64-musl": "catalog:",
+    "@opentui/core-linux-x64": "catalog:",
+    "@opentui/core-linux-x64-musl": "catalog:",
+    "@opentui/core-win32-arm64": "catalog:",
+    "@opentui/core-win32-x64": "catalog:"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@rika/extensions",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir dist --target bun --format esm --external effect --external 'effect/*' --external '@batonfx/*'",
+    "lint": "bun --cwd ../.. oxlint packages/extensions/src packages/extensions/test",
+    "test": "bun test ./test",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@batonfx/core": "catalog:",
+    "@batonfx/mcp": "catalog:",
+    "@batonfx/skills": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

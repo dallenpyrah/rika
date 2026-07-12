@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Check dependencies
+        run: bun run deps:check
+      - name: Check docs
+        run: bun run docs:check
+      - name: Check formatting
+        run: bun run format:check
+      - name: Lint
+        run: bun run lint
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test
+        run: bun run test
+      - name: Agent harness
+        run: bun run test:agent-harness
+      - name: End-to-end
+        run: bun run test:e2e
+      - name: Coverage
+        run: bun run test:coverage
+      - name: Build
+        run: bun run build
+      - name: Check package target construction
+        run: bun run package:construct:test
+      - name: Package smoke
+        run: bun run package:smoke

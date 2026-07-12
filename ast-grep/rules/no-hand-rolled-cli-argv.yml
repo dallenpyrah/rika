@@ -1,0 +1,19 @@
+id: no-hand-rolled-cli-argv
+language: TypeScript
+severity: error
+message: CLI and script argument surfaces must use effect/unstable/cli.
+rule:
+  any:
+    - pattern: process.argv
+    - pattern: Bun.argv
+    - pattern: Deno.args
+    - pattern: parseArgs($$$ARGS)
+files:
+  - "**/*.ts"
+  - "**/*.tsx"
+ignores:
+  - "**/dist/**"
+  - "**/coverage/**"
+  - "node_modules/**"
+  - "scripts/capture-tui-visuals.ts"
+  - "scripts/package.ts"

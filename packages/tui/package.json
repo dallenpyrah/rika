@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@rika/tui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapter": "./src/adapter.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts ./src/adapter.ts --outdir dist --target bun --format esm --external effect --external '@opentui/core' --external '@opentui/core/*'",
+    "lint": "bun --cwd ../.. oxlint packages/tui/src packages/tui/test",
+    "test": "bun --cwd ../.. vitest run packages/tui/test/view-state.test.ts packages/tui/test/adapter.test.ts packages/tui/test/transcript-renderers.test.ts packages/tui/test/pasted-text.test.ts && bun test ./test/adapter.native.test.ts ./test/session.native.test.ts ./test/visual.native.test.ts",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "catalog:",
+    "@pierre/diffs": "catalog:",
+    "effect": "catalog:",
+    "string-width": "7.2.0"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

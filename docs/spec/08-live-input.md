@@ -1,0 +1,23 @@
+# Steering, Queueing, Cancellation, and Transport
+
+## Input Classes
+
+- A normal message submitted while busy becomes a durable Pending Turn outside the active Execution.
+- Steering input drains at Baton-safe boundaries before the next model turn.
+- Interrupt-and-send durably requests cancellation, then promotes the requested Pending Turn to its own Execution after the active Execution reaches a terminal state.
+
+## Durability
+
+Accepted Pending Turns and steering input are durable before acceptance is shown. Replay observes the same steering set. Cancellation records a durable request and terminal outcome.
+
+The Effect SQL TurnRepository is authoritative for Pending Turns. Every queue projection is emitted only after a repository operation and is keyed by durable Turn ID, including prompt and image attachment summaries. The terminal renders this projection in one joined panel above the composer rather than adding queue blocks or notices to the transcript. Selection follows Turn IDs across snapshots. While an Execution is active and the composer is empty, Up and Down select Pending Turns, Enter steers the selected Turn or the FIFO head when none is selected, and Backspace dequeues only an explicitly selected Turn. Editing, steering, and dequeueing update durable state before publishing a replacement projection.
+
+FIFO promotion is atomic and remains blocked while an Execution has an unresolved wait. An in-memory Effect Queue may serialize UI-edge callbacks, but it is never queue authority and restart or thread continuation always reconstructs the projection from TurnRepository.
+
+## Transport
+
+In-process execution uses Effect Streams and services. Any process boundary uses WebSockets with Schema-framed messages.
+
+The protocol must define connection initialization, cursor catch-up, live events, steering, follow-up input, permission answers, cancellation, heartbeat, typed errors, bounded buffering, and reconnect.
+
+SSE is forbidden for Rika-owned live execution/control transport. Provider and MCP package transports remain governed by their public contracts.

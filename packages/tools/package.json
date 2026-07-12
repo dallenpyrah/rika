@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@rika/tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir dist --target bun --format esm --external effect --external 'effect/*' --external '@effect/*'",
+    "lint": "bun --cwd ../.. oxlint packages/tools/src packages/tools/test",
+    "test": "bun --cwd ../.. vitest run packages/tools/test && bun test ./test/tool-runtime.native.test.ts",
+    "typecheck": "bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@ff-labs/fff-node": "^0.9.6",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
