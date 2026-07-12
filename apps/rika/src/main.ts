@@ -35,6 +35,7 @@ import { Command } from "effect/unstable/cli"
 import { mkdir, realpath, rm, stat } from "node:fs/promises"
 import { dirname, isAbsolute, relative as relativePathFrom, resolve } from "node:path"
 import { command, version } from "./command"
+import { renderGoodbye } from "./goodbye"
 
 const imageMediaType = (path: string) => {
   const lower = path.toLowerCase()
@@ -920,28 +921,9 @@ if (import.meta.main) {
                 const threadTitle =
                   model.currentThreadTitle ??
                   (model.threads as ReadonlyArray<ViewState.ThreadItem>).find((thread) => thread.id === threadId)?.title
-                const workspaceLine = model.workspace.replace(/^\/Users\/[^/]+/, "~")
-                const blue = "[38;2;88;166;255m"
-                const dim = "[2m"
-                const reset = "[0m"
-                const mark = [
-                  "    ·••••·",
-                  "  :••●●••••:",
-                  " ••●●●••••••·",
-                  " ••●●●●●•••••",
-                  "  :••••••••·",
-                  "     ·····",
-                ]
-                const details = new Map([
-                  [1, threadTitle ?? ""],
-                  [2, workspaceLine],
-                ])
-                const lines = mark.map((row, index) => {
-                  const detail = details.get(index)
-                  return `${blue}${row.padEnd(18)}${reset}${detail === undefined || detail.length === 0 ? "" : detail}`
-                })
-                const trailer = threadId === undefined ? "" : `\n\n${dim}rika threads continue ${threadId}${reset}`
-                process.stdout.write(`\n${lines.join("\n")}${trailer}\n`)
+                process.stdout.write(
+                  renderGoodbye({ mode: model.mode, workspace: model.workspace, threadId, threadTitle }),
+                )
               }
               const close = (exitCode?: number) => {
                 if (closing) return
