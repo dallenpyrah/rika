@@ -30,7 +30,7 @@ import { create as createTui } from "@rika/tui/adapter"
 import type { PathTarget } from "@rika/tui"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { Config, Console, Effect, Exit, Fiber, FileSystem, Layer, Path, Redacted, Schema } from "effect"
+import { Config, Console, Effect, Exit, Fiber, FileSystem, Layer, Path, Redacted, Schedule, Schema } from "effect"
 import { Command } from "effect/unstable/cli"
 import { mkdir, realpath, rm, stat } from "node:fs/promises"
 import { dirname, isAbsolute, relative as relativePathFrom, resolve } from "node:path"
@@ -43,6 +43,31 @@ const imageMediaType = (path: string) => {
   if (lower.endsWith(".gif")) return "image/gif"
   if (lower.endsWith(".webp")) return "image/webp"
   return "application/octet-stream"
+}
+
+const pastedImageFormat = (bytes: Uint8Array, declaredMediaType?: string) => {
+  const prefix = (start: number, end: number) => new TextDecoder().decode(bytes.subarray(start, end))
+  const signature =
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+      ? { mediaType: "image/png", extension: "png" }
+      : bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+        ? { mediaType: "image/jpeg", extension: "jpg" }
+        : bytes.length >= 6 && /^GIF8[79]a$/.test(prefix(0, 6))
+          ? { mediaType: "image/gif", extension: "gif" }
+          : bytes.length >= 12 && prefix(0, 4) === "RIFF" && prefix(8, 12) === "WEBP"
+            ? { mediaType: "image/webp", extension: "webp" }
+            : undefined
+  if (signature === undefined) return undefined
+  const mediaType = declaredMediaType?.split(";", 1)[0]?.trim().toLowerCase()
+  return mediaType === undefined || mediaType === signature.mediaType ? signature : undefined
 }
 
 export const resolveWorkspacePath = (workspace: string, target: PathTarget): string => {
@@ -270,6 +295,23 @@ export const pasteClipboardPng = (
       if (!extracted) await rm(absolute, { force: true })
     }
   }).pipe(Effect.orElseSucceed(() => undefined))
+
+export const pastedImagePath = (
+  bytes: Uint8Array,
+  mediaType?: string,
+  now = Date.now,
+  id = crypto.randomUUID,
+): string | undefined => {
+  const format = pastedImageFormat(bytes, mediaType)
+  return format === undefined ? undefined : `.rika/pasted/paste-${now()}-${id()}.${format.extension}`
+}
+
+export const persistPastedImage = (workspace: string, relative: string, bytes: Uint8Array) =>
+  Effect.promise(async () => {
+    await mkdir(`${workspace}/.rika/pasted`, { recursive: true })
+    await Bun.write(`${workspace}/${relative}`, bytes)
+    return true
+  }).pipe(Effect.orElseSucceed(() => false))
 
 export const relayBackendLayer = (
   options: Omit<
@@ -720,27 +762,49 @@ if (import.meta.main) {
               let model = ViewState.initial(process.cwd(), input.mode ?? "medium")
               let renderer: Awaited<ReturnType<typeof createTui>> | undefined
               let closed = false
-              let activeTurnId: string | undefined
               let previewTimer: ReturnType<typeof setTimeout> | undefined
+              let renderTimer: ReturnType<typeof setTimeout> | undefined
               let replayTurns = new Map<string, Turn.Turn>()
               const fibers = new Set<Fiber.Fiber<void, never>>()
               let followFiber: Fiber.Fiber<void, never> | undefined
+              const render = (immediate = false) => {
+                if (renderer === undefined) return
+                if (immediate) {
+                  if (renderTimer !== undefined) clearTimeout(renderTimer)
+                  renderTimer = undefined
+                  renderer.surface.update(model)
+                  return
+                }
+                if (renderTimer !== undefined) return
+                renderTimer = setTimeout(() => {
+                  renderTimer = undefined
+                  renderer?.surface.update(model)
+                }, 50)
+              }
               const dispatch = (event: Operation.InteractiveEvent) => {
                 if (closed) return
                 if (event._tag === "QueueChanged") {
-                  model = ViewState.replaceQueue(
-                    model,
-                    event.turns
-                      .filter((turn) => turn.status === "queued")
-                      .map((turn) => {
-                        const attachments = turn.promptParts
-                          ?.filter((part) => part.type === "image")
-                          .flatMap((part) => (part.filename === undefined ? [] : [part.filename]))
-                        if (attachments === undefined || attachments.length === 0)
-                          return { id: turn.id, prompt: turn.prompt }
-                        return { id: turn.id, prompt: turn.prompt, attachments }
-                      }),
-                  )
+                  if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+                    model = ViewState.replaceQueue(
+                      model,
+                      event.turns
+                        .filter((turn) => turn.status === "queued")
+                        .map((turn) => {
+                          const attachments = turn.promptParts
+                            ?.filter((part) => part.type === "image")
+                            .flatMap((part) => (part.filename === undefined ? [] : [part.filename]))
+                          if (attachments === undefined || attachments.length === 0)
+                            return { id: turn.id, prompt: turn.prompt }
+                          return { id: turn.id, prompt: turn.prompt, attachments }
+                        }),
+                    )
+                } else if (event._tag === "TurnStarted") {
+                  if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+                    model = ViewState.update(model, {
+                      _tag: "TurnStarted",
+                      turnId: event.turn.id,
+                      prompt: event.turn.prompt,
+                    })
                 } else if (event._tag === "ThreadsListed") {
                   model = ViewState.update(model, {
                     _tag: "ThreadsReplaced",
@@ -759,14 +823,15 @@ if (import.meta.main) {
                   const activeTurn = event.turns.find(
                     (turn) => turn.status === "accepted" || turn.status === "running" || turn.status === "waiting",
                   )
-                  activeTurnId = activeTurn?.id
                   model = {
                     ...model,
                     entries: [],
                     blocks: [],
                     items: [],
                     seenEventIds: [],
+                    seenExecutionEventKeys: [],
                     eventCursor: undefined,
+                    activeTurnId: activeTurn?.id,
                     busy: activeTurn !== undefined,
                     busyStatus: activeTurn === undefined ? undefined : "Working",
                     currentThreadId: String(event.thread.id),
@@ -777,24 +842,36 @@ if (import.meta.main) {
                         (thread) => thread.id === event.thread.id,
                       ),
                     ),
+                    threadPreview: undefined,
                   }
                 } else if (event._tag === "ExecutionReplayed") {
+                  if (model.currentThreadId !== event.threadId) return
                   const turn = replayTurns.get(event.result.turnId)
                   model =
                     turn === undefined
                       ? ExecutionEvents.project(model, event.result.events)
                       : ExecutionEvents.projectTurn(model, turn.id, turn.prompt, event.result.events)
                 } else if (event._tag === "ExecutionEventReceived") {
-                  model = ExecutionEvents.project(model, [event.event])
+                  if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+                    model = ExecutionEvents.project(model, [{ ...event.event, turnId: event.turnId }])
                 } else if (event._tag === "ExecutionControlled") {
+                  if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
                   if (event.action === "cancelled" && model.busy)
-                    model = ViewState.update(model, { _tag: "ExecutionCancelled" })
+                    model = ViewState.update(model, { _tag: "ExecutionCancelled", turnId: event.turnId })
+                } else if (event._tag === "ExecutionFailed") {
+                  if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
+                  model = ViewState.update(model, {
+                    _tag: "ExecutionFailed",
+                    turnId: event.turnId,
+                    message: event.message,
+                  })
                 } else if (event._tag === "ShellPermissionRequested") {
                   model = ViewState.update(model, {
                     _tag: "BlockAdded",
                     block: {
                       _tag: "Permission",
                       id: event.id,
+                      kind: "permission",
                       title: "Run shell command",
                       detail: event.command,
                       status: "pending",
@@ -817,15 +894,25 @@ if (import.meta.main) {
                     title: event.title,
                   })
                 } else if (event._tag === "ThreadPreviewLoaded") {
-                  model = ViewState.update(model, {
-                    _tag: "ThreadPreviewLoaded",
-                    threadId: event.threadId,
-                    turns: event.turns,
-                  })
+                  if (model.threadSwitcher.open && ViewState.selectedThreadMetadata(model)?.id === event.threadId)
+                    model = ViewState.update(model, {
+                      _tag: "ThreadPreviewLoaded",
+                      threadId: event.threadId,
+                      turns: event.turns,
+                    })
                 } else {
                   model = ViewState.update(model, event)
                 }
-                renderer?.surface.update(model)
+                render(
+                  event._tag === "ExecutionFailed" ||
+                    event._tag === "ExecutionControlled" ||
+                    (event._tag === "ExecutionEventReceived" &&
+                      (event.event.type === "execution.completed" ||
+                        event.event.type === "execution.failed" ||
+                        event.event.type === "execution.cancelled" ||
+                        event.event.type === "permission.ask.requested" ||
+                        event.event.type === "tool.approval.requested")),
+                )
               }
               let closing = false
               const goodbye = () => {
@@ -863,6 +950,10 @@ if (import.meta.main) {
                 if (exitCode !== undefined) process.exitCode = exitCode
                 process.off("SIGINT", interrupt)
                 process.off("SIGTERM", close)
+                if (previewTimer !== undefined) clearTimeout(previewTimer)
+                previewTimer = undefined
+                if (renderTimer !== undefined) clearTimeout(renderTimer)
+                renderTimer = undefined
                 for (const fiber of fibers) fork(Fiber.interrupt(fiber))
                 const finish = () => {
                   goodbye()
@@ -919,10 +1010,19 @@ if (import.meta.main) {
               }
               const loadSelected = (effect: Effect.Effect<void, never>) =>
                 Effect.gen(function* () {
-                  if (followFiber !== undefined) yield* Fiber.interrupt(followFiber)
+                  if (followFiber !== undefined) {
+                    yield* Fiber.interrupt(followFiber)
+                    fibers.delete(followFiber)
+                  }
                   yield* effect
-                  followFiber = yield* Effect.forkDaemon(session.followSelected(dispatch))
-                  fibers.add(followFiber)
+                  const selectedFollowFiber = yield* Effect.forkDaemon(session.followSelected(dispatch))
+                  followFiber = selectedFollowFiber
+                  fibers.add(selectedFollowFiber)
+                  fork(
+                    Fiber.await(selectedFollowFiber).pipe(
+                      Effect.tap(() => Effect.sync(() => fibers.delete(selectedFollowFiber))),
+                    ),
+                  )
                 })
               const loadChangedFiles = () =>
                 Effect.promise(async () => {
@@ -930,6 +1030,9 @@ if (import.meta.main) {
                   model = ViewState.update(model, { _tag: "ChangedFilesReplaced", files })
                   renderer?.surface.update(model)
                 }).pipe(Effect.asVoid)
+              const watchChangedFiles = Effect.suspend(() =>
+                model.changedFilesOpen ? loadChangedFiles() : Effect.void,
+              ).pipe(Effect.repeat({ schedule: Schedule.spaced("1 second") }), Effect.asVoid)
               const editComposer = () =>
                 Effect.promise(async () => {
                   if (editor === undefined) {
@@ -994,10 +1097,10 @@ if (import.meta.main) {
                 steer: (prompt) => run(session.steer(prompt, dispatch)),
                 interruptAndSend: (prompt) => run(session.interruptAndSend(prompt, dispatch)),
                 cancel: () => run(session.cancel(dispatch)),
-                decidePermission: (id, decision) => run(session.resolvePermission(id, decision, dispatch)),
+                decidePermission: (id, kind, decision) => run(session.resolvePermission(id, kind, decision, dispatch)),
                 selectThread: (id) => run(loadSelected(session.selectThread(id, dispatch))),
                 replay: (cursor) => {
-                  const turnId = activeTurnId
+                  const turnId = model.activeTurnId
                   if (turnId !== undefined) run(session.replay(turnId, cursor, dispatch))
                 },
               }
@@ -1019,17 +1122,36 @@ if (import.meta.main) {
                   model = ViewState.update(model, { _tag: "PastedTextExpanded", token })
                   renderer?.surface.update(model)
                 },
-                pasteImage: () =>
+                pasteImage: (image) => {
+                  if (image !== undefined) {
+                    const path = pastedImagePath(image.bytes, image.mediaType)
+                    if (path === undefined) {
+                      renderer?.surface.showToast("Pasted image must be a non-empty PNG, JPEG, GIF, or WebP")
+                      return
+                    }
+                    model = ViewState.update(model, { _tag: "ImageInserted", path })
+                    renderer?.surface.update(model)
+                    run(
+                      persistPastedImage(model.workspace, path, image.bytes).pipe(
+                        Effect.tap((persisted) =>
+                          Effect.sync(() => {
+                            if (persisted) return
+                            model = ViewState.update(model, { _tag: "ImageRemoved", path })
+                            renderer?.surface.update(model)
+                            renderer?.surface.showToast("Pasted image could not be saved")
+                          }),
+                        ),
+                        Effect.asVoid,
+                      ),
+                    )
+                    return
+                  }
                   run(
                     pasteClipboardPng(model.workspace).pipe(
                       Effect.tap((path) =>
                         Effect.sync(() => {
                           if (path === undefined) {
-                            model = ViewState.update(model, {
-                              _tag: "ExecutionFailed",
-                              message: "Clipboard does not contain a supported non-empty PNG image",
-                            })
-                            renderer?.surface.update(model)
+                            renderer?.surface.showToast("Clipboard does not contain a supported non-empty PNG image")
                             return
                           }
                           model = ViewState.update(model, { _tag: "ImageInserted", path })
@@ -1038,7 +1160,8 @@ if (import.meta.main) {
                       ),
                       Effect.asVoid,
                     ),
-                  ),
+                  )
+                },
                 clickToggle: (unit) => {
                   model = ViewState.update(model, { _tag: "DetailToggled", id: unit })
                   renderer?.surface.update(model)
@@ -1101,6 +1224,7 @@ if (import.meta.main) {
                   renderer = created
                   created.surface.update(model)
                   created.renderer.start()
+                  run(watchChangedFiles)
                   run(
                     Effect.promise(async () => {
                       const gitListing = Bun.spawn(

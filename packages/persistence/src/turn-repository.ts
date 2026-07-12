@@ -36,6 +36,8 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/persistence/TurnRepository") {}
 
+const isTerminalStatus = (status: Status) => status === "completed" || status === "failed" || status === "cancelled"
+
 const Row = Schema.Struct({
   id: Schema.String,
   thread_id: Schema.String,
@@ -89,7 +91,8 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
         const result = yield* Ref.modify(state, (turns): readonly [SubmissionResult, Map<TurnId, Turn>] => {
           if (turns.has(input.id)) return [{ _tag: "Duplicate" as const }, turns]
           const active = [...turns.values()].some(
-            (turn) => turn.threadId === input.threadId && ["accepted", "running", "waiting"].includes(turn.status),
+            (turn) =>
+              turn.threadId === input.threadId && ["queued", "accepted", "running", "waiting"].includes(turn.status),
           )
           const turn: Turn = {
             ...input,
@@ -107,24 +110,24 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
       list: Effect.fn("TurnRepository.list")(function* (threadId) {
         return [...(yield* Ref.get(state)).values()]
           .filter((turn) => turn.threadId === threadId)
-          .toSorted((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+          .toSorted((left, right) => left.createdAt - right.createdAt)
           .map(clone)
       }),
       findActive: Effect.fn("TurnRepository.findActive")(function* (threadId) {
         return [...(yield* Ref.get(state)).values()]
           .filter((turn) => turn.threadId === threadId && ["accepted", "running", "waiting"].includes(turn.status))
-          .toSorted((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]
+          .toSorted((left, right) => left.createdAt - right.createdAt)[0]
       }),
       listQueued: Effect.fn("TurnRepository.listQueued")(function* (threadId) {
         return [...(yield* Ref.get(state)).values()]
           .filter((turn) => turn.threadId === threadId && turn.status === "queued")
-          .toSorted((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+          .toSorted((left, right) => left.createdAt - right.createdAt)
           .map(clone)
       }),
       listNonterminal: Effect.fn("TurnRepository.listNonterminal")(function* () {
         return [...(yield* Ref.get(state)).values()]
           .filter((turn) => ["queued", "accepted", "running", "waiting"].includes(turn.status))
-          .toSorted((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+          .toSorted((left, right) => left.createdAt - right.createdAt)
           .map(clone)
       }),
       claimNextQueued: Effect.fn("TurnRepository.claimNextQueued")(function* (threadId, now) {
@@ -134,7 +137,7 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
           )
           const queued = [...turns.values()]
             .filter((turn) => turn.threadId === threadId && turn.status === "queued")
-            .toSorted((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]
+            .toSorted((left, right) => left.createdAt - right.createdAt)[0]
           if (hasActive || queued === undefined) return [undefined, turns]
           const claimed: Turn = { ...queued, status: "accepted", updatedAt: now }
           return [clone(claimed), new Map(turns).set(claimed.id, claimed)]
@@ -168,18 +171,22 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
         return clone(next)
       }),
       setStatus: Effect.fn("TurnRepository.setStatus")(function* (id, status, lastCursor, now) {
-        const current = yield* get(id)
-        if (current === undefined) return yield* Effect.fail(missing(id))
-        const { lastCursor: previousCursor, ...withoutCursor } = current
-        void previousCursor
-        const next: Turn = {
-          ...withoutCursor,
-          status,
-          ...(lastCursor === undefined ? {} : { lastCursor }),
-          updatedAt: now,
-        }
-        yield* Ref.update(state, (turns) => new Map(turns).set(id, next))
-        return clone(next)
+        const updated = yield* Ref.modify(state, (turns) => {
+          const current = turns.get(id)
+          if (current === undefined) return [undefined, turns]
+          if (isTerminalStatus(current.status) && !isTerminalStatus(status)) return [clone(current), turns]
+          const { lastCursor: previousCursor, ...withoutCursor } = current
+          void previousCursor
+          const next: Turn = {
+            ...withoutCursor,
+            status,
+            ...(lastCursor === undefined ? {} : { lastCursor }),
+            updatedAt: now,
+          }
+          return [clone(next), new Map(turns).set(id, next)]
+        })
+        if (updated === undefined) return yield* Effect.fail(missing(id))
+        return updated
       }),
     })
   })
@@ -198,7 +205,7 @@ export const layer = Layer.effect(
       createForSubmission: Effect.fn("TurnRepository.createForSubmission")(function* (input) {
         yield* sql`INSERT INTO rika_turns (id, thread_id, prompt, prompt_parts_json, status, created_at, updated_at)
           VALUES (${input.id}, ${input.threadId}, ${input.prompt}, ${input.promptParts === undefined ? null : JSON.stringify(input.promptParts)},
-            CASE WHEN EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${input.threadId} AND status IN ('accepted', 'running', 'waiting')) THEN 'queued' ELSE 'accepted' END,
+            CASE WHEN EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${input.threadId} AND status IN ('queued', 'accepted', 'running', 'waiting')) THEN 'queued' ELSE 'accepted' END,
             ${input.now}, ${input.now})`.pipe(Effect.mapError(repositoryError))
         const turn = yield* get(input.id)
         if (turn === undefined) return yield* Effect.fail(missing(input.id))
@@ -207,35 +214,35 @@ export const layer = Layer.effect(
       get,
       list: Effect.fn("TurnRepository.list")(function* (threadId) {
         const rows =
-          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} ORDER BY created_at ASC, id ASC`.pipe(
+          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} ORDER BY created_at ASC, rowid ASC`.pipe(
             Effect.mapError(repositoryError),
           )
         return yield* Effect.all(rows.map(decode))
       }),
       findActive: Effect.fn("TurnRepository.findActive")(function* (threadId) {
         const rows =
-          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND status IN ('accepted', 'running', 'waiting') ORDER BY created_at ASC, id ASC LIMIT 1`.pipe(
+          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND status IN ('accepted', 'running', 'waiting') ORDER BY created_at ASC, rowid ASC LIMIT 1`.pipe(
             Effect.mapError(repositoryError),
           )
         return rows[0] === undefined ? undefined : yield* decode(rows[0])
       }),
       listQueued: Effect.fn("TurnRepository.listQueued")(function* (threadId) {
         const rows =
-          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND status = 'queued' ORDER BY created_at ASC, id ASC`.pipe(
+          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND status = 'queued' ORDER BY created_at ASC, rowid ASC`.pipe(
             Effect.mapError(repositoryError),
           )
         return yield* Effect.all(rows.map(decode))
       }),
       listNonterminal: Effect.fn("TurnRepository.listNonterminal")(function* () {
         const rows =
-          yield* sql`SELECT * FROM rika_turns WHERE status IN ('queued', 'accepted', 'running', 'waiting') ORDER BY created_at ASC, id ASC`.pipe(
+          yield* sql`SELECT * FROM rika_turns WHERE status IN ('queued', 'accepted', 'running', 'waiting') ORDER BY created_at ASC, rowid ASC`.pipe(
             Effect.mapError(repositoryError),
           )
         return yield* Effect.all(rows.map(decode))
       }),
       claimNextQueued: Effect.fn("TurnRepository.claimNextQueued")(function* (threadId, now) {
         const rows = yield* sql`UPDATE rika_turns SET status = 'accepted', updated_at = ${now}
-          WHERE id = (SELECT id FROM rika_turns WHERE thread_id = ${threadId} AND status = 'queued' ORDER BY created_at ASC, id ASC LIMIT 1)
+          WHERE id = (SELECT id FROM rika_turns WHERE thread_id = ${threadId} AND status = 'queued' ORDER BY created_at ASC, rowid ASC LIMIT 1)
           AND NOT EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${threadId} AND status IN ('accepted', 'running', 'waiting'))
           RETURNING *`.pipe(Effect.mapError(repositoryError))
         return rows[0] === undefined ? undefined : yield* decode(rows[0])
@@ -269,9 +276,11 @@ export const layer = Layer.effect(
         return yield* decode(rows[0])
       }),
       setStatus: Effect.fn("TurnRepository.setStatus")(function* (id, status, lastCursor, now) {
-        yield* sql`UPDATE rika_turns SET status = ${status}, last_cursor = ${lastCursor ?? null}, updated_at = ${now} WHERE id = ${id}`.pipe(
-          Effect.mapError(repositoryError),
-        )
+        const rows =
+          yield* sql`UPDATE rika_turns SET status = ${status}, last_cursor = ${lastCursor ?? null}, updated_at = ${now}
+          WHERE id = ${id} AND (status NOT IN ('completed', 'failed', 'cancelled') OR ${status} IN ('completed', 'failed', 'cancelled'))
+          RETURNING *`.pipe(Effect.mapError(repositoryError))
+        if (rows[0] !== undefined) return yield* decode(rows[0])
         const turn = yield* get(id)
         if (turn === undefined) return yield* Effect.fail(missing(id))
         return turn

@@ -63,13 +63,15 @@ describe("ViewState", () => {
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "right" }) })
     expect(model.input).toBe("xi")
     model = ViewState.update(model, { _tag: "Submitted" })
-    expect(model.entries).toEqual([{ role: "user", text: "xi" }])
+    expect(model.entries).toEqual([])
     expect(model.busy).toBe(true)
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "q", sequence: "q" }) })
     model = ViewState.update(model, { _tag: "Submitted" })
-    expect(model.entries.at(-1)).toEqual({ role: "user", text: "q" })
+    expect(model.entries).toEqual([])
     model = ViewState.update(model, { _tag: "SubmissionQueued", prompt: "q" })
-    expect(model.entries.at(-1)).toEqual({ role: "user", text: "q" })
+    expect(model.entries).toEqual([])
+    model = ViewState.update(model, { _tag: "TurnStarted", turnId: "q", prompt: "q" })
+    expect(model.entries.at(-1)).toEqual({ role: "user", text: "q", turnId: "q" })
     expect(model.busy).toBe(true)
   })
 
@@ -186,8 +188,10 @@ describe("ViewState", () => {
     expect(model.busy).toBe(false)
     model = { ...model, input: "try again", cursor: 9 }
     model = ViewState.update(model, { _tag: "Submitted" })
-    expect(model.entries.at(-1)).toEqual({ role: "user", text: "try again" })
-    expect(model.items.at(-1)).toEqual({ _tag: "Entry", index: 3 })
+    expect(model.entries.at(-1)).toEqual({ role: "assistant", text: "completion only" })
+    model = ViewState.update(model, { _tag: "TurnStarted", turnId: "retry", prompt: "try again" })
+    expect(model.entries.at(-1)).toEqual({ role: "user", text: "try again", turnId: "retry" })
+    expect(model.items.at(-1)).toEqual({ _tag: "Entry", index: 3, turnId: "retry" })
     expect(model).toMatchObject({ input: "", busy: true })
     model = ViewState.update(ViewState.initial("/work"), { _tag: "AssistantCompleted", text: "standalone" })
     expect(model.entries).toEqual([{ role: "assistant", text: "standalone" }])
@@ -208,7 +212,7 @@ describe("ViewState", () => {
     model = ViewState.update(model, { _tag: "BlockAdded", block: { _tag: "Diff", path: "a.ts", patch: "+hello" } })
     model = ViewState.update(model, {
       _tag: "BlockAdded",
-      block: { _tag: "Permission", id: "2", title: "Write", detail: "a.ts", status: "pending" },
+      block: { _tag: "Permission", id: "2", kind: "tool-approval", title: "Write", detail: "a.ts", status: "pending" },
     })
     expect(model.blocks).toHaveLength(5)
     expect(model.blocks[0]).toMatchObject({ _tag: "Reasoning", text: "checking files" })
@@ -260,28 +264,38 @@ describe("ViewState", () => {
     expect(model.pendingAction).toBeUndefined()
   })
 
-  test("routes Alt+T to the latest reasoning block", () => {
-    let model = {
-      ...ViewState.initial("/work"),
-      blocks: [
-        { _tag: "Reasoning", text: "first", expanded: false },
-        { _tag: "ToolResult", id: "1", output: "ok", failed: false },
-        { _tag: "Reasoning", text: "latest", expanded: false },
-      ],
-    } as ViewState.Model
+  test("switches mutually exclusively between the file tree and changed files", () => {
+    let model = ViewState.initial("/work")
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "t", alt: true }) })
-    expect(model.blocks).toMatchObject([{ expanded: false }, {}, { expanded: true }])
+    expect(model).toMatchObject({ sidebarOpen: true, changedFilesOpen: false })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "s", alt: true }) })
+    expect(model).toMatchObject({ sidebarOpen: false, changedFilesOpen: true })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "t", alt: true }) })
+    expect(model).toMatchObject({ sidebarOpen: true, changedFilesOpen: false })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "t", alt: true }) })
+    expect(model).toMatchObject({ sidebarOpen: false, changedFilesOpen: false })
+    model = { ...model, sidebarOpen: true }
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "o", ctrl: true }) })
+    for (const character of "changed files")
+      model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: character, sequence: character }) })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "return" }) })
+    expect(model).toMatchObject({ sidebarOpen: false, changedFilesOpen: true })
   })
 
   test("selects permission decisions and executes the pending choice from keys", () => {
     let model = ViewState.update(ViewState.initial("/work"), {
       _tag: "BlockAdded",
-      block: { _tag: "Permission", id: "p", title: "Write", detail: "a.ts", status: "pending" },
+      block: { _tag: "Permission", id: "p", kind: "tool-approval", title: "Write", detail: "a.ts", status: "pending" },
     })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "right" }) })
     expect(model.permissionSelection).toBe(1)
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "return" }) })
-    expect(model.pendingAction).toEqual({ _tag: "DecidePermission", id: "p", decision: "always" })
+    expect(model.pendingAction).toEqual({
+      _tag: "DecidePermission",
+      id: "p",
+      kind: "tool-approval",
+      decision: "always",
+    })
     expect(model.blocks[0]).toMatchObject({ status: "approved" })
   })
 
@@ -311,7 +325,7 @@ describe("ViewState", () => {
     expect(model.pendingAction).toEqual({ _tag: "Dequeue", id: "first" })
   })
 
-  test("navigates transcript detail units with Tab and toggles the selected unit with Opt+T", () => {
+  test("navigates transcript detail units with Tab and toggles the selected unit", () => {
     let model = {
       ...ViewState.initial("/work"),
       blocks: [
@@ -320,14 +334,17 @@ describe("ViewState", () => {
         { _tag: "Diff", path: "a", patch: "+a", expanded: false },
       ],
     } as ViewState.Model
-    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "t", alt: true }) })
+    model = ViewState.update(
+      { ...model, detailSelection: "block:Diff:2" },
+      { _tag: "DetailToggled", id: "block:Diff:2" },
+    )
     expect(model).toMatchObject({
       detailSelection: "block:Diff:2",
       blocks: [{ expanded: false }, {}, { expanded: true }],
     })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "tab", shift: true }) })
     expect(model.detailSelection).toBe("tool:1")
-    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "t", alt: true }) })
+    model = ViewState.update(model, { _tag: "DetailToggled", id: "tool:1" })
     expect(model).toMatchObject({
       detailSelection: "tool:1",
       blocks: [{ expanded: false }, { expanded: true }, { expanded: true }],
@@ -349,9 +366,13 @@ describe("ViewState", () => {
     model = ViewState.update(model, { _tag: "ThreadSelectionMoved", offset: 1 })
     model = ViewState.update(model, { _tag: "ThreadSelectionConfirmed" })
     expect(model.pendingAction).toEqual({ _tag: "SelectThread", id: "b" })
+    model = {
+      ...model,
+      blocks: [{ _tag: "Permission", id: "p", kind: "permission", title: "P", detail: "d", status: "pending" }],
+    }
     model = ViewState.update(model, { _tag: "PermissionSelectionMoved", offset: -1 })
     model = ViewState.update(model, { _tag: "PermissionDecisionSelected", id: "p" })
-    expect(model.pendingAction).toEqual({ _tag: "DecidePermission", id: "p", decision: "deny" })
+    expect(model.pendingAction).toEqual({ _tag: "DecidePermission", id: "p", kind: "permission", decision: "deny" })
     const event = {
       id: "stable",
       cursor: "42",
@@ -439,12 +460,16 @@ describe("ViewState", () => {
     for (const c of "mode") model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: c, sequence: c }) })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "return" }) })
     expect(model.modePicker.open).toBe(true)
+    model = {
+      ...model,
+      blocks: [{ _tag: "Permission", id: "p", kind: "permission", title: "P", detail: "d", status: "pending" }],
+    }
     model = ViewState.update(model, { _tag: "PermissionDecisionSelected", id: "p", decision: "allow" })
     expect(model.pendingAction).toMatchObject({ decision: "allow" })
     model = {
       ...model,
       blocks: [
-        { _tag: "Permission", id: "p", title: "P", detail: "d", status: "pending" },
+        { _tag: "Permission", id: "p", kind: "permission", title: "P", detail: "d", status: "pending" },
         { _tag: "Queued", id: "queued", prompt: "x" },
       ],
     }
@@ -493,7 +518,7 @@ describe("ViewState", () => {
     expect(ViewState.canSubmit({ ...base, input: "multi\\", cursor: 6 })).toBe(false)
     const withPermission = ViewState.update(base, {
       _tag: "BlockAdded",
-      block: { _tag: "Permission", id: "p1", title: "Run shell", detail: "ls", status: "pending" },
+      block: { _tag: "Permission", id: "p1", kind: "permission", title: "Run shell", detail: "ls", status: "pending" },
     })
     expect(ViewState.canSubmit(withPermission)).toBe(false)
   })

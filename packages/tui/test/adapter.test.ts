@@ -49,6 +49,7 @@ const opentui = vi.hoisted(() => {
     scrollHeight = 24
     stickyScroll = true
     viewport = { height: 24 }
+    content = { minHeight: 0, justifyContent: "flex-end" }
     verticalScrollBar = { visible: true }
 
     scrollTo(offset: number) {
@@ -56,11 +57,37 @@ const opentui = vi.hoisted(() => {
     }
   }
 
+  class ScrollBarRenderable {
+    scrollSize = 0
+    scrollPosition = 0
+    viewportSize = 0
+    visible = true
+
+    constructor(
+      readonly renderer: object,
+      options: Record<string, unknown>,
+    ) {
+      Object.assign(this, options)
+    }
+
+    destroy() {}
+  }
+
   class RGBA {
     a = 0
 
+    constructor(readonly token: string = "rgba") {}
+
     static defaultBackground() {
-      return new RGBA()
+      return new RGBA("default-bg")
+    }
+
+    static defaultForeground() {
+      return new RGBA("default-fg")
+    }
+
+    static fromIndex(index: number) {
+      return new RGBA(`ansi-${index}`)
     }
   }
 
@@ -96,6 +123,7 @@ const opentui = vi.hoisted(() => {
   return {
     BoxRenderable,
     RGBA,
+    ScrollBarRenderable,
     ScrollBoxRenderable,
     TextRenderable,
     boxChildren,
@@ -113,6 +141,7 @@ const opentui = vi.hoisted(() => {
 vi.mock("@opentui/core", () => ({
   BoxRenderable: opentui.BoxRenderable,
   RGBA: opentui.RGBA,
+  ScrollBarRenderable: opentui.ScrollBarRenderable,
   ScrollBoxRenderable: opentui.ScrollBoxRenderable,
   CliRenderEvents: { RESIZE: "resize", SELECTION: "selection" },
   TextRenderable: opentui.TextRenderable,
@@ -122,6 +151,9 @@ vi.mock("@opentui/core", () => ({
   bg: (_color: string) => (chunk: { text: string }) => chunk,
   bold: (chunk: { text: string }) => chunk,
   italic: (chunk: { text: string }) => chunk,
+  dim: (chunk: { text: string }) => chunk,
+  underline: (chunk: { text: string }) => chunk,
+  strikethrough: (chunk: { text: string }) => chunk,
   link: () => (chunk: { text: string }) => chunk,
   StyledText: class StyledText {
     constructor(readonly chunks: ReadonlyArray<{ text: string }>) {}
@@ -138,7 +170,7 @@ import {
   renderTranscript,
   renderTranscriptStyled,
 } from "../src/adapter"
-import { initial, type Mode, type Model } from "../src/view-state"
+import { defaultReasoningEffort, initial, type Mode, type Model } from "../src/view-state"
 
 const handlers = () => ({ key: vi.fn(), resize: vi.fn() })
 
@@ -165,11 +197,11 @@ test("renders changed files as an indented path tree", () => {
     renderChangedFiles(model({ changedFiles: [{ path: "src/main.ts", status: "M", added: 3, removed: 1 }] }), 28)
       .chunks,
   ).toEqual([
-    { text: "src/", fg: "#7d8590" },
-    { text: "\n", fg: "#c9d1d9" },
-    { text: "  main.ts", fg: "#d2a25c" },
-    { text: " +3", fg: "#98c379" },
-    { text: " -1", fg: "#e06c75" },
+    { text: "src/", fg: opentui.RGBA.fromIndex(8) },
+    { text: "\n", fg: opentui.RGBA.defaultForeground() },
+    { text: "  main.ts", fg: opentui.RGBA.fromIndex(3) },
+    { text: " +3", fg: opentui.RGBA.fromIndex(2) },
+    { text: " -1", fg: opentui.RGBA.fromIndex(1) },
   ])
 })
 
@@ -195,7 +227,7 @@ describe("Surface", () => {
         turnId: "turn-4",
         recovery: "Press Enter to retry.",
       },
-      { _tag: "Permission", id: "p", title: "Write", detail: "a", status: "pending" },
+      { _tag: "Permission", id: "p", kind: "tool-approval", title: "Write", detail: "a", status: "pending" },
       { _tag: "ChildAgent", name: "child", summary: "work", status: "running" },
       { _tag: "Workflow", name: "flow", step: "wait", status: "waiting" },
       { _tag: "ImageAttachment", name: "a.png", mediaType: "image/png" },
@@ -242,12 +274,13 @@ describe("Surface", () => {
     const callbacks = handlers()
     const { renderer } = await create(callbacks)
 
-    expect(opentui.rootChildren).toHaveLength(5)
+    expect(opentui.rootChildren).toHaveLength(6)
     const surface = new Surface(renderer, callbacks)
-    expect(opentui.rootChildren.slice(-5)).toEqual([
+    expect(opentui.rootChildren.slice(-6)).toEqual([
       surface.main,
       surface.modeLabel,
       surface.statusLabel,
+      surface.workspaceLabel,
       surface.paletteBox,
       surface.toastBox,
     ])
@@ -284,6 +317,7 @@ describe("Surface", () => {
     }
     for (const listener of opentui.pasteHandlers) {
       listener({ bytes: new TextEncoder().encode("pasted text") })
+      listener({ bytes: Uint8Array.from([1, 2, 3]), metadata: { kind: "binary", mimeType: "image/png" } })
       listener({ bytes: new Uint8Array() })
     }
     for (const listener of opentui.selectionHandlers) {
@@ -291,11 +325,25 @@ describe("Surface", () => {
       listener({ getSelectedText: () => "  " })
     }
 
-    expect(callbacks.pasteImage).toHaveBeenCalledOnce()
+    expect(callbacks.pasteImage).toHaveBeenCalledTimes(2)
+    expect(callbacks.pasteImage).toHaveBeenLastCalledWith({
+      bytes: Uint8Array.from([1, 2, 3]),
+      mediaType: "image/png",
+    })
     expect(callbacks.key).toHaveBeenCalledOnce()
     expect(callbacks.paste).toHaveBeenCalledOnce()
     expect(callbacks.paste).toHaveBeenCalledWith("pasted text")
     expect(opentui.renderer.copyToClipboardOSC52).toHaveBeenCalledWith("selected text")
+  })
+
+  test("never decodes binary paste as text without an image handler", async () => {
+    const callbacks = { key: vi.fn(), paste: vi.fn(), resize: vi.fn() }
+    await create(callbacks)
+
+    for (const listener of opentui.pasteHandlers)
+      listener({ bytes: Uint8Array.from([0xff, 0xfe]), metadata: { kind: "binary" } })
+
+    expect(callbacks.paste).not.toHaveBeenCalled()
   })
 
   test("opens a clicked changed file through the host callback", async () => {
@@ -393,9 +441,12 @@ describe("Surface", () => {
     expect(surface.transcriptContent).toBeInstanceOf(Object)
     expect(inputText()).toBe("abcd")
     expect(surface.inputBox.title).toBe("")
-    expect(modeLabelText()).toBe(" medium  ")
-    expect(surface.inputBox.borderColor).toBe("#c9d1d9")
-    expect(surface.inputBox.bottomTitle).toBe(" /workspace ")
+    expect(modeLabelText()).toBe(" medium ")
+    expect(surface.inputBox.borderColor).toEqual(opentui.RGBA.defaultForeground())
+    expect(surface.inputBox.bottomTitle).toBe("")
+    expect(surface.workspaceLabel.content).toEqual(
+      expect.objectContaining({ chunks: [expect.objectContaining({ text: " /workspace " })] }),
+    )
     expect(surface.palette.visible).toBe(false)
 
     surface.update(model({ width: 40, input: "one\ntwo\nthree", cursor: 13 }))
@@ -430,18 +481,22 @@ describe("Surface", () => {
       ["ultra", "#ae77ff"],
     ]
     for (const [mode] of modeColors) {
-      surface.update(model({ mode, busy: true }))
+      surface.update(model({ mode, busy: true, reasoningEffort: defaultReasoningEffort(mode) }))
       expect(surface.inputBox.title).toBe("")
-      expect(modeLabelText()).toBe(`  $····  ${mode}  `)
-      expect(surface.inputBox.borderColor).toBe("#c9d1d9")
-      expect(surface.inputBox.bottomTitle).toContain(" Waiting ")
+      expect(modeLabelText()).toBe(` $···· ─ ${mode} `)
+      expect(surface.inputBox.borderColor).toEqual(opentui.RGBA.defaultForeground())
+      expect(surface.statusLabel.content).toEqual(
+        expect.objectContaining({
+          chunks: expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(" Waiting ") })]),
+        }),
+      )
     }
     surface.update(model({ mode: "medium", busy: false, costUsd: 0.0074 }))
-    expect(modeLabelText()).toBe("  $0.007  medium  ")
+    expect(modeLabelText()).toBe(" $0.007 ─ medium ")
     surface.update(model({ mode: "medium", busy: false, costUsd: 5.4449 }))
-    expect(modeLabelText()).toBe("  $5.44  medium  ")
+    expect(modeLabelText()).toBe(" $5.44 ─ medium ")
     surface.update(model({ mode: "medium", busy: false, costUsd: 5.4449, fastMode: true }))
-    expect(modeLabelText()).toBe("  $5.44  ↯medium  ")
+    expect(modeLabelText()).toBe(" $5.44 ─ ↯medium ")
 
     surface.update(
       model({

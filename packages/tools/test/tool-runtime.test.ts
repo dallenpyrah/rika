@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, FileSystem, Layer, Option, Path, PlatformError, Sink, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { MediaView, ParallelSearch, ReadWebPage, Runtime } from "../src"
+import { MediaView, ParallelSearch, ProcessRegistry, ReadWebPage, Runtime } from "../src"
 
 const workspace = "/workspace"
 
@@ -91,9 +91,15 @@ const testEnvironment = () => {
       if (command.command === "fail-spawn") return Effect.fail(platformError("spawn", command.command))
       if (command.command === "large")
         return Effect.succeed(processHandle({ stdout: "x".repeat(40_001), stderr: "", exitCode: 0 }))
+      if (command.command === "unicode-boundary")
+        return Effect.succeed(processHandle({ stdout: `${"x".repeat(39_999)}🙂`, stderr: "", exitCode: 0 }))
       if (command.command === "running") {
         const handle = processHandle({ stdout: "x".repeat(40_001), stderr: "error", exitCode: 0 })
         return Effect.succeed({ ...handle, exitCode: Effect.never })
+      }
+      if (command.command === "stream-failure") {
+        const handle = processHandle({ stdout: "", stderr: "", exitCode: 0 })
+        return Effect.succeed({ ...handle, stdout: Stream.fail(platformError("stdout", command.command)) })
       }
       if (command.command === "bad") return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 7 }))
       if (command.command === "git")
@@ -118,6 +124,28 @@ const testEnvironment = () => {
 }
 
 describe("Runtime", () => {
+  it.effect("drains large streams while retaining only bounded text and complete UTF-8 characters", () => {
+    const encoded = new TextEncoder().encode("🙂")
+    const stream = Stream.concat(
+      Stream.fromIterable(Array.from({ length: 10_000 }, () => new Uint8Array(1_000).fill(120))),
+      Stream.make(encoded.slice(0, 2), encoded.slice(2)),
+    )
+    return Effect.gen(function* () {
+      const result = yield* ProcessRegistry.collectBoundedText(stream, 40_004)
+      expect(result.text).toHaveLength(40_004)
+      expect(result.text.endsWith("🙂")).toBe(false)
+      expect(result.truncated).toBe(true)
+
+      const unicode = yield* ProcessRegistry.collectBoundedText(Stream.make(encoded.slice(0, 2), encoded.slice(2)), 4)
+      expect(unicode).toEqual({ text: "🙂", truncated: false })
+      const truncatedUnicode = yield* ProcessRegistry.collectBoundedText(
+        Stream.make(new TextEncoder().encode("x🙂")),
+        2,
+      )
+      expect(truncatedUnicode).toEqual({ text: "x", truncated: true })
+    })
+  })
+
   it.effect("discovers recursively, skips ignored and other entries, and greps readable files", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
@@ -187,6 +215,11 @@ describe("Runtime", () => {
       const git = yield* runtime.run({ _tag: "GitStatus" })
       const large = yield* runtime.run({ _tag: "Shell", command: "large", args: [] })
       const running = yield* runtime.run({ _tag: "Shell", command: "running", args: [], waitMillis: 0 })
+      const completed = yield* Effect.flip(
+        runtime.run({ _tag: "ShellCommandStatus", processId: ok.processId ?? "", waitMillis: 0 }),
+      )
+      const failedStream = yield* runtime.run({ _tag: "Shell", command: "stream-failure", args: [] })
+      const unicodeBoundary = yield* runtime.run({ _tag: "Shell", command: "unicode-boundary", args: [] })
 
       expect(ok).toMatchObject({ text: "outerr", truncated: false, running: false, exitCode: 0 })
       expect(bad.text).toBe("outerr\nexit 7")
@@ -194,12 +227,17 @@ describe("Runtime", () => {
       expect(large.text).toHaveLength(40_000)
       expect(large.truncated).toBe(true)
       expect(running.running).toBe(true)
+      expect(completed).toMatchObject({ _tag: "ToolError", tool: "ShellCommandStatus" })
+      expect(failedStream).toMatchObject({ running: false, exitCode: 0, truncated: true })
+      expect(unicodeBoundary).toMatchObject({ text: "x".repeat(39_999), truncated: true })
       expect(environment.commands.map(({ command, args, options }) => ({ command, args, cwd: options.cwd }))).toEqual([
         { command: "ok", args: ["one"], cwd: workspace },
         { command: "bad", args: [], cwd: workspace },
         { command: "git", args: ["status", "--short", "--branch"], cwd: workspace },
         { command: "large", args: [], cwd: workspace },
         { command: "running", args: [], cwd: workspace },
+        { command: "stream-failure", args: [], cwd: workspace },
+        { command: "unicode-boundary", args: [], cwd: workspace },
       ])
     }).pipe(Effect.provide(environment.runtime))
   })

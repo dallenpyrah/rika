@@ -152,6 +152,14 @@ test("keeps click rows stable after a clipped wide-character filename", async ()
     const frame = setup.captureCharFrame()
     expect(frame).toContain("+1 -1")
     expect(frame).toContain("after.ts +2 -0")
+    await setup.mockMouse.moveTo(72, 4)
+    await setup.renderOnce()
+    expect(
+      setup
+        .captureSpans()
+        .lines.flatMap((line) => line.spans)
+        .some((span) => span.text.includes("after.ts") && (span.attributes & 8) === 8),
+    ).toBe(true)
     await setup.mockMouse.click(72, 4)
     expect(opened).toEqual(["b/after.ts"])
   } finally {
@@ -191,6 +199,31 @@ test("escapes control characters without shifting changed-file click rows", asyn
   }
 })
 
+test("keeps the mode label and picker grouped with the narrowed composer", async () => {
+  const setup = await createTestRenderer({ width: 100, height: 24 })
+  const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+  try {
+    surface.update({
+      ...initial("/work", "high"),
+      width: 100,
+      height: 24,
+      costUsd: 0.004,
+      changedFilesOpen: true,
+      changedFiles: [{ path: "src/main.ts", status: "M", added: 2, removed: 1 }],
+      modePicker: { open: true, selected: 2 },
+    })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain(" $0.004 ─ high ")
+    const composerRight = surface.inputBox.x + surface.inputBox.width
+    expect(surface.modeLabel.x + surface.modeLabel.width).toBeLessThanOrEqual(composerRight)
+    expect(surface.paletteBox.x + surface.paletteBox.width).toBeLessThanOrEqual(composerRight)
+    expect(surface.paletteBox.x + surface.paletteBox.width).toBeLessThanOrEqual(surface.changedFilesBox.x)
+  } finally {
+    surface.destroy()
+    setup.renderer.destroy()
+  }
+})
+
 for (const width of [80, 50] as const) {
   test(`renders a visible error action and leaves the composer usable at width ${width}`, async () => {
     const setup = await createTestRenderer({ width, height: 20 })
@@ -215,14 +248,16 @@ for (const width of [80, 50] as const) {
           .captureSpans()
           .lines.flatMap((line) => line.spans)
           .some(
-            (span) => span.text.includes("ERROR: Execution failed") && span.fg.toInts().join(",") === "224,108,117,255",
+            (span) => span.text.includes("ERROR: Execution failed") && span.fg.toInts().join(",") === "128,0,0,255",
           ),
       ).toBe(true)
       await setup.mockInput.typeText("retry")
       setup.mockInput.pressEnter()
-      await setup.renderOnce()
-      expect(model.entries.at(-1)).toEqual({ role: "user", text: "retry" })
       expect(model.busy).toBe(true)
+      model = update(model, { _tag: "TurnStarted", turnId: "turn-retry", prompt: "retry" })
+      surface.update(model)
+      await setup.renderOnce()
+      expect(model.entries.at(-1)).toEqual({ role: "user", text: "retry", turnId: "turn-retry" })
       expect(setup.captureCharFrame()).toContain("┃ retry")
     } finally {
       surface.destroy()
@@ -296,7 +331,7 @@ for (const [width, height] of [
       const coloredMark = setup
         .captureSpans()
         .lines.flatMap((line) => line.spans)
-        .some((span) => /[•●·]/u.test(span.text) && span.fg.toInts().join(",") === "63,185,80,255")
+        .some((span) => /[•●·]/u.test(span.text) && span.fg.toInts().join(",") === "61,212,255,255")
       expect(coloredMark).toBe(true)
     } finally {
       surface.destroy()
@@ -368,6 +403,8 @@ test("drives keyboard, palette, resize, frame capture, and teardown", async () =
     await setup.mockInput.typeText("?")
     await setup.mockInput.typeText("hello")
     setup.mockInput.pressEnter()
+    model = update(model, { _tag: "TurnStarted", turnId: "turn-hello", prompt: "hello" })
+    surface.update(model)
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("┃ hello")
     model = update(model, { _tag: "AssistantStreamed", text: "stream" })
@@ -391,7 +428,7 @@ test("drives keyboard, palette, resize, frame capture, and teardown", async () =
     surface.update(model)
     await setup.renderOnce()
     const activityFrame = setup.captureCharFrame()
-    expect(activityFrame).toContain("⠿ Exploring 1 file ▸")
+    expect(activityFrame).toMatch(/[⠿⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Exploring 1 file ▸/)
     expect(activityFrame).toContain("Edited src/main.ts +1 -1")
     model = update(model, {
       _tag: "BlockAdded",
@@ -484,8 +521,9 @@ test("joins the durable queue to the composer and exposes steering controls", as
     expect(frame).toContain("Selected queued prompt")
     expect(frame).toContain("Enter to steer · Backspace to dequeue")
     expect(surface.inputBox.y).toBe(surface.queueBox.y + surface.queueBox.height)
-    expect(rows[surface.inputBox.y]).toStartWith("├")
-    expect(rows[surface.inputBox.y]).toEndWith("┤")
+    expect(rows[surface.queueBox.y]).toStartWith("╭")
+    expect(rows[surface.inputBox.y]).toStartWith("╭")
+    expect(rows[surface.inputBox.y]).toEndWith("╮")
   } finally {
     surface.destroy()
     setup.renderer.destroy()

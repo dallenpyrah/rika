@@ -71,6 +71,21 @@ it.effect("memory turns preserve deterministic identity and status", () =>
   }).pipe(Effect.provide(TurnRepository.memoryLayer())),
 )
 
+it.effect("memory terminal status does not regress to nonterminal", () =>
+  Effect.gen(function* () {
+    const repository = yield* TurnRepository.Service
+    const created = yield* repository.createForSubmission({
+      id: Turn.TurnId.make("terminal"),
+      threadId: Thread.ThreadId.make("terminal-thread"),
+      prompt: "done",
+      now: 1,
+    })
+    yield* repository.setStatus(created.id, "completed", "terminal-cursor", 2)
+    const unchanged = yield* repository.setStatus(created.id, "running", "stale-cursor", 3)
+    expect(unchanged).toMatchObject({ status: "completed", lastCursor: "terminal-cursor", updatedAt: 2 })
+  }).pipe(Effect.provide(TurnRepository.memoryLayer())),
+)
+
 it.effect("memory turns reject duplicates and missing updates", () =>
   Effect.gen(function* () {
     const repository = yield* TurnRepository.Service
@@ -112,10 +127,10 @@ it.effect("memory submissions queue while active and promote one in FIFO order",
     })
     expect(first.status).toBe("accepted")
     expect((yield* repository.findActive(threadId))?.id).toBe(first.id)
-    expect((yield* repository.listQueued(threadId)).map((turn) => turn.id)).toEqual([second.id, third.id])
+    expect((yield* repository.listQueued(threadId)).map((turn) => turn.id)).toEqual([third.id, second.id])
     expect(yield* repository.claimNextQueued(threadId, 3)).toBeUndefined()
     yield* repository.setStatus(first.id, "completed", undefined, 3)
-    expect((yield* repository.claimNextQueued(threadId, 4))?.id).toBe(second.id)
+    expect((yield* repository.claimNextQueued(threadId, 4))?.id).toBe(third.id)
     expect(yield* repository.claimNextQueued(threadId, 4)).toBeUndefined()
   }).pipe(Effect.provide(TurnRepository.memoryLayer())),
 )
@@ -135,10 +150,10 @@ it.effect("memory lists nonterminal turns and rejects a missing extension pin", 
     const repository = yield* TurnRepository.Service
     const threadId = Thread.ThreadId.make("thread-a")
     expect((yield* repository.listNonterminal()).map((turn) => turn.id)).toEqual([
-      Turn.TurnId.make("a"),
       Turn.TurnId.make("b"),
+      Turn.TurnId.make("a"),
     ])
-    expect((yield* repository.findActive(threadId))?.id).toBe(Turn.TurnId.make("a"))
+    expect((yield* repository.findActive(threadId))?.id).toBe(Turn.TurnId.make("b"))
     expect(
       (yield* Effect.result(
         repository.setExtensionPin(Turn.TurnId.make("missing"), {
@@ -244,7 +259,7 @@ it.effect("sql turns create, get, list, and decode cursor variants", () =>
       expect(listed.map((turn) => turn.lastCursor)).toEqual([undefined, "cursor-b"])
       expect(sql.statements[0]?.parameters).toEqual(["turn-a", "thread-a", "hello", null, "thread-a", 1, 1])
       expect(sql.statements.at(-1)).toEqual({
-        sql: "SELECT * FROM rika_turns WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
+        sql: "SELECT * FROM rika_turns WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
         parameters: ["thread-a"],
       })
     }),
@@ -254,15 +269,13 @@ it.effect("sql turns create, get, list, and decode cursor variants", () =>
 it.effect("sql status updates bind cursor and null cursor", () =>
   sqlTest((sql) =>
     Effect.gen(function* () {
-      sql.rows()
       sql.rows(row({ status: "running", last_cursor: "cursor-a", updated_at: 2 }))
-      sql.rows()
       sql.rows(row({ status: "completed", updated_at: 3 }))
       const repository = yield* TurnRepository.Service
       yield* repository.setStatus(Turn.TurnId.make("turn-a"), "running", "cursor-a", 2)
       yield* repository.setStatus(Turn.TurnId.make("turn-a"), "completed", undefined, 3)
-      expect(sql.statements[0]?.parameters).toEqual(["running", "cursor-a", 2, "turn-a"])
-      expect(sql.statements[2]?.parameters).toEqual(["completed", null, 3, "turn-a"])
+      expect(sql.statements[0]?.parameters).toEqual(["running", "cursor-a", 2, "turn-a", "running"])
+      expect(sql.statements[1]?.parameters).toEqual(["completed", null, 3, "turn-a", "completed"])
     }),
   ),
 )

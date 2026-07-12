@@ -5,7 +5,7 @@
   │ > thread                 │
   │                          │
   │           thread         │
-╭─│ switch Ctrl+T        high│─╮
+╭─│ switch Ctrl+T        high ─╮
 │ ╰──────────────────────────╯ │
 │                              │
 │                              │

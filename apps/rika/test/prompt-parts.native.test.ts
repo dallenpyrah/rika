@@ -9,6 +9,8 @@ import {
   materializePromptParts,
   parseChangedFiles,
   pasteClipboardPng,
+  pastedImagePath,
+  persistPastedImage,
   readChangedFiles,
   resolveWorkspaceFile,
 } from "../src/main"
@@ -178,6 +180,38 @@ test("extracts a clipboard image in a fresh workspace with the path passed outsi
   expect(receivedScript).toContain("POSIX file (item 1 of argv)")
   expect(receivedScript).not.toContain(workspace)
   expect(await Bun.file(receivedPath).exists()).toBe(true)
+})
+
+test("persists terminal image paste bytes with their media type", async () => {
+  const workspace = `${process.env.TMPDIR ?? "/tmp"}/rika-pasted-image-${crypto.randomUUID()}`
+  workspaces.push(workspace)
+  const bytes = Uint8Array.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50])
+  const relative = pastedImagePath(
+    bytes,
+    "IMAGE/WEBP",
+    () => 42,
+    () => "one",
+  )
+  expect(relative).toBe(".rika/pasted/paste-42-one.webp")
+  if (relative === undefined) throw new Error("expected a WebP path")
+  const persisted = await Effect.runPromise(persistPastedImage(workspace, relative, bytes))
+  expect(persisted).toBe(true)
+  expect(await Bun.file(`${workspace}/${relative}`).bytes()).toEqual(bytes)
+})
+
+test("rejects unsupported, unrecognized, and mismatched terminal image bytes", () => {
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  expect(
+    pastedImagePath(
+      png,
+      "image/png",
+      () => 1,
+      () => "png",
+    ),
+  ).toBe(".rika/pasted/paste-1-png.png")
+  expect(pastedImagePath(png, "image/jpeg")).toBeUndefined()
+  expect(pastedImagePath(Uint8Array.from([1, 2, 3]), "image/png")).toBeUndefined()
+  expect(pastedImagePath(new TextEncoder().encode("<svg/>"), "image/svg+xml")).toBeUndefined()
 })
 
 test.each([

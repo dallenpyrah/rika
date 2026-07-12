@@ -1,5 +1,5 @@
 import { FileFinder } from "@ff-labs/fff-node"
-import { Context, Effect, FileSystem, Layer, Path, PlatformError, Schema, Stream } from "effect"
+import { Context, Effect, FileSystem, Layer, Path, PlatformError, Schema } from "effect"
 import { Tool, Toolkit } from "effect/unstable/ai"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Service as ParallelSearchService } from "./parallel-search"
@@ -305,13 +305,14 @@ export const layer = (workspace: string) =>
             const process = yield* spawner.spawn(ChildProcess.make(command, args, { cwd: workspace }))
             const [stdout, stderr, exitCode] = yield* Effect.all(
               [
-                Stream.mkString(Stream.decodeText(process.stdout)),
-                Stream.mkString(Stream.decodeText(process.stderr)),
+                ProcessRegistry.collectBoundedText(process.stdout, maxOutput),
+                ProcessRegistry.collectBoundedText(process.stderr, maxOutput),
                 process.exitCode,
               ],
               { concurrency: 3 },
             )
-            return bounded(`${stdout}${stderr}${exitCode === 0 ? "" : `\nexit ${exitCode}`}`.trim())
+            const result = bounded(`${stdout.text}${stderr.text}${exitCode === 0 ? "" : `\nexit ${exitCode}`}`.trim())
+            return { ...result, truncated: result.truncated || stdout.truncated || stderr.truncated }
           }),
         )
       })

@@ -4,6 +4,7 @@
 
 - Child Runs have isolated context.
 - Parent definitions may narrow child instructions, tools, mode, model route, budget, permissions, and output schema.
+- Parent child-join waits are non-actionable progress. The parent follower remains attached through the join and continues until parent terminal state or a separate explicit external permission request.
 - Fan-out supports bounded parallelism.
 - Joins support all, first-success, quorum, and best-effort policies.
 - Parent and child cancellation are explicit.

@@ -19,7 +19,12 @@ export type Action =
   | { readonly _tag: "Steer"; readonly prompt: string }
   | { readonly _tag: "InterruptAndSend"; readonly prompt: string }
   | { readonly _tag: "Cancel" }
-  | { readonly _tag: "DecidePermission"; readonly id: string; readonly decision: PermissionDecision }
+  | {
+      readonly _tag: "DecidePermission"
+      readonly id: string
+      readonly kind: "permission" | "tool-approval"
+      readonly decision: PermissionDecision
+    }
   | { readonly _tag: "SelectThread"; readonly id: string }
 
 export interface Adapter {
@@ -30,7 +35,7 @@ export interface Adapter {
   readonly steer?: (prompt: string) => void
   readonly interruptAndSend?: (prompt: string) => void
   readonly cancel?: () => void
-  readonly decidePermission?: (id: string, decision: PermissionDecision) => void
+  readonly decidePermission?: (id: string, kind: "permission" | "tool-approval", decision: PermissionDecision) => void
   readonly selectThread?: (id: string) => void
   readonly replay?: (cursor: string | undefined, emit: (event: UiEvent) => void) => void
 }
@@ -59,7 +64,7 @@ export const execute = (adapter: Adapter, action: Action): boolean => {
       adapter.cancel?.()
       return adapter.cancel !== undefined
     case "DecidePermission":
-      adapter.decidePermission?.(action.id, action.decision)
+      adapter.decidePermission?.(action.id, action.kind, action.decision)
       return adapter.decidePermission !== undefined
     case "SelectThread":
       adapter.selectThread?.(action.id)

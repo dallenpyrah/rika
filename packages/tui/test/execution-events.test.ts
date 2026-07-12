@@ -3,6 +3,27 @@ import { ExecutionEvents, ViewState } from "../src"
 import { renderTranscript } from "../src/adapter"
 
 describe("ExecutionEvents", () => {
+  it("deduplicates overlapping delivery and keeps late completion scoped to its turn", () => {
+    let model = ViewState.initial("/work")
+    model = ViewState.update(model, { _tag: "TurnStarted", turnId: "a", prompt: "A" })
+    const delta = { turnId: "a", cursor: "a-1", sequence: 1, type: "model.output.delta", text: "draft" }
+    model = ExecutionEvents.project(model, [delta, delta])
+    model = ViewState.update(model, { _tag: "TurnStarted", turnId: "b", prompt: "B" })
+    model = ExecutionEvents.project(model, [
+      { turnId: "a", cursor: "a-2", sequence: 2, type: "model.output.completed", text: "answer A" },
+      { turnId: "a", cursor: "a-3", sequence: 3, type: "execution.completed" },
+      { turnId: "b", cursor: "b-1", sequence: 1, type: "model.output.completed", text: "answer B" },
+    ])
+    expect(model.entries).toEqual([
+      { role: "user", text: "A", turnId: "a" },
+      { role: "assistant", text: "answer A", turnId: "a" },
+      { role: "user", text: "B", turnId: "b" },
+      { role: "assistant", text: "answer B", turnId: "b" },
+    ])
+    expect(model.activeTurnId).toBe("b")
+    expect(model.busy).toBe(true)
+  })
+
   it("preserves prose and activity interleaving across live projection and reopen replay", () => {
     const events: ReadonlyArray<ExecutionEvents.Event> = [
       { cursor: "1", sequence: 1, type: "model.output.delta", text: "first" },
@@ -59,7 +80,7 @@ describe("ExecutionEvents", () => {
     ])
   })
 
-  it("projects Relay wait identifiers", () => {
+  it("does not project generic or child waits as permissions", () => {
     const model = ExecutionEvents.project(ViewState.initial("/work"), [
       {
         cursor: "wait",
@@ -68,14 +89,10 @@ describe("ExecutionEvents", () => {
         data: { wait_id: "wait-42", mode: "event", tool_name: "create_file", input: { path: "a.ts" } },
       },
     ])
-    expect(model.blocks).toContainEqual(
-      expect.objectContaining({
-        _tag: "Permission",
-        id: "wait-42",
-        title: "create_file",
-        detail: '{"path":"a.ts"}',
-      }),
-    )
+    const child = ExecutionEvents.project(model, [
+      { cursor: "child", sequence: 2, type: "wait.created", data: { wait_id: "child-1", mode: "child" } },
+    ])
+    expect(child.blocks).toEqual([])
   })
 
   it("projects and reconciles tool approval events as one permission card", () => {
@@ -103,6 +120,7 @@ describe("ExecutionEvents", () => {
       {
         _tag: "Permission",
         id: "wait-42",
+        kind: "tool-approval",
         title: "create_file",
         detail: '{"path":"a.ts"}',
         status: "denied",
@@ -130,10 +148,10 @@ describe("ExecutionEvents", () => {
     model = ExecutionEvents.projectTurn(model, "turn-2", "second prompt", events)
 
     expect(model.entries).toEqual([
-      { role: "user", text: "first prompt" },
-      { role: "assistant", text: "answer" },
-      { role: "user", text: "second prompt" },
-      { role: "assistant", text: "answer" },
+      { role: "user", text: "first prompt", turnId: "turn-1" },
+      { role: "assistant", text: "answer", turnId: "turn-1" },
+      { role: "user", text: "second prompt", turnId: "turn-2" },
+      { role: "assistant", text: "answer", turnId: "turn-2" },
     ])
     expect(model.blocks).toEqual([
       expect.objectContaining({ _tag: "ToolCall", id: "turn-1:call", output: "contents", status: "complete" }),

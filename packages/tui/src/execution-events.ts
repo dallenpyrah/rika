@@ -53,27 +53,25 @@ const block = (event: Event): TranscriptBlock | undefined => {
       output: outputText(value.output),
       failed: typeof value.error === "string",
     }
-  if (event.type === "wait.created")
-    return {
-      _tag: "Permission",
-      id: string(value.wait_id, event.cursor),
-      title: string(value.tool_name ?? value.name, "Permission required"),
-      detail:
-        value.input === undefined
-          ? string(value.detail ?? value.mode)
-          : typeof value.input === "string"
-            ? value.input
-            : JSON.stringify(value.input),
-      status: "pending",
-    }
   if (event.type === "tool.approval.requested" || event.type === "tool.approval.resolved")
     return {
       _tag: "Permission",
       id: string(value.wait_id, event.cursor),
+      kind: "tool-approval",
       title: string(value.tool_name, "Permission required"),
       detail:
         typeof value.input === "string" ? value.input : value.input === undefined ? "" : JSON.stringify(value.input),
       status: event.type === "tool.approval.requested" ? "pending" : value.approved === false ? "denied" : "approved",
+    }
+  if (event.type === "permission.ask.requested" || event.type === "permission.ask.resolved")
+    return {
+      _tag: "Permission",
+      id: string(value.wait_id ?? value.permission_id, event.cursor),
+      kind: "permission",
+      title: string(value.title ?? value.tool_name ?? value.name, "Permission required"),
+      detail:
+        typeof value.input === "string" ? value.input : value.input === undefined ? "" : JSON.stringify(value.input),
+      status: event.type === "permission.ask.requested" ? "pending" : value.approved === false ? "denied" : "approved",
     }
   if (event.type === "model.usage.reported") return undefined
   if (event.type.includes("diff"))
@@ -105,18 +103,6 @@ const block = (event: Event): TranscriptBlock | undefined => {
       name: string(value.name ?? value.tool, "tool"),
       input: string(value.input, JSON.stringify(value.input ?? value)),
       status: event.type.includes("failed") ? "failed" : event.type.includes("completed") ? "complete" : "running",
-    }
-  if (event.type.includes("permission") || event.type === "wait.created")
-    return {
-      _tag: "Permission",
-      id: string(value.waitId ?? value.wait_id ?? value.id, event.cursor),
-      title: string(value.title ?? value.name, "Permission required"),
-      detail: event.text ?? string(value.detail ?? value.input),
-      status: event.type.includes("denied")
-        ? "denied"
-        : event.type.includes("approved") || event.type.includes("resolved")
-          ? "approved"
-          : "pending",
     }
   if (event.type.includes("child"))
     return {
@@ -170,15 +156,39 @@ const usageCost = (value: Record<string, unknown>): number | undefined => {
 
 export const messages = (event: Event): ReadonlyArray<Message> => {
   if (event.type === "model.output.delta")
-    return event.text === undefined ? [] : [{ _tag: "AssistantStreamed", text: event.text }]
+    return event.text === undefined
+      ? []
+      : [
+          {
+            _tag: "AssistantStreamed",
+            ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+            text: event.text,
+          },
+        ]
   if (event.type === "model.usage.reported") {
     const cost = usageCost(payload(event))
     return cost === undefined ? [] : [{ _tag: "UsageReported", costUsd: cost }]
   }
-  if (event.type === "model.output.completed") return [{ _tag: "AssistantCompleted", text: event.text ?? "" }]
-  if (event.type === "execution.completed") return [{ _tag: "ExecutionCompleted" }]
-  if (event.type === "execution.failed") return [{ _tag: "ExecutionFailed", message: event.text ?? "Execution failed" }]
-  if (event.type === "execution.cancelled") return [{ _tag: "ExecutionCancelled" }]
+  if (event.type === "model.output.completed")
+    return [
+      {
+        _tag: "AssistantCompleted",
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+        text: event.text ?? "",
+      },
+    ]
+  if (event.type === "execution.completed")
+    return [{ _tag: "ExecutionCompleted", ...(event.turnId === undefined ? {} : { turnId: event.turnId }) }]
+  if (event.type === "execution.failed")
+    return [
+      {
+        _tag: "ExecutionFailed",
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+        message: event.text ?? "Execution failed",
+      },
+    ]
+  if (event.type === "execution.cancelled")
+    return [{ _tag: "ExecutionCancelled", ...(event.turnId === undefined ? {} : { turnId: event.turnId }) }]
   if (event.type === "model.toolcall.delta") {
     const value = payload(event)
     const id = eventId(event, string(value.tool_call_id, event.cursor))
@@ -197,6 +207,7 @@ export const messages = (event: Event): ReadonlyArray<Message> => {
     event: {
       id: eventId(event, `${event.sequence}:${event.type}${suffix}`),
       cursor: event.cursor,
+      ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
       block: projected,
     },
   })
@@ -214,8 +225,21 @@ export const messages = (event: Event): ReadonlyArray<Message> => {
 
 export const project = (model: import("./view-state").Model, events: ReadonlyArray<Event>) => {
   let next = model
-  for (const event of events) for (const message of messages(event)) next = importViewStateUpdate(next, message)
-  return next
+  const seen = new Set(next.seenExecutionEventKeys)
+  let eventCursor = next.eventCursor
+  for (const event of events.toSorted((left, right) => left.sequence - right.sequence)) {
+    const key = `${event.turnId ?? ""}\u0000${event.cursor}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    eventCursor = event.cursor
+    for (const message of messages(event)) next = importViewStateUpdate(next, message)
+  }
+  const keys = [...seen]
+  return {
+    ...next,
+    seenExecutionEventKeys: keys.length > 2048 ? keys.slice(-2048) : keys,
+    eventCursor,
+  }
 }
 
 export const projectTurn = (
@@ -225,11 +249,7 @@ export const projectTurn = (
   events: ReadonlyArray<Event>,
 ) =>
   project(
-    {
-      ...model,
-      entries: [...model.entries, { role: "user" as const, text: prompt }],
-      items: [...model.items, { _tag: "Entry" as const, index: model.entries.length }],
-    },
+    importViewStateUpdate(model, { _tag: "TurnStarted", turnId, prompt }),
     events.map((event) => ({ ...event, turnId })),
   )
 

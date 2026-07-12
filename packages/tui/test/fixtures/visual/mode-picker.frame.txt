@@ -17,7 +17,7 @@
           ••••••••••••│ ••••••••••••••••••••••••••••••••••••·················· │
             •·········│ low             medium           high            ultra │
                     ••│                                                        │
-╭─────────────────────│ Agent:  GPT-5.6 Sol high                       high    │
+╭─────────────────────│ Agent:  GPT-5.6 Sol high                         high  │
 │                     │ Oracle: Fable 5 high                                   │
 │                     │                                                        │
 │                     │ Deep reasoning for hard tasks                          │

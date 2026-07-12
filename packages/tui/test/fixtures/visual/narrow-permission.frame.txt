@@ -1,11 +1,11 @@
 
- ? Shell [pending]
-   bun run verification with a
- long command
-   › Allow once     Always
- Deny
 
-╭────────────────────────high──╮
+ ? Shell [pending]
+   bun run verification with
+ a long command
+   › Allow once     Always
+  Deny
+╭─────────────────────── high ─╮
 │                              │
 │                              │
 │                              │

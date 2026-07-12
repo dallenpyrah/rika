@@ -9,7 +9,7 @@ describe("transcript renderers", () => {
       renderMarkdown(
         "# Heading\n\n- one\n  - two\n> quoted\n`code` and [docs](https://rika.dev)\n```ts\nconst x = 1\n```",
       ),
-    ).toBe("Heading\n\n• one\n  • two\n│ quoted\ncode and docs <https://rika.dev>\nconst x = 1")
+    ).toBe("Heading\n\n- one\n  - two\n    │ quoted\n    │ code and docs <https://rika.dev>\n    const x = 1")
   })
 
   test("parses hunk line numbers and clips source lines", () => {

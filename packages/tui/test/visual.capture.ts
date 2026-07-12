@@ -108,7 +108,14 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
     ],
     [
       "permission",
-      block({ _tag: "Permission", id: "permission-1", title: "Write", detail: "src/main.ts", status: "pending" }),
+      block({
+        _tag: "Permission",
+        id: "permission-1",
+        kind: "tool-approval",
+        title: "Write",
+        detail: "src/main.ts",
+        status: "pending",
+      }),
       80,
       24,
     ],
@@ -176,6 +183,7 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
       block({
         _tag: "Permission",
         id: "narrow",
+        kind: "permission",
         title: "Shell",
         detail: "bun run verification with a long command",
         status: "pending",

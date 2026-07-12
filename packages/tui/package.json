@@ -17,12 +17,16 @@
   "dependencies": {
     "@opentui/core": "catalog:",
     "@pierre/diffs": "catalog:",
+    "cli-spinners": "catalog:",
     "effect": "catalog:",
+    "marked": "catalog:",
+    "prismjs": "catalog:",
     "string-width": "7.2.0"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
     "@types/bun": "catalog:",
+    "@types/prismjs": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

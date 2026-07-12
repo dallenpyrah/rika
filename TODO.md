@@ -114,10 +114,14 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Port the initial command palette.
 - [x] Port thread sidebar.
 - [x] Render changed files as a complete nested tree in a full-height right sidebar with panel-bounded scrolling, colored line counts, and editor-opening file clicks.
+- [x] Keep the mode selector grouped with the narrowed composer, refresh changed files while open, and switch mutually exclusively between changed files (`Opt+S`) and the Workspace file tree (`Opt+T`).
+- [x] Bound subprocess output while draining, release terminal process entries, and stop loader animation from rebuilding the complete transcript.
+- [x] Keep generic and child waits non-actionable, preserve permission request kinds, and reconcile exhausted Relay 0.0.50 follows through parent terminal state.
 - [x] Implement measured transcript follow/detach behavior, footer cutout spacing, and phase-driven streaming/waiting dither loader.
 - [x] Port image attachment rendering.
 - [x] Preserve collapsed text paste through transcript, persistence, and model-input boundaries without leaking composer attachment tokens; click and repeated-paste expansion restore exact editable text.
 - [x] Preserve structured image attachments through clipboard insertion, composer history, durable queued Turns, replay, and ordered Relay/Baton model input.
+- [x] Preserve typed terminal image paste bytes, keep composer image attachments structured through prompt-part construction, and align recognized path formats with materialization.
 - [x] Add child-agent and workflow activity views as presentation adapters, with frozen visual evidence and Relay-backed restart harnesses.
 - [x] Remove all Rivet-specific status and recovery UI.
 - [x] Remove semantic-search activity.

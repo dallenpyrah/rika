@@ -19,11 +19,11 @@ test("dispatches every session action and reports absent optional callbacks", ()
     { _tag: "Steer", prompt: "c" },
     { _tag: "InterruptAndSend", prompt: "d" },
     { _tag: "Cancel" },
-    { _tag: "DecidePermission", id: "p", decision: "deny" },
+    { _tag: "DecidePermission", id: "p", kind: "permission", decision: "deny" },
     { _tag: "SelectThread", id: "t" },
   ]
   for (const action of actions) expect(execute(adapter, action)).toBe(true)
-  expect(adapter.submit).toHaveBeenCalledWith("a", [{ type: "text", text: "a" }], "medium")
+  expect(adapter.submit).toHaveBeenCalledWith("a", [{ type: "text", text: "a" }], "medium", undefined)
   const minimal: Adapter = { submit: vi.fn() }
   for (const action of actions.slice(1)) expect(execute(minimal, action)).toBe(false)
 })

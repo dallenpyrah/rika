@@ -10,7 +10,7 @@ test("routes session actions only through available adapter callbacks", () => {
     steer: (prompt) => calls.push(`steer:${prompt}`),
     interruptAndSend: (prompt) => calls.push(`interrupt:${prompt}`),
     cancel: () => calls.push("cancel"),
-    decidePermission: (id, decision) => calls.push(`${id}:${decision}`),
+    decidePermission: (id, _kind, decision) => calls.push(`${id}:${decision}`),
   }
   expect(
     Session.execute(adapter, {
@@ -25,7 +25,9 @@ test("routes session actions only through available adapter callbacks", () => {
   expect(Session.execute(adapter, { _tag: "Steer", prompt: "two" })).toBe(true)
   expect(Session.execute(adapter, { _tag: "InterruptAndSend", prompt: "urgent" })).toBe(true)
   expect(Session.execute(adapter, { _tag: "Cancel" })).toBe(true)
-  expect(Session.execute(adapter, { _tag: "DecidePermission", id: "p", decision: "always" })).toBe(true)
+  expect(
+    Session.execute(adapter, { _tag: "DecidePermission", id: "p", kind: "tool-approval", decision: "always" }),
+  ).toBe(true)
   expect(calls).toEqual([
     "submit:one",
     "edit:one:changed",

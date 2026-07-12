@@ -12,6 +12,7 @@ export type Mode = typeof Mode.Type
 export const Entry = Schema.Struct({
   role: Schema.Literals(["user", "assistant", "notice"]),
   text: Schema.String,
+  turnId: Schema.optionalKey(Schema.String),
 })
 export type Entry = typeof Entry.Type
 
@@ -41,6 +42,7 @@ export type TranscriptBlock =
   | {
       readonly _tag: "Permission"
       readonly id: string
+      readonly kind: "permission" | "tool-approval"
       readonly title: string
       readonly detail: string
       readonly status: "pending" | "approved" | "denied"
@@ -106,10 +108,15 @@ export interface PastedTextAttachment {
   readonly path?: string
   readonly label: string
 }
-export type UiEvent = { readonly id: string; readonly cursor: string; readonly block: TranscriptBlock }
+export type UiEvent = {
+  readonly id: string
+  readonly cursor: string
+  readonly turnId?: string
+  readonly block: TranscriptBlock
+}
 export type TranscriptItem =
-  | { readonly _tag: "Entry"; readonly index: number }
-  | { readonly _tag: "Block"; readonly index: number }
+  | { readonly _tag: "Entry"; readonly index: number; readonly turnId?: string }
+  | { readonly _tag: "Block"; readonly index: number; readonly turnId?: string }
 
 export interface PaletteState {
   readonly open: boolean
@@ -198,6 +205,8 @@ export const Model = Schema.Struct({
   queue: Schema.Array(Schema.Unknown),
   detailSelection: Schema.optional(Schema.String),
   seenEventIds: Schema.Array(Schema.String),
+  seenExecutionEventKeys: Schema.Array(Schema.String),
+  activeTurnId: Schema.optional(Schema.String),
   eventCursor: Schema.optional(Schema.String),
   currentThreadId: Schema.optional(Schema.String),
   currentThreadTitle: Schema.optional(Schema.String),
@@ -221,15 +230,17 @@ export type Message =
   | { readonly _tag: "KeyPressed"; readonly key: Key }
   | { readonly _tag: "Pasted"; readonly text: string }
   | { readonly _tag: "ImageInserted"; readonly path: string }
+  | { readonly _tag: "ImageRemoved"; readonly path: string }
   | { readonly _tag: "PastedTextExpanded"; readonly token: string }
   | { readonly _tag: "Resized"; readonly width: number; readonly height: number }
   | { readonly _tag: "ComposerHeightChanged"; readonly height: number }
   | { readonly _tag: "Submitted" }
-  | { readonly _tag: "AssistantStreamed"; readonly text: string }
-  | { readonly _tag: "AssistantCompleted"; readonly text: string }
-  | { readonly _tag: "ExecutionCompleted" }
-  | { readonly _tag: "ExecutionFailed"; readonly message: string }
-  | { readonly _tag: "ExecutionCancelled" }
+  | { readonly _tag: "TurnStarted"; readonly turnId: string; readonly prompt: string }
+  | { readonly _tag: "AssistantStreamed"; readonly turnId?: string; readonly text: string }
+  | { readonly _tag: "AssistantCompleted"; readonly turnId?: string; readonly text: string }
+  | { readonly _tag: "ExecutionCompleted"; readonly turnId?: string }
+  | { readonly _tag: "ExecutionFailed"; readonly turnId?: string; readonly message: string }
+  | { readonly _tag: "ExecutionCancelled"; readonly turnId?: string }
   | { readonly _tag: "SubmissionQueued"; readonly prompt: string }
   | { readonly _tag: "BlockAdded"; readonly block: TranscriptBlock }
   | { readonly _tag: "ReasoningStreamed"; readonly text: string }
@@ -314,6 +325,8 @@ export const initial = (workspace: string, mode: Mode = "medium"): Model => ({
   queueSelection: undefined,
   queue: [],
   seenEventIds: [],
+  seenExecutionEventKeys: [],
+  activeTurnId: undefined,
   fastMode: false,
   reasoningEffort: defaultReasoningEffort(mode),
   changedFilesOpen: false,
@@ -349,22 +362,22 @@ export const classifyPrompt = (input: string): PromptSubmission => {
 }
 
 const imagePathPattern =
-  /\[([^\]\n]+\.(?:png|jpe?g|gif|webp|bmp|tiff|heic))\]|(?:file:\/\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp|tiff|heic))|(?:(?:\\ |[^\s[\]])+\.(?:png|jpe?g|gif|webp|bmp|tiff|heic))/gi
+  /\[([^\]\n]+\.(?:png|jpe?g|gif|webp))\]|(?:file:\/\/[^\s]+\.(?:png|jpe?g|gif|webp))|(?:(?:\\ |[^\s[\]])+\.(?:png|jpe?g|gif|webp))/gi
 
-export const promptParts = (
-  input: string,
-  pastedText: ReadonlyArray<ComposerAttachment> = [],
-): ReadonlyArray<PromptPart> => {
-  const parts: Array<PromptPart> = []
-  const expanded = pastedText.reduce(
-    (text, attachment) =>
-      text.replaceAll(attachment.token, attachment.type === "image" ? `[${attachment.path}]` : attachment.value),
-    input,
-  )
+const appendPromptPart = (parts: Array<PromptPart>, part: PromptPart): void => {
+  const previous = parts.at(-1)
+  if (part.type === "text" && previous?.type === "text") {
+    parts[parts.length - 1] = { type: "text", text: previous.text + part.text }
+    return
+  }
+  parts.push(part)
+}
+
+const appendParsedText = (parts: Array<PromptPart>, text: string): void => {
   let offset = 0
-  for (const match of expanded.matchAll(imagePathPattern)) {
+  for (const match of text.matchAll(imagePathPattern)) {
     const index = match.index
-    if (index > offset) parts.push({ type: "text", text: expanded.slice(offset, index) })
+    if (index > offset) appendPromptPart(parts, { type: "text", text: text.slice(offset, index) })
     const value = match[1] ?? match[0]
     let path = value
     if (path.startsWith("file://")) {
@@ -372,11 +385,23 @@ export const promptParts = (
         path = decodeURIComponent(new URL(path).pathname)
       } catch {}
     }
-    parts.push({ type: "image", path: path.replace(/\\ /g, " ") })
+    appendPromptPart(parts, { type: "image", path: path.replace(/\\ /g, " ") })
     offset = index + match[0].length
   }
-  if (offset < expanded.length) parts.push({ type: "text", text: expanded.slice(offset) })
-  return parts.length === 0 ? [{ type: "text", text: expanded }] : parts
+  if (offset < text.length) appendPromptPart(parts, { type: "text", text: text.slice(offset) })
+}
+
+export const promptParts = (
+  input: string,
+  pastedText: ReadonlyArray<ComposerAttachment> = [],
+): ReadonlyArray<PromptPart> => {
+  const parts: Array<PromptPart> = []
+  for (const value of input.split(/([\uE000-\uF8FF])/u)) {
+    const attachment = pastedText.find((candidate) => candidate.token === value)
+    if (attachment?.type === "image") appendPromptPart(parts, { type: "image", path: attachment.path })
+    else appendParsedText(parts, attachment?.type === "text" ? attachment.value : value)
+  }
+  return parts.length === 0 ? [{ type: "text", text: "" }] : parts
 }
 
 const insert = (model: Model, value: string): Model => ({
@@ -398,8 +423,7 @@ const pastedImagePath = (value: string): string | undefined => {
     .trim()
     .replace(/^'(.*)'$/, "$1")
     .replace(/^"(.*)"$/, "$1")
-  if (!/^(?:file:\/\/|~\/|\.{0,2}\/|\/)?(?:[^\s[\]]|\\ )+\.(?:png|jpe?g|gif|webp|bmp|tiff|heic)$/i.test(unquoted))
-    return undefined
+  if (!/^(?:file:\/\/|~\/|\.{0,2}\/|\/)?(?:[^\s[\]]|\\ )+\.(?:png|jpe?g|gif|webp)$/i.test(unquoted)) return undefined
   return unquoted.replace(/\\ /g, " ")
 }
 
@@ -424,6 +448,21 @@ const insertImage = (model: Model, path: string): Model => {
   return {
     ...next,
     pastedText: [...model.pastedText, { type: "image", token, path, label: `[Image #${imageCount + 1}]` }],
+  }
+}
+
+const removeImage = (model: Model, path: string): Model => {
+  const attachment = model.pastedText.find(
+    (candidate): candidate is Extract<ComposerAttachment, { readonly type: "image" }> =>
+      candidate.type === "image" && candidate.path === path,
+  )
+  if (attachment === undefined) return model
+  const offset = model.input.indexOf(attachment.token)
+  return {
+    ...model,
+    input: model.input.replace(attachment.token, ""),
+    cursor: offset >= 0 && model.cursor > offset ? model.cursor - attachment.token.length : model.cursor,
+    pastedText: model.pastedText.filter((candidate) => candidate !== attachment),
   }
 }
 
@@ -515,6 +554,8 @@ export const update = (model: Model, message: Message): Model => {
       return insertPaste(model, message.text)
     case "ImageInserted":
       return insertImage(model, message.path)
+    case "ImageRemoved":
+      return removeImage(model, message.path)
     case "PastedTextExpanded":
       return expandPastedTextAttachment(model, message.token)
     case "ThreadsReplaced": {
@@ -545,7 +586,7 @@ export const update = (model: Model, message: Message): Model => {
     case "BranchDetected":
       return { ...model, branch: message.branch }
     case "SidebarToggled":
-      return { ...model, sidebarOpen: !model.sidebarOpen }
+      return { ...model, sidebarOpen: !model.sidebarOpen, changedFilesOpen: false }
     case "ThreadSelectionMoved":
       return {
         ...model,
@@ -560,6 +601,11 @@ export const update = (model: Model, message: Message): Model => {
     case "PermissionDecisionSelected": {
       const decisions = ["allow", "always", "deny"] as const
       const decision = message.decision ?? decisions[model.permissionSelection]!
+      const permission = (model.blocks as ReadonlyArray<TranscriptBlock>).find(
+        (block): block is Extract<TranscriptBlock, { _tag: "Permission" }> =>
+          block._tag === "Permission" && block.id === message.id,
+      )
+      if (permission?.kind === undefined) return model
       return {
         ...model,
         blocks: model.blocks.map((block) =>
@@ -571,7 +617,7 @@ export const update = (model: Model, message: Message): Model => {
               }
             : block,
         ),
-        pendingAction: { _tag: "DecidePermission", id: message.id, decision },
+        pendingAction: { _tag: "DecidePermission", id: message.id, kind: permission.kind, decision },
       }
     }
     case "EventReplayed":
@@ -582,7 +628,12 @@ export const update = (model: Model, message: Message): Model => {
         let items = [...model.items] as Array<TranscriptItem>
         const lastItem = items.at(-1)
         const last = lastItem?._tag === "Block" ? blocks[lastItem.index] : undefined
-        if (incoming._tag === "Reasoning" && last?._tag === "Reasoning" && lastItem?._tag === "Block")
+        if (
+          incoming._tag === "Reasoning" &&
+          last?._tag === "Reasoning" &&
+          lastItem?._tag === "Block" &&
+          lastItem.turnId === message.event.turnId
+        )
           blocks[lastItem.index] = { ...last, text: last.text + incoming.text }
         else if (incoming._tag === "ToolResult") {
           const index = blocks.findIndex((candidate) => candidate._tag === "ToolCall" && candidate.id === incoming.id)
@@ -594,25 +645,41 @@ export const update = (model: Model, message: Message): Model => {
               status: incoming.failed ? "failed" : "complete",
             }
           } else {
-            items.push({ _tag: "Block", index: blocks.length })
+            items.push({
+              _tag: "Block",
+              index: blocks.length,
+              ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
+            })
             blocks.push(incoming)
           }
         } else if (incoming._tag === "ToolCall") {
           const index = blocks.findIndex((candidate) => candidate._tag === "ToolCall" && candidate.id === incoming.id)
           if (index >= 0) blocks[index] = { ...(blocks[index] as typeof incoming), ...incoming }
           else {
-            items.push({ _tag: "Block", index: blocks.length })
+            items.push({
+              _tag: "Block",
+              index: blocks.length,
+              ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
+            })
             blocks.push(incoming)
           }
         } else if (incoming._tag === "Permission") {
           const index = blocks.findIndex((candidate) => candidate._tag === "Permission" && candidate.id === incoming.id)
           if (index >= 0) blocks[index] = { ...(blocks[index] as typeof incoming), ...incoming }
           else {
-            items.push({ _tag: "Block", index: blocks.length })
+            items.push({
+              _tag: "Block",
+              index: blocks.length,
+              ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
+            })
             blocks.push(incoming)
           }
         } else {
-          items.push({ _tag: "Block", index: blocks.length })
+          items.push({
+            _tag: "Block",
+            index: blocks.length,
+            ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
+          })
           blocks.push(incoming)
         }
         return {
@@ -663,8 +730,6 @@ export const update = (model: Model, message: Message): Model => {
         ? model
         : {
             ...model,
-            entries: [...model.entries, { role: "user", text: submittedPrompt }],
-            items: [...model.items, { _tag: "Entry", index: model.entries.length }],
             input: "",
             cursor: 0,
             pastedText: [],
@@ -682,6 +747,17 @@ export const update = (model: Model, message: Message): Model => {
             busyStatus: "Waiting",
             toolCallDrafts: [],
           }
+    case "TurnStarted":
+      if (model.entries.some((entry) => entry.role === "user" && entry.turnId === message.turnId))
+        return { ...model, activeTurnId: message.turnId, busy: true, busyStatus: "Waiting" }
+      return {
+        ...model,
+        entries: [...model.entries, { role: "user", text: message.prompt, turnId: message.turnId }],
+        items: [...model.items, { _tag: "Entry", index: model.entries.length, turnId: message.turnId }],
+        activeTurnId: message.turnId,
+        busy: true,
+        busyStatus: "Waiting",
+      }
     case "SubmissionQueued":
       return model
     case "BlockAdded":
@@ -743,44 +819,75 @@ export const update = (model: Model, message: Message): Model => {
       return { ...model, pendingAction: undefined }
     case "AssistantStreamed": {
       const entries = [...model.entries]
-      const lastItem = model.items.at(-1) as TranscriptItem | undefined
-      const last = lastItem?._tag === "Entry" ? entries[lastItem.index] : undefined
-      if (!model.busy && last?.role === "notice" && last.text === "cancelled") return model
-      if (model.busyStatus === "Streaming" && last?.role === "assistant" && lastItem?._tag === "Entry")
-        entries[lastItem.index] = { role: "assistant", text: last.text + message.text }
-      else entries.push({ role: "assistant", text: message.text })
+      const lastItem = (model.items as ReadonlyArray<TranscriptItem>).findLast(
+        (item) => message.turnId === undefined || item.turnId === message.turnId,
+      ) as TranscriptItem | undefined
+      const index =
+        lastItem?._tag === "Entry" &&
+        entries[lastItem.index]?.role === "assistant" &&
+        (message.turnId !== undefined || model.busyStatus === "Streaming")
+          ? lastItem.index
+          : -1
+      if (index >= 0) entries[index] = { ...entries[index]!, text: entries[index]!.text + message.text }
+      else
+        entries.push({
+          role: "assistant",
+          text: message.text,
+          ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
+        })
       return {
         ...model,
         entries,
         items:
-          model.busyStatus === "Streaming" && last?.role === "assistant"
+          index >= 0
             ? model.items
-            : [...model.items, { _tag: "Entry", index: entries.length - 1 }],
+            : [
+                ...model.items,
+                {
+                  _tag: "Entry",
+                  index: entries.length - 1,
+                  ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
+                } as const,
+              ],
         busy: true,
         busyStatus: "Streaming",
       }
     }
     case "AssistantCompleted": {
       const entries = [...model.entries]
-      const lastItem = model.items.at(-1) as TranscriptItem | undefined
-      const last = lastItem?._tag === "Entry" ? entries[lastItem.index] : undefined
-      if (model.busyStatus === "Streaming" && last?.role === "assistant" && lastItem?._tag === "Entry")
-        entries[lastItem.index] = { role: "assistant", text: message.text }
-      else entries.push({ role: "assistant", text: message.text })
+      const lastItem = (model.items as ReadonlyArray<TranscriptItem>).findLast(
+        (item) => message.turnId === undefined || item.turnId === message.turnId,
+      ) as TranscriptItem | undefined
+      const index =
+        lastItem?._tag === "Entry" &&
+        entries[lastItem.index]?.role === "assistant" &&
+        (message.turnId !== undefined || model.busyStatus === "Streaming")
+          ? lastItem.index
+          : -1
+      if (index >= 0) entries[index] = { ...entries[index]!, text: message.text }
+      else
+        entries.push({
+          role: "assistant",
+          text: message.text,
+          ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
+        })
       return {
         ...model,
         entries,
         items:
-          model.busyStatus === "Streaming" && last?.role === "assistant"
+          index >= 0
             ? model.items
-            : [...model.items, { _tag: "Entry", index: entries.length - 1 }],
+            : [...model.items, { _tag: "Entry", index: entries.length - 1, turnId: message.turnId }],
         busy: model.busy,
         busyStatus: model.busy ? "Working" : undefined,
       }
     }
     case "ExecutionCompleted":
-      return { ...model, busy: false, busyStatus: undefined }
+      return message.turnId !== undefined && model.activeTurnId !== message.turnId
+        ? model
+        : { ...model, busy: false, busyStatus: undefined, activeTurnId: undefined }
     case "ExecutionFailed":
+      if (message.turnId !== undefined && model.activeTurnId !== message.turnId) return model
       return {
         ...model,
         blocks: [
@@ -795,8 +902,10 @@ export const update = (model: Model, message: Message): Model => {
         items: [...model.items, { _tag: "Block", index: model.blocks.length }],
         busy: false,
         busyStatus: undefined,
+        activeTurnId: undefined,
       }
     case "ExecutionCancelled":
+      if (message.turnId !== undefined && model.activeTurnId !== message.turnId) return model
       if (!model.busy) return model
       return {
         ...model,
@@ -804,6 +913,7 @@ export const update = (model: Model, message: Message): Model => {
         items: [...model.items, { _tag: "Entry", index: model.entries.length }],
         busy: false,
         busyStatus: undefined,
+        activeTurnId: undefined,
       }
     case "UsageReported":
       return message.costUsd === undefined ? model : { ...model, costUsd: (model.costUsd ?? 0) + message.costUsd }
@@ -841,7 +951,7 @@ export const update = (model: Model, message: Message): Model => {
       return { ...model, reasoningEffort: efforts[(efforts.indexOf(model.reasoningEffort) + 1) % efforts.length]! }
     }
     case "SidebarViewToggled":
-      return { ...model, changedFilesOpen: !model.changedFilesOpen }
+      return { ...model, changedFilesOpen: !model.changedFilesOpen, sidebarOpen: false }
     case "ChangedFilesReplaced":
       return { ...model, changedFiles: [...message.files] }
     case "ThreadPreviewLoaded":
@@ -895,11 +1005,13 @@ export const update = (model: Model, message: Message): Model => {
           modePicker: { ...model.modePicker, open: false },
           filePicker: { ...model.filePicker, open: false, kind: "file" },
           shortcutsOpen: false,
+          ...(open ? {} : { threadPreview: undefined }),
         }
       }
       if (model.threadSwitcher.open) {
         const threads = filteredThreads(model)
-        if (key.name === "escape") return { ...model, threadSwitcher: { open: false, query: "", selected: 0 } }
+        if (key.name === "escape")
+          return { ...model, threadSwitcher: { open: false, query: "", selected: 0 }, threadPreview: undefined }
         if (key.name === "return") {
           const thread = threads[model.threadSwitcher.selected]
           return thread === undefined
@@ -907,6 +1019,7 @@ export const update = (model: Model, message: Message): Model => {
             : {
                 ...model,
                 threadSwitcher: { open: false, query: "", selected: 0 },
+                threadPreview: undefined,
                 pendingAction: { _tag: "SelectThread", id: thread.id },
               }
         }
@@ -975,14 +1088,7 @@ export const update = (model: Model, message: Message): Model => {
       if (key.ctrl && key.name === "return" && model.busy && model.input.length > 0)
         return { ...model, pendingAction: { _tag: "InterruptAndSend", prompt: model.input }, input: "", cursor: 0 }
       if (key.alt && key.name === "t") {
-        if (model.detailSelection === undefined) {
-          const units = expandableUnits(model)
-          const unit = units.at(-1)
-          return unit === undefined
-            ? model
-            : update({ ...model, detailSelection: transcriptUnitId(model, unit) }, { _tag: "DetailToggled" })
-        }
-        return update(model, { _tag: "DetailToggled" })
+        return update(model, { _tag: "SidebarToggled" })
       }
       if (key.alt && key.name === "d") return update(model, { _tag: "ReasoningEffortCycled" })
       if (key.alt && key.name === "s") return update(model, { _tag: "SidebarViewToggled" })
@@ -1050,6 +1156,7 @@ export const update = (model: Model, message: Message): Model => {
               paletteOpen: false,
               palette: { open: false, query: "", selected: 0 },
               changedFilesOpen: !model.changedFilesOpen,
+              sidebarOpen: false,
             }
           if (action?._tag === "ToggleFastMode")
             return {

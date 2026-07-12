@@ -186,8 +186,24 @@ describe("InteractiveSession controls", () => {
       yield* session.submit("", (event) => events.push(event))
       expect(events).toEqual([
         { _tag: "ThreadActivated", threadId: "created", title: "New thread" },
-        { _tag: "AssistantCompleted", text: "" },
-        { _tag: "QueueChanged", turns: [] },
+        {
+          _tag: "TurnStarted",
+          threadId: "created",
+          turn: expect.objectContaining({ id: "created-turn", threadId: "created", prompt: "", status: "accepted" }),
+        },
+        {
+          _tag: "ExecutionEventReceived",
+          threadId: "created",
+          turnId: "created-turn",
+          event: { cursor: "output", sequence: 1, type: "model.output.completed", createdAt: 1 },
+        },
+        {
+          _tag: "ExecutionEventReceived",
+          threadId: "created",
+          turnId: "created-turn",
+          event: { cursor: "done", sequence: 2, type: "execution.completed", createdAt: 2 },
+        },
+        { _tag: "QueueChanged", threadId: "created", turns: [] },
       ])
       expect(yield* repositories.get(Thread.ThreadId.make("created"))).toMatchObject({ title: "New thread" })
       expect(yield* turns.get(Turn.TurnId.make("created-turn"))).toMatchObject({
@@ -208,7 +224,7 @@ describe("InteractiveSession controls", () => {
       expect(events.at(-1)).toMatchObject({ _tag: "QueueChanged", turns: [{ id: "queued", prompt: "after" }] })
       yield* session.dequeue("queued", (event) => events.push(event))
       expect(yield* turns.get(Turn.TurnId.make("queued"))).toBeUndefined()
-      expect(events.at(-1)).toEqual({ _tag: "QueueChanged", turns: [] })
+      expect(events.at(-1)).toEqual({ _tag: "QueueChanged", threadId: "older", turns: [] })
     }),
   )
 
@@ -229,8 +245,8 @@ describe("InteractiveSession controls", () => {
         lastCursor: "cancel-cursor",
       })
       expect(events.slice(-2)).toEqual([
-        { _tag: "ExecutionControlled", action: "cancelled" },
-        { _tag: "QueueChanged", turns: [] },
+        { _tag: "ExecutionControlled", threadId: "older", turnId: "active", action: "cancelled" },
+        { _tag: "QueueChanged", threadId: "older", turns: [] },
       ])
     }),
   )
@@ -305,15 +321,12 @@ describe("InteractiveSession controls", () => {
       yield* session.selectThread("older", (event) => events.push(event))
       yield* Ref.set(controls, [])
       events.length = 0
-      yield* session.resolvePermission("allow-wait", "allow", (event) => events.push(event))
-      yield* session.resolvePermission("deny-wait", "deny", (event) => events.push(event))
-      yield* session.resolvePermission("always-wait", "always", (event) => events.push(event))
+      yield* session.resolvePermission("allow-wait", "permission", "allow", (event) => events.push(event))
+      yield* session.resolvePermission("deny-wait", "permission", "deny", (event) => events.push(event))
+      yield* session.resolvePermission("always-wait", "permission", "always", (event) => events.push(event))
       expect(yield* Ref.get(controls)).toEqual([
-        ["list-approvals", "active"],
         ["permission", "allow-wait", "Approved", 0],
-        ["list-approvals", "active"],
         ["permission", "deny-wait", "Denied", 0],
-        ["list-approvals", "active"],
         ["permission", "always-wait", "Always", 0],
       ])
       expect(events).toHaveLength(3)
@@ -330,15 +343,12 @@ describe("InteractiveSession controls", () => {
       const dispatch = (event: Operation.InteractiveEvent) => events.push(event)
       yield* session.selectThread("older", dispatch)
       yield* Ref.set(controls, [])
-      yield* session.resolvePermission("allow-tool", "allow", dispatch)
-      yield* session.resolvePermission("always-tool", "always", dispatch)
-      yield* session.resolvePermission("deny-tool", "deny", dispatch)
+      yield* session.resolvePermission("allow-tool", "tool-approval", "allow", dispatch)
+      yield* session.resolvePermission("always-tool", "tool-approval", "always", dispatch)
+      yield* session.resolvePermission("deny-tool", "tool-approval", "deny", dispatch)
       expect(yield* Ref.get(controls)).toEqual([
-        ["list-approvals", "active"],
         ["tool-approval", "allow-tool", true, 0],
-        ["list-approvals", "active"],
         ["tool-approval", "always-tool", true, 0],
-        ["list-approvals", "active"],
         ["tool-approval", "deny-tool", false, 0],
       ])
     }),
@@ -356,7 +366,7 @@ describe("InteractiveSession controls", () => {
       })
       const events: Array<Operation.InteractiveEvent> = []
       yield* session.selectThread(older.id, (event) => events.push(event))
-      yield* session.resolvePermission("permission-wait", "allow", (event) => events.push(event))
+      yield* session.resolvePermission("permission-wait", "permission", "allow", (event) => events.push(event))
       expect(yield* Ref.get(controls)).toContainEqual(["follow", "active", "wait-cursor"])
       expect(yield* turns.get(Turn.TurnId.make("active"))).toMatchObject({
         status: "completed",
@@ -368,10 +378,14 @@ describe("InteractiveSession controls", () => {
       })
       expect(events).toContainEqual({
         _tag: "ExecutionEventReceived",
+        threadId: "older",
+        turnId: "active",
         event: expect.objectContaining({ type: "model.output.completed", text: "created file" }),
       })
       expect(events).toContainEqual({
         _tag: "ExecutionEventReceived",
+        threadId: "older",
+        turnId: "active",
         event: expect.objectContaining({ cursor: "resumed-done", type: "execution.completed" }),
       })
     }),
@@ -441,7 +455,7 @@ describe("InteractiveSession controls", () => {
           yield* Effect.yieldNow
           const permission = events.find((event) => event._tag === "ShellPermissionRequested")
           if (permission?._tag !== "ShellPermissionRequested") return yield* Effect.die("Missing shell permission")
-          yield* session.resolvePermission(permission.id, decision, (event) => events.push(event))
+          yield* session.resolvePermission(permission.id, "permission", decision, (event) => events.push(event))
           yield* Fiber.join(fiber)
           return events
         })

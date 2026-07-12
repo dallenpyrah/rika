@@ -476,14 +476,17 @@ describe("Operation", () => {
       yield* session.steer("direction", dispatch)
       yield* session.interruptAndSend("next", dispatch)
       yield* session.cancel(dispatch)
-      yield* session.resolvePermission("wait", "allow", dispatch)
-      yield* session.resolvePermission("wait", "deny", dispatch)
-      yield* session.resolvePermission("wait", "always", dispatch)
+      yield* session.resolvePermission("wait", "permission", "allow", dispatch)
+      yield* session.resolvePermission("wait", "permission", "deny", dispatch)
+      yield* session.resolvePermission("wait", "permission", "always", dispatch)
       yield* session.selectThread("missing", dispatch)
       yield* session.reopenThread(dispatch)
       yield* session.replay("turn", undefined, dispatch)
       expect((yield* Ref.get(events)).filter((event) => event._tag === "ExecutionFailed").length).toBeGreaterThan(0)
-      expect((yield* Ref.get(events)).at(-1)?._tag).toBe("ExecutionReplayed")
+      expect((yield* Ref.get(events)).at(-1)).toMatchObject({
+        _tag: "ExecutionFailed",
+        message: expect.stringContaining("No thread selected"),
+      })
     }),
   )
 
@@ -573,7 +576,7 @@ describe("Operation", () => {
       yield* session.dequeue("queued-control", dispatch)
       yield* session.submit("later", dispatch)
       yield* session.steerQueued("queued-control-2", "redirect", dispatch)
-      yield* session.resolvePermission("wait", "allow", dispatch)
+      yield* session.resolvePermission("wait", "permission", "allow", dispatch)
       yield* session.replay("active-control", "cursor", dispatch)
       yield* session.cancel(dispatch)
       yield* session.reopenThread(dispatch)
@@ -676,13 +679,34 @@ describe("Operation", () => {
         Effect.runSync(Ref.update(events, (values) => [...values, event])),
       )
       const dispatched = yield* Ref.get(events)
-      expect(dispatched.slice(0, 3)).toEqual([
+      expect(dispatched.slice(0, 5)).toEqual([
         { _tag: "ThreadActivated", threadId: "thread-interactive", title: "exact prompt" },
-        { _tag: "AssistantCompleted", text: "answer" },
-        { _tag: "QueueChanged", turns: [] },
+        {
+          _tag: "TurnStarted",
+          threadId: "thread-interactive",
+          turn: expect.objectContaining({
+            id: "turn-interactive",
+            threadId: "thread-interactive",
+            prompt: "exact prompt",
+            status: "accepted",
+          }),
+        },
+        {
+          _tag: "ExecutionEventReceived",
+          threadId: "thread-interactive",
+          turnId: "turn-interactive",
+          event: { cursor: "cursor-a", sequence: 1, type: "model.output.completed", createdAt: 1, text: "answer" },
+        },
+        {
+          _tag: "ExecutionEventReceived",
+          threadId: "thread-interactive",
+          turnId: "turn-interactive",
+          event: { cursor: "cursor-b", sequence: 2, type: "execution.completed", createdAt: 2 },
+        },
+        { _tag: "QueueChanged", threadId: "thread-interactive", turns: [] },
       ])
-      expect(dispatched[3]).toMatchObject({ _tag: "ThreadTitled", threadId: "thread-interactive", title: "answer" })
-      expect(dispatched[4]?._tag).toBe("ThreadsListed")
+      expect(dispatched[5]).toMatchObject({ _tag: "ThreadTitled", threadId: "thread-interactive", title: "answer" })
+      expect(dispatched[6]?._tag).toBe("ThreadsListed")
       expect(yield* turns.get(Turn.TurnId.make("turn-interactive"))).toMatchObject({
         prompt: "exact prompt",
         status: "completed",
@@ -748,15 +772,24 @@ describe("Operation", () => {
       const failedBackend = yield* runCase("backend")
       const failed = yield* runCase("failed")
       const cancelled = yield* runCase("cancelled")
-      const failedBackendEvent = nonActivation(failedBackend.events)[0]
+      const failedBackendEvent = nonActivation(failedBackend.events).find((event) => event._tag === "ExecutionFailed")
       expect(failedBackendEvent).toMatchObject({ _tag: "ExecutionFailed" })
       expect(failedBackendEvent?._tag === "ExecutionFailed" ? failedBackendEvent.message : undefined).toContain(
         "interactive backend failed",
       )
       expect(failedBackend.turn?.status).toBe("failed")
       expect(failedBackend.successor?.status).toBe("completed")
-      expect(nonActivation(failed.events)).toContainEqual({ _tag: "ExecutionFailed", message: "Execution failed" })
-      expect(nonActivation(cancelled.events)).toContainEqual({ _tag: "QueueChanged", turns: [] })
+      expect(nonActivation(failed.events)).toContainEqual({
+        _tag: "ExecutionFailed",
+        threadId: "thread-failed",
+        turnId: "turn-failed",
+        message: "Execution failed",
+      })
+      expect(nonActivation(cancelled.events)).toContainEqual({
+        _tag: "QueueChanged",
+        threadId: "thread-cancelled",
+        turns: [],
+      })
     }),
   )
 

@@ -369,11 +369,11 @@ describe("ExecutionBackend Relay client adapter", () => {
       }),
   )
 
-  it.effect("returns waiting with replayed events when Relay suspends on a wait", () =>
+  it.effect("returns waiting with replayed events when Relay suspends on an actionable wait", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({
         startStatus: "waiting",
-        replayEvents: [relayEvent("model.output.delta", 1), relayEvent("wait.created", 2)],
+        replayEvents: [relayEvent("model.output.delta", 1), relayEvent("permission.ask.requested", 2)],
         streamEvents: [],
       })
       const seen: Array<string> = []
@@ -388,8 +388,8 @@ describe("ExecutionBackend Relay client adapter", () => {
         })
       }).pipe(provideBackend(fixture.implementation))
       expect(result.status).toBe("waiting")
-      expect(result.events.map((value) => value.type)).toEqual(["model.output.delta", "wait.created"])
-      expect(seen).toEqual(["model.output.delta", "wait.created"])
+      expect(result.events.map((value) => value.type)).toEqual(["model.output.delta", "permission.ask.requested"])
+      expect(seen).toEqual(["model.output.delta", "permission.ask.requested"])
     }),
   )
 

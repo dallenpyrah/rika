@@ -46,8 +46,9 @@ describe("pasted text attachments", () => {
     expect(expanded.pastedText).toEqual([])
 
     const submitted = ViewState.update(collapsed, { _tag: "Submitted" })
-    expect(submitted.entries.at(-1)?.text).toBe("line one\nline two")
     expect(submitted.history.at(-1)).toBe("line one\nline two")
+    const started = ViewState.update(submitted, { _tag: "TurnStarted", turnId: "turn-1", prompt: "line one\nline two" })
+    expect(started.entries.at(-1)?.text).toBe("line one\nline two")
   })
 
   it("expands pasted attachment tokens before identifying image prompt parts", () => {
@@ -67,6 +68,31 @@ describe("pasted text attachments", () => {
     ])
   })
 
+  it("keeps typed image attachments structured without reparsing their paths", () => {
+    const token = String.fromCharCode(0xe000)
+    expect(
+      ViewState.promptParts(`before ${token} after`, [
+        { type: "image", token, path: "odd [name].png", label: "[Image #1]" },
+      ]),
+    ).toEqual([
+      { type: "text", text: "before " },
+      { type: "image", path: "odd [name].png" },
+      { type: "text", text: " after" },
+    ])
+  })
+
+  it("removes only the failed image attachment while preserving later input", () => {
+    let model = ViewState.update(ViewState.initial("/work"), { _tag: "ImageInserted", path: "failed.png" })
+    model = ViewState.update(model, {
+      _tag: "KeyPressed",
+      key: { name: "x", sequence: "after", ctrl: false, alt: false, meta: false, shift: false, eventType: "press" },
+    })
+    model = ViewState.update(model, { _tag: "ImageRemoved", path: "failed.png" })
+    expect(model.input).toBe("after")
+    expect(model.cursor).toBe(5)
+    expect(model.pastedText).toEqual([])
+  })
+
   it("handles image-only, escaped, and malformed file image references", () => {
     expect(ViewState.promptParts("only\\ image.png")).toEqual([{ type: "image", path: "only image.png" }])
     expect(ViewState.promptParts("file:///tmp/bad%ZZ.png")).toEqual([{ type: "image", path: "file:///tmp/bad%ZZ.png" }])
@@ -84,6 +110,7 @@ describe("pasted text attachments", () => {
     const permission = {
       _tag: "Permission" as const,
       id: "one",
+      kind: "permission" as const,
       title: "Write",
       detail: "file",
       status: "pending" as const,
@@ -93,7 +120,12 @@ describe("pasted text attachments", () => {
     const updated = ViewState.update(model, { _tag: "PermissionDecisionSelected", id: "one", decision: "deny" })
 
     expect(updated.blocks).toEqual([{ ...permission, status: "denied" }, notice])
-    expect(updated.pendingAction).toEqual({ _tag: "DecidePermission", id: "one", decision: "deny" })
+    expect(updated.pendingAction).toEqual({
+      _tag: "DecidePermission",
+      id: "one",
+      kind: "permission",
+      decision: "deny",
+    })
   })
 
   it("executes mode actions selected from the command palette", () => {

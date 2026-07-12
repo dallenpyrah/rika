@@ -26,6 +26,8 @@ Rika supports creation, continuation, listing, search, rename, label, pin, archi
 
 Durable execution terminal events control Turn terminal state. Model completion controls finalized assistant content only. Status derivation searches the event history for terminal state rather than assuming the terminal event is last, and replay, inspection, and follow reconcile missed terminal events before waiting or retaining a nonterminal projection.
 
+Following does not complete normally at an internal child wait or an unexpectedly exhausted Relay stream. Rika reconnects from the latest public cursor on a spaced schedule and reconciles public replay and inspection state until it observes a terminal event or an explicit externally actionable permission request. This bounded-delay safeguard covers Relay 0.0.50 history pages that can omit a terminal event beyond the first 1,000 rows and remains interruptible with its caller scope.
+
 Deletion removes Rika product metadata and invokes only supported Relay deletion/retention operations. It must not partially erase canonical execution state while presenting success.
 
 Prior-message editing, restoring, and forking create a new branch of Thread state and new Executions. Completed canonical execution history is never mutated.

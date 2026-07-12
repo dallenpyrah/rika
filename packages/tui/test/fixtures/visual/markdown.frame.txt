@@ -1,23 +1,23 @@
 
+
+
+
+
+
+
+
+
  Styled Markdown
 
- bold and *emphasis* with inline code.
+ bold and emphasis with inline code.
 
- • first
- • second
+ - first
+ - second
 
  │ muted quote
 
- const answer = 42
-
-
-
-
-
-
-
-
-╭──────────────────────────────────────────────────────────────────────high────╮
+     const answer = 42
+╭─────────────────────────────────────────────────────────────────────── high ─╮
 │                                                                              │
 │                                                                              │
 │                                                                              │

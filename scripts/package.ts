@@ -122,15 +122,19 @@ const main = async () => {
       recursive: true,
       dereference: true,
     })
-    for (const [packageName, source] of [
-      [target.fff, fffSource],
-      ["@ff-labs/fff-node", fffNodeSource],
-      ["ffi-rs", ffiSource],
-    ] as const) {
-      const destination = join(stage, "bin", "node_modules", ...packageName.split("/"))
-      await mkdir(destination, { recursive: true })
-      await cp(source, destination, { recursive: true, dereference: true })
-    }
+    await Promise.all(
+      (
+        [
+          [target.fff, fffSource],
+          ["@ff-labs/fff-node", fffNodeSource],
+          ["ffi-rs", ffiSource],
+        ] as const
+      ).map(async ([packageName, source]) => {
+        const destination = join(stage, "bin", "node_modules", ...packageName.split("/"))
+        await mkdir(destination, { recursive: true })
+        await cp(source, destination, { recursive: true, dereference: true })
+      }),
+    )
     await writeFile(join(stage, "INSTALL"), "Install bin/rika on PATH. Keep node_modules adjacent to bin.\n")
     const archive = join(output, `${stageName}.tar.gz`)
     const tar = Bun.spawnSync([
