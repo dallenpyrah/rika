@@ -873,7 +873,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         to: "address:entity:thread-a",
         idempotency_key: "rika:turn:turn-9",
       })
-      expect(JSON.parse((sent[0]?.content as Array<{ text: string }>)[0]!.text)).toEqual({
+      expect(JSON.parse((sent[0]!.content as Array<{ text: string }>)[0]!.text)).toEqual({
         kind: "pending-turn",
         thread_id: "thread-a",
         turn_id: "turn-9",

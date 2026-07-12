@@ -39,6 +39,52 @@ test("drags the composer top border through OpenTUI mouse routing", async () => 
   }
 })
 
+test("drags the sidebar left border to resize it through OpenTUI mouse routing", async () => {
+  const setup = await createTestRenderer({ width: 120, height: 30 })
+  const pointers: Array<string> = []
+  ;(setup.renderer as unknown as { realStdoutWrite?: undefined }).realStdoutWrite = undefined
+  setup.renderer.setMousePointer = (style) => pointers.push(style)
+  let model: Model = {
+    ...initial("/work", "high"),
+    width: 120,
+    height: 30,
+    changedFilesOpen: true,
+    changedFiles: ready([{ path: "src/main.ts", status: "M", added: 1, removed: 0 }]),
+  }
+  const surface = new Surface(setup.renderer, {
+    key: () => undefined,
+    sidebarResize: (width) => {
+      model = update(model, { _tag: "SidebarWidthChanged", width })
+      surface.update(model)
+    },
+    resize: () => undefined,
+  })
+  try {
+    surface.update(model)
+    await setup.renderOnce()
+    expect(surface.changedFilesBox.visible).toBe(true)
+    const borderX = surface.changedFilesBox.x
+    await setup.mockMouse.moveTo(borderX, 10)
+    expect(pointers.at(-1)).toBe("move")
+    await setup.mockMouse.drag(borderX, 10, borderX - 10, 10)
+    await setup.renderOnce()
+    expect(model.sidebarWidth).toBe(46)
+    expect(surface.changedFilesBox.width).toBe(44)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Changed files (1)")
+    surface.changedFilesBox.focus()
+    await setup.renderOnce()
+    const focusBlue = setup
+      .captureSpans()
+      .lines.flatMap((line) => line.spans)
+      .some((span) => span.text.includes("│") && span.fg.toInts().join(",") === "0,170,255,255")
+    expect(focusBlue).toBe(false)
+  } finally {
+    surface.destroy()
+    setup.renderer.destroy()
+  }
+})
+
 test("routes bracketed multiline paste through the adapter as collapsed text", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24 })
   let model = initial("/work", "high")

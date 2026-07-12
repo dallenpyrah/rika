@@ -185,7 +185,9 @@ const fileTreeRows = (
           rows.push({
             chunks: [
               ...indentChunks,
-              fg(changedFileColor(child.file.status))(truncateToWidth(displayName, Math.max(1, innerWidth - indent.length))),
+              fg(changedFileColor(child.file.status))(
+                truncateToWidth(displayName, Math.max(1, innerWidth - indent.length)),
+              ),
             ],
             file: child.file,
             nameIndex: indentChunks.length,

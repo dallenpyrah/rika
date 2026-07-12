@@ -144,12 +144,7 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
       80,
       24,
     ],
-    [
-      "changed-files-loading",
-      { ...base(), changedFilesOpen: true, changedFiles: { _tag: "Loading" } },
-      80,
-      24,
-    ],
+    ["changed-files-loading", { ...base(), changedFilesOpen: true, changedFiles: { _tag: "Loading" } }, 80, 24],
     [
       "changed-files-ready",
       {
