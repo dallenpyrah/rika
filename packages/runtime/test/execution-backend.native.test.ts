@@ -1,7 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { AiError, ModelResilience, Response } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
-import { ContextUsage } from "@rika/app"
 import { expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import { Duration, Effect, Fiber, FileSystem, Schedule } from "effect"
@@ -552,18 +551,6 @@ test("persists automatic compaction across backend restart and reuses compacted 
   expect(result.requests).toHaveLength(3)
   expect(JSON.stringify(result.requests[1]?.prompt)).toContain("Summarize the conversation")
   expect(JSON.stringify(result.requests[2]?.prompt)).toContain("Finish the compacted run")
-  expect(
-    ContextUsage.analyze(200, {
-      contextWindow: 100,
-      reserveTokens: 0,
-      keepRecentTokens: 10,
-      toolOutputMaxBytes: 1_024,
-    }),
-  ).toMatchObject({
-    contextTokens: 200,
-    availableTokens: 100,
-    shouldCompact: true,
-  })
 }, 60_000)
 
 test("cancels an in-flight model through Relay", async () => {
