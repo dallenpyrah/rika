@@ -8,7 +8,7 @@ Accepted
 
 Provider names and endpoint presence previously selected runtime behavior, models did not own exact request variants, and `oracleModel` did not reach Oracle child execution. This made VibeProxy special, allowed old configuration to remain accidentally valid, and made mode routing incomplete.
 
-Baton 0.4.3 registers exact model selections and measures the currently assembled prompt for proactive compaction, but exposes no candidate chain whose fallback is limited to availability failures before output. Relay 0.2.12 carries typed compaction policies on root definitions, child presets, and fan-out overrides, and assigns every child execution an isolated durable Session.
+Baton 0.4.3 registers exact model selections and measures the currently assembled prompt for proactive compaction, but exposes no candidate chain whose fallback is limited to availability failures before output. Relay 0.2.13 carries typed compaction policies on root definitions, child presets, and fan-out overrides, and assigns every direct and model-initiated child execution an isolated durable Session.
 
 ## Decision
 
