@@ -112,6 +112,8 @@ const fanOutAgentId = (fanOutId: unknown, childExecutionId: unknown) =>
 const executionId = (turnId: string) =>
   Ids.ExecutionId.make(turnId.startsWith("child:") ? turnId : `execution:${turnId}`)
 const sessionId = (threadId: string) => Ids.SessionId.make(`session:${threadId}`)
+const childSessionId = (childExecutionId: Ids.ChildExecutionId) =>
+  Ids.SessionId.make(`session:${String(childExecutionId)}`)
 const error = (cause: unknown) => new BackendError({ message: String(cause) })
 const executionInput = (input: { readonly prompt: string; readonly promptParts?: ReadonlyArray<PromptPart> }) =>
   input.promptParts?.map((part) =>
@@ -840,6 +842,7 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                       })
                       yield* client.startExecutionByAgentDefinition({
                         root_address_id: child.address_id,
+                        session_id: childSessionId(child.child_execution_id),
                         agent_id: childAgentId,
                         agent_revision: registered.record.current_revision,
                         execution_id: Ids.ExecutionId.make(String(child.child_execution_id)),

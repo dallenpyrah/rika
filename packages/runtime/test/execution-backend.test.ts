@@ -1283,6 +1283,9 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect(starts.map((start) => (start as { agent_revision?: number }).agent_revision)).toEqual(
         registrations.map((_, index) => 40 + index),
       )
+      for (const start of starts) {
+        expect(start.session_id).toBe(`session:${String(start.execution_id)}`)
+      }
       for (const registration of registrations) {
         const typed = registration as { metadata?: Record<string, unknown>; handoff_targets?: unknown }
         expect(typed.metadata?.multi_agent_enabled).not.toBe(true)
