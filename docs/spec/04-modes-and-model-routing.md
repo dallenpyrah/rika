@@ -15,7 +15,7 @@ Each mode has a budget and complete `main` and `oracle` routes. A route selects 
 | high   | `gpt-5.6-sol`, xhigh    | `claude-fable-5`, max |
 | ultra  | `claude-fable-5`, max   | `gpt-5.6-sol`, max    |
 
-Fable declares candidates `claude-fable-5` then `claude-opus-4-8`; Opus is also separately configurable. Baton 0.4.2 does not expose a candidate fallback policy constrained to availability failures before output, so Rika does not fake automatic fallback. Startup and doctor route resolution must report missing Gateways, aliases, and variants explicitly.
+Fable declares candidates `claude-fable-5` then `claude-opus-4-8`; Opus is also separately configurable. Baton 0.4.3 does not expose a candidate fallback policy constrained to availability failures before output, so Rika does not fake automatic fallback. Startup and doctor route resolution must report missing Gateways, aliases, and variants explicitly.
 
 ## Runtime invariants
 
