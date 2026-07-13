@@ -113,7 +113,7 @@ const executionId = (turnId: string) =>
   Ids.ExecutionId.make(turnId.startsWith("child:") ? turnId : `execution:${turnId}`)
 const sessionId = (threadId: string) => Ids.SessionId.make(`session:${threadId}`)
 const childSessionId = (childExecutionId: Ids.ChildExecutionId) =>
-  Ids.SessionId.make(`session:${String(childExecutionId)}`)
+  Ids.SessionId.make(`session:child:${String(childExecutionId)}`)
 const error = (cause: unknown) => new BackendError({ message: String(cause) })
 const executionInput = (input: { readonly prompt: string; readonly promptParts?: ReadonlyArray<PromptPart> }) =>
   input.promptParts?.map((part) =>

@@ -1284,7 +1284,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         registrations.map((_, index) => 40 + index),
       )
       for (const start of starts) {
-        expect(start.session_id).toBe(`session:${String(start.execution_id)}`)
+        expect(start.session_id).toBe(`session:child:${String(start.execution_id)}`)
       }
       for (const registration of registrations) {
         const typed = registration as { metadata?: Record<string, unknown>; handoff_targets?: unknown }
