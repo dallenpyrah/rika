@@ -482,9 +482,8 @@ const canonical = (value: unknown): string => {
 const normalizedBaseUrl = (value: string) => {
   const url = new URL(value)
   url.hash = ""
-  url.search = ""
   url.pathname = url.pathname.replace(/\/+$/, "") || "/"
-  return url.toString().replace(/\/$/, "")
+  return url.toString().replace(/\/(?=\?|$)/, "")
 }
 
 export const modelRoutePlan = (route: ConfigContract.ResolvedModelRoute) => {

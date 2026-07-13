@@ -32,6 +32,25 @@ test("content-addresses non-secret model execution semantics deterministically",
   expect(
     modelRoutePlan({ ...route, gateway: { ...route.gateway, baseUrl: `${route.gateway.baseUrl}/` } }).registrationKey,
   ).toBe(key)
+  expect(
+    modelRoutePlan({ ...route, gateway: { ...route.gateway, baseUrl: `${route.gateway.baseUrl}#primary` } })
+      .registrationKey,
+  ).toBe(key)
+  const firstQuery = modelRoutePlan({
+    ...route,
+    gateway: { ...route.gateway, baseUrl: `${route.gateway.baseUrl}/?tenant=first` },
+  }).registrationKey
+  const secondQuery = modelRoutePlan({
+    ...route,
+    gateway: { ...route.gateway, baseUrl: `${route.gateway.baseUrl}?tenant=second` },
+  }).registrationKey
+  expect(firstQuery).not.toBe(secondQuery)
+  expect(
+    modelRoutePlan({
+      ...route,
+      gateway: { ...route.gateway, baseUrl: `${route.gateway.baseUrl}?tenant=first#ignored` },
+    }).registrationKey,
+  ).toBe(firstQuery)
   const changes = [
     { ...route, gateway: { ...route.gateway, protocol: "openai" as const } },
     { ...route, gateway: { ...route.gateway, baseUrl: "https://models.example.test/v1" } },
