@@ -858,12 +858,15 @@ if (import.meta.main) {
                 } else if (event._tag === "ExecutionControlled") {
                   if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
                   if (event.action === "cancelled" && model.busy)
-                    model = ViewState.update(model, { _tag: "ExecutionCancelled", turnId: event.turnId })
+                    model = ViewState.update(model, {
+                      _tag: "ExecutionCancelled",
+                      ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+                    })
                 } else if (event._tag === "ExecutionFailed") {
                   if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
                   model = ViewState.update(model, {
                     _tag: "ExecutionFailed",
-                    turnId: event.turnId,
+                    ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
                     message: event.message,
                   })
                 } else if (event._tag === "ShellPermissionRequested") {
@@ -922,7 +925,12 @@ if (import.meta.main) {
                   model.currentThreadTitle ??
                   (model.threads as ReadonlyArray<ViewState.ThreadItem>).find((thread) => thread.id === threadId)?.title
                 process.stdout.write(
-                  renderGoodbye({ mode: model.mode, workspace: model.workspace, threadId, threadTitle }),
+                  renderGoodbye({
+                    mode: model.mode,
+                    workspace: model.workspace,
+                    ...(threadId === undefined ? {} : { threadId }),
+                    ...(threadTitle === undefined ? {} : { threadTitle }),
+                  }),
                 )
               }
               const close = (exitCode?: number) => {
@@ -1010,7 +1018,7 @@ if (import.meta.main) {
                       }),
                     ),
                   )
-                  const selectedFollowFiber = yield* Effect.forkDaemon(session.followSelected(dispatch))
+                  const selectedFollowFiber = fork(session.followSelected(dispatch))
                   followFiber = selectedFollowFiber
                   fibers.add(selectedFollowFiber)
                   fork(

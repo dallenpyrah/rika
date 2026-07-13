@@ -190,9 +190,9 @@ test("persists terminal image paste bytes with their media type", async () => {
     bytes,
     "IMAGE/WEBP",
     () => 42,
-    () => "one",
+    () => "00000000-0000-0000-0000-000000000001",
   )
-  expect(relative).toBe(".rika/pasted/paste-42-one.webp")
+  expect(relative).toBe(".rika/pasted/paste-42-00000000-0000-0000-0000-000000000001.webp")
   if (relative === undefined) throw new Error("expected a WebP path")
   const persisted = await Effect.runPromise(persistPastedImage(workspace, relative, bytes))
   expect(persisted).toBe(true)
@@ -206,9 +206,9 @@ test("rejects unsupported, unrecognized, and mismatched terminal image bytes", (
       png,
       "image/png",
       () => 1,
-      () => "png",
+      () => "00000000-0000-0000-0000-000000000002",
     ),
-  ).toBe(".rika/pasted/paste-1-png.png")
+  ).toBe(".rika/pasted/paste-1-00000000-0000-0000-0000-000000000002.png")
   expect(pastedImagePath(png, "image/jpeg")).toBeUndefined()
   expect(pastedImagePath(Uint8Array.from([1, 2, 3]), "image/png")).toBeUndefined()
   expect(pastedImagePath(new TextEncoder().encode("<svg/>"), "image/svg+xml")).toBeUndefined()

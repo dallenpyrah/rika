@@ -151,7 +151,7 @@ test("turn SQL mutations, ordering, and rejection branches", async () => {
         })
         expect((yield* turns.findActive(id))?.id).toBe(active.id)
         expect((yield* turns.listQueued(id)).map((turn) => turn.id)).toEqual([second.id, third.id])
-        expect((yield* turns.listNonterminal()).map((turn) => turn.id)).toEqual([active.id])
+        expect((yield* turns.listNonterminal()).map((turn) => turn.id)).toEqual([active.id, second.id, third.id])
         expect(yield* turns.claimNextQueued(id, 5)).toBeUndefined()
         expect((yield* turns.editQueued(second.id, "edited", 6)).prompt).toBe("edited")
         expect((yield* Effect.result(turns.editQueued(active.id, "no", 6)))._tag).toBe("Failure")

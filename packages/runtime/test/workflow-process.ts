@@ -1,24 +1,14 @@
 import { layer as fileSystemLayer } from "@effect/platform-bun/BunFileSystem"
 import { TestModel } from "@batonfx/test"
-import { Client, LanguageModelService, RunnerRuntime, SQLite, ToolRuntime } from "@relayfx/sdk/sqlite"
-import * as RelaySqlite from "@relayfx/sdk/sqlite"
-
-const legacyRuntimes = RelaySqlite as typeof RelaySqlite & {
-  readonly ChildFanOutRuntime?: any
-  readonly WorkflowDefinitionRuntime?: any
-}
-const legacySqlite = SQLite as typeof SQLite & { readonly childFanOutLayer?: any; readonly workflowLayer?: any }
-if (
-  legacyRuntimes.ChildFanOutRuntime === undefined ||
-  legacyRuntimes.WorkflowDefinitionRuntime === undefined ||
-  legacySqlite.childFanOutLayer === undefined ||
-  legacySqlite.workflowLayer === undefined
-) {
-  process.stdout.write(`${JSON.stringify({ type: "ready", pid: process.pid, workflowSurface: false })}\n`)
-  process.exit(0)
-}
-const ChildFanOutRuntime = legacyRuntimes.ChildFanOutRuntime
-const WorkflowDefinitionRuntime = legacyRuntimes.WorkflowDefinitionRuntime
+import {
+  ChildFanOutRuntime,
+  Client,
+  LanguageModelService,
+  RunnerRuntime,
+  SQLite,
+  ToolRuntime,
+  WorkflowDefinitionRuntime,
+} from "@relayfx/sdk/sqlite"
 import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
@@ -26,6 +16,7 @@ import * as RelayExecutionBackend from "../src/execution-backend"
 
 const database = process.env.RIKA_WORKFLOW_DATABASE ?? "missing.sqlite"
 const control = process.env.RIKA_WORKFLOW_WORKSPACE ?? "."
+await Effect.runPromise(Layer.build(SQLite.layer({ filename: database })).pipe(Effect.scoped))
 const append = (value: unknown) =>
   FileSystem.FileSystem.pipe(
     Effect.flatMap((fileSystem) =>
@@ -50,7 +41,7 @@ const fanOutHandlers = ChildFanOutRuntime.testHandlersLayer({
     ),
   cancel: () => Effect.void,
 })
-const fanOutLayer = legacySqlite.childFanOutLayer({ filename: database }, fanOutHandlers)
+const fanOutLayer = SQLite.childFanOutLayer({ filename: database }, fanOutHandlers)
 const workflowHandlers: any = Layer.effect(
   WorkflowDefinitionRuntime.HandlerService,
   ChildFanOutRuntime.Service.pipe(
@@ -69,7 +60,7 @@ const workflowHandlers: any = Layer.effect(
     ),
   ),
 ).pipe(Layer.provide(fanOutLayer))
-const workflowLayer = legacySqlite.workflowLayer({ filename: database }, workflowHandlers)
+const workflowLayer = SQLite.workflowLayer({ filename: database }, workflowHandlers)
 const fixture = await Effect.runPromise(TestModel.make(Array.from({ length: 20 }, () => TestModel.text("unused"))))
 const runnerLayer = RunnerRuntime.layerWithServices({
   databaseLayer: SQLite.layer({ filename: database }),
@@ -77,7 +68,9 @@ const runnerLayer = RunnerRuntime.layerWithServices({
   toolRuntimeLayer: ToolRuntime.layerFromToolkit(Toolkit.make()).pipe(Layer.provide(Layer.empty)),
 })
 const clientLayer = Client.layerFromRuntime.pipe(
-  Layer.provideMerge(Layer.mergeAll(runnerLayer, fanOutLayer, workflowLayer) as Layer.Layer<any>),
+  Layer.provideMerge(
+    workflowLayer.pipe(Layer.provideMerge(fanOutLayer), Layer.provideMerge(runnerLayer)) as Layer.Layer<any>,
+  ),
 ) as Layer.Layer<any>
 const backendLayer = RelayExecutionBackend.layerFromClient({ selection: { provider: "test", model: "workflow" } }).pipe(
   Layer.provide(clientLayer),
@@ -108,8 +101,8 @@ process.stdin.on("data", (chunk) => {
   while (newline >= 0) {
     const message = JSON.parse(buffer.slice(0, newline))
     buffer = buffer.slice(newline + 1)
-    void handle(message).catch((error) => send({ id: message.id, ok: false, error: String(error) }))
+    void handle(message).catch((error) => send({ id: message.id, ok: false, error: Bun.inspect(error) }))
     newline = buffer.indexOf("\n")
   }
 })
-send({ type: "ready", pid: process.pid, host: "rika", workflowSurface: true })
+send({ type: "ready", pid: process.pid, host: "rika" })

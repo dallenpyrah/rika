@@ -13,11 +13,16 @@ export class PromoteTurnError extends Schema.TaggedErrorClass<PromoteTurnError>(
   message: Schema.String,
 }) {}
 
+const PromoteTurnFailure = Schema.Struct({
+  _tag: Schema.tag("PromoteTurnError"),
+  message: Schema.String,
+})
+
 export const promoteTurnTool = Tool.make("promote_turn", {
   description: "Claim and start every currently claimable queued Rika turn for a thread",
   parameters: Schema.Struct({ threadId: Schema.String }),
   success: Schema.Struct({ promoted: Schema.Number }),
-  failure: PromoteTurnError,
+  failure: PromoteTurnFailure,
   failureMode: "return",
 })
 

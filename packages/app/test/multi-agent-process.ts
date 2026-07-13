@@ -1,15 +1,6 @@
 import { layer as fileSystemLayer } from "@effect/platform-bun/BunFileSystem"
 import { ProductAgent } from "../src/index"
-import { Client, SQLite } from "@relayfx/sdk/sqlite"
-import * as RelaySqlite from "@relayfx/sdk/sqlite"
-
-const legacyRuntimes = RelaySqlite as typeof RelaySqlite & { readonly ChildFanOutRuntime?: any }
-const legacySqlite = SQLite as typeof SQLite & { readonly childFanOutLayer?: any }
-if (legacyRuntimes.ChildFanOutRuntime === undefined || legacySqlite.childFanOutLayer === undefined) {
-  process.stdout.write(`${JSON.stringify({ type: "ready", pid: process.pid, fanOutSurface: false })}\n`)
-  process.exit(0)
-}
-const ChildFanOutRuntime = legacyRuntimes.ChildFanOutRuntime
+import { ChildFanOutRuntime, Client, Ids, SQLite } from "@relayfx/sdk/sqlite"
 import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
 
@@ -38,7 +29,7 @@ const handlers = ChildFanOutRuntime.testHandlersLayer({
     }).pipe(Effect.provide(fileSystemLayer)),
   cancel: (childId: any, reason: any) => append({ type: "cancel", childId, reason }),
 })
-const fanOutLayer = legacySqlite.childFanOutLayer({ filename: database }, handlers)
+const fanOutLayer = SQLite.childFanOutLayer({ filename: database }, handlers)
 const clientLayer = Layer.effect(
   Client.Service,
   Effect.gen(function* () {
@@ -46,14 +37,14 @@ const clientLayer = Layer.effect(
     return Client.Service.of({
       createChildFanOut: host.create,
       inspectChildFanOut: (input: { readonly fan_out_id: string }) =>
-        host.inspect(input.fan_out_id).pipe(Effect.map((fan_out) => ({ fan_out }))),
+        host.inspect(Ids.ChildFanOutId.make(input.fan_out_id)).pipe(Effect.map((fan_out) => ({ fan_out }))),
       cancelChildFanOut: (input: {
         readonly fan_out_id: string
         readonly cancelled_at: number
         readonly reason?: string
       }) =>
         host
-          .cancel(input.fan_out_id, input.cancelled_at, input.reason ?? "cancelled")
+          .cancel(Ids.ChildFanOutId.make(input.fan_out_id), input.cancelled_at, input.reason ?? "cancelled")
           .pipe(Effect.map((fan_out) => ({ fan_out: fan_out! }))),
     } as unknown as Client.Interface)
   }),
@@ -91,4 +82,4 @@ process.stdin.on("data", (chunk) => {
     newline = buffer.indexOf("\n")
   }
 })
-send({ type: "ready", pid: process.pid, host: "public", fanOutSurface: true })
+send({ type: "ready", pid: process.pid, host: "public" })

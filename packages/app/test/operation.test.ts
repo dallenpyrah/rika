@@ -7,10 +7,21 @@ import * as ExecutionBackend from "@rika/runtime/contract"
 import { ExecutionExtensions, PluginRegistry } from "@rika/extensions"
 import { Effect, Layer, Ref, Schema } from "effect"
 import { TestConsole } from "effect/testing"
-import { Operation } from "../src/index"
+import { Operation, ResolvedContext } from "../src/index"
 
 const nonActivation = (list: ReadonlyArray<Operation.InteractiveEvent>) =>
   list.filter((event) => event._tag !== "ThreadActivated")
+
+const reconcileDependencies = (extensions: ExecutionExtensions.Interface) =>
+  Layer.merge(
+    ResolvedContext.testLayer({ resolve: () => Effect.die("unused") }),
+    Layer.succeed(ExecutionExtensions.Service, extensions),
+  )
+
+const unusedExtensions = ExecutionExtensions.Service.of({
+  future: () => Effect.die("unused"),
+  resume: () => Effect.die("unused"),
+})
 
 const backend = ExecutionBackend.Service.of({
   invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
@@ -115,6 +126,8 @@ describe("Operation", () => {
       yield* Operation.reconcile().pipe(
         Effect.provide(
           Layer.mergeAll(
+            reconcileDependencies(unusedExtensions),
+            ThreadRepository.memoryLayer(),
             Layer.succeed(TurnRepository.Service, turns),
             Layer.succeed(ExecutionBackend.Service, restartBackend),
           ),
@@ -160,6 +173,8 @@ describe("Operation", () => {
       yield* Operation.reconcile().pipe(
         Effect.provide(
           Layer.mergeAll(
+            reconcileDependencies(unusedExtensions),
+            ThreadRepository.memoryLayer(),
             Layer.succeed(TurnRepository.Service, turns),
             Layer.succeed(ExecutionBackend.Service, terminalBackend),
           ),
@@ -788,11 +803,12 @@ describe("Operation", () => {
                   ? turns
                       .createForSubmission({
                         id: Turn.TurnId.make("successor-backend"),
-                        threadId: input.threadId,
+                        threadId: Thread.ThreadId.make(input.threadId),
                         prompt: "queued successor",
                         now: 1,
                       })
                       .pipe(
+                        Effect.mapError((cause) => new ExecutionBackend.BackendError({ message: cause.message })),
                         Effect.andThen(
                           Effect.fail(new ExecutionBackend.BackendError({ message: "interactive backend failed" })),
                         ),
@@ -1260,7 +1276,9 @@ describe("Operation", () => {
       ])
       const failure = yield* Operation.reconcile(extensions).pipe(
         Effect.provide(
-          Layer.merge(
+          Layer.mergeAll(
+            reconcileDependencies(extensions),
+            ThreadRepository.memoryLayer(),
             Layer.succeed(TurnRepository.Service, existing),
             Layer.succeed(ExecutionBackend.Service, { ...backend, inspect: () => Effect.succeed(undefined) }),
           ),
@@ -1310,7 +1328,9 @@ describe("Operation", () => {
       ])
       yield* Operation.reconcile(extensions).pipe(
         Effect.provide(
-          Layer.merge(
+          Layer.mergeAll(
+            reconcileDependencies(extensions),
+            ThreadRepository.memoryLayer(),
             Layer.succeed(TurnRepository.Service, pinned),
             Layer.succeed(ExecutionBackend.Service, {
               ...backend,
@@ -1333,7 +1353,9 @@ describe("Operation", () => {
       ])
       const result = yield* Operation.reconcile(extensions).pipe(
         Effect.provide(
-          Layer.merge(
+          Layer.mergeAll(
+            reconcileDependencies(extensions),
+            ThreadRepository.memoryLayer(),
             Layer.succeed(TurnRepository.Service, unpinned),
             Layer.succeed(ExecutionBackend.Service, { ...backend, inspect: () => Effect.succeed(undefined) }),
           ),

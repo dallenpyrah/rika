@@ -8,10 +8,6 @@ import { Duration, Effect, Fiber, FileSystem, Schedule } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
 
-const relaySuspendedWaitResumeAvailable = await import("@relayfx/sdk/sqlite").then(
-  (module) => "ChildFanOutRuntime" in module,
-)
-
 const withBackend = <A, E>(
   script: Parameters<typeof TestModel.make>[0],
   run: (
@@ -361,104 +357,91 @@ test("persists automatic compaction across backend restart and reuses compacted 
   })
 }, 60_000)
 
-test.skipIf(!relaySuspendedWaitResumeAvailable)(
-  "cancels an in-flight model through Relay",
-  async () => {
-    const program = withBackend([TestModel.turn([TestModel.text("late")], { delay: Duration.seconds(5) })], (fixture) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const backend = yield* ExecutionBackend.Service
-          const fiber = yield* Effect.forkScoped(
-            backend.start({ threadId: "thread-a", turnId: "turn-cancel", prompt: "wait", startedAt: 1 }),
-          )
-          yield* fixture.awaitRequests(1)
-          const accepted = yield* backend.cancel("turn-cancel", 2)
-          const completed = yield* Fiber.join(fiber)
-          return { accepted, completed }
-        }),
-      ),
-    )
-    const result = await Effect.runPromise(program)
-    expect(result.accepted.status).toBe("cancelled")
-    expect(result.accepted.events.filter((event) => event.type === "execution.cancelled")).toHaveLength(1)
-    expect(result.completed.status).toBe("cancelled")
-    expect(result.completed.events.filter((event) => event.type === "execution.cancelled")).toHaveLength(1)
-  },
-  30_000,
-)
+test("cancels an in-flight model through Relay", async () => {
+  const program = withBackend([TestModel.turn([TestModel.text("late")], { delay: Duration.seconds(5) })], (fixture) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        const fiber = yield* Effect.forkScoped(
+          backend.start({ threadId: "thread-a", turnId: "turn-cancel", prompt: "wait", startedAt: 1 }),
+        )
+        yield* fixture.awaitRequests(1)
+        const accepted = yield* backend.cancel("turn-cancel", 2)
+        const completed = yield* Fiber.join(fiber)
+        return { accepted, completed }
+      }),
+    ),
+  )
+  const result = await Effect.runPromise(program)
+  expect(result.accepted.status).toBe("cancelled")
+  expect(result.accepted.events.filter((event) => event.type === "execution.cancelled")).toHaveLength(1)
+  expect(result.completed.status).toBe("cancelled")
+  expect(result.completed.events.filter((event) => event.type === "execution.cancelled")).toHaveLength(1)
+}, 30_000)
 
 for (const answer of ["Approved", "Denied", "Always"] as const) {
-  test.skipIf(!relaySuspendedWaitResumeAvailable)(
-    `resumes a durable permission wait after restart with ${answer} and no duplicate tool effects`,
-    async () => {
-      const result = await Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const fileSystem = yield* FileSystem.FileSystem
-            const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-permission-" })
-            yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "permission fixture")
-            const fixture = yield* TestModel.make([
-              TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: `read-${answer}` })]),
-              TestModel.text(`${answer} complete`),
-            ])
-            const options = {
-              filename: `${directory}/relay.db`,
-              workspace: directory,
-              registration: fixture.registration,
-              selection: fixture.selection,
-              permissionPolicy: { rules: [{ pattern: "read_file", level: "ask" as const }] },
-            }
-            const useBackend = <A, E>(effect: Effect.Effect<A, E, ExecutionBackend.Service>) =>
-              effect.pipe(Effect.provide(RelayExecutionBackend.layer(options)))
-            const input = {
-              threadId: `thread-${answer}`,
-              turnId: `turn-${answer}`,
-              prompt: "read fixture",
-              startedAt: 1,
-            }
-            const waiting = yield* useBackend(
-              Effect.gen(function* () {
-                const backend = yield* ExecutionBackend.Service
-                const started = yield* backend.start(input)
-                const inspection = yield* backend.inspect(input.turnId)
-                return { started, waits: inspection?.waits ?? [] }
-              }),
-            )
-            expect(waiting.started.status).toBe("waiting")
-            expect(waiting.waits).toHaveLength(1)
-            const waitId = waiting.waits[0]!.id
-            yield* useBackend(
-              Effect.gen(function* () {
-                const backend = yield* ExecutionBackend.Service
-                yield* backend.resolvePermission(waitId, answer, 2, "test decision")
-              }),
-            )
-            const completed = yield* useBackend(
-              Effect.gen(function* () {
-                const backend = yield* ExecutionBackend.Service
-                const resumed = yield* backend.start(input)
-                const duplicate = yield* backend.start(input)
-                const replay = yield* backend.replay(input.turnId)
-                return { resumed, duplicate, replay, approvals: yield* backend.listApprovals(input.turnId) }
-              }),
-            )
-            return { ...completed, requests: yield* fixture.requests }
-          }),
-        ).pipe(Effect.provide(BunServices.layer)),
-      )
-      expect(result.resumed.status).toBe("completed")
-      expect(result.duplicate.status).toBe("completed")
-      expect(result.approvals).toEqual([])
-      expect(result.requests).toHaveLength(2)
-      expect(result.replay.events.filter((event) => event.type === "tool.result.received")).toHaveLength(
-        answer === "Denied" ? 0 : 1,
-      )
-      expect(result.replay.events.map((event) => event.cursor)).toEqual(
-        result.duplicate.events.map((event) => event.cursor),
-      )
-    },
-    60_000,
-  )
+  test(`resumes a durable permission wait after restart with ${answer} and no duplicate tool effects`, async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem
+          const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-permission-" })
+          yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "permission fixture")
+          const fixture = yield* TestModel.make([
+            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: `read-${answer}` })]),
+            TestModel.text(`${answer} complete`),
+          ])
+          const options = {
+            filename: `${directory}/relay.db`,
+            workspace: directory,
+            registration: fixture.registration,
+            selection: fixture.selection,
+            permissionPolicy: { rules: [{ pattern: "read_file", level: "ask" as const }] },
+          }
+          const useBackend = <A, E>(effect: Effect.Effect<A, E, ExecutionBackend.Service>) =>
+            effect.pipe(Effect.provide(RelayExecutionBackend.layer(options)))
+          const input = {
+            threadId: `thread-${answer}`,
+            turnId: `turn-${answer}`,
+            prompt: "read fixture",
+            startedAt: 1,
+          }
+          const waiting = yield* useBackend(
+            Effect.gen(function* () {
+              const backend = yield* ExecutionBackend.Service
+              const started = yield* backend.start(input)
+              const inspection = yield* backend.inspect(input.turnId)
+              return { started, waits: inspection?.waits ?? [] }
+            }),
+          )
+          expect(waiting.started.status).toBe("waiting")
+          expect(waiting.waits).toHaveLength(1)
+          const waitId = waiting.waits[0]!.id
+          const completed = yield* useBackend(
+            Effect.gen(function* () {
+              const backend = yield* ExecutionBackend.Service
+              yield* backend.resolvePermission(waitId, answer, 2, "test decision")
+              const resumed = yield* backend.start(input)
+              const duplicate = yield* backend.start(input)
+              const replay = yield* backend.replay(input.turnId)
+              return { resumed, duplicate, replay, approvals: yield* backend.listApprovals(input.turnId) }
+            }),
+          )
+          return { ...completed, requests: yield* fixture.requests }
+        }),
+      ).pipe(Effect.provide(BunServices.layer)),
+    )
+    expect(result.resumed.status).toBe("completed")
+    expect(result.duplicate.status).toBe("completed")
+    expect(result.approvals).toEqual([])
+    expect(result.requests).toHaveLength(2)
+    expect(result.replay.events.filter((event) => event.type === "tool.result.received")).toHaveLength(
+      answer === "Denied" ? 0 : 1,
+    )
+    expect(result.replay.events.map((event) => event.cursor)).toEqual(
+      result.duplicate.events.map((event) => event.cursor),
+    )
+  }, 60_000)
 }
 
 test("thread host entity wakes on a delivered promotion and invokes the registered promoter", async () => {

@@ -1,7 +1,7 @@
 import { Agent, type Compaction, ModelRegistry, ModelResilience, type Permissions } from "@batonfx/core"
 import { Catalog as ToolCatalog, ParallelSearch, ReadWebPage, Runtime as RikaToolRuntime } from "@rika/tools"
 import { Client, Content, type Entity, type Execution, Ids } from "@relayfx/sdk"
-import { Context, Duration, Effect, Layer, Option, Redacted, Schedule, Semaphore, Stream } from "effect"
+import { Duration, Effect, Layer, Option, Redacted, Schedule, Semaphore, Stream } from "effect"
 import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai"
 import { FetchHttpClient } from "effect/unstable/http"
 import { BackendError, Event, type PromptPart, Service, Status } from "./execution-contract"
@@ -14,7 +14,6 @@ import {
   subagentHandoffTargets,
 } from "./agent-profiles"
 import * as MediaAnalyzer from "./media-analyzer"
-import * as RelayCompat from "./relay-compat"
 import * as ThreadHost from "./thread-host"
 import { definitions, idFor } from "./workflow-definitions"
 
@@ -189,6 +188,7 @@ const followExecution = (
   turnId: string,
   afterCursor: string | undefined,
   onEvent: ((item: Event) => void) | undefined,
+  stopAtActionableWait = true,
 ) =>
   Effect.gen(function* () {
     const events: Array<Event> = []
@@ -213,8 +213,8 @@ const followExecution = (
               item.type === "execution.completed" ||
               item.type === "execution.failed" ||
               item.type === "execution.cancelled" ||
-              item.type === "permission.ask.requested" ||
-              item.type === "tool.approval.requested",
+              (stopAtActionableWait &&
+                (item.type === "permission.ask.requested" || item.type === "tool.approval.requested")),
           ),
           Stream.map(append),
           Stream.runDrain,
@@ -242,7 +242,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
   Layer.effect(
     Service,
     Effect.gen(function* () {
-      const client = RelayCompat.extend(yield* Client.Service)
+      const client = yield* Client.Service
       const registry =
         Option.getOrUndefined(yield* Effect.serviceOption(ThreadHost.Registry)) ?? (yield* ThreadHost.makeRegistry)
       const hostInstances = new Map<string, Entity.Instance>()
@@ -274,23 +274,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
       )
       const hostGate = yield* Semaphore.make(1)
       const entityFor = Effect.fn("ExecutionBackend.entityFor")(function* (threadId: string, now: number) {
-        yield* client
-          .getOrCreateEntity({
-            kind: ThreadHost.entityKind,
-            key: Ids.EntityKey.make(threadId),
-            metadata: { rika_thread_id: threadId },
-            created_at: now,
-          })
-          .pipe(Effect.forkDetach)
-        return yield* Effect.gen(function* () {
-          const found = yield* client.getEntity({ kind: ThreadHost.entityKind, key: Ids.EntityKey.make(threadId) })
-          if (found === undefined || found.status !== "active") {
-            return yield* Effect.fail(
-              new Client.ClientError({ message: `Thread host for ${threadId} is not active yet` }),
-            )
-          }
-          return found
-        }).pipe(Effect.retry({ schedule: Schedule.spaced(Duration.millis(50)), times: 100 }))
+        return yield* client.getOrCreateEntity({
+          kind: ThreadHost.entityKind,
+          key: Ids.EntityKey.make(threadId),
+          metadata: { rika_thread_id: threadId },
+          created_at: now,
+        })
       })
       const hostInstance = Effect.fn("ExecutionBackend.hostInstance")(function* (threadId: string, now: number) {
         yield* hostReady
@@ -368,7 +357,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         createFanOut: Effect.fn("ExecutionBackend.createFanOut")(function* (input) {
           const state = yield* client
             .createChildFanOut({
-              fan_out_id: input.fanOutId,
+              fan_out_id: Ids.ChildFanOutId.make(input.fanOutId),
               parent_execution_id: executionId(input.parentTurnId),
               children: input.children.map((child) => {
                 const profile = child.profile ?? "Task"
@@ -392,13 +381,15 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           return mapFanOut(state)
         }),
         inspectFanOut: Effect.fn("ExecutionBackend.inspectFanOut")(function* (fanOutId) {
-          const result = yield* client.inspectChildFanOut({ fan_out_id: fanOutId }).pipe(Effect.mapError(error))
+          const result = yield* client
+            .inspectChildFanOut({ fan_out_id: Ids.ChildFanOutId.make(fanOutId) })
+            .pipe(Effect.mapError(error))
           return result.fan_out === undefined ? undefined : mapFanOut(result.fan_out)
         }),
         cancelFanOut: Effect.fn("ExecutionBackend.cancelFanOut")(function* (fanOutId, cancelledAt, reason) {
           const result = yield* client
             .cancelChildFanOut({
-              fan_out_id: fanOutId,
+              fan_out_id: Ids.ChildFanOutId.make(fanOutId),
               cancelled_at: cancelledAt,
               ...(reason === undefined ? {} : { reason }),
             })
@@ -478,7 +469,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               handoff_targets: subagentHandoffTargets,
               child_run_presets: presets(selection),
             })
-            yield* client.startExecutionByAgentDefinition({
+            const started = yield* client.startExecutionByAgentDefinition({
               root_address_id: addressId,
               session_id: sessionId(input.threadId),
               agent_id: agentId,
@@ -488,7 +479,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               started_at: input.startedAt,
               completed_at: input.startedAt,
             })
-            return yield* followExecution(client, input.turnId, undefined, input.onEvent)
+            return yield* followExecution(client, input.turnId, undefined, input.onEvent, started.status === "waiting")
           }).pipe(Effect.mapError(error))
         }),
         follow: Effect.fn("ExecutionBackend.follow")(function* (turnId, afterCursor, onEvent) {
@@ -605,8 +596,15 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
       const promoterRegistry = yield* ThreadHost.makeRegistry
       const promoterRegistryLayer = Layer.succeed(ThreadHost.Registry, promoterRegistry)
       {
-        const { LanguageModelService, RunnerRuntime, SchemaRegistry, SQLite, ToolRuntime } = sqliteModule
-        const { ChildFanOutRuntime, WorkflowDefinitionRuntime } = RelayCompat.legacyRuntimes(sqliteModule)
+        const {
+          ChildFanOutRuntime,
+          LanguageModelService,
+          RunnerRuntime,
+          SchemaRegistry,
+          SQLite,
+          ToolRuntime,
+          WorkflowDefinitionRuntime,
+        } = sqliteModule
         {
           const toolkit = toolkitFor(options)
           const runnerToolkit = Toolkit.make(...Object.values(toolkit.tools), ThreadHost.promoteTurnTool)
@@ -684,9 +682,6 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                 }),
               )
           }
-          if (!RelayCompat.hasFanOutWorkflowRuntimes(sqliteModule, SQLite)) {
-            return layerFromClient(options).pipe(Layer.provide(runnerClientLayer), Layer.provide(promoterRegistryLayer))
-          }
           const fanOutHandlers = Layer.effect(
             ChildFanOutRuntime.HandlerService,
             Client.Service.pipe(
@@ -735,10 +730,7 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               ),
             ),
           ).pipe(Layer.provide(runnerClientLayer))
-          const fanOutLayer = RelayCompat.legacyLayers(SQLite).childFanOutLayer(
-            { filename: options.filename },
-            fanOutHandlers,
-          )
+          const fanOutLayer = SQLite.childFanOutLayer({ filename: options.filename }, fanOutHandlers)
           const workflowHandlers = Layer.effect(
             WorkflowDefinitionRuntime.HandlerService,
             Effect.gen(function* () {
@@ -773,45 +765,10 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               })
             }),
           ).pipe(Layer.provide(runnerClientLayer), Layer.provide(fanOutLayer))
-          const workflowLayer = RelayCompat.legacyLayers(SQLite).workflowLayer(
-            { filename: options.filename },
-            workflowHandlers,
-          )
-          const runtimeLayer = Layer.mergeAll(runnerLayer, fanOutLayer, workflowLayer)
-          const hostBoundClientLayer = Layer.unwrap(
-            Effect.gen(function* () {
-              const runtimeContext = yield* Layer.build(runtimeLayer)
-              const clientContext = yield* Layer.build(Client.layerFromRuntime).pipe(Effect.provide(runtimeContext))
-              const client = Context.get(clientContext, Client.Service)
-              const childFanOutRuntime: any = Context.get(runtimeContext, ChildFanOutRuntime.Service)
-              const extended: RelayCompat.ExtendedClient = {
-                ...RelayCompat.extend(client),
-                createChildFanOut: (input: any) =>
-                  childFanOutRuntime
-                    .create(input)
-                    .pipe(Effect.mapError((cause) => new Client.ClientError({ message: String(cause) }))),
-                inspectChildFanOut: (input: any) =>
-                  childFanOutRuntime.inspect(input.fan_out_id).pipe(
-                    Effect.map((state) => ({ fan_out: state ?? null })),
-                    Effect.mapError((cause) => new Client.ClientError({ message: String(cause) })),
-                  ),
-                cancelChildFanOut: (input: any) =>
-                  childFanOutRuntime
-                    .cancel(input.fan_out_id, input.cancelled_at, input.reason ?? "child fan-out cancelled")
-                    .pipe(
-                      Effect.flatMap((state) =>
-                        state === undefined
-                          ? Effect.fail(new BackendError({ message: `Child fan-out not found: ${input.fan_out_id}` }))
-                          : Effect.succeed({ fan_out: state }),
-                      ),
-                      Effect.mapError((cause) => new Client.ClientError({ message: String(cause) })),
-                    ),
-              }
-              return Layer.succeed(Client.Service, Client.Service.of(extended))
-            }),
-          )
+          const workflowLayer = SQLite.workflowLayer({ filename: options.filename }, workflowHandlers)
+          const runtimeLayer = workflowLayer.pipe(Layer.provideMerge(fanOutLayer), Layer.provideMerge(runnerLayer))
           return layerFromClient(options).pipe(
-            Layer.provide(hostBoundClientLayer),
+            Layer.provide(Client.layerFromRuntime.pipe(Layer.provideMerge(runtimeLayer))),
             Layer.provide(promoterRegistryLayer),
           )
         }

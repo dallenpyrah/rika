@@ -94,6 +94,12 @@ export class ToolError extends Schema.TaggedErrorClass<ToolError>()("ToolError",
   message: Schema.String,
 }) {}
 
+const ToolFailure = Schema.Struct({
+  _tag: Schema.tag("ToolError"),
+  tool: Schema.String,
+  message: Schema.String,
+})
+
 const tool = <const Name extends string, Parameters extends Schema.Struct.Fields>(
   name: Name,
   description: string,
@@ -103,7 +109,7 @@ const tool = <const Name extends string, Parameters extends Schema.Struct.Fields
     description,
     parameters: Schema.Struct(parameters),
     success: Result,
-    failure: ToolError,
+    failure: ToolFailure,
     failureMode: "return",
   })
 

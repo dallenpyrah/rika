@@ -49,19 +49,30 @@ test("keeps the welcome mark renderable stable while typing", async () => {
   try {
     surface.update(model)
     await setup.renderOnce()
-    const before = surface.transcriptChildren[0]
+    const transcriptChildren = () =>
+      (surface as unknown as { readonly transcriptChildren: ReadonlyArray<{ readonly content: unknown }> })
+        .transcriptChildren
+    const before = transcriptChildren()[0]
     const beforeContent = before?.content
     expect(before).toBeDefined()
     for (const character of "hello world") {
       model = update(model, {
         _tag: "KeyPressed",
-        key: { name: character, ctrl: false, alt: false, meta: false, shift: false, sequence: character },
+        key: {
+          name: character,
+          ctrl: false,
+          alt: false,
+          meta: false,
+          shift: false,
+          sequence: character,
+          eventType: "press",
+        },
       })
       surface.update(model)
     }
     await setup.renderOnce()
-    expect(surface.transcriptChildren[0]).toBe(before)
-    expect(surface.transcriptChildren[0]?.content).toBe(beforeContent)
+    expect(transcriptChildren()[0]).toBe(before)
+    expect(transcriptChildren()[0]?.content).toBe(beforeContent)
     expect(setup.captureCharFrame()).toContain("Welcome to Rika")
   } finally {
     surface.destroy()

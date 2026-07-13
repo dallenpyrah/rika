@@ -86,6 +86,7 @@ test("drives bypassed recorded and incognito shell commands through Operation an
             block: {
               _tag: "Permission",
               id: event.id,
+              kind: "permission",
               title: "Run shell command",
               detail: event.command,
               status: "pending",
@@ -108,7 +109,8 @@ test("drives bypassed recorded and incognito shell commands through Operation an
           event._tag !== "ThreadsListed" &&
           event._tag !== "ThreadTitled" &&
           event._tag !== "ThreadActivated" &&
-          event._tag !== "ThreadPreviewLoaded"
+          event._tag !== "ThreadPreviewLoaded" &&
+          event._tag !== "TurnStarted"
         )
           model = ViewState.update(model, event)
         surface.update(model)

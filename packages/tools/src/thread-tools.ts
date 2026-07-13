@@ -12,6 +12,12 @@ export class ToolError extends Schema.TaggedErrorClass<ToolError>()("ThreadToolE
   message: Schema.String,
 }) {}
 
+const ToolFailure = Schema.Struct({
+  _tag: Schema.tag("ThreadToolError"),
+  tool: Schema.String,
+  message: Schema.String,
+})
+
 export const findThreadTool = Tool.make("find_thread", {
   description:
     "Find local Rika threads by bounded metadata query terms. Supports plain text and workspace:, repo:, ref:, author:, label:, file:, after:, and before: terms.",
@@ -21,7 +27,7 @@ export const findThreadTool = Tool.make("find_thread", {
     limit: Schema.optionalKey(Schema.Number),
   }),
   success: Result,
-  failure: ToolError,
+  failure: ToolFailure,
   failureMode: "return",
 })
 
@@ -34,7 +40,7 @@ export const readThreadTool = Tool.make("read_thread", {
     maxChars: Schema.optionalKey(Schema.Number),
   }),
   success: Result,
-  failure: ToolError,
+  failure: ToolFailure,
   failureMode: "return",
 })
 

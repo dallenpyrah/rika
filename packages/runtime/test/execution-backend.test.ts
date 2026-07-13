@@ -9,7 +9,6 @@ import { Effect, Layer, Redacted, Ref, Schedule, Stream } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
-import * as RelayCompat from "../src/relay-compat"
 
 const native = vi.hoisted(() => ({ client: undefined as Client.Interface | undefined, results: [] as Array<unknown> }))
 
@@ -141,7 +140,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["startExecutionByAgentDefinition"]>[0]>>([])
   const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["replayExecution"]>[0]>>([])
   const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["cancelExecution"]>[0]>>([])
-  const implementation: RelayCompat.ExtendedClient = {
+  const implementation: Client.Interface = {
     registerAgent: (input) =>
       Ref.update(registrations, (values) => [...values, input]).pipe(
         Effect.as({
@@ -204,6 +203,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     routeExecution: unused,
     send: unused,
     streamExecution: () => Stream.fromIterable(options?.streamEvents ?? []),
+    followExecution: () => Stream.empty,
     wake: unused,
     listPendingApprovals: unused,
     resolveToolApproval: unused,
@@ -220,8 +220,11 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     inspectChildFanOut: unused,
     cancelChildFanOut: unused,
     registerWorkflowDefinition: unused,
+    getWorkflowDefinitionRevision: unused,
+    listWorkflowDefinitionRevisions: unused,
     startWorkflowRun: unused,
     inspectWorkflowRun: unused,
+    replayWorkflowRun: unused,
     cancelWorkflowRun: unused,
     claimEnvelopeReady: unused,
     ackEnvelopeReady: unused,
@@ -253,7 +256,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   return { implementation, registrations, starts, replays, cancellations }
 })
 
-const provideBackend = (implementation: RelayCompat.ExtendedClient, includeThreadTools = false) =>
+const provideBackend = (implementation: Client.Interface, includeThreadTools = false) =>
   Effect.provide(
     RelayExecutionBackend.layerFromClient({
       selection,
