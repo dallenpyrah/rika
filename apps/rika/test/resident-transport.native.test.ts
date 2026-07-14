@@ -362,7 +362,7 @@ describe("resident WebSocket process transport", () => {
       expect((await client.next()).type).toBe("interactive-callback")
       client.send("close")
       const completed = [await client.next(), await client.next()]
-      expect(completed.map((item) => item.type).sort()).toEqual(["blocking-completed", "closed"])
+      expect(completed.map((item) => item.type).toSorted()).toEqual(["blocking-completed", "closed"])
       client.client.stdin.end()
       await client.client.exited
       await waitUntil(() => !alive(event.hostPid!))

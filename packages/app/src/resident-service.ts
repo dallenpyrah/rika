@@ -242,14 +242,13 @@ export const negotiateCapabilities = (
 ): ReadonlyArray<string> => local.filter((capability) => remote.includes(capability))
 
 export type LifecycleState = "starting" | "ready" | "grace" | "draining" | "stopped"
+type LifecycleValue = { state: LifecycleState; clients: number; graceGeneration: number }
 
 export const makeLifecycle = (changed: (state: LifecycleState) => Effect.Effect<void>) =>
   Effect.gen(function* () {
-    const value = yield* Ref.make({ state: "starting" as LifecycleState, clients: 0, graceGeneration: 0 })
+    const value = yield* Ref.make<LifecycleValue>({ state: "starting", clients: 0, graceGeneration: 0 })
     const admission = yield* Semaphore.make(1)
-    const transition = (
-      update: (current: { state: LifecycleState; clients: number; graceGeneration: number }) => typeof current,
-    ) =>
+    const transition = (update: (current: LifecycleValue) => LifecycleValue) =>
       Ref.modify(value, (current) => {
         const next = update(current)
         return [next.state === current.state ? undefined : next.state, next] as const
@@ -266,7 +265,7 @@ export const makeLifecycle = (changed: (state: LifecycleState) => Effect.Effect<
       }).pipe(Effect.tap((generation) => changed(generation === undefined ? "ready" : "grace"))),
       tryAttach: Ref.modify(
         value,
-        (current): readonly [{ readonly attached: boolean; readonly changed: boolean }, typeof current] => {
+        (current): readonly [{ readonly attached: boolean; readonly changed: boolean }, LifecycleValue] => {
           if (current.state === "draining" || current.state === "stopped")
             return [{ attached: false, changed: false }, current] as const
           const state = current.state === "grace" ? "ready" : current.state

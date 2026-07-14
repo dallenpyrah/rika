@@ -1,6 +1,6 @@
 import { ModelRegistry } from "@batonfx/core"
 import { Ids } from "@relayfx/sdk"
-import { Context, Crypto, Effect, Layer, Option, Ref, Schema, Stream } from "effect"
+import { Context, Crypto, Effect, Layer, Option, PlatformError, Ref, Schema, Stream } from "effect"
 import { LanguageModel, type Prompt, Response, Tool, Toolkit } from "effect/unstable/ai"
 
 export const hostAgentId = Ids.AgentId.make("agent:rika-thread-host")
@@ -143,20 +143,21 @@ const toStreamParts = (parts: Array<Response.PartEncoded>): Array<Response.Strea
     ]
   })
 
-export const hostRegistration: Effect.Effect<ModelRegistry.Registration> = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto
-  const namespace = yield* crypto.randomUUIDv4
-  const counter = yield* Ref.make(0)
-  const service = yield* LanguageModel.make({
-    generateText: (options) => respond(namespace, counter, options),
-    streamText: (options) =>
-      Stream.unwrap(
-        respond(namespace, counter, options).pipe(Effect.map((parts) => Stream.fromIterable(toStreamParts(parts)))),
-      ),
+export const hostRegistration: Effect.Effect<ModelRegistry.Registration, PlatformError.PlatformError, Crypto.Crypto> =
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto
+    const namespace = yield* crypto.randomUUIDv4
+    const counter = yield* Ref.make(0)
+    const service = yield* LanguageModel.make({
+      generateText: (options) => respond(namespace, counter, options),
+      streamText: (options) =>
+        Stream.unwrap(
+          respond(namespace, counter, options).pipe(Effect.map((parts) => Stream.fromIterable(toStreamParts(parts)))),
+        ),
+    })
+    return yield* ModelRegistry.registrationFromLayer({
+      provider: hostSelection.provider,
+      model: hostSelection.model,
+      layer: Layer.succeed(LanguageModel.LanguageModel, service),
+    })
   })
-  return yield* ModelRegistry.registrationFromLayer({
-    provider: hostSelection.provider,
-    model: hostSelection.model,
-    layer: Layer.succeed(LanguageModel.LanguageModel, service),
-  })
-})
