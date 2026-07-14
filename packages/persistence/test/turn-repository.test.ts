@@ -46,6 +46,43 @@ it.effect("memory turns preserve immutable execution extension pins", () =>
   }).pipe(Effect.provide(TurnRepository.memoryLayer())),
 )
 
+it.effect("memory turns preserve immutable execution route pins", () =>
+  Effect.gen(function* () {
+    const repository = yield* TurnRepository.Service
+    const created = yield* repository.createForSubmission({
+      id: Turn.TurnId.make("turn-route-pin"),
+      threadId: Thread.ThreadId.make("thread-route-pin"),
+      prompt: "pin route",
+      executionRoute: Turn.testExecutionRoute("low"),
+      now: 1,
+    })
+    expect(created.executionRoute?.mode).toBe("low")
+    expect(
+      (yield* Effect.result(repository.setExecutionRoute(created.id, Turn.testExecutionRoute("ultra"))))._tag,
+    ).toBe("Failure")
+  }).pipe(Effect.provide(TurnRepository.memoryLayer())),
+)
+
+it.effect("memory turns preserve review fan-out route ownership while nonterminal", () =>
+  Effect.gen(function* () {
+    const repository = yield* TurnRepository.Service
+    const created = yield* repository.createForSubmission({
+      id: Turn.TurnId.make("review-owner"),
+      threadId: Thread.ThreadId.make("review-thread"),
+      prompt: "Review workspace changes",
+      executionRoute: Turn.testExecutionRoute("medium"),
+      reviewFanOutId: "review:review-owner",
+      now: 1,
+    })
+    yield* repository.setStatus(created.id, "running", undefined, 2)
+    expect(yield* repository.get(created.id)).toMatchObject({
+      status: "running",
+      reviewFanOutId: "review:review-owner",
+    })
+    expect((yield* repository.listNonterminal()).map((turn) => turn.id)).toContain(created.id)
+  }).pipe(Effect.provide(TurnRepository.memoryLayer())),
+)
+
 it.effect("memory turns preserve deterministic identity and status", () =>
   Effect.gen(function* () {
     const repository = yield* TurnRepository.Service
@@ -257,7 +294,7 @@ it.effect("sql turns create, get, list, and decode cursor variants", () =>
       expect(found?.lastCursor).toBe("cursor-a")
       expect(missing).toBeUndefined()
       expect(listed.map((turn) => turn.lastCursor)).toEqual([undefined, "cursor-b"])
-      expect(sql.statements[0]?.parameters).toEqual(["turn-a", "thread-a", "hello", null, "thread-a", 1, 1])
+      expect(sql.statements[0]?.parameters).toEqual(["turn-a", "thread-a", "hello", null, null, null, "thread-a", 1, 1])
       expect(sql.statements.at(-1)).toEqual({
         sql: "SELECT * FROM rika_turns WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
         parameters: ["thread-a"],

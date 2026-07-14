@@ -10,7 +10,7 @@ const packages = [
   ["@batonfx/providers", "batonfx/packages/providers"],
   ["@batonfx/skills", "batonfx/packages/skills"],
   ["@batonfx/test", "batonfx/packages/test"],
-  ["@relayfx/sdk", "relay/packages/relay"],
+  ["@relayfx/sdk", "relayfx/packages/relay"],
 ] as const
 
 const consumers = [
@@ -19,11 +19,14 @@ const consumers = [
   ["packages/runtime", ["@batonfx/core", "@batonfx/test", "@relayfx/sdk"]],
 ] as const
 
-const run = Effect.fn("Upstream.run")(function* (command: string, args: ReadonlyArray<string>, cwd: string) {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-  const output = yield* spawner.string(ChildProcess.make(command, args, { cwd }), { includeStderr: true })
-  return output.trim()
-})
+const run = Effect.fn("Upstream.run")((command: string, args: ReadonlyArray<string>, cwd: string) =>
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+    const exitCode = yield* spawner.exitCode(ChildProcess.make(command, args, { cwd }))
+    if (Number(exitCode) !== 0)
+      return yield* Effect.fail(new Error(`${command} ${args.join(" ")} exited with ${exitCode}`))
+  }),
+)
 
 const roots = Effect.gen(function* () {
   const path = yield* Path.Path
@@ -52,14 +55,15 @@ const status = Effect.gen(function* () {
 const link = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem
   const { path, project, projects } = yield* roots
-  for (const repository of ["batonfx", "relay"] as const) {
+  for (const repository of ["batonfx", "relayfx"] as const) {
     const repositoryPath = path.join(projects, repository)
     if (!(yield* fileSystem.exists(repositoryPath))) {
       return yield* Effect.fail(new Error(`Missing sibling repository: ${repositoryPath}`))
     }
   }
-  yield* run("bun", ["run", "build"], path.join(projects, "relay", "packages", "relay"))
+  yield* run("bun", ["run", "build"], path.join(projects, "relayfx", "packages", "relay"))
   for (const [, relative] of packages) {
+    yield* run("bun", ["run", "build"], path.join(projects, relative))
     yield* run("bun", ["link"], path.join(projects, relative))
   }
   for (const [consumer, names] of consumers) {

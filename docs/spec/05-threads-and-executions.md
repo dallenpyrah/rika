@@ -16,7 +16,7 @@ Normal input accepted while a Turn is active becomes a product-owned Pending Tur
 
 `@rika/runtime` is the adapter boundary around Relay. Its product-facing contract accepts Thread and Turn identifiers, ordered text/image prompt parts, timestamps, and cursors. Image parts contain a media type, base64 bytes, and optional filename and remain structured through Baton model input. It returns normalized execution status and product events. Relay identifiers, schemas, runtime layers, agent registration, and SQLite composition do not cross into `@rika/app`, tools, or TUI packages.
 
-The runtime exposes a client-requiring adapter layer for deterministic tests and a SQLite production composition layer. The production layer supplies the Relay client, runner runtime, language model, and tool runtime without changing the product-facing contract.
+The runtime exposes a client-requiring adapter layer for deterministic tests. Production execution lives only in the Resident Rika Service. The service supplies the Relay client, runner runtime, language model, tool runtime, route-driven `ExecutionBackend`, and all Operation and Turn admission, following, promotion, and reconciliation fibers without changing the product-facing contract. CLI and TUI clients do not open execution persistence or run reconciliation.
 
 The Relay Session identifier is `session:<thread-id>` and the top-level Relay Execution identifier is `execution:<turn-id>`. Starting the same Turn again uses the same idempotency key and returns the existing execution without duplicating visible events.
 
@@ -38,4 +38,20 @@ Prior-message editing, restoring, and forking create a new branch of Thread stat
 
 ## Streaming
 
-In-process clients consume Effect Streams. If a future process boundary is introduced, the transport is a typed WebSocket protocol with cursor replay, heartbeats, bounded queues, cancellation, and reconnect semantics.
+Resident service internals consume Effect Streams. Execution-capable CLI and TUI processes use the local typed WebSocket protocol specified by ADR 0007. The shipped protocol v1 carries requests, interactive events, and actions only for the lifetime of one authenticated connection. It has no durable transport subscriptions, cursors, acknowledgements, reconnect replay, bounded delivery windows, or slow-consumer handling.
+
+Threads, Turns, execution references, and execution projections remain durable in SQLite when a connection closes. In-flight transport requests and interactive actions are interrupted on disconnect or resident drain, and the client may not know whether a mutation was accepted before interruption. The caller must reconnect, refresh durable state, and reissue only a command that is safe to repeat. Protocol v1 does not promise request idempotency or deduplication across connections. Relay and product persistence continue to own their existing durable execution and projection behavior; the resident transport does not add another replay or idempotency layer.
+
+## Resident Service Lifecycle
+
+One Resident Rika Service exists for each canonical Profile/data-root identity. Its state machine is explicit and monotonic except for the stated grace cancellation:
+
+```text
+starting -> ready -> grace -> draining -> stopped
+               ^       |
+               +-------+ new authenticated client
+```
+
+`starting` owns the bound listener and performs authentication setup, product and Relay migration, route registration, runtime acquisition, and startup reconciliation. It accepts handshakes but returns a typed `starting` response until it can serve requests. `ready` admits authenticated clients and work. Disconnect of the final authenticated client enters a bounded `grace` timer; a new authenticated client cancels that timer and returns the service to `ready`. Grace expiry or SIGINT/SIGTERM enters `draining`. Draining rejects new execution admission, stops accepting new clients, completes or interrupts owned request/subscription fibers according to their cancellation contract, flushes projections, stops Relay hosts, closes Relay then product SQLite, and only then closes the listener and reaches `stopped`. The listener remains bound throughout starting, ready, grace, and draining, including database close. `SIGKILL` performs no cleanup, but the OS releases the listener so a replacement may bind and reconcile durable state.
+
+Startup races converge through the OS-owned exclusive bind on the derived loopback endpoint. The bind winner becomes the service. A bind loser connects, authenticates, verifies identity and protocol compatibility, and attaches; it never opens either database. PID files, directories, process metadata, and SQLite locks are diagnostics only and never establish service ownership.

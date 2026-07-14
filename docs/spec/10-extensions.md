@@ -18,4 +18,4 @@ MCP command approval includes Workspace root, server name, command, arguments, e
 
 ## Transport
 
-Remote MCP transport follows the MCP package contract. Rika-owned live execution transport, if needed, uses WebSockets rather than SSE.
+Remote MCP transport follows the MCP package contract. Rika-owned client-to-resident-service execution transport uses WebSockets rather than SSE.

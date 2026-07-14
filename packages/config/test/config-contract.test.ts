@@ -25,6 +25,78 @@ describe("ConfigContract", () => {
     expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)
   })
 
+  it.each(["not a url", "/v1", "ftp://moon.test/v1"])("rejects invalid gateway URL %s", (baseUrl) => {
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        gateways: { moon: { protocol: "openai", baseUrl, auth: { type: "none" } } },
+      }),
+    ).toThrowError(/absolute HTTP or HTTPS URL/)
+  })
+
+  it.each([
+    "https://user@moon.test/v1",
+    "https://user:password@moon.test/v1",
+    "https://moon.test/v1?api_key=secret",
+    "https://moon.test/v1?access-token=secret",
+    "https://moon.test/v1?auth=secret",
+    "https://moon.test/v1?signature=secret",
+    "https://moon.test/v1?sig=secret",
+    "https://moon.test/v1?request-auth-value=secret",
+    "https://moon.test/v1?request_signature_value=secret",
+    "https://moon.test/v1?request.sig.value=secret",
+  ])("rejects credentials in gateway URL %s", (baseUrl) => {
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        gateways: { moon: { protocol: "openai", baseUrl, auth: { type: "none" } } },
+      }),
+    ).toThrowError(/cannot contain credentials/)
+  })
+
+  it.each([
+    "apiKey",
+    "access_token",
+    "authorization",
+    "nested.client-secret",
+    "nested.items.0.password",
+    "nested.auth",
+    "nested.signature",
+    "nested.sig",
+    "nested.request-auth-value",
+    "nested.request_signature_value",
+    "nested.request-sig-value",
+  ])("rejects credential-like provider option key %s recursively", (keyPath) => {
+    const parts = keyPath.split(".")
+    const options = parts.reduceRight<Record<string, unknown>>((value, key) => ({ [key]: value }), { value: true })
+    const source = ConfigContract.defaults.models.luna!
+    const model = { ...source, variants: { ...source.variants, low: { normal: { options } } } }
+    expect(() => ConfigContract.decodeSettingsInput("settings.json", { models: { moon: model } })).toThrowError(
+      /credential-like provider option key/,
+    )
+  })
+
+  it("accepts legitimate model option keys at any depth", () => {
+    const source = ConfigContract.defaults.models.luna!
+    const model = {
+      ...source,
+      variants: {
+        ...source.variants,
+        low: {
+          normal: {
+            options: {
+              max_tokens: 1,
+              max_output_tokens: 2,
+              reasoning: { effort: "low" },
+              service_tier: "priority",
+            },
+          },
+        },
+      },
+    }
+    expect(ConfigContract.decodeSettingsInput("settings.json", { models: { moon: model } })).toMatchObject({
+      models: { moon: model },
+    })
+  })
+
   it("requires bearer auth to name a valid environment variable", () => {
     expect(() =>
       ConfigContract.decodeSettingsInput("settings.json", {

@@ -1,10 +1,22 @@
 import { Agent, type Compaction, ModelRegistry, ModelResilience, type Permissions } from "@batonfx/core"
 import { Catalog as ToolCatalog, ParallelSearch, ReadWebPage, Runtime as RikaToolRuntime } from "@rika/tools"
-import { Client, Content, type Entity, type Execution, Ids } from "@relayfx/sdk"
-import { Duration, Effect, Layer, Option, Redacted, Schedule, Semaphore, Stream } from "effect"
+import {
+  Client,
+  Content,
+  type Entity,
+  type Execution,
+  Ids,
+  Runtime,
+  ToolRuntime as RelayToolRuntime,
+} from "@relayfx/sdk"
+import type {
+  ChildFanOutRuntime as ChildFanOutRuntimeModule,
+  WorkflowDefinitionRuntime as WorkflowDefinitionRuntimeModule,
+} from "@relayfx/sdk/sqlite"
+import { Context, Duration, Effect, Layer, LayerMap, Option, Redacted, Schedule, Semaphore, Stream } from "effect"
 import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai"
 import { FetchHttpClient } from "effect/unstable/http"
-import { BackendError, Event, type PromptPart, Service, Status } from "./execution-contract"
+import { BackendError, Event, type ExecutionRoutePin, type PromptPart, Service, Status } from "./execution-contract"
 import {
   childRunSpawnPermission,
   outputSchemaRegistrations,
@@ -43,8 +55,38 @@ export interface LayerOptions<AdditionalTools extends Record<string, Tool.Any> =
   readonly additionalToolkit?: Toolkit.Toolkit<AdditionalTools>
   readonly additionalHandlerLayer?: Layer.Layer<Tool.HandlersFor<AdditionalTools>, unknown, never>
   readonly toolRuntimeLayer?: Layer.Layer<RikaToolRuntime.Service, unknown, never>
+  readonly toolRuntimeLayerForWorkspace?: (workspace: string) => Layer.Layer<RikaToolRuntime.Service, unknown, any>
+  readonly resolveWorkspace?: (executionId: string) => Effect.Effect<string, BackendError>
   readonly toolNeedsApproval?: (name: string) => boolean
+  readonly resolveExecutionRoute?: (turnId: string) => Effect.Effect<ExecutionRoutePin | undefined, BackendError>
 }
+
+export const routedToolRuntimeLayer = (
+  layerForWorkspace: (workspace: string) => Layer.Layer<RikaToolRuntime.Service, unknown, any>,
+  resolveWorkspace: (executionId: string) => Effect.Effect<string, BackendError>,
+) =>
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const runtimes = yield* LayerMap.make(layerForWorkspace, { idleTimeToLive: "1 minute" })
+      const run = ((request: RikaToolRuntime.Request) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const call = yield* RelayToolRuntime.ToolCallInfo
+            const workspace = yield* resolveWorkspace(String(call.executionId))
+            const context = yield* runtimes.contextEffect(workspace)
+            const runtime = Context.get(context, RikaToolRuntime.Service)
+            return yield* runtime.run(request)
+          }),
+        ).pipe(
+          Effect.mapError((cause) =>
+            cause instanceof RikaToolRuntime.ToolError
+              ? cause
+              : new RikaToolRuntime.ToolError({ tool: request._tag, message: String(cause) }),
+          ),
+        )) as RikaToolRuntime.Interface["run"]
+      return Layer.succeed(RikaToolRuntime.Service, RikaToolRuntime.Service.of({ run }))
+    }),
+  )
 
 const withResilience = (
   registration: ModelRegistry.Registration,
@@ -83,6 +125,18 @@ const compactionPolicy = (compaction: Compaction.DefaultOptions | undefined): Co
         keep_recent_tokens: compaction.keepRecentTokens,
       }
 
+const pinnedCompactionPolicy = (route: ExecutionRoutePin["main"]): CompactionPolicy => ({
+  context_window: route.compaction.contextWindow,
+  reserve_tokens: route.compaction.reserveTokens,
+  keep_recent_tokens: route.compaction.keepRecentTokens,
+})
+
+const pinnedSelection = (route: ExecutionRoutePin["main"]): ModelRegistry.ModelSelection => ({
+  provider: route.provider,
+  model: route.model,
+  registrationKey: route.registrationKey,
+})
+
 const toolkitFor = <AdditionalTools extends Record<string, Tool.Any>>(
   options: Pick<LayerOptions<AdditionalTools>, "additionalToolkit">,
 ) =>
@@ -111,6 +165,20 @@ const fanOutAgentId = (fanOutId: unknown, childExecutionId: unknown) =>
   Ids.AgentId.make(`agent:rika:fan-out:${String(fanOutId)}:${String(childExecutionId)}`)
 const executionId = (turnId: string) =>
   Ids.ExecutionId.make(turnId.startsWith("child:") ? turnId : `execution:${turnId}`)
+const makeChildExecutionId = (parentTurnId: string, childId: string) =>
+  Ids.ChildExecutionId.make(`child:${encodeURIComponent(parentTurnId)}:${childId}`)
+const childIdFromExecutionId = (parentTurnId: string, value: unknown) => {
+  const id = String(value)
+  const prefix = `child:${encodeURIComponent(parentTurnId)}:`
+  return id.startsWith(prefix) ? id.slice(prefix.length) : id.replace(/^child:/, "")
+}
+export const turnIdFromExecutionId = (value: string): string | undefined => {
+  if (value.startsWith("execution:")) return value.slice("execution:".length)
+  if (!value.startsWith("child:")) return undefined
+  const separator = value.indexOf(":", "child:".length)
+  if (separator < 0) return undefined
+  return decodeURIComponent(value.slice("child:".length, separator))
+}
 const sessionId = (threadId: string) => Ids.SessionId.make(`session:${threadId}`)
 const childSessionId = (childExecutionId: Ids.ChildExecutionId) =>
   Ids.SessionId.make(`session:child:${String(childExecutionId)}`)
@@ -127,26 +195,29 @@ const executionInput = (input: { readonly prompt: string; readonly promptParts?:
         },
   ) ?? [Content.text(input.prompt)]
 
-const mapFanOut = (value: any) => ({
-  fanOutId: String(value.fan_out_id),
-  parentTurnId: String(value.parent_execution_id).replace(/^execution:/, ""),
-  state: value.state,
-  maxConcurrency: value.max_concurrency,
-  join: value.join._tag,
-  members: value.members.map((member: any) => ({
-    childId: String(member.child_execution_id).replace(/^child:/, ""),
-    ordinal: member.ordinal,
-    state: member.state,
-    ...(member.output === undefined
-      ? {}
-      : {
-          output: Array.isArray(member.output)
-            ? member.output.map((part: any) => (part.type === "text" ? part.text : JSON.stringify(part))).join("")
-            : member.output,
-        }),
-    ...(member.error === undefined ? {} : { error: member.error }),
-  })),
-})
+const mapFanOut = (value: any) => {
+  const parentTurnId = String(value.parent_execution_id).replace(/^execution:/, "")
+  return {
+    fanOutId: String(value.fan_out_id),
+    parentTurnId,
+    state: value.state,
+    maxConcurrency: value.max_concurrency,
+    join: value.join._tag,
+    members: value.members.map((member: any) => ({
+      childId: childIdFromExecutionId(parentTurnId, member.child_execution_id),
+      ordinal: member.ordinal,
+      state: member.state,
+      ...(member.output === undefined
+        ? {}
+        : {
+            output: Array.isArray(member.output)
+              ? member.output.map((part: any) => (part.type === "text" ? part.text : JSON.stringify(part))).join("")
+              : member.output,
+          }),
+      ...(member.error === undefined ? {} : { error: member.error }),
+    })),
+  }
+}
 
 const workflow = (value: any) => ({
   runId: String(value.execution_id).replace(/^workflow:/, ""),
@@ -308,7 +379,10 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
     | "permissionPolicy"
     | "defaultReasoningEffort"
     | "modelVariantPolicy"
-  >,
+    | "resolveExecutionRoute"
+  > & {
+    readonly registerModels?: (registrations: ReadonlyArray<ModelRegistry.Registration>) => Effect.Effect<void>
+  },
 ) =>
   Layer.effect(
     Service,
@@ -317,6 +391,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
       const registry =
         Option.getOrUndefined(yield* Effect.serviceOption(ThreadHost.Registry)) ?? (yield* ThreadHost.makeRegistry)
       const hostInstances = new Map<string, Entity.Instance>()
+      const executionRoutes = new Map<string, ExecutionRoutePin>()
       const hostReady = yield* Effect.cached(
         Effect.gen(function* () {
           yield* client.registerAgent({
@@ -397,6 +472,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         return recreated
       })
       return Service.of({
+        ...(options.registerModels === undefined ? {} : { registerModels: options.registerModels }),
         ensureThreadHost: Effect.fn("ExecutionBackend.ensureThreadHost")(function* (threadId, createdAt) {
           yield* hostInstance(threadId, createdAt).pipe(Effect.mapError(error))
         }),
@@ -426,6 +502,14 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         }),
         registerTurnPromoter: (promoter) => registry.register(promoter),
         createFanOut: Effect.fn("ExecutionBackend.createFanOut")(function* (input) {
+          const cachedRoute = executionRoutes.get(input.parentTurnId)
+          const routePin =
+            input.executionRoute ??
+            cachedRoute ??
+            (options.resolveExecutionRoute === undefined
+              ? undefined
+              : yield* options.resolveExecutionRoute(input.parentTurnId))
+          const durableRoute = routePin === undefined ? undefined : JSON.parse(JSON.stringify(routePin))
           const state = yield* client
             .createChildFanOut({
               fan_out_id: Ids.ChildFanOutId.make(input.fanOutId),
@@ -434,17 +518,34 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 const profile = child.profile ?? "Task"
                 const preset = resolve(
                   profile,
-                  profile === "Oracle" ? (options.oracleSelection ?? options.selection) : options.selection,
+                  routePin === undefined
+                    ? profile === "Oracle"
+                      ? (options.oracleSelection ?? options.selection)
+                      : options.selection
+                    : pinnedSelection(profile === "Oracle" ? routePin.oracle : routePin.main),
                 ).preset
-                const policy = compactionPolicy(
-                  profile === "Oracle" ? (options.oracleCompaction ?? options.compaction) : options.compaction,
-                )
+                const policy =
+                  routePin === undefined
+                    ? compactionPolicy(
+                        profile === "Oracle" ? (options.oracleCompaction ?? options.compaction) : options.compaction,
+                      )
+                    : pinnedCompactionPolicy(profile === "Oracle" ? routePin.oracle : routePin.main)
                 return {
-                  child_execution_id: Ids.ChildExecutionId.make(`child:${child.childId}`),
+                  child_execution_id: makeChildExecutionId(input.parentTurnId, child.childId),
                   address_id: addressId,
                   input: [Content.text(child.prompt)],
                   override: { ...preset, ...(policy === undefined ? {} : { compaction_policy: policy }) },
-                  metadata: { product_profile: profile, steering_enabled: true },
+                  metadata: {
+                    product_profile: profile,
+                    steering_enabled: true,
+                    ...(input.workspace === undefined ? {} : { rika_workspace: input.workspace }),
+                    ...(routePin === undefined
+                      ? {}
+                      : {
+                          rika_execution_route: durableRoute,
+                          rika_token_budget: routePin.tokenBudget,
+                        }),
+                  },
                 }
               }),
               max_concurrency: input.maxConcurrency,
@@ -513,7 +614,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           yield* client
             .spawnChildRun({
               execution_id: executionId(input.parentTurnId),
-              child_execution_id: Ids.ChildExecutionId.make(`child:${input.childId}`),
+              child_execution_id: makeChildExecutionId(input.parentTurnId, input.childId),
               address_id: addressId,
               preset_name: input.profile,
               input: [Content.text(input.prompt)],
@@ -530,32 +631,47 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         start: Effect.fn("ExecutionBackend.start")(function* (input) {
           return yield* Effect.gen(function* () {
             const metadata = { steering_enabled: true, multi_agent_enabled: true }
-            const rootCompaction = compactionPolicy(options.compaction)
-            const selection = variantSelection(
-              options.selection,
-              input.reasoningEffort ?? options.defaultReasoningEffort,
-              input.fastMode === true,
-              options.modelVariantPolicy ?? "registration-key",
-            )
+            const rootCompaction =
+              input.executionRoute === undefined
+                ? compactionPolicy(options.compaction)
+                : pinnedCompactionPolicy(input.executionRoute.main)
+            const selection =
+              input.executionRoute === undefined || options.modelVariantPolicy === "fixed-selection"
+                ? variantSelection(
+                    options.selection,
+                    input.reasoningEffort ?? options.defaultReasoningEffort,
+                    input.fastMode === true,
+                    options.modelVariantPolicy ?? "registration-key",
+                  )
+                : pinnedSelection(input.executionRoute.main)
+            const oracleSelection =
+              input.executionRoute === undefined || options.modelVariantPolicy === "fixed-selection"
+                ? options.oracleSelection
+                : pinnedSelection(input.executionRoute.oracle)
+            const oracleCompaction =
+              input.executionRoute === undefined
+                ? compactionPolicy(options.oracleCompaction ?? options.compaction)
+                : pinnedCompactionPolicy(input.executionRoute.oracle)
             const registered = yield* client.registerAgent({
               id: agentId,
               address: addressId,
               agent: Agent.make("rika", { model: selection, toolkit: toolkitFor(options) }),
               permissions: [...parentPermissions, childRunSpawnPermission],
               ...(options.permissionPolicy === undefined ? {} : { permission_rules: options.permissionPolicy }),
-              ...(options.tokenBudget === undefined ? {} : { token_budget: options.tokenBudget }),
+              ...(input.executionRoute === undefined && options.tokenBudget === undefined
+                ? {}
+                : { token_budget: input.executionRoute?.tokenBudget ?? options.tokenBudget }),
               metadata,
               ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
               handoff_targets: subagentHandoffTargets,
               child_run_presets: Object.fromEntries(
-                Object.entries(presets(selection, options.oracleSelection)).map(([name, preset]) => {
-                  const policy = compactionPolicy(
-                    name === "Oracle" ? (options.oracleCompaction ?? options.compaction) : options.compaction,
-                  )
+                Object.entries(presets(selection, oracleSelection)).map(([name, preset]) => {
+                  const policy = name === "Oracle" ? oracleCompaction : rootCompaction
                   return [name, { ...preset, ...(policy === undefined ? {} : { compaction_policy: policy }) }]
                 }),
               ),
             })
+            if (input.executionRoute !== undefined) executionRoutes.set(input.turnId, input.executionRoute)
             const id = executionId(input.turnId)
             yield* client
               .startExecutionByAgentDefinition({
@@ -700,7 +816,6 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
         const {
           ChildFanOutRuntime,
           LanguageModelService,
-          RunnerRuntime,
           SchemaRegistry,
           SQLite,
           ToolRuntime,
@@ -715,35 +830,49 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               : Layer.merge(RikaToolRuntime.handlerLayer, options.additionalHandlerLayer),
             ThreadHost.handlerLayer(promoterRegistry),
           )
-          const runnerLayer = RunnerRuntime.layerWithServices({
-            databaseLayer: SQLite.layer({ filename: options.filename }),
-            languageModelLayer: LanguageModelService.layerFromRegistrationEffects([
-              ...registrationsFor(options).map((registration) => Effect.succeed(registration)),
-              ThreadHost.hostRegistration,
-            ]),
-            schemaRegistryLayer: SchemaRegistry.layer(outputSchemaRegistrations),
-            toolRuntimeLayer: ToolRuntime.layerFromToolkit(runnerToolkit, (tool) => ({
-              needsApproval:
-                tool.name === ThreadHost.promoteTurnTool.name
-                  ? false
-                  : (options.toolNeedsApproval?.(tool.name) ?? ToolCatalog.get(tool.name)?.permission === "ask"),
-            })).pipe(
-              Layer.provide(handlerLayer),
-              Layer.provideMerge(
-                (options.toolRuntimeLayer ?? RikaToolRuntime.layer(options.workspace)).pipe(
-                  Layer.provide(MediaAnalyzer.layer(options.selection)),
-                  Layer.provide(ModelRegistry.layer(registrationsFor(options))),
-                  Layer.provide(
-                    Layer.mergeAll(
-                      ParallelSearch.layer(remoteToolOptions(options.parallelApiKey)),
-                      ReadWebPage.layer(remoteToolOptions(options.parallelApiKey)),
-                    ).pipe(Layer.provide(FetchHttpClient.layer)),
-                  ),
+          const languageModelLayer = LanguageModelService.layerFromRegistrationEffects([
+            ...registrationsFor(options).map((registration) => Effect.succeed(registration)),
+            ThreadHost.hostRegistration,
+          ])
+          const languageModelService =
+            LanguageModelService.Service === undefined
+              ? undefined
+              : Context.get(yield* Layer.build(languageModelLayer), LanguageModelService.Service)
+          const sharedLanguageModelLayer =
+            languageModelService === undefined
+              ? languageModelLayer
+              : Layer.succeed(LanguageModelService.Service, languageModelService)
+          const modelRegistry = Context.get(
+            yield* Layer.build(ModelRegistry.layer(registrationsFor(options))),
+            ModelRegistry.Service,
+          )
+          const sharedModelRegistryLayer = Layer.succeed(ModelRegistry.Service, modelRegistry)
+          const schemaRegistryLayer = SchemaRegistry.layer(outputSchemaRegistrations)
+          const rikaToolRuntimeLayer =
+            options.toolRuntimeLayerForWorkspace !== undefined && options.resolveWorkspace !== undefined
+              ? routedToolRuntimeLayer(options.toolRuntimeLayerForWorkspace, options.resolveWorkspace)
+              : (options.toolRuntimeLayer ?? RikaToolRuntime.layer(options.workspace))
+          const toolRuntimeLayer = ToolRuntime.layerFromToolkit(runnerToolkit, (tool) => ({
+            needsApproval:
+              tool.name === ThreadHost.promoteTurnTool.name
+                ? false
+                : (options.toolNeedsApproval?.(tool.name) ?? ToolCatalog.get(tool.name)?.permission === "ask"),
+          })).pipe(
+            Layer.provide(handlerLayer),
+            Layer.provideMerge(
+              rikaToolRuntimeLayer.pipe(
+                Layer.provide(MediaAnalyzer.layer(options.selection)),
+                Layer.provide(sharedModelRegistryLayer),
+                Layer.provide(
+                  Layer.mergeAll(
+                    ParallelSearch.layer(remoteToolOptions(options.parallelApiKey)),
+                    ReadWebPage.layer(remoteToolOptions(options.parallelApiKey)),
+                  ).pipe(Layer.provide(FetchHttpClient.layer)),
                 ),
               ),
             ),
-          })
-          const handlerClientLayer = Layer.fresh(Client.layerFromRuntime).pipe(Layer.provideMerge(runnerLayer))
+          )
+          const handlerClientLayer = Layer.fresh(Client.layerFromRuntime)
           const childResult = (client: Client.Interface, childId: string) => {
             const childExecutionId = Ids.ExecutionId.make(childId)
             return client
@@ -783,7 +912,11 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                 }),
               )
           }
-          const fanOutHandlers = Layer.effect(
+          const fanOutHandlers: Layer.Layer<
+            ChildFanOutRuntimeModule.HandlerService,
+            never,
+            Client.RuntimeRequirements
+          > = Layer.effect(
             ChildFanOutRuntime.HandlerService,
             Client.Service.pipe(
               Effect.map((client) =>
@@ -831,7 +964,11 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                         ...(options.permissionPolicy === undefined
                           ? {}
                           : { permission_rules: options.permissionPolicy }),
-                        ...(options.tokenBudget === undefined ? {} : { token_budget: options.tokenBudget }),
+                        ...(typeof child.metadata?.rika_token_budget === "number"
+                          ? { token_budget: child.metadata.rika_token_budget }
+                          : options.tokenBudget === undefined
+                            ? {}
+                            : { token_budget: options.tokenBudget }),
                         ...(override.output_schema_ref === undefined
                           ? {}
                           : { output_schema_ref: override.output_schema_ref }),
@@ -869,8 +1006,11 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
               ),
             ),
           ).pipe(Layer.provide(handlerClientLayer))
-          const fanOutLayer = SQLite.childFanOutLayer({ filename: options.filename }, fanOutHandlers)
-          const workflowHandlers = Layer.effect(
+          const workflowHandlers: Layer.Layer<
+            WorkflowDefinitionRuntimeModule.HandlerService,
+            never,
+            Client.RuntimeRequirements | ChildFanOutRuntimeModule.Service
+          > = Layer.effect(
             WorkflowDefinitionRuntime.HandlerService,
             Effect.gen(function* () {
               const client = yield* Client.Service
@@ -903,13 +1043,28 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                 inspectChildFanOut: childFanOut.inspect,
               })
             }),
-          ).pipe(Layer.provide(handlerClientLayer), Layer.provide(fanOutLayer))
-          const workflowLayer = SQLite.workflowLayer({ filename: options.filename }, workflowHandlers)
-          const runtimeLayer = workflowLayer.pipe(Layer.provideMerge(fanOutLayer), Layer.provideMerge(runnerLayer))
-          return layerFromClient(options).pipe(
-            Layer.provide(Client.layerFromRuntime.pipe(Layer.provideMerge(runtimeLayer))),
-            Layer.provide(promoterRegistryLayer),
-          )
+          ).pipe(Layer.provide(handlerClientLayer))
+          const runtimeLayer = Runtime.layerEmbedded({
+            databaseLayer: SQLite.runtimeDatabaseLayer({ filename: options.filename }),
+            languageModelLayer: sharedLanguageModelLayer,
+            toolRuntimeLayer,
+            schemaRegistryLayer,
+            childFanOutHandlersLayer: fanOutHandlers,
+            workflowDefinitionHandlersLayer: workflowHandlers,
+          }) as Layer.Layer<Runtime.EmbeddedOutput, Runtime.AcquisitionError, never>
+          return layerFromClient({
+            ...options,
+            registerModels: (registrations) =>
+              Effect.forEach(
+                registrations,
+                (registration) =>
+                  Effect.all([
+                    languageModelService === undefined ? Effect.void : languageModelService.register({ registration }),
+                    modelRegistry.register({ registration }),
+                  ]).pipe(Effect.asVoid),
+                { discard: true },
+              ),
+          }).pipe(Layer.provide(runtimeLayer), Layer.provide(promoterRegistryLayer))
         }
       }
     }),

@@ -85,8 +85,8 @@ This file is the execution ledger. Update it in the same change that changes imp
   - [ ] [#106 Persist immutable execution route pins](https://github.com/dallenpyrah/rika/issues/106)
   - [ ] [#107 Collapse Rika onto one Relay runtime backend](https://github.com/dallenpyrah/rika/issues/107)
   - [ ] [#108 Reconcile execution failures from canonical Relay state](https://github.com/dallenpyrah/rika/issues/108)
-  - [ ] [#109 Replace PID-directory ownership with a kernel-released lock](https://github.com/dallenpyrah/rika/issues/109)
-  - [ ] [#110 Make TUI shutdown join the runtime lifecycle](https://github.com/dallenpyrah/rika/issues/110)
+  - [ ] [#109 Converge execution clients on one resident service listener](https://github.com/dallenpyrah/rika/issues/109)
+  - [ ] [#110 Separate TUI client shutdown from resident-service lifecycle](https://github.com/dallenpyrah/rika/issues/110)
   - [ ] [#111 Adopt the unified Relay release and prove packaged recovery](https://github.com/dallenpyrah/rika/issues/111)
   - [ ] Upstream dependency: [Relay #182](https://github.com/In-Time-Tec/relayfx/issues/182), released by [Relay #188](https://github.com/In-Time-Tec/relayfx/issues/188).
 - [x] Define the Rika execution backend contract.
@@ -112,9 +112,9 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Run the runtime oracle review. The 2026-07-13 review found that mode-specific backend construction and Relay's separate runner, fan-out, and Workflow SQLite helpers multiply independent clients against one file.
 - [ ] Release a Relay composition that shares one SQLite client across the runner, Child Run fan-out host, Workflow host, and Client.
 - [ ] Replace mode-specific backend layers with one process-lifetime runtime graph and persist each Turn's selected route before Relay acceptance.
-- [ ] Replace cooperative PID-directory ownership with a proven kernel-released cross-platform lock and acquire it before Relay migration or runtime layer construction.
-- [ ] Prove runtime cardinality, two-process exclusion, `SIGKILL` release, legacy-owner upgrade behavior, and acceptance-to-projection kill points from ADR 0012.
-- [x] Make parsed product-only commands Relay-lazy and reject execution-capable commands while the Relay lease is held.
+- [ ] Replace PID-directory rejection with one authenticated, versioned Resident Rika Service per canonical Profile/data root; converge starters through an OS-owned loopback bind before database startup.
+- [ ] Prove runtime cardinality, concurrent client attachment, lifecycle and grace behavior, protocol auth/version/backpressure, `SIGKILL` replacement, immutable route pins, and acceptance-to-projection kill points from ADRs 0007 and 0012.
+- [x] Keep parsed help/version/parse paths local and route every product-state operation through the resident so no local SQLite fallback can race service startup.
 
 ## Phase 5: OpenTUI
 
@@ -144,8 +144,8 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Add character-frame tests.
 - [x] Add deterministic screenshot capture workflow.
 - [ ] Run the TUI oracle review.
-- [x] Join tracked interactive fibers before resuming shutdown so scoped runtime and lease finalizers run in order.
-- [x] Await delayed TUI initialization during shutdown, destroy a late renderer, and prevent post-close watcher or session work before lease finalization.
+- [x] Join tracked interactive fibers before resuming shutdown; the resident-service change must narrow this to client-owned fibers and protocol disconnect.
+- [x] Await delayed TUI initialization during shutdown, destroy a late renderer, and prevent post-close watcher or session work; service runtime finalization is independently owned.
 
 ## Phase 6: Tools
 

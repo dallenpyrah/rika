@@ -1,4 +1,5 @@
 import { Context, Effect, Schema } from "effect"
+import type { ModelRegistry } from "@batonfx/core"
 
 export const Status = Schema.Literals(["accepted", "queued", "running", "waiting", "completed", "failed", "cancelled"])
 export type Status = typeof Status.Type
@@ -18,6 +19,34 @@ export type PromptPart =
   | { readonly type: "text"; readonly text: string }
   | { readonly type: "image"; readonly mediaType: string; readonly data: string; readonly filename?: string }
 
+export interface ExecutionModelRoute {
+  readonly role: "main" | "oracle"
+  readonly alias: string
+  readonly provider: string
+  readonly model: string
+  readonly registrationKey: string
+  readonly gatewayProtocol: "openai" | "anthropic" | "test"
+  readonly gatewayBaseUrl: string
+  readonly gatewayAuth: string
+  readonly effort: string
+  readonly fast: boolean
+  readonly requestVariant: string
+  readonly providerOptions?: Readonly<Record<string, unknown>>
+  readonly compaction: {
+    readonly contextWindow: number
+    readonly reserveTokens: number
+    readonly keepRecentTokens: number
+  }
+}
+
+export interface ExecutionRoutePin {
+  readonly version: 1
+  readonly mode: "low" | "medium" | "high" | "ultra" | "test"
+  readonly tokenBudget: number
+  readonly main: ExecutionModelRoute
+  readonly oracle: ExecutionModelRoute
+}
+
 export interface StartInput {
   readonly threadId: string
   readonly turnId: string
@@ -25,6 +54,7 @@ export interface StartInput {
   readonly promptParts?: ReadonlyArray<PromptPart>
   readonly startedAt: number
   readonly extensionPin?: ExecutionExtensionPin
+  readonly executionRoute?: ExecutionRoutePin
   readonly reasoningEffort?: string
   readonly fastMode?: boolean
   readonly onEvent?: (event: Event) => void
@@ -45,6 +75,8 @@ export type JoinPolicy = "all" | "first-success" | "quorum" | "best-effort"
 export interface FanOutInput {
   readonly parentTurnId: string
   readonly fanOutId: string
+  readonly workspace?: string
+  readonly executionRoute?: ExecutionRoutePin
   readonly children: ReadonlyArray<{
     readonly childId: string
     readonly profile?: AgentProfile
@@ -137,6 +169,9 @@ export class BackendError extends Schema.TaggedErrorClass<BackendError>()("Execu
 export type TurnPromoter = (threadId: string) => Effect.Effect<number>
 
 export interface Interface {
+  readonly registerModels?: (
+    registrations: ReadonlyArray<ModelRegistry.Registration>,
+  ) => Effect.Effect<void, BackendError>
   readonly invokeChild: (input: InvokeChildInput) => Effect.Effect<ChildEvent, BackendError>
   readonly createFanOut: (input: FanOutInput) => Effect.Effect<FanOutInspection, BackendError>
   readonly inspectFanOut: (fanOutId: string) => Effect.Effect<FanOutInspection | undefined, BackendError>

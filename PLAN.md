@@ -21,7 +21,7 @@ Rika may consume focused Baton packages directly where they are the public integ
 - Effect SQL with SQLite for local product state.
 - Relay is the sole durable execution authority.
 - Baton is the sole agent-loop authority.
-- WebSockets are the Rika-owned live execution/control transport if a process boundary is introduced.
+- One Resident Rika Service per canonical Profile/data root owns product SQLite, one Relay runtime/SQLite, execution admission, reconciliation, and runtime fibers. Execution-capable CLI and TUI clients converge through an authenticated, versioned loopback WebSocket listener.
 - No SSE for Rika-owned live execution/control transport. Provider and MCP package internals follow their published contracts.
 - No Rivet or Rivet actors.
 - No semantic search tool.
@@ -171,7 +171,9 @@ Exit gate: root help, version, execute, thread, config, MCP, skill, tool, review
 
 ### Phase 4: Durable Runtime Vertical Slice
 
-- Compose embedded Relay over SQLite.
+- Compose embedded Relay over SQLite inside one Resident Rika Service per canonical Profile/data root.
+- Bind the service's authenticated loopback listener before database startup; concurrent execution-capable starters attach to the winner instead of opening state or failing due to another client.
+- Keep help, version, and parsing local and lazy; route every product-state operation through the resident while keeping CLI parsing/output and TUI rendering/input in clients.
 - Apply Relay and Rika migrations before runtime composition.
 - Register Baton-backed model execution through supported package APIs.
 - Create a thread, start an execution, stream events, finish, restart, and reopen.
@@ -327,7 +329,7 @@ Rika v2 is complete when:
 - Baton is the only agent-loop authority.
 - All commands use Effect CLI.
 - All product persistence uses Effect SQL services.
-- All Rika-owned live execution/control process boundaries use WebSockets.
+- All client-to-resident-service live execution/control uses the authenticated, versioned Rika WebSocket protocol.
 - Parallel agents and dynamic workflows survive process death.
 - The packaged TUI matches the approved Rika v1 visual baseline.
 - Full local verification passes.

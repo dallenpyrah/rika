@@ -117,6 +117,8 @@ them with `.rika/settings.json`. Gateway names are arbitrary. To route medium mo
 }
 ```
 
+Mode budgets are measured in thousands of tokens, so `64` means 64,000 execution tokens.
+
 Keep gateway credentials out of JSON. Each `bearer-env` Gateway names the environment variable resolved once at startup. The defaults use `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; VibeProxy configurations may name `RIKA_MODEL_API_KEY` on both protocol Gateways:
 
 ```bash

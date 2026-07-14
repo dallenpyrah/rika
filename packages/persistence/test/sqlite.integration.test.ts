@@ -71,7 +71,7 @@ test("migrates, persists, and reopens", async () => {
   })
 })
 
-test("upgrades a seeded v5 database and preserves thread rows", async () => {
+test("upgrades a seeded pre-v7 database and preserves legacy active and queued rows", async () => {
   const program = Effect.scoped(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
@@ -96,17 +96,33 @@ test("upgrades a seeded v5 database and preserves thread rows", async () => {
       seeded.run(
         "INSERT INTO rika_threads (id, session_id, workspace, title, labels_json, pinned, archived, created_at, updated_at) VALUES ('thread-a', 'dead-uuid', '/work/a', 'Seeded', '[\"keep\"]', 1, 0, 1, 2)",
       )
+      seeded.run(
+        "INSERT INTO rika_turns (id, thread_id, prompt, status, created_at, updated_at) VALUES ('active-turn', 'thread-a', 'active', 'running', 3, 3), ('queued-turn', 'thread-a', 'queued', 'queued', 4, 4)",
+      )
       seeded.close()
       const database = Database.layer(filename)
-      const threads = yield* Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const repository = yield* ThreadRepository.Service
-        return yield* repository.list()
-      }).pipe(Effect.provide(ThreadRepository.layer.pipe(Layer.provide(database))))
-      expect(threads).toHaveLength(1)
-      expect(threads[0]?.id).toBe(Thread.ThreadId.make("thread-a"))
-      expect(threads[0]?.title).toBe("Seeded")
-      expect(threads[0]?.labels).toEqual(["keep"])
-      expect(threads[0]?.pinned).toBe(true)
+        const turns = yield* TurnRepository.Service
+        return { threads: yield* repository.list(), turns: yield* turns.list(id) }
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            ThreadRepository.layer.pipe(Layer.provide(database)),
+            TurnRepository.layer.pipe(Layer.provide(database)),
+          ),
+        ),
+      )
+      expect(result.threads).toHaveLength(1)
+      expect(result.threads[0]?.id).toBe(Thread.ThreadId.make("thread-a"))
+      expect(result.threads[0]?.title).toBe("Seeded")
+      expect(result.threads[0]?.labels).toEqual(["keep"])
+      expect(result.threads[0]?.pinned).toBe(true)
+      expect(result.turns).toMatchObject([
+        { id: "active-turn", status: "running" },
+        { id: "queued-turn", status: "queued" },
+      ])
+      expect(result.turns.every((turn) => turn.executionRoute === undefined)).toBe(true)
     }),
   ).pipe(Effect.provide(BunServices.layer))
   await Effect.runPromise(program)

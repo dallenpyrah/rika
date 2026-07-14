@@ -1,11 +1,30 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { AiError, ModelResilience, Response } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
+import { Runtime as RikaToolRuntime } from "@rika/tools"
 import { expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import { Duration, Effect, Fiber, FileSystem, Schedule } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
+
+const executionModelRoute = (
+  role: "main" | "oracle",
+  selection: { readonly provider: string; readonly model: string; readonly registrationKey?: string },
+): ExecutionBackend.ExecutionModelRoute => ({
+  role,
+  alias: role,
+  provider: selection.provider,
+  model: selection.model,
+  registrationKey: selection.registrationKey ?? role,
+  gatewayProtocol: "test",
+  gatewayBaseUrl: "test://model",
+  gatewayAuth: "none",
+  effort: "medium",
+  fast: false,
+  requestVariant: selection.registrationKey ?? role,
+  compaction: { contextWindow: 1_000, reserveTokens: 100, keepRecentTokens: 50 },
+})
 
 const withBackend = <A, E>(
   script: Parameters<typeof TestModel.make>[0],
@@ -92,6 +111,55 @@ test("executes the Rika toolkit through Relay and returns the result to Baton", 
   expect(result.result.status).toBe("completed")
   expect(result.requests).toHaveLength(2)
   expect(JSON.stringify(result.requests[1])).toContain("fixture.txt")
+}, 30_000)
+
+test("routes durable tools to each execution's workspace", async () => {
+  const program = Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-runtime-workspaces-" })
+      const firstWorkspace = `${directory}/first`
+      const secondWorkspace = `${directory}/second`
+      yield* fileSystem.makeDirectory(firstWorkspace)
+      yield* fileSystem.makeDirectory(secondWorkspace)
+      const fixture = yield* TestModel.make([
+        TestModel.toolCall("create_file", { path: "result.txt", content: "first" }),
+        TestModel.text("first complete"),
+        TestModel.toolCall("create_file", { path: "result.txt", content: "second" }),
+        TestModel.text("second complete"),
+      ])
+      const workspaceByExecution = new Map([
+        ["execution:first-turn", firstWorkspace],
+        ["execution:second-turn", secondWorkspace],
+      ])
+      const backendLayer = RelayExecutionBackend.layer({
+        filename: `${directory}/relay.db`,
+        workspace: directory,
+        registration: fixture.registration,
+        selection: fixture.selection,
+        toolRuntimeLayerForWorkspace: RikaToolRuntime.layer,
+        resolveWorkspace: (executionId) => {
+          const workspace = workspaceByExecution.get(executionId)
+          return workspace === undefined
+            ? Effect.fail(new ExecutionBackend.BackendError({ message: `Unknown execution ${executionId}` }))
+            : Effect.succeed(workspace)
+        },
+        toolNeedsApproval: () => false,
+        permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
+      })
+      yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        yield* backend.start({ threadId: "first-thread", turnId: "first-turn", prompt: "first", startedAt: 1 })
+        yield* backend.start({ threadId: "second-thread", turnId: "second-turn", prompt: "second", startedAt: 2 })
+      }).pipe(Effect.provide(backendLayer))
+      return yield* Effect.all([
+        fileSystem.readFileString(`${firstWorkspace}/result.txt`),
+        fileSystem.readFileString(`${secondWorkspace}/result.txt`),
+      ])
+    }),
+  ).pipe(Effect.provide(BunServices.layer))
+
+  expect(await Effect.runPromise(program)).toEqual(["first", "second"])
 }, 30_000)
 
 test("streams grouped model parts and persists usage through Relay SQLite", async () => {
@@ -252,14 +320,14 @@ test("settles a Rika fan-out child after more than one thousand execution events
             .query<
               { readonly id: string; readonly status: string },
               []
-            >("select id, status from relay_executions where id = 'child:long-child'")
+            >("select id, status from relay_executions where id = 'child:turn-long-child-parent:long-child'")
             .all()
           const childEventCount =
             database
               .query<
                 { readonly count: number },
                 []
-              >("select count(*) as count from relay_execution_events where execution_id = 'child:long-child'")
+              >("select count(*) as count from relay_execution_events where execution_id = 'child:turn-long-child-parent:long-child'")
               .get()?.count ?? 0
           database.close()
           return { fanOut, childExecutions, childEventCount }
@@ -267,7 +335,7 @@ test("settles a Rika fan-out child after more than one thousand execution events
     ),
   )
   expect(result.fanOut?.state).toBe("satisfied")
-  expect(result.childExecutions).toEqual([{ id: "child:long-child", status: "completed" }])
+  expect(result.childExecutions).toEqual([{ id: "child:turn-long-child-parent:long-child", status: "completed" }])
   expect(result.childEventCount).toBeGreaterThan(1_000)
   expect(result.fanOut?.members).toEqual([
     {
@@ -303,6 +371,13 @@ test("executes concurrent fan-out members with their persisted main and Oracle m
             model: "oracle-model",
           },
         )
+        const executionRoute: ExecutionBackend.ExecutionRoutePin = {
+          version: 1,
+          mode: "test",
+          tokenBudget: 1_000,
+          main: executionModelRoute("main", main.selection),
+          oracle: executionModelRoute("oracle", oracle.selection),
+        }
         return yield* Effect.gen(function* () {
           const backend = yield* ExecutionBackend.Service
           yield* backend.start({
@@ -342,6 +417,7 @@ test("executes concurrent fan-out members with their persisted main and Oracle m
               additionalRegistrations: [oracle.registration],
               selection: main.selection,
               oracleSelection: oracle.selection,
+              resolveExecutionRoute: () => Effect.succeed(executionRoute),
             }),
           ),
         )

@@ -19,8 +19,11 @@ Every behavior-bearing service has a test or memory layer. Tests use determinist
 - Native OpenTUI end-to-end tests that drive real keyboard input and terminal resize behavior through the packaged application.
 - Real model and MCP opt-in tests.
 - Kill-point tests after external side effects, Relay acceptance, projection commits, active child execution, and migration steps.
-- Runtime-cardinality tests proving one Relay SQLite client, migration sequence, runner, fan-out host, Workflow host, Thread Host registry, and notification graph per process.
-- Ownership tests covering two-process startup, stopped owners, `SIGKILL` release, stale diagnostics, legacy binaries, and acquisition before the first SQLite open.
+- Runtime-cardinality tests proving one product SQLite owner, Relay SQLite client, migration sequence, runner, fan-out host, Workflow host, Thread Host registry, notification graph, route-driven backend, and reconciliation set per canonical Profile/data root.
+- Resident-service tests covering simultaneous bind races, starting wait, authenticated attachment, final-client grace, grace cancellation, draining, listener retention through database close, stopped replacement, and `SIGKILL` replacement and reconciliation.
+- Identity and authentication tests covering canonical/symlinked roots, separate profiles, owner-only token creation and permissions, token and profile mismatch, unauthenticated information disclosure, token replacement, incompatible protocol versions, stale diagnostics, and a foreign process occupying the endpoint.
+- Protocol tests covering frame limits, malformed frames, request idempotency across reconnect, cursor replay and acknowledgement, duplicate suppression, bounded subscription queues, slow consumers, heartbeat timeout, close codes, and reconnect during service lifecycle transitions.
+- Route-pin tests proving every top-level, queued, titled, child, and Workflow execution uses its immutable pre-acceptance route after settings changes and restart, and that malformed or unavailable pins fail before Relay acceptance.
 
 ## Coverage
 

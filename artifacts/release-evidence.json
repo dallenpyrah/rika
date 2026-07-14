@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "bun": "1.3.14",
+  "bun": "1.3.5",
   "artifacts": [
     {
       "target": "darwin-arm64",
       "archive": "rika-darwin-arm64.tar.gz",
-      "sha256": "41b2e02a8c6e140b0f5fa76f8f1d735c3d0df2a5188b03bd3afb0359b6387c99",
+      "sha256": "6528d6af12f8a51572f0e91eb321fc0c6a27c6fad6212d470e50509c151f0b86",
       "opentui": "@opentui/core-darwin-arm64"
     }
   ]

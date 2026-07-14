@@ -82,6 +82,16 @@ const dropThreadSessionId = Effect.gen(function* () {
   yield* sql`CREATE INDEX rika_threads_listing ON rika_threads (pinned DESC, updated_at DESC, id ASC)`
 })
 
+const executionRoutePins = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE rika_turns ADD COLUMN execution_route_json TEXT`
+})
+
+const reviewFanOutOwners = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE rika_turns ADD COLUMN review_fan_out_id TEXT`
+})
+
 const migrations = SqliteMigrator.fromRecord({
   "1_product_baseline": baseline,
   "2_turns": turns,
@@ -89,6 +99,8 @@ const migrations = SqliteMigrator.fromRecord({
   "4_execution_extension_pins": executionExtensionPins,
   "5_turn_prompt_parts": turnPromptParts,
   "6_drop_thread_session_id": dropThreadSessionId,
+  "7_execution_route_pins": executionRoutePins,
+  "8_review_fan_out_owners": reviewFanOutOwners,
 })
 const migrate = SqliteMigrator.layer({ loader: migrations, table: "rika_migrations" })
 

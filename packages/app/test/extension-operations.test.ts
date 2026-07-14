@@ -75,6 +75,45 @@ describe("ExtensionOperations", () => {
     )
   })
 
+  it("uses the connected client's workspace for workspace-owned state", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-app-client-workspace-" })
+          const clientWorkspace = `${root}/client`
+          const source = `${root}/source/client-skill`
+          const options = {
+            globalRoot: `${root}/global`,
+            workspaceRoot: `${root}/host/.rika/skills`,
+            configPath: `${root}/host/.rika/mcp.json`,
+            trustPath: `${root}/trust.json`,
+            generationsPath: `${root}/host/.rika/extensions.json`,
+          }
+          yield* fs.makeDirectory(source, { recursive: true })
+          yield* fs.writeFileString(`${source}/SKILL.md`, "---\nname: client-skill\ndescription: Client\n---\nbody")
+          const run = (input: Parameters<typeof ExtensionOperations.run>[0]) =>
+            ExtensionOperations.run(input).pipe(
+              Effect.provide(Layer.merge(ExtensionOperations.layer(options), oauthLayer)),
+            )
+          yield* run({ _tag: "Skill", action: "add", source, clientWorkspace })
+          yield* run({
+            _tag: "Mcp",
+            action: "add",
+            name: "client",
+            url: "https://example.test/mcp",
+            clientWorkspace,
+          })
+          yield* run({ _tag: "Extension", action: "enable", name: "client", clientWorkspace })
+          expect(yield* fs.exists(`${clientWorkspace}/.rika/skills/client-skill/SKILL.md`)).toBe(true)
+          expect(yield* fs.readFileString(`${clientWorkspace}/.rika/mcp.json`)).toContain('"client"')
+          expect(yield* fs.readFileString(`${clientWorkspace}/.rika/extensions.json`)).toContain('"client"')
+          expect(yield* fs.exists(options.configPath)).toBe(false)
+        }).pipe(Effect.provide(SkillRegistry.fileSystemLayer), Effect.provide(BunServices.layer)),
+      ),
+    )
+  })
+
   it("returns typed errors for unsupported actions and invalid documents", async () => {
     await Effect.runPromise(
       Effect.scoped(

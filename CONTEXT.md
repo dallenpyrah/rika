@@ -44,6 +44,10 @@ This file is Rika's canonical vocabulary. Implementation details belong in specs
 
 **Live Transport**: A Rika-owned WebSocket boundary used only when execution and control streaming crosses a process boundary. In-process streams remain Effect Streams. Provider and MCP transports follow their package contracts.
 
+**Resident Rika Service**: The one execution-capable Rika process for a canonical Profile and data root. It owns product and Relay persistence, runtime fibers, and the local authenticated Live Transport; CLI and TUI processes attach as clients.
+
+**Profile**: The named local Rika configuration identity whose canonical data root contains its product and Relay state. It is not an Agent Mode or model profile.
+
 **Skill**: A lazily activated instruction and resource package discovered from supported local skill directories.
 
 **Plugin**: Trusted local TypeScript extension code that can register tools, policies, commands, agents, modes, or UI actions.

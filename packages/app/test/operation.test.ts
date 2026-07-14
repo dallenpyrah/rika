@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { ConfigContract } from "@rika/config"
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
 import * as TurnRepository from "@rika/persistence/turn-repository"
@@ -51,6 +52,54 @@ const backend = ExecutionBackend.Service.of({
 })
 
 describe("Operation", () => {
+  it.effect("rejects secret-bearing config before execution_route_json persistence", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
+      const turns = yield* TurnRepository.makeMemory([])
+      const writes = yield* Ref.make(0)
+      const repository = TurnRepository.Service.of({
+        ...turns,
+        createForSubmission: (input) =>
+          Ref.update(writes, (count) => count + 1).pipe(Effect.andThen(turns.createForSubmission(input))),
+      })
+      yield* Effect.gen(function* () {
+        const operation = yield* Operation.Service
+        yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
+      }).pipe(
+        Effect.provide(
+          Operation.productLayer({
+            repositoryLayer: ThreadRepository.memoryLayer(),
+            turnRepositoryLayer: Layer.succeed(TurnRepository.Service, repository),
+            backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
+            resolveExecutionRoute: () =>
+              Effect.try(() => {
+                ConfigContract.decodeSettingsInput("settings.json", {
+                  models: {
+                    unsafe: {
+                      ...ConfigContract.defaults.models.luna,
+                      variants: { low: { normal: { options: { nested: { signature: "secret" } } } } },
+                    },
+                  },
+                })
+                return Turn.testExecutionRoute("medium")
+              }),
+            defaultWorkspace: "/work",
+            makeThreadId: Effect.succeed(Thread.ThreadId.make("thread-rejected-config")),
+            makeTurnId: Effect.succeed(Turn.TurnId.make("turn-rejected-config")),
+            interactive: (_, session) => Ref.update(sessions, (values) => [...values, session]),
+          }),
+        ),
+      )
+      const session = (yield* Ref.get(sessions))[0]
+      if (session === undefined) return yield* Effect.die("missing session")
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* session.submit("must not persist", (event) => events.push(event))
+      expect(events.map((event) => event._tag)).toContain("ExecutionFailed")
+      expect(yield* Ref.get(writes)).toBe(0)
+      expect(yield* turns.get(Turn.TurnId.make("turn-rejected-config"))).toBeUndefined()
+    }),
+  )
+
   it.effect("keeps one backend layer alive for sequential interactive submissions", () =>
     Effect.gen(function* () {
       const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
@@ -92,13 +141,15 @@ describe("Operation", () => {
       )
       const session = (yield* Ref.get(sessions))[0]
       if (session === undefined) return yield* Effect.die("missing session")
-      yield* session.submit("First turn", () => {})
-      yield* session.submit("Second turn", () => {})
+      yield* session.submit("First turn", () => {}, "low")
+      yield* session.submit("Second turn", () => {}, "ultra")
       expect(yield* Ref.get(acquisitions)).toBe(1)
       expect((yield* Ref.get(starts)).filter((value) => !value.includes("Generate a concise"))).toEqual([
         "1:First turn",
         "1:Second turn",
       ])
+      expect((yield* turns.get(Turn.TurnId.make("turn-1")))?.executionRoute?.mode).toBe("low")
+      expect((yield* turns.get(Turn.TurnId.make("turn-2")))?.executionRoute?.mode).toBe("ultra")
       expect((yield* turns.get(Turn.TurnId.make("turn-2")))?.status).toBe("completed")
     }),
   )
@@ -133,10 +184,61 @@ describe("Operation", () => {
           ),
         ),
       )
-      expect(yield* Ref.get(starts)).toEqual([
+      expect(yield* Ref.get(starts)).toMatchObject([
         { threadId: "thread-restart", turnId: "turn-restart", prompt: "resume", startedAt: 2 },
       ])
       expect((yield* turns.get(Turn.TurnId.make("turn-restart")))?.status).toBe("completed")
+    }),
+  )
+
+  it.effect("reconciles review route owners through their fan-out without executing the parent prompt", () =>
+    Effect.gen(function* () {
+      const owner = Turn.TurnId.make("review-owner")
+      const turns = yield* TurnRepository.makeMemory([
+        {
+          id: owner,
+          threadId: Thread.ThreadId.make("review-thread"),
+          prompt: "Review workspace changes",
+          status: "running",
+          executionRoute: Turn.testExecutionRoute("medium"),
+          reviewFanOutId: "review:review-owner",
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ])
+      const starts = yield* Ref.make(0)
+      const inspections = yield* Ref.make(0)
+      const routeOwnerBackend = ExecutionBackend.Service.of({
+        ...backend,
+        start: () => Ref.update(starts, (count) => count + 1).pipe(Effect.andThen(Effect.die("must not start"))),
+        inspect: () => Effect.die("must not inspect as a turn"),
+        inspectFanOut: () =>
+          Ref.updateAndGet(inspections, (count) => count + 1).pipe(
+            Effect.map((count) =>
+              count === 1
+                ? {
+                    fanOutId: "review:review-owner",
+                    parentTurnId: owner,
+                    state: "joining" as const,
+                    maxConcurrency: 3,
+                    join: "best-effort" as const,
+                    members: [],
+                  }
+                : undefined,
+            ),
+          ),
+      })
+      const dependencies = Layer.mergeAll(
+        reconcileDependencies(unusedExtensions),
+        ThreadRepository.memoryLayer(),
+        Layer.succeed(TurnRepository.Service, turns),
+        Layer.succeed(ExecutionBackend.Service, routeOwnerBackend),
+      )
+      yield* Operation.reconcile().pipe(Effect.provide(dependencies))
+      expect((yield* turns.get(owner))?.status).toBe("running")
+      yield* Operation.reconcile().pipe(Effect.provide(dependencies))
+      expect((yield* turns.get(owner))?.status).toBe("failed")
+      expect(yield* Ref.get(starts)).toBe(0)
     }),
   )
 
@@ -181,6 +283,64 @@ describe("Operation", () => {
         ),
       )
       expect(yield* Ref.get(starts)).toEqual(["failed", "cancelled", "completed"])
+    }),
+  )
+
+  it.effect("fails legacy active and queued turns and reconciles the next routed turn", () =>
+    Effect.gen(function* () {
+      const threadId = Thread.ThreadId.make("legacy-reconcile")
+      const turns = yield* TurnRepository.makeMemory(
+        [
+          {
+            id: Turn.TurnId.make("active"),
+            threadId,
+            prompt: "active",
+            status: "running",
+            createdAt: 0,
+            updatedAt: 0,
+          },
+          {
+            id: Turn.TurnId.make("legacy"),
+            threadId,
+            prompt: "legacy",
+            status: "queued",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          {
+            id: Turn.TurnId.make("routed"),
+            threadId,
+            prompt: "routed",
+            status: "queued",
+            executionRoute: Turn.testExecutionRoute("high"),
+            createdAt: 2,
+            updatedAt: 2,
+          },
+        ],
+        true,
+      )
+      const starts = yield* Ref.make<ReadonlyArray<string>>([])
+      const routedBackend = ExecutionBackend.Service.of({
+        ...backend,
+        start: (input) =>
+          Ref.update(starts, (values) => [...values, String(input.turnId)]).pipe(
+            Effect.as({ turnId: input.turnId, status: "completed" as const, events: [] }),
+          ),
+      })
+      yield* Operation.reconcile().pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            reconcileDependencies(unusedExtensions),
+            ThreadRepository.memoryLayer(),
+            Layer.succeed(TurnRepository.Service, turns),
+            Layer.succeed(ExecutionBackend.Service, routedBackend),
+          ),
+        ),
+      )
+      expect(yield* Ref.get(starts)).toEqual(["routed"])
+      expect((yield* turns.get(Turn.TurnId.make("active")))?.status).toBe("failed")
+      expect((yield* turns.get(Turn.TurnId.make("legacy")))?.status).toBe("failed")
+      expect((yield* turns.get(Turn.TurnId.make("routed")))?.status).toBe("completed")
     }),
   )
 
@@ -296,7 +456,7 @@ describe("Operation", () => {
       )
       const output = yield* Effect.gen(function* () {
         const operation = yield* Operation.Service
-        yield* operation.run({ _tag: "Thread", action: "new" })
+        yield* operation.run({ _tag: "Thread", action: "new", clientWorkspace: "/client-work" })
         yield* operation.run({ _tag: "Thread", action: "rename", threadId: "thread-a", title: "Named" })
         yield* operation.run({ _tag: "Thread", action: "label", threadId: "thread-a", labels: ["one"] })
         yield* operation.run({ _tag: "Thread", action: "pin", threadId: "thread-a" })
@@ -313,6 +473,7 @@ describe("Operation", () => {
       }).pipe(Effect.provide(layer))
       const lines = Schema.decodeUnknownSync(Schema.Array(Schema.String))(output)
       expect(lines.some((line) => line.includes('"title":"Named"'))).toBe(true)
+      expect(lines.some((line) => line.includes('"workspace":"/client-work"'))).toBe(true)
       expect(lines.some((line) => line.includes('"name":"read_file"'))).toBe(true)
     }),
   )
@@ -521,6 +682,18 @@ describe("Operation", () => {
         start: (input) =>
           Ref.update(started, (all) => [...all, input.turnId]).pipe(
             Effect.as({ turnId: input.turnId, status: "completed" as const, events: [] }),
+          ),
+        inspect: (turnId) =>
+          Effect.succeed(
+            turnId === "busy"
+              ? {
+                  turnId,
+                  status: "running" as const,
+                  waits: [],
+                  pendingTools: [],
+                  children: [],
+                }
+              : undefined,
           ),
         ensureThreadHost: (threadId, createdAt) =>
           Ref.update(ensured, (all) => [...all, [threadId, createdAt] as const]),
@@ -826,8 +999,7 @@ describe("Operation", () => {
       const layer = Operation.productLayer({
         repositoryLayer: Layer.succeed(ThreadRepository.Service, repository),
         turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
-        backendLayer: Layer.succeed(ExecutionBackend.Service, backendFor("default")),
-        backendLayerForMode: (mode) => Layer.succeed(ExecutionBackend.Service, backendFor(mode)),
+        backendLayer: Layer.succeed(ExecutionBackend.Service, backendFor("high")),
         defaultWorkspace: "/work",
         makeThreadId: Effect.succeed(Thread.ThreadId.make("thread-selected-title")),
         makeTurnId: Effect.succeed(Turn.TurnId.make("turn-selected-title")),
@@ -868,7 +1040,6 @@ describe("Operation", () => {
         repositoryLayer: Layer.succeed(ThreadRepository.Service, repository),
         turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
         backendLayer: Layer.succeed(ExecutionBackend.Service, titleFailingBackend),
-        backendLayerForMode: () => Layer.succeed(ExecutionBackend.Service, titleFailingBackend),
         defaultWorkspace: "/work",
         makeThreadId: Effect.succeed(Thread.ThreadId.make("thread-title-failure")),
         makeTurnId: Effect.succeed(Turn.TurnId.make("turn-title-failure")),
@@ -1092,7 +1263,9 @@ describe("Operation", () => {
         workspace: "/default-workspace",
         title: "New thread",
       })
-      expect(yield* Ref.get(starts)).toEqual([{ threadId: "thread-new", turnId: "turn-new", prompt: "", startedAt: 0 }])
+      expect(yield* Ref.get(starts)).toMatchObject([
+        { threadId: "thread-new", turnId: "turn-new", prompt: "", startedAt: 0 },
+      ])
       expect(yield* Ref.get(runningStatuses)).toEqual(["running"])
       expect(turn).toMatchObject({
         id: "turn-new",
@@ -1512,17 +1685,20 @@ describe("Operation", () => {
         ),
       )
       expect(yield* pinned.get(Turn.TurnId.make("pinned"))).toMatchObject({ status: "completed", lastCursor: "old" })
-      const unpinned = yield* TurnRepository.makeMemory([
-        {
-          id: Turn.TurnId.make("unpinned"),
-          threadId: Thread.ThreadId.make("thread"),
-          prompt: "resume",
-          status: "running",
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      ])
-      const result = yield* Operation.reconcile(extensions).pipe(
+      const unpinned = yield* TurnRepository.makeMemory(
+        [
+          {
+            id: Turn.TurnId.make("unpinned"),
+            threadId: Thread.ThreadId.make("thread"),
+            prompt: "resume",
+            status: "running",
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        ],
+        true,
+      )
+      yield* Operation.reconcile(extensions).pipe(
         Effect.provide(
           Layer.mergeAll(
             reconcileDependencies(extensions),
@@ -1531,9 +1707,8 @@ describe("Operation", () => {
             Layer.succeed(ExecutionBackend.Service, { ...backend, inspect: () => Effect.succeed(undefined) }),
           ),
         ),
-        Effect.result,
       )
-      expect(result._tag).toBe("Failure")
+      expect((yield* unpinned.get(Turn.TurnId.make("unpinned")))?.status).toBe("failed")
     }),
   )
 
@@ -1627,7 +1802,7 @@ describe("Operation", () => {
     }),
   )
 
-  it.effect("initializes an interactive thread and drains its queue through the selected mode backend", () =>
+  it.effect("interactive promotion fails a legacy queued turn and drains the next routed turn", () =>
     Effect.gen(function* () {
       const thread: Thread.Thread = {
         id: Thread.ThreadId.make("interactive-mode"),
@@ -1639,24 +1814,27 @@ describe("Operation", () => {
         createdAt: 1,
         updatedAt: 1,
       }
-      const turns = yield* TurnRepository.makeMemory([
-        {
-          id: Turn.TurnId.make("history"),
-          threadId: thread.id,
-          prompt: "history",
-          status: "completed",
-          createdAt: 2,
-          updatedAt: 2,
-        },
-        {
-          id: Turn.TurnId.make("queued"),
-          threadId: thread.id,
-          prompt: "queued",
-          status: "queued",
-          createdAt: 3,
-          updatedAt: 3,
-        },
-      ])
+      const turns = yield* TurnRepository.makeMemory(
+        [
+          {
+            id: Turn.TurnId.make("history"),
+            threadId: thread.id,
+            prompt: "history",
+            status: "completed",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+          {
+            id: Turn.TurnId.make("queued"),
+            threadId: thread.id,
+            prompt: "queued",
+            status: "queued",
+            createdAt: 3,
+            updatedAt: 3,
+          },
+        ],
+        true,
+      )
       const starts = yield* Ref.make<ReadonlyArray<string>>([])
       const events = yield* Ref.make<ReadonlyArray<Operation.InteractiveEvent>>([])
       const dispatch = (event: Operation.InteractiveEvent) =>
@@ -1680,11 +1858,7 @@ describe("Operation", () => {
           Operation.productLayer({
             repositoryLayer: ThreadRepository.memoryLayer([thread]),
             turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
-            backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
-            backendLayerForMode: (mode) =>
-              mode === "high"
-                ? Layer.succeed(ExecutionBackend.Service, modeBackend)
-                : Layer.succeed(ExecutionBackend.Service, backend),
+            backendLayer: Layer.succeed(ExecutionBackend.Service, modeBackend),
             defaultWorkspace: "/work",
             makeThreadId: Effect.die("unused"),
             makeTurnId: Effect.succeed(Turn.TurnId.make("submitted")),
@@ -1699,21 +1873,53 @@ describe("Operation", () => {
       )
       expect(yield* Ref.get(starts)).toEqual(["submitted"])
       expect((yield* Ref.get(events)).map((event) => event._tag)).toContain("QueueChanged")
-      expect((yield* turns.get(Turn.TurnId.make("queued")))?.status).toBe("completed")
+      expect((yield* turns.get(Turn.TurnId.make("queued")))?.status).toBe("failed")
+      expect((yield* turns.get(Turn.TurnId.make("submitted")))?.status).toBe("completed")
     }),
   )
 
-  it.effect("selects a mode backend for non-interactive runs and maps workflow defects", () =>
+  it.effect("pins the selected mode for non-interactive runs and maps workflow defects", () =>
     Effect.gen(function* () {
       const modes = yield* Ref.make<ReadonlyArray<string>>([])
-      const selected = ExecutionBackend.Service.of({ ...backend })
       const layer = Operation.productLayer({
         repositoryLayer: ThreadRepository.memoryLayer(),
         turnRepositoryLayer: TurnRepository.memoryLayer(),
         backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
-        backendLayerForMode: (mode) => {
+        resolveExecutionRoute: (mode) => {
           Effect.runSync(Ref.update(modes, (all) => [...all, mode]))
-          return Layer.succeed(ExecutionBackend.Service, selected)
+          return Effect.succeed({
+            version: 1,
+            mode,
+            tokenBudget: 1,
+            main: {
+              role: "main",
+              alias: "test",
+              provider: "test",
+              model: "test",
+              registrationKey: "test",
+              gatewayProtocol: "test",
+              gatewayBaseUrl: "test://model",
+              gatewayAuth: "none",
+              effort: "medium",
+              fast: false,
+              requestVariant: "test",
+              compaction: { contextWindow: 10, reserveTokens: 2, keepRecentTokens: 1 },
+            },
+            oracle: {
+              role: "oracle",
+              alias: "test",
+              provider: "test",
+              model: "test",
+              registrationKey: "test",
+              gatewayProtocol: "test",
+              gatewayBaseUrl: "test://model",
+              gatewayAuth: "none",
+              effort: "medium",
+              fast: false,
+              requestVariant: "test",
+              compaction: { contextWindow: 10, reserveTokens: 2, keepRecentTokens: 1 },
+            },
+          })
         },
         defaultWorkspace: "/work",
         makeThreadId: Effect.succeed(Thread.ThreadId.make("mode-thread")),
@@ -1731,7 +1937,7 @@ describe("Operation", () => {
           streamJsonThinking: false,
         })
       }).pipe(Effect.provide(layer))
-      expect(yield* Ref.get(modes)).toEqual(["low", "high", "ultra", "ultra"])
+      expect(yield* Ref.get(modes)).toEqual(["ultra"])
 
       const workflowLayer = Operation.productLayer({
         repositoryLayer: ThreadRepository.memoryLayer(),

@@ -18,6 +18,8 @@ Models own ordered candidate IDs, operational compaction, and explicitly configu
 
 Each fan-out member uses a deterministic child-specific Relay agent definition materialized from its persisted override. This preserves the selected model, request variant, compaction policy, narrowed tools and permissions, output schema, and metadata without racing the shared root definition.
 
+Review fan-out keeps a nonterminal synthetic parent Turn as its durable route owner. The Turn stores the deterministic `review:<turn-id>` fan-out identity, so resident startup can register its original workspace route before fan-out recovery without loading every completed Turn. Reconciliation inspects and settles the fan-out rather than starting the synthetic parent prompt as a model execution.
+
 No legacy decoder, provider-name branch, endpoint inference, or old mode keys remain.
 
 Fable declares `claude-fable-5` followed by `claude-opus-4-8`, and Opus is also a separately configured alias. Rika does not automatically fail over because the published Baton API cannot constrain candidate fallback to availability failures before output. Startup rejects unresolved routes and unavailable variants rather than silently changing models.

@@ -16,7 +16,7 @@ const binary = join(temporary, `rika-${platform}`, "bin", "rika")
 const env = {
   ...process.env,
   HOME: home,
-  RIKA_DATABASE: join(state, "product.db"),
+  RIKA_DATABASE: join(state, "rika.db"),
   RIKA_RELAY_DATABASE: join(state, "relay.db"),
 }
 const run = (args: string[]) => Bun.spawnSync([binary, ...args], { cwd: temporary, env })
@@ -26,8 +26,8 @@ try {
     if (result.exitCode !== 0) throw new Error(`Artifact command failed: ${args.join(" ")}\n${result.stderr}`)
   }
   const files = await readdir(state)
-  if (!files.includes("product.db")) throw new Error("Product migration database was not created")
-  const database = new Database(join(state, "product.db"), { readonly: true })
+  if (!files.includes("rika.db")) throw new Error("Product migration database was not created")
+  const database = new Database(join(state, "rika.db"), { readonly: true })
   const migrations = database.query("select count(*) as count from rika_migrations").get() as { count: number }
   database.close()
   if (migrations.count < 1) throw new Error("Product migrations were not applied and retained across reopen")

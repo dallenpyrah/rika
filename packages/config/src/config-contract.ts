@@ -129,6 +129,64 @@ const exactKeys = (path: string, label: string, value: Record<string, unknown>, 
 
 const positiveInteger = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0
 const efforts: ReadonlyArray<Effort> = ["low", "medium", "high", "xhigh", "max"]
+const allowedModelOptionKeys = new Set(["maxtokens", "maxoutputtokens", "reasoning", "servicetier"])
+const credentialTerms = new Set([
+  "auth",
+  "authorization",
+  "authentication",
+  "credential",
+  "credentials",
+  "password",
+  "passwd",
+  "secret",
+  "bearer",
+  "signature",
+  "sig",
+])
+
+const keyParts = (key: string) =>
+  key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 0)
+
+const credentialLikeKey = (key: string) => {
+  const parts = keyParts(key)
+  const normalized = parts.join("")
+  if (allowedModelOptionKeys.has(normalized)) return false
+  if (parts.some((part) => credentialTerms.has(part))) return true
+  if (parts.includes("token")) return true
+  return [
+    "apikey",
+    "accesstoken",
+    "authtoken",
+    "clientsecret",
+    "privatekey",
+    "secretkey",
+    "sessiontoken",
+    "refreshtoken",
+    "idtoken",
+  ].some((term) => normalized.includes(term))
+}
+
+const credentialOptionPath = (value: unknown, path: string): string | undefined => {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const found = credentialOptionPath(item, `${path}.${index}`)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (!object(value)) return undefined
+  for (const [key, item] of Object.entries(value)) {
+    const nextPath = `${path}.${key}`
+    if (credentialLikeKey(key)) return nextPath
+    const found = credentialOptionPath(item, nextPath)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
 
 export const resolveModelRoute = (settings: Settings, mode: ModeId, role: Role = "main"): ResolvedModelRoute => {
   const route = settings.modes[mode][role]
@@ -190,6 +248,20 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
       throw new ConfigFileError({ path, message: `Gateway ${name} none auth cannot name an environment variable` })
     if (typeof gateway.baseUrl !== "string")
       throw new ConfigFileError({ path, message: `Gateway ${name} baseUrl must be a string` })
+    let gatewayUrl: URL
+    try {
+      gatewayUrl = new URL(gateway.baseUrl)
+    } catch {
+      throw new ConfigFileError({ path, message: `Gateway ${name} baseUrl must be an absolute HTTP or HTTPS URL` })
+    }
+    if ((gatewayUrl.protocol !== "http:" && gatewayUrl.protocol !== "https:") || gatewayUrl.hostname.length === 0)
+      throw new ConfigFileError({ path, message: `Gateway ${name} baseUrl must be an absolute HTTP or HTTPS URL` })
+    if (
+      gatewayUrl.username.length > 0 ||
+      gatewayUrl.password.length > 0 ||
+      Array.from(gatewayUrl.searchParams.keys()).some(credentialLikeKey)
+    )
+      throw new ConfigFileError({ path, message: `Gateway ${name} baseUrl cannot contain credentials` })
   }
   for (const [name, model] of Object.entries((value.models ?? {}) as Record<string, unknown>)) {
     if (!object(model)) throw new ConfigFileError({ path, message: `Model alias ${name} must be an object` })
@@ -229,6 +301,12 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
         if (!object(variant) || !object(variant.options))
           throw new ConfigFileError({ path, message: `Model alias ${name} ${effort} variant requires options` })
         exactKeys(path, `Model alias ${name} ${effort} variant`, variant, ["options"])
+        const credentialPath = credentialOptionPath(variant.options, `models.${name}.variants.${effort}.options`)
+        if (credentialPath !== undefined)
+          throw new ConfigFileError({
+            path,
+            message: `Model alias ${name} ${effort} variant contains credential-like provider option key at ${credentialPath}`,
+          })
       }
     }
   }

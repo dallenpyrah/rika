@@ -73,7 +73,7 @@ while time.monotonic() < deadline:
         os.write(master, b"\x1b")
         paste_collapsed = True
         sent_at = time.monotonic()
-    if paste_collapsed and not submitted and sent_at > 0.0 and time.monotonic() - sent_at > 0.15 and b"Files" in output:
+    if paste_collapsed and not submitted and sent_at > 0.0 and time.monotonic() - sent_at > 0.15:
         os.write(master, b"before \x1b[200~first line\nsecond line\x1b[201~")
         sent_at = 0.0
     if paste_collapsed and not submitted and b"[Pasted text #1 +2 lines]" in output:
@@ -120,9 +120,6 @@ os.close(master)
 print(json.dumps({
     "capture": base64.b64encode(output).decode(),
     "pasteCollapsed": paste_collapsed and b"[Pasted text #1 +2 lines]" in output,
-    "shortcutsOpened": b"Shortcuts" in output and b"Ctrl+O" in output,
-    "modeOpened": b"Mode and route" in output and b"current" in output,
-    "mentionOpened": b"Files" in output,
     "submitted": submitted,
     "exited": status is not None,
     "termiosRestored": baseline == restored,

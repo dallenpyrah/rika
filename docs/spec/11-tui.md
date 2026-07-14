@@ -25,7 +25,7 @@ The baseline is Amp CLI's rendered output; Rika never copies Amp branding, produ
 - Interactive execution publishes each durable Execution Event as it arrives. `model.output.completed` finalizes assistant content but does not clear working state; only `execution.completed`, `execution.failed`, or `execution.cancelled` makes the TUI terminal, and that state is monotonic against late model events.
 - Startup lists Threads from the product repository and remains on the empty welcome view. It selects and replays durable execution history only when a Thread is intentionally opened, including an explicit `--thread` startup selection.
 - When a Turn reaches a terminal state, the oldest Pending Turn is atomically promoted and executed until the durable queue is empty or an execution waits.
-- Shutdown stops input and rendering, awaits pending renderer initialization, snapshots all tracked work, interrupts and awaits every tracked fiber, and only then completes the interactive operation so Relay, database, and lease scopes finalize in order. A renderer that completes initialization after shutdown begins is stopped and destroyed without starting watchers or session work. Repeated close requests are idempotent.
+- Client shutdown stops input and rendering, awaits pending renderer initialization, snapshots client-owned work, interrupts and awaits every client-owned fiber, closes its protocol subscriptions and connection, and then destroys the renderer. It does not stop the Resident Rika Service or join service-owned runtime and database fibers. A renderer that completes initialization after shutdown begins is stopped and destroyed without starting watchers or session work. Repeated close requests are idempotent.
 
 ## Required Interaction
 
@@ -48,6 +48,8 @@ Asynchronously loaded panels never render empty and then populate. Changed files
 Transcript follow intent is pure view state while OpenTUI measured content, viewport, and scroll geometry are adapter state. User movement above the physical bottom detaches; reaching the bottom or pressing End reattaches. Detached content and resize preserve the visible anchor, while attached content and resize scroll to the measured bottom after layout. Programmatic movement never changes intent. The transcript content column keeps its minimum height pinned to the viewport height with end-justified children so short transcripts sit against the composer. Working states show the animated blue braille spinner with a dim status label in the bottom-left border embed; idle and terminal states show none. Narrow terminals drop the workspace embed.
 
 Loader animation mutates only the status renderable and requests a frame; it never rebuilds transcript children. Live execution deltas update pure state immediately but coalesce full renderer updates into bounded frames, while terminal and actionable permission events render immediately. Execution-event deduplication uses an indexed, serializable, bounded recent-key window. Terminal events clear working state only when they belong to the active Turn, so replay from an older Turn cannot stop the current spinner.
+
+Every TUI that has the same Thread open continues watching after the current Turn ends. A Turn submitted from another TUI appears with its prompt, live events, and terminal result without reopening the Thread.
 
 ## Proof
 

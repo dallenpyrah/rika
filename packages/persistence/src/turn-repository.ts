@@ -1,7 +1,15 @@
 import { Context, Effect, Layer, Ref, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { ThreadId } from "./thread-schema"
-import { ExecutionExtensionPin, PromptPart, Status, Turn, TurnId } from "./turn-schema"
+import {
+  ExecutionExtensionPin,
+  ExecutionRoutePin,
+  PromptPart,
+  Status,
+  Turn,
+  TurnId,
+  testExecutionRoute,
+} from "./turn-schema"
 
 export class RepositoryError extends Schema.TaggedErrorClass<RepositoryError>()("TurnRepositoryError", {
   message: Schema.String,
@@ -12,6 +20,8 @@ export interface CreateInput {
   readonly threadId: ThreadId
   readonly prompt: string
   readonly promptParts?: ReadonlyArray<PromptPart>
+  readonly executionRoute?: ExecutionRoutePin
+  readonly reviewFanOutId?: string
   readonly now: number
 }
 
@@ -26,6 +36,7 @@ export interface Interface {
   readonly editQueued: (id: TurnId, prompt: string, now: number) => Effect.Effect<Turn, RepositoryError>
   readonly dequeue: (id: TurnId) => Effect.Effect<void, RepositoryError>
   readonly setExtensionPin: (id: TurnId, pin: ExecutionExtensionPin) => Effect.Effect<Turn, RepositoryError>
+  readonly setExecutionRoute: (id: TurnId, pin: ExecutionRoutePin) => Effect.Effect<Turn, RepositoryError>
   readonly setStatus: (
     id: TurnId,
     status: Status,
@@ -45,6 +56,8 @@ const Row = Schema.Struct({
   status: Schema.String,
   last_cursor: Schema.NullOr(Schema.String),
   extension_pin_json: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  execution_route_json: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  review_fan_out_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   prompt_parts_json: Schema.optionalKey(Schema.NullOr(Schema.String)),
   created_at: Schema.Number,
   updated_at: Schema.Number,
@@ -66,6 +79,10 @@ const decode = (row: unknown) =>
       value.prompt_parts_json == null
         ? undefined
         : yield* Schema.decodeUnknownEffect(Schema.Array(PromptPart))(JSON.parse(value.prompt_parts_json))
+    const executionRoute =
+      value.execution_route_json == null
+        ? undefined
+        : yield* Schema.decodeUnknownEffect(ExecutionRoutePin)(JSON.parse(value.execution_route_json))
     return {
       id: TurnId.make(value.id),
       threadId: ThreadId.make(value.thread_id),
@@ -74,14 +91,27 @@ const decode = (row: unknown) =>
       status,
       ...(value.last_cursor === null ? {} : { lastCursor: value.last_cursor }),
       ...(extensionPin === undefined ? {} : { extensionPin }),
+      ...(executionRoute === undefined ? {} : { executionRoute }),
+      ...(value.review_fan_out_id == null ? {} : { reviewFanOutId: value.review_fan_out_id }),
       createdAt: value.created_at,
       updatedAt: value.updated_at,
     }
   }).pipe(Effect.mapError(repositoryError))
 
-export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
+export const makeMemory = (initial: ReadonlyArray<Turn> = [], preserveUnpinned = false) =>
   Effect.gen(function* () {
-    const state = yield* Ref.make(new Map(initial.map((turn) => [turn.id, clone(turn)])))
+    const state = yield* Ref.make(
+      new Map(
+        initial.map((turn) => [
+          turn.id,
+          clone(
+            turn.executionRoute === undefined && !preserveUnpinned
+              ? { ...turn, executionRoute: testExecutionRoute() }
+              : turn,
+          ),
+        ]),
+      ),
+    )
     const get = Effect.fn("TurnRepository.get")(function* (id: TurnId) {
       const turn = (yield* Ref.get(state)).get(id)
       return turn === undefined ? undefined : clone(turn)
@@ -96,6 +126,7 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
           )
           const turn: Turn = {
             ...input,
+            executionRoute: input.executionRoute ?? testExecutionRoute(),
             status: active ? "queued" : "accepted",
             createdAt: input.now,
             updatedAt: input.now,
@@ -170,6 +201,15 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
         yield* Ref.update(state, (turns) => new Map(turns).set(id, next))
         return clone(next)
       }),
+      setExecutionRoute: Effect.fn("TurnRepository.setExecutionRoute")(function* (id, pin) {
+        const current = yield* get(id)
+        if (current === undefined) return yield* Effect.fail(missing(id))
+        if (current.executionRoute !== undefined && JSON.stringify(current.executionRoute) !== JSON.stringify(pin))
+          return yield* Effect.fail(new RepositoryError({ message: `Turn ${id} execution route is immutable` }))
+        const next = { ...current, executionRoute: structuredClone(pin) }
+        yield* Ref.update(state, (turns) => new Map(turns).set(id, next))
+        return clone(next)
+      }),
       setStatus: Effect.fn("TurnRepository.setStatus")(function* (id, status, lastCursor, now) {
         const updated = yield* Ref.modify(state, (turns) => {
           const current = turns.get(id)
@@ -191,7 +231,8 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
     })
   })
 
-export const memoryLayer = (initial: ReadonlyArray<Turn> = []) => Layer.effect(Service, makeMemory(initial))
+export const memoryLayer = (initial: ReadonlyArray<Turn> = [], preserveUnpinned = false) =>
+  Layer.effect(Service, makeMemory(initial, preserveUnpinned))
 
 export const layer = Layer.effect(
   Service,
@@ -203,8 +244,8 @@ export const layer = Layer.effect(
     })
     return Service.of({
       createForSubmission: Effect.fn("TurnRepository.createForSubmission")(function* (input) {
-        yield* sql`INSERT INTO rika_turns (id, thread_id, prompt, prompt_parts_json, status, created_at, updated_at)
-          VALUES (${input.id}, ${input.threadId}, ${input.prompt}, ${input.promptParts === undefined ? null : JSON.stringify(input.promptParts)},
+        yield* sql`INSERT INTO rika_turns (id, thread_id, prompt, prompt_parts_json, execution_route_json, review_fan_out_id, status, created_at, updated_at)
+          VALUES (${input.id}, ${input.threadId}, ${input.prompt}, ${input.promptParts === undefined ? null : JSON.stringify(input.promptParts)}, ${input.executionRoute === undefined ? null : JSON.stringify(input.executionRoute)}, ${input.reviewFanOutId ?? null},
             CASE WHEN EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${input.threadId} AND status IN ('queued', 'accepted', 'running', 'waiting')) THEN 'queued' ELSE 'accepted' END,
             ${input.now}, ${input.now})`.pipe(Effect.mapError(repositoryError))
         const turn = yield* get(input.id)
@@ -272,6 +313,18 @@ export const layer = Layer.effect(
         if (rows[0] === undefined)
           return yield* Effect.fail(
             new RepositoryError({ message: `Turn ${id} extension pin is immutable or turn does not exist` }),
+          )
+        return yield* decode(rows[0])
+      }),
+      setExecutionRoute: Effect.fn("TurnRepository.setExecutionRoute")(function* (id, pin) {
+        const encoded = JSON.stringify(pin)
+        const rows = yield* sql`UPDATE rika_turns SET execution_route_json = ${encoded}
+          WHERE id = ${id} AND (execution_route_json IS NULL OR execution_route_json = ${encoded}) RETURNING *`.pipe(
+          Effect.mapError(repositoryError),
+        )
+        if (rows[0] === undefined)
+          return yield* Effect.fail(
+            new RepositoryError({ message: `Turn ${id} execution route is immutable or turn does not exist` }),
           )
         return yield* decode(rows[0])
       }),

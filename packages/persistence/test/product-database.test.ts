@@ -61,6 +61,9 @@ it.effect("builds the client directory and applies all product migrations in ord
       "3_queued_turn_status",
       "4_execution_extension_pins",
       "5_turn_prompt_parts",
+      "6_drop_thread_session_id",
+      "7_execution_route_pins",
+      "8_review_fan_out_owners",
     ])
     expect(sql.statements.map((statement) => statement.sql)).toEqual([
       "CREATE TABLE rika_workspaces ( path TEXT PRIMARY KEY NOT NULL, created_at INTEGER NOT NULL )",
@@ -75,6 +78,13 @@ it.effect("builds the client directory and applies all product migrations in ord
       "CREATE INDEX rika_turns_thread ON rika_turns (thread_id, created_at ASC, id ASC)",
       "ALTER TABLE rika_turns ADD COLUMN extension_pin_json TEXT",
       "ALTER TABLE rika_turns ADD COLUMN prompt_parts_json TEXT",
+      "CREATE TABLE rika_threads_next ( id TEXT PRIMARY KEY NOT NULL, workspace TEXT NOT NULL REFERENCES rika_workspaces(path), title TEXT NOT NULL, labels_json TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)), archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL )",
+      "INSERT INTO rika_threads_next SELECT id, workspace, title, labels_json, pinned, archived, created_at, updated_at FROM rika_threads",
+      "DROP TABLE rika_threads",
+      "ALTER TABLE rika_threads_next RENAME TO rika_threads",
+      "CREATE INDEX rika_threads_listing ON rika_threads (pinned DESC, updated_at DESC, id ASC)",
+      "ALTER TABLE rika_turns ADD COLUMN execution_route_json TEXT",
+      "ALTER TABLE rika_turns ADD COLUMN review_fan_out_id TEXT",
     ])
     expect(sql.statements.every((statement) => statement.parameters.length === 0)).toBe(true)
   })

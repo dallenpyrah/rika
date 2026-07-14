@@ -6,6 +6,7 @@ import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import { Runtime as ToolRuntime } from "@rika/tools"
 import { Effect, Fiber, Layer, Ref } from "effect"
+import { TestClock } from "effect/testing"
 import { Operation } from "../src/index"
 
 const thread = (id: string, updatedAt: number): Thread.Thread => ({
@@ -39,6 +40,7 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
   const turns = yield* TurnRepository.makeMemory([active(older.id), active(latest.id, "latest-active")])
   const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
   const controls = yield* Ref.make<ReadonlyArray<ReadonlyArray<unknown>>>([])
+  const hiddenExecutions = yield* Ref.make<ReadonlySet<string>>(new Set())
   const record = (...call: ReadonlyArray<unknown>) => Ref.update(controls, (calls) => [...calls, call])
   const backend = ExecutionBackend.Service.of({
     invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
@@ -81,10 +83,12 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
         }
       : {}),
     inspect: (turnId) =>
-      Effect.succeed(
-        turnId === "recorded-shell"
-          ? undefined
-          : { turnId, status: "running" as const, waits: [], pendingTools: [], children: [] },
+      Ref.get(hiddenExecutions).pipe(
+        Effect.map((hidden) =>
+          turnId === "recorded-shell" || hidden.has(turnId)
+            ? undefined
+            : { turnId, status: "running" as const, waits: [], pendingTools: [], children: [] },
+        ),
       ),
     steer: (turnId, text, now) => record("steer", turnId, text, now),
     cancel: (turnId, now) =>
@@ -129,10 +133,104 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
   }).pipe(Effect.provide(layer))
   const session = (yield* Ref.get(sessions))[0]
   if (session === undefined) return yield* Effect.die("Missing interactive session")
-  return { session, repositories, turns, controls, older, latest }
+  return { session, repositories, turns, controls, hiddenExecutions, older, latest }
 })
 
 describe("InteractiveSession controls", () => {
+  it.effect("keeps simultaneous interactive sessions independent and uses each request workspace", () =>
+    Effect.gen(function* () {
+      const repositories = yield* ThreadRepository.makeMemory()
+      const turns = yield* TurnRepository.makeMemory()
+      const sessions = new Map<string, Operation.InteractiveSession>()
+      const toolWorkspaces: Array<string> = []
+      const threadSequence = yield* Ref.make(0)
+      const turnSequence = yield* Ref.make(0)
+      const backend = ExecutionBackend.Service.of({
+        invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
+        createFanOut: () => Effect.die("unused"),
+        inspectFanOut: () => Effect.die("unused"),
+        cancelFanOut: () => Effect.die("unused"),
+        registerWorkflows: () => Effect.die("unused"),
+        startWorkflow: () => Effect.die("unused"),
+        inspectWorkflow: () => Effect.die("unused"),
+        cancelWorkflow: () => Effect.die("unused"),
+        inspect: () => Effect.succeed(undefined),
+        start: (input) => Effect.succeed({ turnId: input.turnId, status: "completed" as const, events: [] }),
+        replay: () => Effect.die("unused"),
+        steer: () => Effect.die("unused"),
+        cancel: () => Effect.die("unused"),
+        listApprovals: () => Effect.succeed([]),
+        resolveToolApproval: () => Effect.void,
+        resolvePermission: () => Effect.die("unused"),
+      })
+      const layer = Operation.productLayer({
+        repositoryLayer: Layer.succeed(ThreadRepository.Service, repositories),
+        turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
+        backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
+        toolRuntimeLayer: (workspace) => {
+          toolWorkspaces.push(workspace)
+          return ToolRuntime.testLayer(() => Effect.succeed({ text: workspace, truncated: false }))
+        },
+        defaultWorkspace: "/default",
+        makeThreadId: Ref.updateAndGet(threadSequence, (value) => value + 1).pipe(
+          Effect.map((value) => Thread.ThreadId.make(`thread-${value}`)),
+        ),
+        makeTurnId: Ref.updateAndGet(turnSequence, (value) => value + 1).pipe(
+          Effect.map((value) => Turn.TurnId.make(`turn-${value}`)),
+        ),
+        interactive: (input, session) => Effect.sync(() => sessions.set(input.workspace ?? "/default", session)),
+      })
+      yield* Effect.gen(function* () {
+        const operation = yield* Operation.Service
+        yield* Effect.all(
+          [
+            operation.run({ _tag: "Interactive", prompt: [], workspace: "/alpha", ephemeral: false }),
+            operation.run({ _tag: "Interactive", prompt: [], workspace: "/beta", ephemeral: false }),
+          ],
+          { concurrency: "unbounded" },
+        )
+      }).pipe(Effect.provide(layer))
+      const alpha = sessions.get("/alpha")
+      const beta = sessions.get("/beta")
+      if (alpha === undefined || beta === undefined) return yield* Effect.die("Missing interactive sessions")
+      const alphaEvents: Array<Operation.InteractiveEvent> = []
+      const betaEvents: Array<Operation.InteractiveEvent> = []
+      yield* Effect.all(
+        [
+          alpha.submit("alpha prompt", (event) => alphaEvents.push(event)),
+          beta.submit("beta prompt", (event) => betaEvents.push(event)),
+        ],
+        { concurrency: "unbounded" },
+      )
+      yield* Effect.all([
+        alpha.shell("pwd", true, (event) => alphaEvents.push(event)),
+        beta.shell("pwd", true, (event) => betaEvents.push(event)),
+      ])
+      const alphaThreadId = alphaEvents.find((event) => event._tag === "ThreadActivated")?.threadId
+      const betaThreadId = betaEvents.find((event) => event._tag === "ThreadActivated")?.threadId
+      expect(alphaThreadId).not.toBe(betaThreadId)
+      yield* Effect.all([
+        alpha.selectThread(alphaThreadId!, (event) => alphaEvents.push(event)),
+        beta.selectThread(betaThreadId!, (event) => betaEvents.push(event)),
+      ])
+      yield* Effect.all([
+        alpha.submit("alpha follow-up", (event) => alphaEvents.push(event)),
+        beta.submit("beta follow-up", (event) => betaEvents.push(event)),
+      ])
+      expect((yield* repositories.get(Thread.ThreadId.make(alphaThreadId!)))?.workspace).toBe("/alpha")
+      expect((yield* repositories.get(Thread.ThreadId.make(betaThreadId!)))?.workspace).toBe("/beta")
+      expect((yield* turns.list(Thread.ThreadId.make(alphaThreadId!))).map((turn) => turn.prompt)).toEqual([
+        "alpha prompt",
+        "alpha follow-up",
+      ])
+      expect((yield* turns.list(Thread.ThreadId.make(betaThreadId!))).map((turn) => turn.prompt)).toEqual([
+        "beta prompt",
+        "beta follow-up",
+      ])
+      expect(toolWorkspaces.toSorted()).toEqual(["/alpha", "/beta"])
+    }),
+  )
+
   it.effect("submits a prompt through every returned session callback", () =>
     Effect.gen(function* () {
       const repositories = yield* ThreadRepository.makeMemory()
@@ -387,6 +485,65 @@ describe("InteractiveSession controls", () => {
     }),
   )
 
+  it.effect("keeps following a selected thread when another session starts a later turn", () =>
+    Effect.gen(function* () {
+      const { session, turns, controls, older } = yield* makeHarness(true)
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* session.selectThread(older.id, (event) => events.push(event))
+      const follower = yield* Effect.forkChild(session.followSelected((event) => events.push(event)))
+      yield* Effect.yieldNow
+      expect(yield* Ref.get(controls)).toContainEqual(["follow", "active", "active-cursor"])
+
+      yield* turns.createForSubmission({
+        id: Turn.TurnId.make("later"),
+        threadId: older.id,
+        prompt: "later prompt",
+        now: 4,
+      })
+      yield* turns.setStatus(Turn.TurnId.make("later"), "running", undefined, 5)
+      yield* TestClock.adjust("100 millis")
+      yield* Effect.yieldNow
+
+      expect(yield* Ref.get(controls)).toContainEqual(["follow", "later", undefined])
+      expect(events).toContainEqual({
+        _tag: "TurnStarted",
+        threadId: "older",
+        turn: expect.objectContaining({ id: "later", prompt: "later prompt" }),
+      })
+      yield* Fiber.interrupt(follower)
+    }),
+  )
+
+  it.effect("waits for an accepted turn execution to become visible before following", () =>
+    Effect.gen(function* () {
+      const { session, turns, controls, hiddenExecutions, older } = yield* makeHarness(true)
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* session.selectThread(older.id, (event) => events.push(event))
+      const follower = yield* Effect.forkChild(session.followSelected((event) => events.push(event)))
+      yield* Effect.yieldNow
+
+      yield* Ref.set(hiddenExecutions, new Set(["later-accepted"]))
+      yield* turns.createForSubmission({
+        id: Turn.TurnId.make("later-accepted"),
+        threadId: older.id,
+        prompt: "accepted elsewhere",
+        now: 6,
+      })
+      yield* TestClock.adjust("100 millis")
+      yield* Effect.yieldNow
+
+      expect(yield* Ref.get(controls)).not.toContainEqual(["follow", "later-accepted", undefined])
+      expect(events.some((event) => event._tag === "ExecutionFailed")).toBe(false)
+
+      yield* Ref.set(hiddenExecutions, new Set())
+      yield* TestClock.adjust("100 millis")
+      yield* Effect.yieldNow
+
+      expect(yield* Ref.get(controls)).toContainEqual(["follow", "later-accepted", undefined])
+      yield* Fiber.interrupt(follower)
+    }),
+  )
+
   it.effect(
     "persists approved shell output, keeps incognito output transient, denies execution, and queues while busy",
     () =>
@@ -395,6 +552,7 @@ describe("InteractiveSession controls", () => {
         const turns = yield* TurnRepository.makeMemory()
         const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
         const commands = yield* Ref.make<ReadonlyArray<string>>([])
+        const permissionWorkspaces = yield* Ref.make<ReadonlyArray<string>>([])
         let turnNumber = 0
         const layer = Operation.productLayer({
           repositoryLayer: Layer.succeed(ThreadRepository.Service, repositories),
@@ -428,15 +586,17 @@ describe("InteractiveSession controls", () => {
               )
             }),
           defaultWorkspace: "/work",
-          shellPermission: "ask",
+          shellPermission: (workspace) =>
+            Ref.update(permissionWorkspaces, (values) => [...values, workspace]).pipe(Effect.as("ask" as const)),
           makeThreadId: Effect.succeed(Thread.ThreadId.make("shell-thread")),
           makeTurnId: Effect.sync(() => Turn.TurnId.make(`shell-turn-${turnNumber++}`)),
           interactive: (_, session) => Ref.update(sessions, (values) => [...values, session]),
         })
         yield* Effect.gen(function* () {
           const operation = yield* Operation.Service
-          yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
+          yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false, workspace: "/client-shell" })
         }).pipe(Effect.provide(layer))
+        expect(yield* Ref.get(permissionWorkspaces)).toContain("/client-shell")
         const session = (yield* Ref.get(sessions))[0]
         if (session === undefined) return yield* Effect.die("Missing interactive session")
 

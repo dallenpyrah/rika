@@ -12,91 +12,15 @@ import { MediaView, ParallelSearch, ReadWebPage, Runtime as ToolRuntime } from "
 import { ViewState } from "@rika/tui"
 import { Surface } from "@rika/tui/adapter"
 import { expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, FileSystem, Layer, Redacted } from "effect"
+import { Context, Deferred, Effect, Fiber, FileSystem, Layer, Redacted } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
-import { fileURLToPath } from "node:url"
 import {
   credentialForRoute,
+  interruptAndClearTrackedFiber,
   interruptTrackedFibers,
-  relayDatabaseLease,
-  requiresRelay,
+  refreshThreadsOnSwitcherOpen,
   settleTuiInitialization,
 } from "../src/main"
-
-test("holds one exclusive process lease for a Relay database", async () => {
-  const program = Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem
-    const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-relay-lease-" })
-    const filename = `${workspace}/relay.db`
-    const concurrent = yield* Effect.scoped(
-      Effect.gen(function* () {
-        yield* relayDatabaseLease(filename)
-        return yield* Effect.exit(Effect.scoped(relayDatabaseLease(filename)))
-      }),
-    )
-    expect(String(concurrent)).toContain("is already in use by Rika process")
-    yield* Effect.scoped(relayDatabaseLease(filename))
-  })
-  await Effect.runPromise(Effect.scoped(program).pipe(Effect.provide(BunServices.layer)))
-})
-
-test("classifies product-only commands without Relay and execution commands with Relay", () => {
-  expect(requiresRelay({ _tag: "Config", action: "list" })).toBe(false)
-  expect(requiresRelay({ _tag: "Doctor" })).toBe(false)
-  expect(requiresRelay({ _tag: "Thread", action: "list" })).toBe(false)
-  expect(requiresRelay({ _tag: "Thread", action: "continue", last: true })).toBe(true)
-  expect(
-    requiresRelay({
-      _tag: "Run",
-      prompt: [],
-      ephemeral: false,
-      streamJson: false,
-      streamJsonInput: false,
-      streamJsonThinking: false,
-    }),
-  ).toBe(true)
-})
-
-test("runs a product-only command under a held Relay lease without creating relay.db and rejects execution", async () => {
-  await Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem
-        const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-relay-lazy-" })
-        const relayDatabase = `${workspace}/relay.db`
-        yield* relayDatabaseLease(relayDatabase)
-        const run = (args: ReadonlyArray<string>) =>
-          Effect.promise(async () => {
-            const child = Bun.spawn(["bun", fileURLToPath(new URL("../src/main.ts", import.meta.url)), ...args], {
-              cwd: fileURLToPath(new URL("../../..", import.meta.url)),
-              env: {
-                ...Bun.env,
-                HOME: workspace,
-                RIKA_DATABASE: `${workspace}/rika.db`,
-                RIKA_RELAY_DATABASE: relayDatabase,
-              },
-              stdout: "pipe",
-              stderr: "pipe",
-            })
-            const stdout = new Response(child.stdout).text()
-            const stderr = new Response(child.stderr).text()
-            return {
-              code: await child.exited,
-              stdout: await stdout,
-              stderr: await stderr,
-            }
-          })
-        const configList = yield* run(["config", "list"])
-        if (configList.code !== 0) throw new Error(configList.stderr)
-        expect(yield* fileSystem.exists(relayDatabase)).toBe(false)
-        const execution = yield* run(["run", "blocked"])
-        expect(execution.code).not.toBe(0)
-        expect(execution.stderr).toContain("already in use by Rika process")
-        expect(yield* fileSystem.exists(relayDatabase)).toBe(false)
-      }).pipe(Effect.provide(BunServices.layer)),
-    ),
-  )
-}, 30_000)
 
 test("selects only the credential named by each high and ultra main and Oracle gateway", () => {
   const openai = Redacted.make("openai-sentinel")
@@ -132,6 +56,41 @@ test("awaits tracked fiber cleanup before releasing its enclosing lease", async 
     ),
   )
   expect(events).toEqual(["fiber-cleaned", "shutdown-resumed", "lease-released"])
+})
+
+test("clears an interrupted follow so a newly selected thread can be followed", async () => {
+  let followed = 0
+  let tracked: Fiber.Fiber<void, never> | undefined
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const startFollow = Effect.gen(function* () {
+          if (tracked !== undefined) return
+          followed += 1
+          tracked = yield* Effect.forkChild(Effect.never)
+        })
+        yield* startFollow
+        const previous = tracked!
+        yield* interruptAndClearTrackedFiber(previous, (fiber) => {
+          if (tracked === fiber) tracked = undefined
+        })
+        yield* startFollow
+        expect(tracked).not.toBe(previous)
+      }),
+    ),
+  )
+  expect(followed).toBe(2)
+})
+
+test("refreshes threads only when the switcher transitions from closed to open", async () => {
+  let refreshes = 0
+  const initialize = Effect.sync(() => {
+    refreshes += 1
+  })
+  await Effect.runPromise(refreshThreadsOnSwitcherOpen(false, true, initialize))
+  await Effect.runPromise(refreshThreadsOnSwitcherOpen(true, true, initialize))
+  await Effect.runPromise(refreshThreadsOnSwitcherOpen(true, false, initialize))
+  expect(refreshes).toBe(1)
 })
 
 test("awaits delayed TUI initialization and tears down its renderer before lease finalization", async () => {
@@ -229,10 +188,8 @@ test("drives bypassed recorded and incognito shell commands through Operation an
         makeTurnId: Effect.sync(() => Turn.TurnId.make(`shell-turn-${nextTurn++}`)),
         interactive: (_, session) => Effect.sync(() => sessions.push(session)),
       })
-      yield* Effect.gen(function* () {
-        const operation = yield* Operation.Service
-        yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
-      }).pipe(Effect.provide(operationLayer))
+      const operation = Context.get(yield* Layer.buildWithScope(operationLayer, yield* Effect.scope), Operation.Service)
+      yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
       const session = sessions[0]
       if (session === undefined) return yield* Effect.die("Missing interactive session")
 

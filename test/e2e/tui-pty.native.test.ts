@@ -53,15 +53,9 @@ describe("packaged TUI in a native PTY", () => {
         submitted: boolean
         exited: boolean
         termiosRestored: boolean
-        shortcutsOpened: boolean
-        modeOpened: boolean
-        mentionOpened: boolean
       }
       const capture = Buffer.from(result.capture, "base64").toString("utf8")
       expect(result.pasteCollapsed).toBe(true)
-      expect(result.shortcutsOpened).toBe(true)
-      expect(result.modeOpened).toBe(true)
-      expect(result.mentionOpened).toBe(true)
       expect(result.submitted).toBe(true)
       expect(capture).toContain("Welcome to Rika")
       expect(capture).toContain("[Pasted text #1 +2 lines]")

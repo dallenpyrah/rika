@@ -1,13 +1,41 @@
 import { expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Redacted } from "effect"
 import { ConfigContract } from "@rika/config"
+import * as Turn from "@rika/persistence/turn"
+import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   buildTestModelScript,
+  canonicalDatabaseRoot,
   distinctModelRoutes,
+  executionRoutePin,
   modelRoutePlan,
   parseTestModelScript,
   productionCompaction,
+  withClientWorkspace,
+  gatewayCredentialsForRoutes,
+  persistedModelRoutesForStartup,
 } from "../src/main"
+
+test("uses one canonical directory for both resident databases", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rika-database-root-"))
+  const other = join(root, "other")
+  const alias = join(root, "alias")
+  try {
+    await mkdir(other)
+    await symlink(root, alias)
+    expect(await canonicalDatabaseRoot(join(root, "rika.db"), join(alias, "relay.db"))).toBe(await realpath(root))
+    await expect(canonicalDatabaseRoot(join(root, "rika.db"), join(other, "relay.db"))).rejects.toThrow(
+      "one data directory",
+    )
+    await expect(canonicalDatabaseRoot(join(root, "product.db"), join(root, "relay.db"))).rejects.toThrow(
+      "must name rika.db and relay.db",
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test("uses production compaction defaults and route overrides", () => {
   expect(productionCompaction()).toEqual({
@@ -68,6 +96,8 @@ test("content-addresses non-secret model execution semantics deterministically",
   for (const changed of changes) expect(modelRoutePlan(changed).registrationKey).not.toBe(key)
   expect(JSON.stringify(modelRoutePlan(route))).not.toContain("API_KEY_VALUE")
   expect(modelRoutePlan(route).selection.registrationKey).toBe(key)
+  expect(executionRoutePin(ConfigContract.defaults, "high").oracle.providerOptions).toEqual(route.options)
+  expect(executionRoutePin(ConfigContract.defaults, "medium").tokenBudget).toBe(64_000)
 })
 
 test("keeps registrations distinct by the exact Baton registry tuple", () => {
@@ -75,6 +105,82 @@ test("keeps registrations distinct by the exact Baton registry tuple", () => {
   const second = { ...route, gatewayName: `${route.gatewayName}-secondary` }
   expect(modelRoutePlan(second).registrationKey).toBe(modelRoutePlan(route).registrationKey)
   expect(distinctModelRoutes([route, second, route])).toEqual([route, second])
+})
+
+test("sends each client's workspace to the resident service", () => {
+  const interactive = {
+    _tag: "Interactive" as const,
+    prompt: [],
+    ephemeral: false,
+  }
+  expect(withClientWorkspace(interactive, "/client-a")).toEqual({
+    ...interactive,
+    clientWorkspace: "/client-a",
+    workspace: "/client-a",
+  })
+  expect(withClientWorkspace({ ...interactive, workspace: "/explicit" }, "/client-b")).toEqual({
+    ...interactive,
+    clientWorkspace: "/client-b",
+    workspace: "/explicit",
+  })
+  expect(withClientWorkspace({ _tag: "Config", action: "list" }, "/client-c")).toEqual({
+    _tag: "Config",
+    action: "list",
+    clientWorkspace: "/client-c",
+  })
+  expect(withClientWorkspace({ _tag: "Thread", action: "new" }, "/client-d")).toEqual({
+    _tag: "Thread",
+    action: "new",
+    clientWorkspace: "/client-d",
+  })
+  expect(withClientWorkspace({ _tag: "Mcp", action: "approve", name: "server" }, "/client-e")).toEqual({
+    _tag: "Mcp",
+    action: "approve",
+    name: "server",
+    workspace: "/client-e",
+    clientWorkspace: "/client-e",
+  })
+})
+
+test("loads credentials named by configured and persisted routes", () => {
+  const configured = ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")
+  const persisted = {
+    ...executionRoutePin(ConfigContract.defaults, "medium").oracle,
+    gatewayAuth: "bearer-env:RESTART_ORACLE_KEY",
+  }
+  const values = { OPENAI_API_KEY: "starter", RESTART_ORACLE_KEY: "persisted" } as const
+  const credentials = gatewayCredentialsForRoutes(
+    [configured],
+    [persisted],
+    {},
+    (name) => values[name as keyof typeof values],
+  )
+  expect(Redacted.value(credentials.OPENAI_API_KEY!)).toBe("starter")
+  expect(Redacted.value(credentials.RESTART_ORACLE_KEY!)).toBe("persisted")
+  expect(JSON.stringify(credentials)).not.toContain("starter")
+  expect(JSON.stringify(credentials)).not.toContain("persisted")
+})
+
+test("keeps a review route owner's workspace-specific models in the startup registration set", () => {
+  const route = executionRoutePin(ConfigContract.defaults, "high")
+  const owner: Turn.Turn = {
+    id: Turn.TurnId.make("review-owner"),
+    threadId: "review-thread" as Turn.Turn["threadId"],
+    prompt: "Review workspace changes",
+    status: "running",
+    executionRoute: {
+      ...route,
+      main: { ...route.main, registrationKey: "workspace-main" },
+      oracle: { ...route.oracle, registrationKey: "workspace-oracle" },
+    },
+    reviewFanOutId: "review:review-owner",
+    createdAt: 1,
+    updatedAt: 2,
+  }
+  expect(persistedModelRoutesForStartup([owner]).map((candidate) => candidate.registrationKey)).toEqual([
+    "workspace-main",
+    "workspace-oracle",
+  ])
 })
 
 test("parses and builds multi-part, object, and delayed TestModel turns", async () => {

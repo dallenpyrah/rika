@@ -8,7 +8,11 @@ Business behavior lives behind Effect services. Flags and arguments are Schema-v
 
 Help, version, completions, and parse errors require only platform services. They must not initialize SQL, Relay, models, MCP, plugins, or OpenTUI.
 
-Parsed product-only operations build a lightweight product layer without acquiring or migrating Relay state. Config, doctor, extension, tool catalog, MCP, skill, and metadata-only Thread operations remain available while another process holds the Relay lease. Interactive, run, review, workflow, and Thread continue operations acquire Relay ownership before runtime construction and fail while it is held.
+The dispatcher classifies the parsed operation before reading the resident-service token or constructing infrastructure. Help, version, completions, and parse failures remain entirely local and lazy. Every operation that can read or write product state starts or attaches to the Resident Rika Service, so no probe-then-open race can create a second product SQLite owner.
+
+The first stateful command for a Profile/data root attempts the resident listener bind. The winner starts the service and attaches its own client; bind losers attach to the winner after an authenticated, versioned handshake. Concurrent starters therefore wait through `starting` and converge on one service rather than rejecting the second process. TUI processes own terminal input, OpenTUI rendering, local view state, and protocol connection only. Noninteractive clients own CLI formatting and stdout/stderr only. Neither owns runtime or database fibers.
+
+Every client sends its own current Workspace when an operation accepts a Workspace and no explicit `--workspace` was supplied. The resident service never substitutes the starter's current directory for a later client.
 
 ## Required Surfaces
 

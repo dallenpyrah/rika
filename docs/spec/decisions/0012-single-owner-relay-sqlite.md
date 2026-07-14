@@ -1,4 +1,4 @@
-# ADR 0012: One Owner and One Runtime Graph per Relay SQLite File
+# ADR 0012: One Resident Rika Service per Profile Data Root
 
 Status: Accepted
 
@@ -8,25 +8,28 @@ Relay's embedded SQLite topology is single-process. Each published `SQLite.layer
 
 ## Decision
 
-One live owner holds a Relay SQLite file, and that owner constructs one process-lifetime Relay runtime graph over one shared SQLite client. Ownership is acquired before migrations or runtime layers start and is released only after every runtime-using fiber has terminated and the runtime has finalized. Modes and model tuning are immutable execution data routed through that graph; they never select or construct another database runtime. A second execution-capable process fails before opening the Relay database. Help, version, parse errors, and product-only commands remain lazy and do not acquire Relay ownership.
+One Resident Rika Service owns each canonical Profile/data root. The root contains fixed `rika.db` and `relay.db` files; configurations that split or rename those files are rejected before listener probing or database open. The service owns product SQLite, one Relay embedded Runtime over one Relay SQLite client, route-driven `ExecutionBackend`, Operation and Turn admission/reconciliation, Relay hosts, and all runtime fibers. Clients own CLI parsing and formatting, TUI rendering and input, and the authenticated protocol connection.
 
-The dispatcher classifies parsed operations before constructing execution infrastructure. Interactive, run, review, workflow, and Thread continue require Relay. Config, doctor, extension, tool catalog, MCP, skill, and metadata-only Thread operations do not acquire the Relay lease or open its database. Interactive shutdown stops terminal input and rendering, awaits renderer initialization and tears down a renderer that arrives during shutdown, interrupts and awaits the snapshot of tracked fibers, and resumes the enclosing operation only after their cleanup, allowing runtime and ownership finalizers to run in scope order. No watcher or session fiber starts after shutdown has begun.
+The first stateful starter attempts an exclusive OS-owned loopback listener bind derived from canonical profile identity. The bind winner starts the service; concurrent losers connect and attach after the authenticated/versioned ADR 0007 handshake. The listener is acquired before either database opens and remains held until both databases close. PID directories, metadata, and database locks do not grant ownership. The OS releases the listener after `SIGKILL`, allowing a replacement to bind and reconcile durable state.
+
+The service lifecycle is `starting -> ready -> grace -> draining -> stopped`. Final authenticated-client disconnect enters grace; a new client cancels grace. Grace expiry and cooperative signals drain. Draining rejects admission and cannot return to ready, closes client work, joins runtime fibers, closes Relay then product SQLite, and releases the listener last. Help, version, completion, and parse paths stay local and lazy. Every operation that can touch product SQLite starts or attaches to the service; there is no unsafe local fallback after an absent-service probe.
 
 The published Relay package must expose composition that lets its runner, Child Run fan-out host, Workflow host, and Client share one SQLite client. Rika does not deep-import Relay internals or recreate that composition. Until that package contract is released and consumed, single-runtime completion remains blocked and release evidence must not claim the invariant is implemented.
 
 ## Consequences
 
-Embedded Rika execution is deliberately single-owner. A TUI and a separate execution command cannot concurrently use the same Relay SQLite file; supporting concurrent clients requires a separately specified resident process with a typed WebSocket protocol. A cooperative process lease is containment rather than proof against older binaries that do not participate, so upgrades must stop or detect legacy owners before opening existing state.
+Embedded Rika execution remains single-owner but supports many concurrent clients. A TUI and separate commands share one runtime and durable admission authority. A foreign or incompatible listener fails closed; Rika does not infer that state is safe to open from absent or stale PID metadata.
 
 Turn routing must persist the selected mode and non-secret resolved route identity before Relay acceptance so queued promotion and restart reconciliation use the original route. Ambiguous storage failure after Relay acceptance does not manufacture a terminal product status; only canonical Relay terminal state may terminalize the Turn.
 
-Verification counts SQLite clients, migrations, runtime hosts, and notification graphs rather than inferring ownership from successful prompts. Process tests cover concurrent startup, graceful shutdown, `SIGKILL`, stale owner metadata, legacy binaries, and every acceptance-to-projection kill point.
+Verification counts service instances, listeners, SQLite owners, migrations, runtime hosts, backends, reconciliation fibers, and notification graphs rather than inferring ownership from successful prompts. Process tests cover concurrent convergence, authenticated attachment, lifecycle transitions, graceful shutdown, `SIGKILL`, replacement, incompatible and foreign listeners, and every acceptance-to-projection kill point.
 
 ## Rejected alternatives
 
 - **WAL, busy timeout, or retries across independent clients:** rejected because they reduce lock frequency without creating one serialization or notification domain.
 - **One Relay runtime per model mode:** rejected because mode is execution data and multiplying infrastructure by routing choice creates avoidable writers and recovery hosts.
-- **A resident daemon now:** rejected because the product does not yet require concurrent execution clients and the protocol, lifecycle, authentication, replay, and upgrade surface is substantially larger than single-owner embedding.
+- **Reject the second execution-capable process:** rejected because independent TUI and command clients are a product requirement and rejection does not provide a usable interface.
+- **PID-directory or database-lock ownership:** rejected because user-space metadata can become stale and a database lock does not establish the authenticated service and runtime owner. The listener bind is released by the OS on process death.
 - **Multi-process Relay SQLite:** rejected because Relay's SQLite notifications and worker ownership are process-local; true multi-process operation requires a server database and Relay's supported multi-node topology.
 
 ## Related docs

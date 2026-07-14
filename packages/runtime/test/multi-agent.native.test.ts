@@ -69,7 +69,7 @@ const input = (name: string, joinPolicy: "all" | "first-success" | "quorum" | "b
 
 const release = (directory: string, name: string, ordinal: number, status = "completed") =>
   writeFile(
-    join(directory, `child:${name}-${ordinal}.json`),
+    join(directory, `child:parent-${name}:${name}-${ordinal}.json`),
     JSON.stringify({ status, output: [{ _tag: "text", text: `output-${ordinal}` }], completedAt: 200 + ordinal }),
   )
 

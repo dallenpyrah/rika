@@ -10,16 +10,54 @@ import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
 
-const native = vi.hoisted(() => ({ client: undefined as Client.Interface | undefined, results: [] as Array<unknown> }))
+const native = vi.hoisted(() => ({
+  client: undefined as Client.Interface | undefined,
+  results: [] as Array<unknown>,
+  databaseAcquisitions: 0,
+  runtimeGraphs: 0,
+}))
+
+const routeFor = (
+  role: "main" | "oracle",
+  model: { readonly provider: string; readonly model: string; readonly registrationKey?: string },
+  compaction: { readonly contextWindow: number; readonly reserveTokens: number; readonly keepRecentTokens: number },
+) => ({
+  role,
+  alias: role,
+  ...model,
+  registrationKey: model.registrationKey ?? "default",
+  gatewayProtocol: "test" as const,
+  gatewayBaseUrl: "test://model",
+  gatewayAuth: "none",
+  effort: "medium",
+  fast: false,
+  requestVariant: "test",
+  compaction,
+})
 
 vi.mock("@relayfx/sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@relayfx/sdk")>()
   const { Layer: EffectLayer } = await import("effect")
+  const sqlite = await import("@relayfx/sdk/sqlite")
   return {
     ...actual,
     Client: {
       ...actual.Client,
       layerFromRuntime: EffectLayer.suspend(() => actual.Client.testLayer(native.client!)),
+    },
+    Runtime: {
+      ...actual.Runtime,
+      layerEmbedded: (options: any) => {
+        native.runtimeGraphs += 1
+        const childFanOut = sqlite.SQLite.childFanOutLayer({ filename: ":memory:" }, options.childFanOutHandlersLayer)
+        const workflow = sqlite.SQLite.workflowLayer(
+          { filename: ":memory:" },
+          options.workflowDefinitionHandlersLayer,
+        ).pipe(EffectLayer.provideMerge(childFanOut))
+        return EffectLayer.merge(childFanOut, workflow).pipe(
+          EffectLayer.provideMerge(actual.Client.testLayer(native.client!)),
+        )
+      },
     },
   }
 })
@@ -50,6 +88,10 @@ vi.mock("@relayfx/sdk/sqlite", async () => {
     SchemaRegistry: { layer: () => NativeLayer.empty },
     ToolRuntime: { layerFromToolkit: () => NativeLayer.empty },
     SQLite: {
+      runtimeDatabaseLayer: () => {
+        native.databaseAcquisitions += 1
+        return NativeLayer.empty
+      },
       layer: () => NativeLayer.empty,
       childFanOutLayer: (_options: unknown, handlers: Layer.Layer<unknown>) =>
         Layer.succeed(FanOutRuntimeService, fanOutService).pipe(
@@ -1037,7 +1079,7 @@ describe("ExecutionBackend Relay client adapter", () => {
     }),
   )
 
-  it.effect("pins main and Oracle selections and alias-owned compaction policies", () =>
+  it.effect("durably carries workspace, route, token budget, and compaction through fan-out", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
       const fanOutInputs: Array<any> = []
@@ -1059,10 +1101,19 @@ describe("ExecutionBackend Relay client adapter", () => {
       const oracleCompaction = { contextWindow: 1_000_000, reserveTokens: 128_000, keepRecentTokens: 64_000 }
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.start({ threadId: "thread", turnId: "turn", prompt: "prompt", startedAt: 1 })
+        const route = {
+          version: 1 as const,
+          mode: "test" as const,
+          tokenBudget: 777,
+          main: routeFor("main", selection, mainCompaction),
+          oracle: routeFor("oracle", oracleSelection, oracleCompaction),
+        }
+        yield* backend.start({ threadId: "thread", turnId: "other-turn", prompt: "prompt", startedAt: 1 })
         yield* backend.createFanOut({
           fanOutId: "fan",
           parentTurnId: "turn",
+          workspace: "/client/workspace",
+          executionRoute: route,
           children: [
             { childId: "oracle", profile: "Oracle", prompt: "inspect" },
             { childId: "task", profile: "Task", prompt: "work" },
@@ -1097,8 +1148,19 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect(fanOutInputs[0].children[0].override.compaction_policy).toEqual(
         registered.child_run_presets.Oracle.compaction_policy,
       )
-      expect(fanOutInputs[0].children[1].override.model).toEqual(selection)
+      expect(fanOutInputs[0].children[1].override.model).toEqual({ ...selection, registrationKey: "default" })
       expect(fanOutInputs[0].children[1].override.compaction_policy).toEqual(registered.compaction_policy)
+      expect(fanOutInputs[0].children[0].metadata).toMatchObject({
+        rika_workspace: "/client/workspace",
+        rika_token_budget: 777,
+      })
+      expect(fanOutInputs[0].children[0].metadata.rika_execution_route).toEqual({
+        version: 1,
+        mode: "test",
+        tokenBudget: 777,
+        main: routeFor("main", selection, mainCompaction),
+        oracle: routeFor("oracle", oracleSelection, oracleCompaction),
+      })
     }),
   )
 
@@ -1228,9 +1290,15 @@ describe("ExecutionBackend Relay client adapter", () => {
       Object.assign(fixture.implementation, {
         getExecution: () => Effect.succeed({ status: "completed" }),
         spawnChildRun: () => Effect.succeed({}),
+        createChildFanOut: (definition: unknown) =>
+          Effect.sync(() => (native.results.push(["create", definition]), definition)),
+        inspectChildFanOut: (input: unknown) =>
+          Effect.sync(() => (native.results.push(["inspect", input]), { fan_out: null })),
       })
       native.client = fixture.implementation
       native.results.length = 0
+      native.databaseAcquisitions = 0
+      native.runtimeGraphs = 0
       const result = yield* Layer.build(
         RelayExecutionBackend.layer({
           filename: ":memory:",
@@ -1242,6 +1310,8 @@ describe("ExecutionBackend Relay client adapter", () => {
         }),
       ).pipe(Effect.provide(BunServices.layer), Effect.scoped, Effect.exit)
       expect(result._tag).toBe("Success")
+      expect(native.databaseAcquisitions).toBe(1)
+      expect(native.runtimeGraphs).toBe(1)
       expect(native.results).toContainEqual({ status: "completed", output: [Content.text("done")] })
       expect(native.results).toContainEqual({ approved: true, prompt: "approve" })
       expect(native.results).toContainEqual(null)
@@ -1265,6 +1335,8 @@ describe("ExecutionBackend Relay client adapter", () => {
       Object.assign(fixture.implementation, {
         getExecution: () => Effect.succeed({ status: "completed" }),
         spawnChildRun: () => Effect.succeed({}),
+        createChildFanOut: (definition: unknown) => Effect.succeed(definition),
+        inspectChildFanOut: () => Effect.succeed({ fan_out: null }),
       })
       native.client = fixture.implementation
       native.results.length = 0

@@ -5,8 +5,8 @@ import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import { Runtime as ToolRuntime } from "@rika/tools"
-import { Effect, Layer, Ref } from "effect"
-import { TestConsole } from "effect/testing"
+import { Context, Deferred, Effect, Fiber, Layer, Ref } from "effect"
+import { TestClock, TestConsole } from "effect/testing"
 import { Operation, ProductAgent } from "../src/index"
 
 const backend = ExecutionBackend.Service.of({
@@ -49,18 +49,24 @@ const layer = (
     projectChildren: () => [],
     cancelChild: () => Effect.die("unused"),
   }),
+  options: {
+    readonly repositoryLayer?: Layer.Layer<ThreadRepository.Service>
+    readonly turnRepositoryLayer?: Layer.Layer<TurnRepository.Service>
+    readonly resolveExecutionRoute?: () => Effect.Effect<Turn.ExecutionRoutePin>
+  } = {},
 ) =>
   Layer.mergeAll(
     TestConsole.layer,
     Operation.productLayer({
-      repositoryLayer: ThreadRepository.memoryLayer(),
-      turnRepositoryLayer: TurnRepository.memoryLayer(),
+      repositoryLayer: options.repositoryLayer ?? ThreadRepository.memoryLayer(),
+      turnRepositoryLayer: options.turnRepositoryLayer ?? TurnRepository.memoryLayer(),
       backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
       productAgentLayer: Layer.succeed(ProductAgent.Service, agent),
       toolRuntimeLayer: () => Layer.succeed(ToolRuntime.Service, tool),
       defaultWorkspace: "/work",
       makeThreadId: Effect.succeed(Thread.ThreadId.make("thread")),
       makeTurnId: Effect.succeed(Turn.TurnId.make("review-turn")),
+      ...(options.resolveExecutionRoute === undefined ? {} : { resolveExecutionRoute: options.resolveExecutionRoute }),
     }),
   )
 
@@ -126,7 +132,12 @@ describe("Operation review dispatcher", () => {
 
   it.effect("runs review lanes and renders completed, failed, and structured lane output", () =>
     Effect.gen(function* () {
-      const checks = yield* Ref.make<ReadonlyArray<ProductAgent.TaskInput>>([])
+      const capturedRequest = yield* Ref.make<Parameters<ProductAgent.Interface["runReviewLanes"]>[0] | undefined>(
+        undefined,
+      )
+      const threads = yield* ThreadRepository.makeMemory()
+      const turns = yield* TurnRepository.makeMemory()
+      const route = Turn.testExecutionRoute("medium")
       const agent = ProductAgent.Service.of({
         invoke: () => Effect.die("unused"),
         fanOut: () => Effect.die("unused"),
@@ -134,7 +145,7 @@ describe("Operation review dispatcher", () => {
         cancelFanOut: () => Effect.die("unused"),
         runParallel: () => Effect.die("unused"),
         runReviewLanes: (request) =>
-          Ref.set(checks, request.checks).pipe(
+          Ref.set(capturedRequest, request).pipe(
             Effect.as({
               fanOutId: request.fanOutId,
               parentTurnId: request.parentTurnId,
@@ -169,14 +180,152 @@ describe("Operation review dispatcher", () => {
       const output = yield* Effect.gen(function* () {
         const operation = yield* Operation.Service
         yield* operation.run(input())
-        yield* operation.run(input({ json: true }))
         return yield* TestConsole.logLines
-      }).pipe(Effect.provide(layer(tool, agent)))
-      expect(yield* Ref.get(checks)).toHaveLength(3)
+      }).pipe(
+        Effect.provide(
+          layer(tool, agent, {
+            repositoryLayer: Layer.succeed(ThreadRepository.Service, threads),
+            turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
+            resolveExecutionRoute: () => Effect.succeed(route),
+          }),
+        ),
+      )
+      const submitted = yield* Ref.get(capturedRequest)
+      expect(submitted?.checks).toHaveLength(3)
+      expect(submitted).toMatchObject({ workspace: "/work", executionRoute: route })
+      expect((yield* turns.get(Turn.TurnId.make("review-turn")))?.executionRoute).toEqual(route)
+      expect(yield* turns.get(Turn.TurnId.make("review-turn"))).toMatchObject({
+        status: "completed",
+        reviewFanOutId: "review:review-turn",
+      })
+      expect((yield* threads.get(Thread.ThreadId.make("thread")))?.workspace).toBe("/work")
       expect(output[0]).toContain("## correctness\nok")
       expect(output[0]).toContain("Review lane failed: bad")
       expect(output[0]).toContain('{"count":1}')
-      expect(output[1]).toContain('"status":"satisfied"')
     }),
+  )
+
+  it.effect("marks the review owner failed when its foreground fan-out disappears", () =>
+    Effect.gen(function* () {
+      const turns = yield* TurnRepository.makeMemory()
+      const created = yield* Deferred.make<void>()
+      const agent = ProductAgent.Service.of({
+        invoke: () => Effect.die("unused"),
+        fanOut: () => Effect.die("unused"),
+        inspectFanOut: () => Effect.die("unused"),
+        cancelFanOut: () => Effect.die("unused"),
+        runParallel: () => Effect.die("unused"),
+        runReviewLanes: (request) =>
+          Deferred.succeed(created, undefined).pipe(
+            Effect.as({
+              fanOutId: request.fanOutId,
+              parentTurnId: request.parentTurnId,
+              state: "joining" as const,
+              maxConcurrency: request.maxConcurrency,
+              join: "best-effort" as const,
+              members: [],
+            }),
+          ),
+        projectChildren: () => [],
+        cancelChild: () => Effect.die("unused"),
+      })
+      const missingBackend = ExecutionBackend.Service.of({
+        ...backend,
+        inspectFanOut: () => Effect.succeed(undefined),
+      })
+      const tool = ToolRuntime.Service.of({
+        run: () => Effect.succeed({ text: "diff --git a/a b/a", truncated: false, exitCode: 0 }),
+      })
+      const context = yield* Layer.build(
+        Layer.mergeAll(
+          TestConsole.layer,
+          Operation.productLayer({
+            repositoryLayer: ThreadRepository.memoryLayer(),
+            turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
+            backendLayer: Layer.succeed(ExecutionBackend.Service, missingBackend),
+            productAgentLayer: Layer.succeed(ProductAgent.Service, agent),
+            toolRuntimeLayer: () => Layer.succeed(ToolRuntime.Service, tool),
+            defaultWorkspace: "/work",
+            makeThreadId: Effect.succeed(Thread.ThreadId.make("thread")),
+            makeTurnId: Effect.succeed(Turn.TurnId.make("review-turn")),
+          }),
+        ),
+      )
+      const operation = Context.get(context, Operation.Service)
+      const error = yield* Effect.flip(operation.run(input()))
+      expect(error.message).toContain("Review review:review-turn disappeared")
+      expect((yield* turns.get(Turn.TurnId.make("review-turn")))?.status).toBe("failed")
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("settles the review owner after the requesting operation is interrupted", () =>
+    Effect.gen(function* () {
+      const turns = yield* TurnRepository.makeMemory()
+      const persisted = yield* Deferred.make<void>()
+      const continueAdmission = yield* Deferred.make<void>()
+      const created = yield* Deferred.make<void>()
+      const fanOutState = yield* Ref.make<"joining" | "satisfied">("joining")
+      const reviewTurns = TurnRepository.Service.of({
+        ...turns,
+        createForSubmission: (submission) =>
+          turns.createForSubmission(submission).pipe(
+            Effect.tap(() => Deferred.succeed(persisted, undefined)),
+            Effect.tap(() => Deferred.await(continueAdmission)),
+          ),
+      })
+      const inspection = (state: "joining" | "satisfied") => ({
+        fanOutId: "review:review-turn",
+        parentTurnId: Turn.TurnId.make("review-turn"),
+        state,
+        maxConcurrency: 3,
+        join: "best-effort" as const,
+        members: [],
+      })
+      const agent = ProductAgent.Service.of({
+        invoke: () => Effect.die("unused"),
+        fanOut: () => Effect.die("unused"),
+        inspectFanOut: () => Effect.die("unused"),
+        cancelFanOut: () => Effect.die("unused"),
+        runParallel: () => Effect.die("unused"),
+        runReviewLanes: () => Deferred.succeed(created, undefined).pipe(Effect.as(inspection("joining"))),
+        projectChildren: () => [],
+        cancelChild: () => Effect.die("unused"),
+      })
+      const residentBackend = ExecutionBackend.Service.of({
+        ...backend,
+        inspectFanOut: () => Ref.get(fanOutState).pipe(Effect.map(inspection)),
+      })
+      const tool = ToolRuntime.Service.of({
+        run: () => Effect.succeed({ text: "diff --git a/a b/a", truncated: false, exitCode: 0 }),
+      })
+      const context = yield* Layer.build(
+        Layer.mergeAll(
+          TestConsole.layer,
+          Operation.productLayer({
+            repositoryLayer: ThreadRepository.memoryLayer(),
+            turnRepositoryLayer: Layer.succeed(TurnRepository.Service, reviewTurns),
+            backendLayer: Layer.succeed(ExecutionBackend.Service, residentBackend),
+            productAgentLayer: Layer.succeed(ProductAgent.Service, agent),
+            toolRuntimeLayer: () => Layer.succeed(ToolRuntime.Service, tool),
+            defaultWorkspace: "/work",
+            makeThreadId: Effect.succeed(Thread.ThreadId.make("thread")),
+            makeTurnId: Effect.succeed(Turn.TurnId.make("review-turn")),
+          }),
+        ),
+      )
+      const operation = Context.get(context, Operation.Service)
+      const request = yield* Effect.forkChild(operation.run(input()))
+      yield* Deferred.await(persisted)
+      const cancellation = yield* Effect.forkChild(Fiber.interrupt(request))
+      yield* Deferred.succeed(continueAdmission, undefined)
+      yield* Deferred.await(created)
+      yield* Fiber.join(cancellation)
+      expect((yield* turns.get(Turn.TurnId.make("review-turn")))?.status).toBe("running")
+      yield* Ref.set(fanOutState, "satisfied")
+      yield* TestClock.adjust("50 millis")
+      while ((yield* turns.get(Turn.TurnId.make("review-turn")))?.status !== "completed")
+        yield* Effect.sleep("10 millis")
+      expect((yield* turns.get(Turn.TurnId.make("review-turn")))?.status).toBe("completed")
+    }).pipe(Effect.scoped),
   )
 })
