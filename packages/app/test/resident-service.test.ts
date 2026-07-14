@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 import { Cause, Crypto, Deferred, Effect, Exit, Fiber, FiberSet, Layer, Ref } from "effect"
-import { canonicalServiceIdentity, makeLifecycle, protocolVersion, validateHandshake } from "../src/resident-service"
+import {
+  canonicalServiceIdentity,
+  makeLifecycle,
+  negotiateCapabilities,
+  protocolVersion,
+  validateHandshake,
+} from "../src/resident-service"
 
 describe("resident service protocol", () => {
   it("uses canonical profile and data root identity", async () => {
@@ -38,6 +44,15 @@ describe("resident service protocol", () => {
     expect(
       validateHandshake({ ...base, version: { major: 2, minor: 0 } }, { identity: "identity", token: "token" })._tag,
     ).toBe("UpgradeRequired")
+  })
+
+  it("enables a transport capability only when both peers advertise it", () => {
+    expect(negotiateCapabilities(["ping", "startup-state"], ["ping", "startup-state"])).toEqual([
+      "ping",
+      "startup-state",
+    ])
+    expect(negotiateCapabilities(["ping", "startup-state"], ["ping"])).toEqual(["ping"])
+    expect(negotiateCapabilities(["ping"], ["ping", "startup-state"])).toEqual(["ping"])
   })
 })
 

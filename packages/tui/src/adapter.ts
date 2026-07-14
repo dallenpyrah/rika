@@ -2221,6 +2221,33 @@ export const create = async (handlers: Handlers) => {
     useMouse: true,
     enableMouseMovement: true,
   })
-  handlers.resize(renderer.terminalWidth, renderer.terminalHeight)
-  return { renderer, surface: new Surface(renderer, handlers) }
+  let surface: Surface | undefined
+  let released = false
+  const releaseTerminal = () => {
+    if (released) return
+    released = true
+    try {
+      surface?.destroy()
+    } catch {
+    } finally {
+      try {
+        renderer.destroy()
+      } catch {
+      }
+    }
+  }
+  const suspendTerminal = () => {
+    if (!released) renderer.suspend()
+  }
+  const resumeTerminal = () => {
+    if (!released) renderer.resume()
+  }
+  try {
+    handlers.resize(renderer.terminalWidth, renderer.terminalHeight)
+    surface = new Surface(renderer, handlers)
+    return { renderer, surface, releaseTerminal, suspendTerminal, resumeTerminal }
+  } catch (cause) {
+    releaseTerminal()
+    throw cause
+  }
 }

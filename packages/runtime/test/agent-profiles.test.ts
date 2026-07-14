@@ -11,6 +11,15 @@ import {
 } from "../src/agent-profiles"
 
 const model = { provider: "test", model: "deterministic" }
+const relayModel = (selection: {
+  readonly provider: string
+  readonly model: string
+  readonly registrationKey?: string
+}) => ({
+  provider: selection.provider,
+  model: selection.model,
+  ...(selection.registrationKey === undefined ? {} : { registration_key: selection.registrationKey }),
+})
 
 describe("product agent profiles", () => {
   it("resolves named narrowed Baton agents and Relay presets", () => {
@@ -19,7 +28,7 @@ describe("product agent profiles", () => {
     for (const name of names) {
       const profile = resolve(name, model)
       expect(profile.agent.name).toBe(`rika-${name.toLowerCase()}`)
-      expect(registered[name]?.model).toEqual(model)
+      expect(registered[name]?.model).toEqual(relayModel(model))
       expect(registered[name]?.tool_names).toEqual(Object.keys(profile.agent.toolkit.tools))
       expect(registered[name]?.permissions.length).toBeGreaterThan(0)
       expect(registered[name]?.output_schema_ref).toMatch(/^rika\.agent\./)
@@ -70,7 +79,7 @@ describe("product agent profiles", () => {
   it.effect("uses the configured route for Painter and returns a typed unavailable error", () =>
     Effect.gen(function* () {
       const painter = yield* resolvePainter(model, true)
-      expect(painter.preset.model).toEqual(model)
+      expect(painter.preset.model).toEqual(relayModel(model))
       expect(painter.preset.tool_names).toEqual(["view_media"])
       const unavailable = yield* Effect.flip(resolvePainter(model, false))
       expect(unavailable._tag).toBe("PainterUnavailableError")

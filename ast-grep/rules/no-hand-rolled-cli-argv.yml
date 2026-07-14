@@ -15,5 +15,6 @@ ignores:
   - "**/dist/**"
   - "**/coverage/**"
   - "node_modules/**"
+  - "repos/effect/**"
   - "scripts/capture-tui-visuals.ts"
   - "scripts/package.ts"

@@ -39,7 +39,12 @@ const program = serve({
           input._tag === "Interactive"
             ? interactive(input, {
                 initialize: (dispatch) => Effect.sync(() => dispatch({ _tag: "ThreadsListed", threads: [] })),
-                submit: () => Effect.void,
+                submit: (prompt) =>
+                  prompt === "ambiguous"
+                    ? Effect.promise(() =>
+                        appendFile(join(dataRoot, "mutation-attempts.log"), `${process.pid}\n`),
+                      ).pipe(Effect.andThen(Effect.sync(() => process.kill(process.pid, "SIGKILL"))), Effect.asVoid)
+                    : Effect.void,
                 shell: () => Effect.void,
                 editQueued: () => Effect.void,
                 dequeue: () => Effect.void,

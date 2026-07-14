@@ -4,6 +4,8 @@ import {
   type Diagnostic,
   type EffectiveConfig,
   type Environment,
+  type ModelAlias,
+  type ModelAliasInput,
   type ModeId,
   type Settings,
   type SettingsInput,
@@ -15,13 +17,34 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/config/ConfigService") {}
 
+const mergeModels = (...sources: ReadonlyArray<Readonly<Record<string, ModelAliasInput>> | undefined>) => {
+  const models: Record<string, ModelAlias> = { ...defaults.models }
+  for (const source of sources) {
+    for (const [name, input] of Object.entries(source ?? {})) {
+      const current = models[name]
+      models[name] =
+        current === undefined
+          ? (input as ModelAlias)
+          : {
+              ...current,
+              ...input,
+              limits: { ...current.limits, ...input.limits },
+              variants: { ...current.variants, ...input.variants },
+            }
+    }
+  }
+  return models
+}
+
 const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Settings => {
   const mode = (id: ModeId) => ({ ...defaults.modes[id], ...global.modes?.[id], ...workspace.modes?.[id] })
   const modes = { low: mode("low"), medium: mode("medium"), high: mode("high"), ultra: mode("ultra") }
   return {
     gateways: { ...defaults.gateways, ...global.gateways, ...workspace.gateways },
-    models: { ...defaults.models, ...global.models, ...workspace.models },
+    models: mergeModels(global.models, workspace.models),
     modes,
+    agents: { ...defaults.agents, ...global.agents, ...workspace.agents },
+    compaction: { ...defaults.compaction, ...global.compaction, ...workspace.compaction },
     keymap: { ...defaults.keymap, ...global.keymap, ...workspace.keymap },
     permissions: { ...defaults.permissions, ...global.permissions, ...workspace.permissions },
     extensionRoots: workspace.extensionRoots ?? global.extensionRoots ?? defaults.extensionRoots,

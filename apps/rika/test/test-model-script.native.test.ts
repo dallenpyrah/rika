@@ -39,7 +39,7 @@ test("uses one canonical directory for both resident databases", async () => {
 
 test("uses production compaction defaults and route overrides", () => {
   expect(productionCompaction()).toEqual({
-    contextWindow: 372_000,
+    contextWindow: 1_050_000,
     reserveTokens: 128_000,
     keepRecentTokens: 32_000,
   })
@@ -80,7 +80,7 @@ test("content-addresses non-secret model execution semantics deterministically",
     }).registrationKey,
   ).toBe(firstQuery)
   const changes = [
-    { ...route, gateway: { ...route.gateway, protocol: "openai" as const } },
+    { ...route, gateway: { ...route.gateway, protocol: "anthropic" as const } },
     { ...route, gateway: { ...route.gateway, baseUrl: "https://models.example.test/v1" } },
     { ...route, model: "claude-opus-4-8" },
     { ...route, effort: "high" as const },
@@ -97,7 +97,17 @@ test("content-addresses non-secret model execution semantics deterministically",
   expect(JSON.stringify(modelRoutePlan(route))).not.toContain("API_KEY_VALUE")
   expect(modelRoutePlan(route).selection.registrationKey).toBe(key)
   expect(executionRoutePin(ConfigContract.defaults, "high").oracle.providerOptions).toEqual(route.options)
-  expect(executionRoutePin(ConfigContract.defaults, "medium").tokenBudget).toBe(64_000)
+  expect(executionRoutePin(ConfigContract.defaults, "high").agents?.review.alias).toBe("review")
+  expect(executionRoutePin(ConfigContract.defaults, "medium").tokenBudget).toBeUndefined()
+  const settings = {
+    ...ConfigContract.defaults,
+    compaction: { summaryModel: { alias: "terra", effort: "medium" as const } },
+  }
+  expect(executionRoutePin(settings, "medium").compactionSummary).toMatchObject({
+    role: "compaction",
+    alias: "terra",
+    model: "gpt-5.6-terra",
+  })
 })
 
 test("keeps registrations distinct by the exact Baton registry tuple", () => {
@@ -180,6 +190,12 @@ test("keeps a review route owner's workspace-specific models in the startup regi
   expect(persistedModelRoutesForStartup([owner]).map((candidate) => candidate.registrationKey)).toEqual([
     "workspace-main",
     "workspace-oracle",
+    route.compactionSummary!.registrationKey,
+    route.agents!.librarian.registrationKey,
+    route.agents!.painter.registrationKey,
+    route.agents!.review.registrationKey,
+    route.agents!.readThread.registrationKey,
+    route.agents!.task.registrationKey,
   ])
 })
 

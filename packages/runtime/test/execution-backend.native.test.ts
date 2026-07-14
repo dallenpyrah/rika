@@ -32,10 +32,7 @@ const withBackend = <A, E>(
     fixture: TestModel.Fixture,
     directory: string,
   ) => Effect.Effect<A, E, ExecutionBackend.Service | FileSystem.FileSystem>,
-  options?: Pick<
-    RelayExecutionBackend.LayerOptions,
-    "modelResilience" | "compaction" | "tokenBudget" | "permissionPolicy"
-  >,
+  options?: Pick<RelayExecutionBackend.LayerOptions, "modelResilience" | "compaction" | "permissionPolicy">,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -347,7 +344,7 @@ test("settles a Rika fan-out child after more than one thousand execution events
   ])
 }, 60_000)
 
-test("executes concurrent fan-out members with their persisted main and Oracle model routes", async () => {
+test("executes persisted main and Oracle fan-out routes without enforcing a legacy route budget", async () => {
   const result = await Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
@@ -362,6 +359,7 @@ test("executes concurrent fan-out members with their persisted main and Oracle m
           {
             provider: "main-provider",
             model: "main-model",
+            registrationKey: "main",
           },
         )
         const oracle = yield* TestModel.make(
@@ -369,6 +367,7 @@ test("executes concurrent fan-out members with their persisted main and Oracle m
           {
             provider: "oracle-provider",
             model: "oracle-model",
+            registrationKey: "oracle",
           },
         )
         const executionRoute: ExecutionBackend.ExecutionRoutePin = {
@@ -496,52 +495,6 @@ test("accepts steering while a TestModel execution is active", async () => {
   expect(result.requests).toHaveLength(2)
   expect(JSON.stringify(result.requests[0])).not.toContain("focus on the fixture")
   expect(JSON.stringify(result.requests[1]).match(/focus on the fixture/g)).toHaveLength(1)
-}, 30_000)
-
-test("exhausts the configured token budget before another model turn", async () => {
-  const usage = new Response.Usage({
-    inputTokens: { uncached: 2, total: 2, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: 2, text: 2, reasoning: undefined },
-  })
-  const result = await Effect.runPromise(
-    withBackend(
-      [
-        TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "budget-read" })], {
-          usage,
-        }),
-        TestModel.text("must not be requested"),
-      ],
-      (fixture, directory) =>
-        Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem
-          yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "fixture")
-          const backend = yield* ExecutionBackend.Service
-          const execution = yield* backend.start({
-            threadId: "thread-budget",
-            turnId: "turn-budget",
-            prompt: "read",
-            startedAt: 1,
-          })
-          return { execution, requests: yield* fixture.requests }
-        }),
-      { tokenBudget: 1 },
-    ),
-  )
-  const budgetExceeded = result.execution.events.find((event) => event.type === "budget.exceeded")
-  const failed = result.execution.events.find((event) => event.type === "execution.failed")
-  expect(result.execution.status).toBe("failed")
-  expect(budgetExceeded).toMatchObject({
-    type: "budget.exceeded",
-    data: { tokens_used: 4, token_budget: 1 },
-  })
-  expect(failed).toMatchObject({
-    type: "execution.failed",
-    text: "AgentLoopBudgetExceeded: used 4 of 1 tokens",
-    data: { message: "AgentLoopBudgetExceeded: used 4 of 1 tokens" },
-  })
-  expect(failed?.content).toBeUndefined()
-  expect(budgetExceeded!.sequence).toBeLessThan(failed!.sequence)
-  expect(result.requests).toHaveLength(1)
 }, 30_000)
 
 test("persists automatic compaction across backend restart and reuses compacted context", async () => {

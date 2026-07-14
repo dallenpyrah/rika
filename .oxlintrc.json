@@ -5,5 +5,5 @@
     "perf": "error",
     "suspicious": "error"
   },
-  "ignorePatterns": ["dist", "node_modules", ".turbo"]
+  "ignorePatterns": ["dist", "node_modules", ".turbo", "repos"]
 }

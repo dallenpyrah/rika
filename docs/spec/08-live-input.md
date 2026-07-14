@@ -26,4 +26,6 @@ In-process execution uses Effect Streams and services. Any process boundary uses
 
 The protocol must define connection initialization, cursor catch-up, live events, steering, follow-up input, permission answers, cancellation, heartbeat, typed errors, bounded buffering, and reconnect.
 
+For one physical resident connection, outbound frames and inbound handlers are ordered. Buffering is bounded, interactive action failures reach the caller, and close settles pending interactive actions immediately. One logical Interactive client session supervises replacement physical connections without rerunning its client callback. It restores `initialize` and selected-Thread intent, and read actions (`initialize`, Thread select/preview/reopen, follow, and cursor replay) wait for or retry on the current physical session. Submit, shell, queue edits, steering, interrupt-and-send, permission decisions, and cancel are never automatically resent after an ambiguous disconnect; they return after dispatching a visible transport-unknown `ExecutionFailed` event.
+
 SSE is forbidden for Rika-owned live execution/control transport. Provider and MCP package transports remain governed by their public contracts.

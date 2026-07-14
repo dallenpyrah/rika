@@ -10,17 +10,17 @@ import { join } from "node:path"
 const config = Effect.runSync(
   Config.all({
     enabled: Config.boolean("RIKA_LIVE_MODEL_TEST").pipe(Config.withDefault(false)),
-    apiKey: Config.option(Config.redacted("RIKA_VIBE_API_KEY")),
-    baseUrl: Config.option(Config.string("RIKA_VIBE_BASE_URL")),
-    model: Config.option(Config.string("RIKA_VIBE_MODEL")),
+    apiKey: Config.option(Config.redacted("RIKA_MODEL_API_KEY")),
+    baseUrl: Config.option(Config.string("RIKA_MODEL_BASE_URL")),
+    model: Config.option(Config.string("RIKA_MODEL_ID")),
   }),
 )
 
 const missing = [
   ...(config.enabled ? [] : ["RIKA_LIVE_MODEL_TEST=1"]),
-  ...(Option.isSome(config.apiKey) ? [] : ["RIKA_VIBE_API_KEY"]),
-  ...(Option.isSome(config.baseUrl) ? [] : ["RIKA_VIBE_BASE_URL"]),
-  ...(Option.isSome(config.model) ? [] : ["RIKA_VIBE_MODEL"]),
+  ...(Option.isSome(config.apiKey) ? [] : ["RIKA_MODEL_API_KEY"]),
+  ...(Option.isSome(config.baseUrl) ? [] : ["RIKA_MODEL_BASE_URL"]),
+  ...(Option.isSome(config.model) ? [] : ["RIKA_MODEL_ID"]),
 ]
 const skipReason = `live model suite disabled: missing ${missing.join(", ")}`
 const live = config.enabled && missing.length === 0
@@ -29,8 +29,8 @@ const liveIt = (name: string, test: () => Effect.Effect<void, unknown, never>) =
 const apiKey = Option.getOrElse(config.apiKey, () => Redacted.make("unavailable"))
 const baseUrl = Option.getOrElse(config.baseUrl, () => "http://127.0.0.1")
 const model = Option.getOrElse(config.model, () => "unavailable")
-const selection = { provider: "vibe", model }
-const modelLayer = withOpenAiCompatible({ provider: "vibe", model, baseUrl, apiKey: Config.succeed(apiKey) })
+const selection = { provider: "configured", model }
+const modelLayer = withOpenAiCompatible({ provider: "configured", model, baseUrl, apiKey: Config.succeed(apiKey) })
 
 const normalize = (result: Agent.Result) => ({
   nonEmpty: result.text.trim().length > 0,
@@ -48,7 +48,7 @@ const run = <Tools extends Record<string, Tool.Any>>(
   history?: Agent.RunOptions["history"],
 ) => Agent.generate(agent, { prompt, ...(history === undefined ? {} : { history }) }).pipe(Effect.provide(modelLayer))
 
-describe("local Vibe proxy live model", () => {
+describe("configured OpenAI-compatible live model", () => {
   liveIt("completes a short turn", () =>
     Effect.gen(function* () {
       const result = yield* run(Agent.make("live-smoke", { model: selection }), "Reply with exactly: rika-live-ok")
@@ -119,7 +119,7 @@ describe("local Vibe proxy live model", () => {
       const registrations = yield* registry.registrations
       const workflowSupported = registrations.some((registration) => registration.metadata?.workflow === true)
       expect({
-        modelReachable: registrations.some((registration) => registration.provider === "vibe"),
+        modelReachable: registrations.some((registration) => registration.provider === "configured"),
         workflowSupported,
       }).toEqual({ modelReachable: true, workflowSupported: false })
     }).pipe(Effect.provide(modelLayer)),

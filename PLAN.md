@@ -336,5 +336,5 @@ Rika v2 is complete when:
 - Measured first-party source coverage is at least 95% for statements, branches, functions, and lines.
 - Packaged CLI and native OpenTUI E2E flows pass against real process boundaries.
 - Deterministic fake-model suites prove long tool loops, approvals, steering, subagents, joins, restarts, and workflows.
-- Opt-in live-model suites pass through the configured local Vibe proxy without logging credentials.
+- Opt-in live-model suites pass through the configured OpenAI-compatible endpoint without logging credentials.
 - Final oracle reviews have no unresolved critical or high-severity findings.

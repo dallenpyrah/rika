@@ -93,6 +93,8 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Compose Relay embedded SQLite through `@relayfx/sdk` exports only.
 - [x] Register deterministic model layers through Baton/Effect AI package APIs.
 - [x] Replace provider-name routing and legacy model/mode configuration with protocol-discriminated Gateways, exact model variants, complete main/Oracle mode routes, content-addressed registrations, immutable Relay revision pins, and role-specific typed compaction. Published Baton 0.4.3 cannot safely provide pre-output availability-only candidate fallback; ADR 0013 records that limit.
+- [x] Add configurable GPT-backed Librarian, Painter, Review, ReadThread, and Task routes; persist them in immutable Turn pins and preserve main-route fallback for older pins.
+- [x] Centralize built-in metadata from `models.dev`, expose maximum input, maximum output, and retained recent tokens as the model config contract, derive provider and Baton compaction settings from that source, allow custom Gateway aliases to override transport limits, and remove mode and specialist execution-token budgets.
 - [x] Materialize persisted fan-out overrides into deterministic child-specific Relay definitions and prove concurrent main and Oracle provider execution natively.
 - [x] Implement thread-to-execution mapping.
 - [x] Map each Rika Thread to one stable Relay Session id.
@@ -181,6 +183,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Thread mentions.
 - [x] Image mentions.
 - [x] Automatic compaction.
+- [x] Route durable checkpoint summaries through a configurable, registered model and preserve the route in the immutable Turn pin.
 - [x] Context usage analysis.
 - [x] Skill discovery and lazy activation.
 - [x] Skill-bundled MCP configuration for activated skill resources.
@@ -193,6 +196,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Custom agent profile registration.
 - [x] Custom mode registration.
 - [x] Plugin diagnostics and reload.
+- [x] Add Effect-native per-process JSON file logging, resident-free path/status/export commands, private retention, and a crash-debugging skill.
 - [x] Pin plugin source hash, config fingerprint, generation, and tool-schema digest per execution.
 - [x] Pin MCP command fingerprint and effective cwd for approvals.
 
@@ -264,11 +268,11 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Reach and maintain at least 95% statements, branches, functions, and lines coverage over first-party app and package source. Latest retained global report: 98.17% statements, 95.77% branches, 96.20% functions, and 98.41% lines.
 - [x] Build packaged CLI E2E tests for help, parsing, execute, JSONL, threads, tools, extensions, failures, signals, and restart. Verified from the extracted release artifact with isolated temporary homes/workspaces on 2026-07-10; help/parser failures also prove Relay infrastructure is not started.
 - [x] Build real OpenTUI E2E tests that drive the native renderer through keyboard input, resize, streaming, overlays, queueing, interruption, and teardown. Native renderer coverage remains in `packages/tui/test/*.native.test.ts`; a packaged native-PTY E2E additionally proves welcome/composer rendering, keyboard submission, SIGINT exit, terminal-mode activation sequences, and restored termios state on macOS arm64.
-- [x] Build deterministic fake-model harness scenarios for text streaming, reasoning, tool calls, malformed calls, approvals, steering, retries, compaction, and budgets.
-  - Verified with real Baton TestModel and Relay SQLite on 2026-07-11: grouped text streaming and usage replay, distinct reasoning projection/replay through Baton aaba07e, read-file tool execution, unknown and malformed tool rejection, active-execution steering accepted and injected exactly once into the next eligible model request through Relay adc73d4 plus the issue #126 correction, transient model retry, token-budget exhaustion before a second request, cancellation, idempotent start, cursor replay, Approved/Denied/Always permission restart, forced automatic compaction, one durable checkpoint across backend reopen, compacted next-request context, and context-budget projection.
+- [x] Build deterministic fake-model harness scenarios for text streaming, reasoning, tool calls, malformed calls, approvals, steering, retries, compaction, and provider limits.
+  - Verified with real Baton TestModel and Relay SQLite on 2026-07-11: grouped text streaming and usage replay, distinct reasoning projection/replay through Baton aaba07e, read-file tool execution, unknown and malformed tool rejection, active-execution steering accepted and injected exactly once into the next eligible model request through Relay adc73d4 plus the issue #126 correction, transient model retry, cancellation, idempotent start, cursor replay, Approved/Denied/Always permission restart, forced automatic compaction, one durable checkpoint across backend reopen, compacted next-request context, and context-window projection.
 - [x] Build deterministic fake-model multi-agent scenarios for parallel children, partial failure, joins, cancellation, and parent resume. The Rika-level public-API harness covers bounded parallel dispatch, all four join policies, partial failures, idempotent cancellation, SIGKILL/restart recovery, parent inspection resume, ordered projection, and visible-effect deduplication.
 - [x] Build deterministic fake-model long-workflow scenarios with kill/restart injection at every implemented durable boundary. Native Relay SQLite SIGKILL harnesses pass for delivery and research-synthesis child-handler boundaries with pinned definitions and deduplicated visible effects; approval/timer waits remain outside this claim.
-- [ ] Build opt-in live-model smoke and eval suites using the local Vibe proxy Effect Config.
+- [ ] Build opt-in live-model smoke and eval suites using a configured OpenAI-compatible endpoint through Effect Config.
 - [ ] Capture redacted transcripts and tool-call evidence for the pending live agent suite. Packaged config/keymap/doctor tests already prove configured secrets are not disclosed, but no live-model evidence is claimed.
 - [x] Confirm excluded dependencies and features are absent from release archive inventories and packaged tool/UI surfaces.
 - [ ] Run repeated final oracle reviews until no critical/high findings remain.

@@ -2,6 +2,7 @@ import * as Operation from "@rika/app/operation"
 import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { command as ConfigCommand } from "./commands/config"
+import { command as DiagnosticsCommand } from "./commands/diagnostics"
 import { command as ExtensionsCommand } from "./commands/extensions"
 import { command as McpCommand } from "./commands/mcp"
 import { command as SkillsCommand } from "./commands/skills"
@@ -178,6 +179,7 @@ export const command = Command.make(
     Command.make("last", {}, () => dispatch({ _tag: "Thread", action: "last" })),
     Command.make("top", {}, () => dispatch({ _tag: "Thread", action: "top" })),
     ConfigCommand,
+    DiagnosticsCommand,
     ToolsCommand,
     SkillsCommand,
     McpCommand,

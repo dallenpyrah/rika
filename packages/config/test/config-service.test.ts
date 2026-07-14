@@ -54,7 +54,7 @@ describe("ConfigService", () => {
   it.effect("resolves workspace over global over defaults deterministically", () =>
     Effect.gen(function* () {
       const config = yield* ConfigService.effective()
-      expect(config.settings.logging).toEqual({ level: "debug", file: "/tmp/rika.log" })
+      expect(config.settings.logging).toEqual({ level: "debug" })
       expect(config.settings.permissions).toEqual({
         read: "deny",
         search: "allow",
@@ -71,7 +71,7 @@ describe("ConfigService", () => {
     }).pipe(
       Effect.provide(
         ConfigService.memoryLayer({
-          global: { logging: { level: "debug", file: "/tmp/rika.log" }, permissions: { read: "deny" } },
+          global: { logging: { level: "debug" }, permissions: { read: "deny" } },
           workspace: { logging: { level: "debug" }, permissions: { shell: "allow" } },
         }),
       ),
@@ -100,11 +100,12 @@ describe("ConfigService", () => {
     ),
   )
 
-  it.effect("merges aliases, modes, keymap, MCP, and notification settings", () =>
+  it.effect("merges aliases, modes, specialized agents, keymap, MCP, and notification settings", () =>
     Effect.gen(function* () {
       const config = yield* ConfigService.effective()
       expect(config.settings.models.local?.candidates).toEqual(["fake"])
-      expect(config.settings.modes.medium.budget).toBe(99)
+      expect(config.settings.agents.librarian).toEqual({ alias: "local", effort: "medium" })
+      expect(config.settings.agents.review).toEqual(ConfigContract.defaults.agents.review)
       expect(config.settings.keymap.submit).toBe("ctrl+enter")
       expect(config.settings.notifications.enabled).toBe(false)
       expect(config.settings.mcp.docs).toMatchObject({ transport: "remote" })
@@ -113,11 +114,32 @@ describe("ConfigService", () => {
         ConfigService.memoryLayer({
           workspace: {
             models: { local: { ...ConfigContract.defaults.models.luna!, candidates: ["fake"] } },
-            modes: { medium: { ...ConfigContract.defaults.modes.medium, budget: 99 } },
+            modes: { medium: ConfigContract.defaults.modes.medium },
+            agents: { librarian: { alias: "local", effort: "medium" } },
             keymap: { submit: "ctrl+enter" },
             notifications: { enabled: false },
             mcp: { docs: { transport: "remote", url: "https://example.test/mcp", headers: {}, enabled: true } },
           },
+        }),
+      ),
+    ),
+  )
+
+  it.effect("deep-merges built-in model limit overrides", () =>
+    Effect.gen(function* () {
+      const config = yield* ConfigService.effective()
+      expect(config.settings.models.luna).toMatchObject({
+        gateway: "openai",
+        candidates: ["gpt-5.6-luna"],
+        limits: { maxInputTokens: 500_000, maxOutputTokens: 128_000, keepRecentTokens: 32_000 },
+      })
+      expect(config.settings.models.luna?.variants.low?.normal.options).toEqual({
+        reasoning: { effort: "low" },
+      })
+    }).pipe(
+      Effect.provide(
+        ConfigService.memoryLayer({
+          global: { models: { luna: { limits: { maxInputTokens: 500_000 } } } },
         }),
       ),
     ),

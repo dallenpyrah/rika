@@ -3,7 +3,7 @@
 ## Requirements
 
 - Child Runs have isolated context.
-- Parent definitions may narrow child instructions, tools, mode, model route, budget, permissions, and output schema.
+- Parent definitions may narrow child instructions, tools, mode, model route, permissions, and output schema.
 - Parent child-join waits are non-actionable progress. The parent follower remains attached through the join and continues until parent terminal state or a separate explicit external permission request.
 - Fan-out supports bounded parallelism.
 - Joins support all, first-success, quorum, and best-effort policies.
@@ -21,7 +21,7 @@ Repeating a submission after restart uses the same fan-out and child ids. A diff
 
 ## Product Agents
 
-Built-in profiles include `search`, `review`, `oracle`, `librarian`, `painter`, `read-thread`, and general `task`.
+Built-in profiles include `search`, `review`, `oracle`, `librarian`, `painter`, `read-thread`, and general `task`. Oracle follows the selected mode's Oracle route. Settings independently route Librarian, Painter, Review, ReadThread, and Task. Every accepted Turn pins those routes so queued and resumed children do not change model after configuration reload. Specialists use the selected model's full input and output limits without a separate child execution-token budget. Search and `find_thread` remain model-free tools.
 
 ## Model-Facing Spawning
 

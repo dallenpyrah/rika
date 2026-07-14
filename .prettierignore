@@ -3,4 +3,5 @@
 coverage
 dist
 node_modules
+repos
 packages/tui/test/fixtures/visual/*.styles.json

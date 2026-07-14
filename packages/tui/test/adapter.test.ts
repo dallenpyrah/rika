@@ -94,6 +94,11 @@ const opentui = vi.hoisted(() => {
   const renderer = {
     stdout: { write: vi.fn() },
     realStdoutWrite: vi.fn(),
+    terminalWidth: 80,
+    terminalHeight: 24,
+    destroy: vi.fn(),
+    suspend: vi.fn(),
+    resume: vi.fn(),
     root: {
       add(child: object) {
         rootChildren.push(child)
@@ -580,4 +585,52 @@ test("create configures the CLI renderer", async () => {
   })
   expect(result.renderer).toBe(opentui.renderer)
   expect(result.surface).toBeInstanceOf(Surface)
+})
+
+test("releases renderer terminal modes once when initialization fails after acquisition", async () => {
+  opentui.renderer.destroy.mockClear()
+
+  await expect(
+    create({
+      key: vi.fn(),
+      resize: () => {
+        throw new Error("resize failed")
+      },
+    }),
+  ).rejects.toThrow("resize failed")
+
+  expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
+})
+
+test("releases terminal modes once before other cleanup and prevents editor resume while closing", async () => {
+  opentui.renderer.destroy.mockClear()
+  opentui.renderer.suspend.mockClear()
+  opentui.renderer.resume.mockClear()
+  const created = await create(handlers())
+  const events: Array<string> = []
+  opentui.renderer.destroy.mockImplementation(() => events.push("terminal-released"))
+
+  created.suspendTerminal()
+  created.releaseTerminal()
+  events.push("slow-client-cleanup")
+  created.resumeTerminal()
+  created.releaseTerminal()
+
+  expect(events).toEqual(["terminal-released", "slow-client-cleanup"])
+  expect(opentui.renderer.suspend).toHaveBeenCalledTimes(1)
+  expect(opentui.renderer.resume).not.toHaveBeenCalled()
+  expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
+})
+
+test("destroys the renderer when surface cleanup fails", async () => {
+  opentui.renderer.destroy.mockClear()
+  const created = await create(handlers())
+  created.surface.destroy = () => {
+    throw new Error("surface cleanup failed")
+  }
+
+  expect(() => created.releaseTerminal()).not.toThrow()
+  expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
+  expect(() => created.releaseTerminal()).not.toThrow()
+  expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
 })

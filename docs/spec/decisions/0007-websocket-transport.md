@@ -14,11 +14,15 @@ The shipped resident protocol v1 is connection-bound. The first client frame is 
 
 After the handshake, Schema-framed request and response messages correlate an operation for the lifetime of that connection. Interactive operations can carry events and client actions over the same socket. Protocol decoding and operation failures are returned as typed errors when the connection is still usable.
 
-Protocol v1 does not provide durable request idempotency keys, subscriptions, cursors, acknowledgements, bounded delivery windows, negotiated frame limits, reconnect replay, or slow-consumer handling. A disconnect or resident drain interrupts in-flight transport requests and interactive actions. The client reports the connection failure; it does not infer whether an interrupted mutation was accepted.
+Each connection has one scoped supervisor, one bounded outbound queue and writer, and serialized inbound handling. Frames larger than 1 MiB are rejected. Queue overload, socket close, and cleanup are typed transport failures and settle every pending request, action, startup wait, and heartbeat wait. Heartbeat keeps one probe outstanding, normally probes every five seconds, allows fifteen seconds for liveness, and treats any valid inbound frame as liveness. Heartbeat failure closes the connection and is never an execution result.
+
+Capabilities are enabled only when both peers advertise them. A client and server that negotiate `startup-state` use `accepted` with `state: starting`, followed by `startup-ready` or `startup-failed`. A legacy peer receives only the ready-form handshake and is never sent a frame it did not negotiate.
+
+Protocol v1 does not provide durable request idempotency keys, subscriptions, cursors, acknowledgements, bounded delivery windows, negotiated frame limits, reconnect replay, or slow-consumer handling. A logical Interactive client supervisor may reconnect and create a new connection-bound request while preserving its client callback and stable session interface. It restores only repeatable read state and actions. A disconnect or resident drain leaves an in-flight mutation's outcome unknown; the client reports a visible failure and does not resend it.
 
 ## Consequences
 
-One bidirectional connection carries product requests, interactive events, and control messages. Durable Threads and Executions remain in SQLite after transport loss, but transport request state does not. Callers must reconnect, refresh durable state, and reissue only commands that are safe to repeat. The protocol makes no request-idempotency, replay, or backpressure guarantee. Browser origins are not supported; this is an owner-authenticated native local protocol. Listener ownership, lifecycle, and token storage are defined by ADR 0012 and specs 05 and 12.
+One physical bidirectional connection carries product requests, interactive events, and control messages. Durable Threads and Executions remain in SQLite after transport loss, but transport request state does not. The Interactive client supervisor reconnects with bounded exponential delay, refreshes durable read state on a fresh physical session, and never retries an ambiguous mutation. The protocol makes no request-idempotency, replay, or backpressure guarantee. Browser origins are not supported; this is an owner-authenticated native local protocol. Listener ownership, lifecycle, and token storage are defined by ADR 0012 and specs 05 and 12.
 
 ## Rejected Alternatives
 

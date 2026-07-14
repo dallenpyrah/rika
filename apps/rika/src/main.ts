@@ -16,7 +16,7 @@ import {
   ThreadQuery,
   ThreadToolHandlers,
 } from "@rika/app"
-import { ConfigContract, ConfigService } from "@rika/config"
+import { ConfigContract, ConfigService, Models } from "@rika/config"
 import { McpOAuth, SkillRegistry } from "@rika/extensions"
 import * as Database from "@rika/persistence/database"
 import * as ThreadRepository from "@rika/persistence/repository"
@@ -32,6 +32,7 @@ import type { PathTarget } from "@rika/tui"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import {
+  Cause,
   Config,
   Console,
   Context,
@@ -42,6 +43,7 @@ import {
   Path,
   Redacted,
   Ref,
+  References,
   Schedule,
   Schema,
 } from "effect"
@@ -51,6 +53,7 @@ import { mkdir, realpath, rm, stat } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative as relativePathFrom, resolve } from "node:path"
 import { command, version } from "./command"
 import { renderGoodbye } from "./goodbye"
+import * as Logging from "./logging"
 import { layer as residentLayer, serve as serveResident } from "./resident-transport"
 
 const imageMediaType = (path: string) => {
@@ -505,12 +508,55 @@ export const executionRoutePin = (
       compaction: route.compaction,
     }
   }
+  const resolveAgent = (agent: ConfigContract.AgentId) => {
+    const route = ConfigContract.resolveAgentRoute(settings, agent)
+    const plan = modelRoutePlan(route)
+    return {
+      role: agent,
+      alias: route.alias,
+      provider: plan.selection.provider,
+      model: plan.selection.model,
+      registrationKey: plan.registrationKey,
+      gatewayProtocol: route.gateway.protocol,
+      gatewayBaseUrl: normalizedBaseUrl(route.gateway.baseUrl),
+      gatewayAuth: route.gateway.auth.type === "none" ? "none" : `bearer-env:${route.gateway.auth.variable}`,
+      effort: route.effort,
+      fast: route.fast,
+      requestVariant: plan.registrationKey,
+      providerOptions: route.options,
+      compaction: route.compaction,
+    }
+  }
+  const summaryRoute = ConfigContract.resolveCompactionSummaryRoute(settings)
+  const summaryPlan = modelRoutePlan(summaryRoute)
   return {
     version: 1,
     mode,
-    tokenBudget: settings.modes[mode].budget * 1_000,
+    compactionSummary: {
+      role: "compaction",
+      alias: summaryRoute.alias,
+      provider: summaryPlan.selection.provider,
+      model: summaryPlan.selection.model,
+      registrationKey: summaryPlan.registrationKey,
+      gatewayProtocol: summaryRoute.gateway.protocol,
+      gatewayBaseUrl: normalizedBaseUrl(summaryRoute.gateway.baseUrl),
+      gatewayAuth:
+        summaryRoute.gateway.auth.type === "none" ? "none" : `bearer-env:${summaryRoute.gateway.auth.variable}`,
+      effort: summaryRoute.effort,
+      fast: summaryRoute.fast,
+      requestVariant: summaryPlan.registrationKey,
+      providerOptions: summaryRoute.options,
+      compaction: summaryRoute.compaction,
+    },
     main: resolveRole("main"),
     oracle: resolveRole("oracle"),
+    agents: {
+      librarian: resolveAgent("librarian"),
+      painter: resolveAgent("painter"),
+      review: resolveAgent("review"),
+      readThread: resolveAgent("readThread"),
+      task: resolveAgent("task"),
+    },
   }
 }
 
@@ -624,9 +670,9 @@ export const registrationsForRoutes = (
 export const productionCompaction = (
   route?: Pick<ConfigContract.ResolvedModelRoute, "compaction">,
 ): Compaction.DefaultOptions => ({
-  contextWindow: route?.compaction.contextWindow ?? 372_000,
-  reserveTokens: route?.compaction.reserveTokens ?? 128_000,
-  keepRecentTokens: route?.compaction.keepRecentTokens ?? 32_000,
+  contextWindow: route?.compaction.contextWindow ?? Models.defaultCompaction.contextWindow,
+  reserveTokens: route?.compaction.reserveTokens ?? Models.defaultCompaction.reserveTokens,
+  keepRecentTokens: route?.compaction.keepRecentTokens ?? Models.defaultCompaction.keepRecentTokens,
 })
 
 const registrationTuple = (candidate: {
@@ -646,14 +692,18 @@ export const configuredBackendLayer = (
   allModelRoutes?: ReadonlyArray<ConfigContract.ResolvedModelRoute>,
   oracleRoute?: ConfigContract.ResolvedModelRoute,
   persistedModelRoutes: ReadonlyArray<Turn.ExecutionModelRoute> = [],
+  compactionSummaryRoute?: ConfigContract.ResolvedModelRoute,
 ) =>
   Layer.unwrap(
     Effect.gen(function* () {
       yield* Effect.promise(() => mkdir(dirname(filename), { recursive: true }))
       const route = modelRoute ?? ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")
       const resolvedOracleRoute = oracleRoute ?? route
+      const resolvedCompactionSummaryRoute =
+        compactionSummaryRoute ?? ConfigContract.resolveCompactionSummaryRoute(ConfigContract.defaults)
       const routePlan = modelRoutePlan(route)
       const oracleRoutePlan = modelRoutePlan(resolvedOracleRoute)
+      const compactionSummaryPlan = modelRoutePlan(resolvedCompactionSummaryRoute)
       const testResponse = yield* Config.option(Config.string("RIKA_TEST_MODEL_RESPONSE"))
       const testScript = yield* Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT"))
       if (testResponse._tag === "Some" && testScript._tag === "Some") {
@@ -677,7 +727,7 @@ export const configuredBackendLayer = (
         modelVariantPolicy = "fixed-selection"
       } else {
         const configuredRegistrations = yield* registrationsForRoutes(
-          allModelRoutes ?? [route, resolvedOracleRoute],
+          allModelRoutes ?? [route, resolvedOracleRoute, resolvedCompactionSummaryRoute],
           gatewayCredentials,
         )
         const configuredKeys = new Set(configuredRegistrations.map(registrationTuple))
@@ -706,6 +756,8 @@ export const configuredBackendLayer = (
           selection,
           oracleSelection:
             testScript._tag === "Some" || testResponse._tag === "Some" ? selection : oracleRoutePlan.selection,
+          compactionSummarySelection:
+            testScript._tag === "Some" || testResponse._tag === "Some" ? selection : compactionSummaryPlan.selection,
           modelVariantPolicy,
           compaction: routePlan.compaction,
           oracleCompaction: oracleRoutePlan.compaction,
@@ -847,6 +899,14 @@ export const loadSettingsFile = Effect.fn("Main.loadSettingsFile")(function* (fi
   return ConfigContract.decodeSettingsInput(filename, value)
 })
 
+const failureKind = (cause: Cause.Cause<unknown>) => {
+  const failure = Cause.squash(cause)
+  if (failure instanceof Error) return failure.name
+  if (failure !== null && typeof failure === "object" && "_tag" in failure && typeof failure._tag === "string")
+    return failure._tag
+  return typeof failure
+}
+
 const main = Command.run(command, { version }).pipe(
   Effect.catchTag("OperationUnavailable", (error: Operation.OperationUnavailable) =>
     Console.error(error.message).pipe(Effect.andThen(Effect.fail(error))),
@@ -895,7 +955,14 @@ export const gatewayCredentialsForRoutes = (
 
 export const persistedModelRoutesForStartup = (turns: ReadonlyArray<Turn.Turn>) =>
   turns.flatMap((turn) =>
-    turn.executionRoute === undefined ? [] : [turn.executionRoute.main, turn.executionRoute.oracle],
+    turn.executionRoute === undefined
+      ? []
+      : [
+          turn.executionRoute.main,
+          turn.executionRoute.oracle,
+          ...(turn.executionRoute.compactionSummary === undefined ? [] : [turn.executionRoute.compactionSummary]),
+          ...Object.values(turn.executionRoute.agents ?? {}),
+        ],
   )
 
 export const canonicalDatabaseRoot = async (productDatabase: string, relayDatabase: string) => {
@@ -1174,15 +1241,10 @@ if (import.meta.main) {
             previewTimer = undefined
             if (renderTimer !== undefined) clearTimeout(renderTimer)
             renderTimer = undefined
-            renderer?.surface.destroy()
-            renderer?.renderer.stop()
+            renderer?.releaseTerminal()
             if (initialization !== undefined)
               yield* Effect.promise(() => initialization!).pipe(Effect.catch(() => Effect.void))
             yield* interruptTrackedFibers([...fibers])
-            if (renderer !== undefined) {
-              yield* Effect.promise(() => renderer!.renderer.idle())
-              renderer.renderer.destroy()
-            }
             if (showGoodbye) goodbye()
           })
         const close = (exitCode?: number) => {
@@ -1290,11 +1352,11 @@ if (import.meta.main) {
             const file = `${model.workspace}/${relative}`
             await mkdir(`${model.workspace}/.rika`, { recursive: true })
             await Bun.write(file, ViewState.displayInput(model))
-            renderer?.renderer.suspend()
+            renderer?.suspendTerminal()
             try {
               await Bun.spawn([editor, file], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited
             } finally {
-              renderer?.renderer.resume()
+              renderer?.resumeTerminal()
             }
             const edited = await Bun.file(file).text()
             await rm(file, { force: true })
@@ -1323,7 +1385,7 @@ if (import.meta.main) {
                 renderer?.surface.showToast("Could not open the file in the default application", "#e06c75")
                 return
               }
-              renderer?.renderer.suspend()
+              renderer?.suspendTerminal()
               try {
                 await Bun.spawn(editorArguments(editor, path, target.line, target.column), {
                   stdin: "inherit",
@@ -1331,8 +1393,8 @@ if (import.meta.main) {
                   stderr: "inherit",
                 }).exited
               } finally {
-                renderer?.renderer.resume()
-                renderer?.surface.update(model)
+                renderer?.resumeTerminal()
+                if (!closed) renderer?.surface.update(model)
               }
             }).pipe(Effect.asVoid),
           )
@@ -1484,10 +1546,7 @@ if (import.meta.main) {
           }),
           () => closed,
           async (created) => {
-            created.surface.destroy()
-            created.renderer.stop()
-            await created.renderer.idle()
-            created.renderer.destroy()
+            created.releaseTerminal()
           },
         )
           .then((created) => {
@@ -1614,6 +1673,12 @@ if (import.meta.main) {
               ConfigContract.resolveModelRoute(resolvedWorkspaceConfig.settings, candidate, "main"),
               ConfigContract.resolveModelRoute(resolvedWorkspaceConfig.settings, candidate, "oracle"),
             ])
+            routes.push(
+              ConfigContract.resolveCompactionSummaryRoute(resolvedWorkspaceConfig.settings),
+              ...(["librarian", "painter", "review", "readThread", "task"] as const).map((agent) =>
+                ConfigContract.resolveAgentRoute(resolvedWorkspaceConfig.settings, agent),
+              ),
+            )
             const registrations = yield* registrationsForRoutes(
               routes,
               resolvedWorkspaceConfig.environment.gatewayCredentials,
@@ -1627,6 +1692,12 @@ if (import.meta.main) {
           ConfigContract.resolveModelRoute(effectiveConfig.settings, mode, "main"),
           ConfigContract.resolveModelRoute(effectiveConfig.settings, mode, "oracle"),
         ])
+        allModelRoutes.push(
+          ConfigContract.resolveCompactionSummaryRoute(effectiveConfig.settings),
+          ...(["librarian", "painter", "review", "readThread", "task"] as const).map((agent) =>
+            ConfigContract.resolveAgentRoute(effectiveConfig.settings, agent),
+          ),
+        )
         const repositories = Layer.succeedContext(yield* Layer.build(Layer.merge(repositoryLayer, turnRepositoryLayer)))
         const persistedModelRoutes = yield* TurnRepository.Service.pipe(
           Effect.flatMap((turns) => turns.listNonterminal()),
@@ -1650,6 +1721,7 @@ if (import.meta.main) {
           allModelRoutes,
           ConfigContract.resolveModelRoute(effectiveConfig.settings, "medium", "oracle"),
           persistedModelRoutes,
+          ConfigContract.resolveCompactionSummaryRoute(effectiveConfig.settings),
         ).pipe(Layer.provide(BunServices.layer), Layer.provide(BunCrypto.layer))
         const configAdapter = Layer.effect(
           ConfigOperations.Adapter,
@@ -1774,88 +1846,137 @@ if (import.meta.main) {
           }),
       ),
     )
+  const observedProgram = <A, E>(role: Logging.ProcessRole, dataRoot: string, program: Effect.Effect<A, E>) =>
+    Effect.logInfo("process.started").pipe(
+      Effect.andThen(
+        Effect.gen(function* () {
+          const globalSettings = yield* loadSettingsFile(globalConfig)
+          const workspaceSettings = yield* loadSettingsFile(workspaceConfig)
+          const effectiveConfig = yield* ConfigService.effective().pipe(
+            Effect.provide(ConfigService.memoryLayer({ global: globalSettings, workspace: workspaceSettings })),
+          )
+          return yield* program.pipe(
+            Effect.provideService(
+              References.MinimumLogLevel,
+              Logging.minimumLevel(effectiveConfig.settings.logging.level),
+            ),
+          )
+        }),
+      ),
+      Effect.tapCause((cause) =>
+        Effect.logError("process.failed").pipe(Effect.annotateLogs("rika.failure.kind", failureKind(cause))),
+      ),
+      Effect.ensuring(Effect.logInfo("process.stopped")),
+      Effect.annotateLogs({
+        "rika.process.role": role,
+        "rika.process.instance": `${Date.now()}-${process.pid}`,
+        "rika.process.pid": process.pid,
+        "rika.version": version,
+      }),
+      Effect.provide(Logging.layer({ dataRoot, role, version })),
+      Effect.provide(BunServices.layer),
+    )
   const dispatcherLayer = Layer.effect(
     Operation.Service,
     Effect.gen(function* () {
       const resident = yield* ResidentService.Service
       return Operation.Service.of({
         run: Effect.fn("Operation.dispatch")((input) =>
-          Effect.scoped(
-            Effect.gen(function* () {
-              const clientInput = withClientWorkspace(input, process.cwd())
-              const dataRoot = yield* Effect.promise(() => canonicalDatabaseRoot(database, relayDatabase))
-              const connected = yield* Effect.result(
-                resident
-                  .getOrCreate({
-                    profile: "default",
-                    dataRoot,
-                    clientKind:
-                      clientInput._tag === "Interactive"
-                        ? "interactive"
-                        : clientInput._tag === "Thread"
-                          ? "thread-continue"
-                          : clientInput._tag === "Run"
-                            ? "run"
-                            : clientInput._tag === "Review"
-                              ? "review"
-                              : clientInput._tag === "Workflow"
-                                ? "workflow"
-                                : "product",
-                    clientVersion: version,
-                    startHost: () =>
-                      Effect.gen(function* () {
-                        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-                        const handle = yield* spawner.spawn(
-                          ChildProcess.make(process.execPath, [import.meta.path], {
-                            detached: true,
-                            stdin: "ignore",
-                            stdout: "ignore",
-                            stderr: "ignore",
-                            extendEnv: true,
-                            env: {
-                              RIKA_INTERNAL_RESIDENT_HOST: "1",
-                              RIKA_INTERNAL_RESIDENT_PROFILE: "default",
-                              RIKA_INTERNAL_RESIDENT_DATA_ROOT: dataRoot,
-                            },
-                          }),
+          Logging.resolveDataRoot(database, relayDatabase).pipe(
+            Effect.flatMap((dataRoot) =>
+              observedProgram(
+                "client",
+                dataRoot,
+                Effect.scoped(
+                  Effect.gen(function* () {
+                    const clientInput = withClientWorkspace(input, process.cwd())
+                    const connected = yield* Effect.result(
+                      resident
+                        .getOrCreate({
+                          profile: "default",
+                          dataRoot,
+                          clientKind:
+                            clientInput._tag === "Interactive"
+                              ? "interactive"
+                              : clientInput._tag === "Thread"
+                                ? "thread-continue"
+                                : clientInput._tag === "Run"
+                                  ? "run"
+                                  : clientInput._tag === "Review"
+                                    ? "review"
+                                    : clientInput._tag === "Workflow"
+                                      ? "workflow"
+                                      : "product",
+                          clientVersion: version,
+                          startHost: () =>
+                            Effect.gen(function* () {
+                              const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+                              const handle = yield* spawner.spawn(
+                                ChildProcess.make(process.execPath, [import.meta.path], {
+                                  detached: true,
+                                  stdin: "ignore",
+                                  stdout: "ignore",
+                                  stderr: "ignore",
+                                  extendEnv: true,
+                                  env: {
+                                    RIKA_INTERNAL_RESIDENT_HOST: "1",
+                                    RIKA_INTERNAL_RESIDENT_PROFILE: "default",
+                                    RIKA_INTERNAL_RESIDENT_DATA_ROOT: dataRoot,
+                                  },
+                                }),
+                              )
+                              yield* handle.unref
+                              yield* Effect.logInfo("resident.spawned")
+                            }).pipe(
+                              Effect.mapError((cause) =>
+                                cause instanceof ResidentService.ResidentServiceError
+                                  ? cause
+                                  : new ResidentService.ResidentServiceError({
+                                      reason: "transport-failed",
+                                      message: String(cause),
+                                    }),
+                              ),
+                            ),
+                        })
+                        .pipe(Effect.provide(Layer.merge(BunServices.layer, BunCrypto.layer))),
+                    )
+                    if (connected._tag === "Success") {
+                      const connection = connected.success
+                      yield* Effect.logInfo("resident.connected")
+                      yield* connection
+                        .run(clientInput, {
+                          stdout: (text) => Effect.sync(() => process.stdout.write(text)),
+                          stderr: (text) => Effect.sync(() => process.stderr.write(text)),
+                          ...(clientInput._tag === "Interactive"
+                            ? { interactive: clientOwnedInteractiveFunction }
+                            : {}),
+                        })
+                        .pipe(
+                          Effect.mapError((error) =>
+                            error instanceof Operation.OperationUnavailable
+                              ? error
+                              : new Operation.OperationUnavailable({
+                                  operation: clientInput._tag,
+                                  message: error.message,
+                                }),
+                          ),
+                          Effect.ensuring(connection.close),
                         )
-                        yield* handle.unref
-                      }).pipe(
-                        Effect.mapError((cause) =>
-                          cause instanceof ResidentService.ResidentServiceError
-                            ? cause
-                            : new ResidentService.ResidentServiceError({
-                                reason: "transport-failed",
-                                message: String(cause),
-                              }),
-                        ),
-                      ),
-                  })
-                  .pipe(Effect.provide(Layer.merge(BunServices.layer, BunCrypto.layer))),
-              )
-              if (connected._tag === "Success") {
-                const connection = connected.success
-                yield* connection
-                  .run(clientInput, {
-                    stdout: (text) => Effect.sync(() => process.stdout.write(text)),
-                    stderr: (text) => Effect.sync(() => process.stderr.write(text)),
-                    ...(clientInput._tag === "Interactive" ? { interactive: clientOwnedInteractiveFunction } : {}),
-                  })
-                  .pipe(
-                    Effect.mapError((error) =>
-                      error instanceof Operation.OperationUnavailable
-                        ? error
-                        : new Operation.OperationUnavailable({ operation: clientInput._tag, message: error.message }),
-                    ),
-                    Effect.ensuring(connection.close),
-                  )
-                return
-              }
-              return yield* new Operation.OperationUnavailable({
-                operation: clientInput._tag,
-                message: connected.failure.message,
-              })
-            }),
+                      return
+                    }
+                    return yield* new Operation.OperationUnavailable({
+                      operation: clientInput._tag,
+                      message: connected.failure.message,
+                    })
+                  }),
+                ).pipe(
+                  Effect.tap(() => Effect.logInfo("operation.completed")),
+                  Effect.tapError(() => Effect.logError("operation.failed")),
+                  Effect.annotateLogs("rika.operation", input._tag),
+                ),
+              ),
+            ),
+            Effect.provide(BunServices.layer),
           ),
         ),
       })
@@ -1882,6 +2003,7 @@ if (import.meta.main) {
             owner: residentOwner,
           }),
         ).pipe(Effect.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)))
-  if (process.env.RIKA_INTERNAL_RESIDENT_HOST === "1") BunRuntime.runMain(hostProgram)
+  if (process.env.RIKA_INTERNAL_RESIDENT_HOST === "1")
+    BunRuntime.runMain(observedProgram("resident", hostDataRoot ?? defaultDataRoot, hostProgram))
   else BunRuntime.runMain(clientProgram)
 }

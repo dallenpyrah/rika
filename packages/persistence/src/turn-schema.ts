@@ -18,7 +18,7 @@ export const ExecutionExtensionPin = Schema.Struct({
 export type ExecutionExtensionPin = typeof ExecutionExtensionPin.Type
 
 export const ExecutionModelRoute = Schema.Struct({
-  role: Schema.Literals(["main", "oracle"]),
+  role: Schema.Literals(["main", "oracle", "compaction", "librarian", "painter", "review", "readThread", "task"]),
   alias: Schema.String,
   provider: Schema.String,
   model: Schema.String,
@@ -41,9 +41,19 @@ export type ExecutionModelRoute = typeof ExecutionModelRoute.Type
 export const ExecutionRoutePin = Schema.Struct({
   version: Schema.Literal(1),
   mode: Schema.Literals(["low", "medium", "high", "ultra", "test"]),
-  tokenBudget: Schema.Number,
+  tokenBudget: Schema.optionalKey(Schema.Number),
+  compactionSummary: Schema.optionalKey(ExecutionModelRoute),
   main: ExecutionModelRoute,
   oracle: ExecutionModelRoute,
+  agents: Schema.optionalKey(
+    Schema.Struct({
+      librarian: ExecutionModelRoute,
+      painter: ExecutionModelRoute,
+      review: ExecutionModelRoute,
+      readThread: ExecutionModelRoute,
+      task: ExecutionModelRoute,
+    }),
+  ),
 })
 export type ExecutionRoutePin = typeof ExecutionRoutePin.Type
 
@@ -64,9 +74,16 @@ export const testExecutionRoute = (mode: "low" | "medium" | "high" | "ultra" | "
   return {
     version: 1,
     mode,
-    tokenBudget: 64_000,
+    compactionSummary: { ...route, role: "compaction" },
     main: { ...route, role: "main" },
     oracle: { ...route, role: "oracle" },
+    agents: {
+      librarian: { ...route, role: "librarian" },
+      painter: { ...route, role: "painter" },
+      review: { ...route, role: "review" },
+      readThread: { ...route, role: "readThread" },
+      task: { ...route, role: "task" },
+    },
   }
 }
 

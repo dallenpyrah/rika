@@ -18,7 +18,7 @@ const native = vi.hoisted(() => ({
 }))
 
 const routeFor = (
-  role: "main" | "oracle",
+  role: "main" | "oracle" | "compaction" | "librarian" | "painter" | "review" | "readThread" | "task",
   model: { readonly provider: string; readonly model: string; readonly registrationKey?: string },
   compaction: { readonly contextWindow: number; readonly reserveTokens: number; readonly keepRecentTokens: number },
 ) => ({
@@ -638,7 +638,7 @@ describe("ExecutionBackend Relay client adapter", () => {
     }),
   )
 
-  it.effect("registers compaction, budget, and permission policy options", () =>
+  it.effect("registers compaction and permission policy options", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
       const permissionPolicy = [{ tool: "shell", action: "deny" }] as never
@@ -649,13 +649,11 @@ describe("ExecutionBackend Relay client adapter", () => {
         provideConfiguredBackend(fixture.implementation, {
           selection,
           compaction: { contextWindow: 10_000, reserveTokens: 500, keepRecentTokens: 2_000 },
-          tokenBudget: 8_000,
           permissionPolicy,
         }),
       )
       expect((yield* Ref.get(fixture.registrations))[0]).toMatchObject({
         permission_rules: permissionPolicy,
-        token_budget: 8_000,
         metadata: { steering_enabled: true },
         compaction_policy: {
           context_window: 10_000,
@@ -1097,6 +1095,12 @@ describe("ExecutionBackend Relay client adapter", () => {
         },
       })
       const oracleSelection = { provider: "oracle-gateway", model: "oracle-model", registrationKey: "sol:high:normal" }
+      const taskSelection = { provider: "task-gateway", model: "task-model", registrationKey: "terra:medium:normal" }
+      const summarySelection = {
+        provider: "summary-gateway",
+        model: "summary-model",
+        registrationKey: "terra:low:normal",
+      }
       const mainCompaction = { contextWindow: 372_000, reserveTokens: 128_000, keepRecentTokens: 32_000 }
       const oracleCompaction = { contextWindow: 1_000_000, reserveTokens: 128_000, keepRecentTokens: 64_000 }
       yield* Effect.gen(function* () {
@@ -1104,11 +1108,24 @@ describe("ExecutionBackend Relay client adapter", () => {
         const route = {
           version: 1 as const,
           mode: "test" as const,
-          tokenBudget: 777,
+          compactionSummary: routeFor("compaction", summarySelection, mainCompaction),
           main: routeFor("main", selection, mainCompaction),
           oracle: routeFor("oracle", oracleSelection, oracleCompaction),
+          agents: {
+            librarian: routeFor("librarian", selection, mainCompaction),
+            painter: routeFor("painter", selection, mainCompaction),
+            review: routeFor("review", selection, mainCompaction),
+            readThread: routeFor("readThread", selection, mainCompaction),
+            task: routeFor("task", taskSelection, mainCompaction),
+          },
         }
-        yield* backend.start({ threadId: "thread", turnId: "other-turn", prompt: "prompt", startedAt: 1 })
+        yield* backend.start({
+          threadId: "thread",
+          turnId: "other-turn",
+          prompt: "prompt",
+          startedAt: 1,
+          executionRoute: route,
+        })
         yield* backend.createFanOut({
           fanOutId: "fan",
           parentTurnId: "turn",
@@ -1131,35 +1148,67 @@ describe("ExecutionBackend Relay client adapter", () => {
         }),
       )
       const registered = (yield* Ref.get(fixture.registrations)).at(-1) as any
-      expect(registered.agent.model).toEqual(selection)
+      expect(registered.agent.model).toEqual({ ...selection, registrationKey: "default" })
       expect(registered.compaction_policy).toEqual({
         context_window: 372_000,
         reserve_tokens: 128_000,
         keep_recent_tokens: 32_000,
+        summary_model: {
+          provider: "summary-gateway",
+          model: "summary-model",
+          registration_key: "terra:low:normal",
+        },
       })
-      expect(registered.child_run_presets.Oracle.model).toEqual(oracleSelection)
+      expect(registered.child_run_presets.Oracle.model).toEqual({
+        provider: oracleSelection.provider,
+        model: oracleSelection.model,
+        registration_key: oracleSelection.registrationKey,
+      })
       expect(registered.child_run_presets.Oracle.compaction_policy).toEqual({
         context_window: 1_000_000,
         reserve_tokens: 128_000,
         keep_recent_tokens: 64_000,
+        summary_model: {
+          provider: "summary-gateway",
+          model: "summary-model",
+          registration_key: "terra:low:normal",
+        },
       })
-      expect(registered.child_run_presets.Task.model).toEqual(selection)
-      expect(fanOutInputs[0].children[0].override.model).toEqual(oracleSelection)
+      expect(registered.child_run_presets.Task.model).toEqual({
+        provider: taskSelection.provider,
+        model: taskSelection.model,
+        registration_key: taskSelection.registrationKey,
+      })
+      expect(fanOutInputs[0].children[0].override.model).toEqual({
+        provider: oracleSelection.provider,
+        model: oracleSelection.model,
+        registration_key: oracleSelection.registrationKey,
+      })
       expect(fanOutInputs[0].children[0].override.compaction_policy).toEqual(
         registered.child_run_presets.Oracle.compaction_policy,
       )
-      expect(fanOutInputs[0].children[1].override.model).toEqual({ ...selection, registrationKey: "default" })
+      expect(fanOutInputs[0].children[1].override.model).toEqual({
+        provider: taskSelection.provider,
+        model: taskSelection.model,
+        registration_key: taskSelection.registrationKey,
+      })
       expect(fanOutInputs[0].children[1].override.compaction_policy).toEqual(registered.compaction_policy)
       expect(fanOutInputs[0].children[0].metadata).toMatchObject({
         rika_workspace: "/client/workspace",
-        rika_token_budget: 777,
       })
       expect(fanOutInputs[0].children[0].metadata.rika_execution_route).toEqual({
         version: 1,
         mode: "test",
-        tokenBudget: 777,
+        compactionSummary: routeFor("compaction", summarySelection, mainCompaction),
         main: routeFor("main", selection, mainCompaction),
         oracle: routeFor("oracle", oracleSelection, oracleCompaction),
+        agents: {
+          librarian: routeFor("librarian", selection, mainCompaction),
+          painter: routeFor("painter", selection, mainCompaction),
+          review: routeFor("review", selection, mainCompaction),
+          readThread: routeFor("readThread", selection, mainCompaction),
+          task: routeFor("task", taskSelection, mainCompaction),
+        },
       })
     }),
   )

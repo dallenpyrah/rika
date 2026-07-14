@@ -16,7 +16,15 @@ import type {
 import { Context, Duration, Effect, Layer, LayerMap, Option, Redacted, Schedule, Semaphore, Stream } from "effect"
 import { LanguageModel, Tool, Toolkit } from "effect/unstable/ai"
 import { FetchHttpClient } from "effect/unstable/http"
-import { BackendError, Event, type ExecutionRoutePin, type PromptPart, Service, Status } from "./execution-contract"
+import {
+  type AgentProfile,
+  BackendError,
+  Event,
+  type ExecutionRoutePin,
+  type PromptPart,
+  Service,
+  Status,
+} from "./execution-contract"
 import {
   childRunSpawnPermission,
   outputSchemaRegistrations,
@@ -35,6 +43,11 @@ export interface CompactionPolicy {
   readonly context_window: number
   readonly reserve_tokens: number
   readonly keep_recent_tokens: number
+  readonly summary_model?: {
+    readonly provider: string
+    readonly model: string
+    readonly registration_key?: string
+  }
 }
 
 export interface LayerOptions<AdditionalTools extends Record<string, Tool.Any> = {}> {
@@ -45,12 +58,12 @@ export interface LayerOptions<AdditionalTools extends Record<string, Tool.Any> =
   readonly additionalRegistrations?: ReadonlyArray<ModelRegistry.Registration>
   readonly selection: ModelRegistry.ModelSelection
   readonly oracleSelection?: ModelRegistry.ModelSelection
+  readonly compactionSummarySelection?: ModelRegistry.ModelSelection
   readonly defaultReasoningEffort?: string
   readonly modelVariantPolicy?: ModelVariantPolicy
   readonly modelResilience?: ModelResilience.Interface
   readonly compaction?: Compaction.DefaultOptions
   readonly oracleCompaction?: Compaction.DefaultOptions
-  readonly tokenBudget?: number
   readonly permissionPolicy?: Permissions.Ruleset
   readonly additionalToolkit?: Toolkit.Toolkit<AdditionalTools>
   readonly additionalHandlerLayer?: Layer.Layer<Tool.HandlersFor<AdditionalTools>, unknown, never>
@@ -113,7 +126,16 @@ const registrationsFor = <AdditionalTools extends Record<string, Tool.Any>>(
   ),
 ]
 
-const compactionPolicy = (compaction: Compaction.DefaultOptions | undefined): CompactionPolicy | undefined =>
+const relayModelSelection = (selection: ModelRegistry.ModelSelection) => ({
+  provider: selection.provider,
+  model: selection.model,
+  ...(selection.registrationKey === undefined ? {} : { registration_key: selection.registrationKey }),
+})
+
+const compactionPolicy = (
+  compaction: Compaction.DefaultOptions | undefined,
+  summaryModel?: ModelRegistry.ModelSelection,
+): CompactionPolicy | undefined =>
   compaction === undefined ||
   compaction.contextWindow === undefined ||
   compaction.reserveTokens === undefined ||
@@ -123,12 +145,17 @@ const compactionPolicy = (compaction: Compaction.DefaultOptions | undefined): Co
         context_window: compaction.contextWindow,
         reserve_tokens: compaction.reserveTokens,
         keep_recent_tokens: compaction.keepRecentTokens,
+        ...(summaryModel === undefined ? {} : { summary_model: relayModelSelection(summaryModel) }),
       }
 
-const pinnedCompactionPolicy = (route: ExecutionRoutePin["main"]): CompactionPolicy => ({
+const pinnedCompactionPolicy = (
+  route: ExecutionRoutePin["main"],
+  summaryModel?: ExecutionRoutePin["compactionSummary"],
+): CompactionPolicy => ({
   context_window: route.compaction.contextWindow,
   reserve_tokens: route.compaction.reserveTokens,
   keep_recent_tokens: route.compaction.keepRecentTokens,
+  ...(summaryModel === undefined ? {} : { summary_model: relayModelSelection(pinnedSelection(summaryModel)) }),
 })
 
 const pinnedSelection = (route: ExecutionRoutePin["main"]): ModelRegistry.ModelSelection => ({
@@ -372,10 +399,10 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
     LayerOptions<AdditionalTools>,
     | "selection"
     | "oracleSelection"
+    | "compactionSummarySelection"
     | "additionalToolkit"
     | "compaction"
     | "oracleCompaction"
-    | "tokenBudget"
     | "permissionPolicy"
     | "defaultReasoningEffort"
     | "modelVariantPolicy"
@@ -510,26 +537,38 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               ? undefined
               : yield* options.resolveExecutionRoute(input.parentTurnId))
           const durableRoute = routePin === undefined ? undefined : JSON.parse(JSON.stringify(routePin))
+          const summaryModel = routePin?.compactionSummary
+          const routeForProfile = (profile: AgentProfile) => {
+            if (profile === "Oracle") return routePin?.oracle
+            if (routePin?.agents === undefined) return routePin?.main
+            if (profile === "Librarian") return routePin.agents.librarian
+            if (profile === "Painter") return routePin.agents.painter
+            if (profile === "Review") return routePin.agents.review
+            if (profile === "ReadThread") return routePin.agents.readThread
+            return routePin.agents.task
+          }
           const state = yield* client
             .createChildFanOut({
               fan_out_id: Ids.ChildFanOutId.make(input.fanOutId),
               parent_execution_id: executionId(input.parentTurnId),
               children: input.children.map((child) => {
                 const profile = child.profile ?? "Task"
+                const profileRoute = routeForProfile(profile)
                 const preset = resolve(
                   profile,
-                  routePin === undefined
+                  profileRoute === undefined
                     ? profile === "Oracle"
                       ? (options.oracleSelection ?? options.selection)
                       : options.selection
-                    : pinnedSelection(profile === "Oracle" ? routePin.oracle : routePin.main),
+                    : pinnedSelection(profileRoute),
                 ).preset
                 const policy =
-                  routePin === undefined
+                  profileRoute === undefined
                     ? compactionPolicy(
                         profile === "Oracle" ? (options.oracleCompaction ?? options.compaction) : options.compaction,
+                        options.compactionSummarySelection,
                       )
-                    : pinnedCompactionPolicy(profile === "Oracle" ? routePin.oracle : routePin.main)
+                    : pinnedCompactionPolicy(profileRoute, summaryModel)
                 return {
                   child_execution_id: makeChildExecutionId(input.parentTurnId, child.childId),
                   address_id: addressId,
@@ -543,7 +582,6 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                       ? {}
                       : {
                           rika_execution_route: durableRoute,
-                          rika_token_budget: routePin.tokenBudget,
                         }),
                   },
                 }
@@ -633,8 +671,8 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             const metadata = { steering_enabled: true, multi_agent_enabled: true }
             const rootCompaction =
               input.executionRoute === undefined
-                ? compactionPolicy(options.compaction)
-                : pinnedCompactionPolicy(input.executionRoute.main)
+                ? compactionPolicy(options.compaction, options.compactionSummarySelection)
+                : pinnedCompactionPolicy(input.executionRoute.main, input.executionRoute.compactionSummary)
             const selection =
               input.executionRoute === undefined || options.modelVariantPolicy === "fixed-selection"
                 ? variantSelection(
@@ -650,23 +688,48 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 : pinnedSelection(input.executionRoute.oracle)
             const oracleCompaction =
               input.executionRoute === undefined
-                ? compactionPolicy(options.oracleCompaction ?? options.compaction)
-                : pinnedCompactionPolicy(input.executionRoute.oracle)
+                ? compactionPolicy(options.oracleCompaction ?? options.compaction, options.compactionSummarySelection)
+                : pinnedCompactionPolicy(input.executionRoute.oracle, input.executionRoute.compactionSummary)
+            const agentRoutes = input.executionRoute?.agents
+            const agentModels =
+              agentRoutes === undefined
+                ? {}
+                : {
+                    Librarian: pinnedSelection(agentRoutes.librarian),
+                    Painter: pinnedSelection(agentRoutes.painter),
+                    Review: pinnedSelection(agentRoutes.review),
+                    ReadThread: pinnedSelection(agentRoutes.readThread),
+                    Task: pinnedSelection(agentRoutes.task),
+                  }
             const registered = yield* client.registerAgent({
               id: agentId,
               address: addressId,
               agent: Agent.make("rika", { model: selection, toolkit: toolkitFor(options) }),
               permissions: [...parentPermissions, childRunSpawnPermission],
               ...(options.permissionPolicy === undefined ? {} : { permission_rules: options.permissionPolicy }),
-              ...(input.executionRoute === undefined && options.tokenBudget === undefined
-                ? {}
-                : { token_budget: input.executionRoute?.tokenBudget ?? options.tokenBudget }),
               metadata,
               ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
               handoff_targets: subagentHandoffTargets,
               child_run_presets: Object.fromEntries(
-                Object.entries(presets(selection, oracleSelection)).map(([name, preset]) => {
-                  const policy = name === "Oracle" ? oracleCompaction : rootCompaction
+                Object.entries(presets(selection, oracleSelection, agentModels)).map(([name, preset]) => {
+                  const agentRoute =
+                    name === "Librarian"
+                      ? agentRoutes?.librarian
+                      : name === "Painter"
+                        ? agentRoutes?.painter
+                        : name === "Review"
+                          ? agentRoutes?.review
+                          : name === "ReadThread"
+                            ? agentRoutes?.readThread
+                            : name === "Task"
+                              ? agentRoutes?.task
+                              : undefined
+                  const policy =
+                    name === "Oracle"
+                      ? oracleCompaction
+                      : agentRoute === undefined
+                        ? rootCompaction
+                        : pinnedCompactionPolicy(agentRoute, input.executionRoute?.compactionSummary)
                   return [name, { ...preset, ...(policy === undefined ? {} : { compaction_policy: policy }) }]
                 }),
               ),
@@ -964,11 +1027,6 @@ export const layer = <AdditionalTools extends Record<string, Tool.Any> = {}>(opt
                         ...(options.permissionPolicy === undefined
                           ? {}
                           : { permission_rules: options.permissionPolicy }),
-                        ...(typeof child.metadata?.rika_token_budget === "number"
-                          ? { token_budget: child.metadata.rika_token_budget }
-                          : options.tokenBudget === undefined
-                            ? {}
-                            : { token_budget: options.tokenBudget }),
                         ...(override.output_schema_ref === undefined
                           ? {}
                           : { output_schema_ref: override.output_schema_ref }),

@@ -20,7 +20,7 @@ export type PromptPart =
   | { readonly type: "image"; readonly mediaType: string; readonly data: string; readonly filename?: string }
 
 export interface ExecutionModelRoute {
-  readonly role: "main" | "oracle"
+  readonly role: "main" | "oracle" | "compaction" | "librarian" | "painter" | "review" | "readThread" | "task"
   readonly alias: string
   readonly provider: string
   readonly model: string
@@ -42,9 +42,17 @@ export interface ExecutionModelRoute {
 export interface ExecutionRoutePin {
   readonly version: 1
   readonly mode: "low" | "medium" | "high" | "ultra" | "test"
-  readonly tokenBudget: number
+  readonly tokenBudget?: number
+  readonly compactionSummary?: ExecutionModelRoute
   readonly main: ExecutionModelRoute
   readonly oracle: ExecutionModelRoute
+  readonly agents?: {
+    readonly librarian: ExecutionModelRoute
+    readonly painter: ExecutionModelRoute
+    readonly review: ExecutionModelRoute
+    readonly readThread: ExecutionModelRoute
+    readonly task: ExecutionModelRoute
+  }
 }
 
 export interface StartInput {

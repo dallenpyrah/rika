@@ -11,7 +11,7 @@
 
 - SQLite is the only required database.
 - No daemon, Docker, Postgres, Rivet engine, or hosted Rika service is required.
-- The packaged artifact restores the terminal on success, failure, defect, signal, and interruption.
+- The packaged artifact restores the terminal immediately and exactly once on success, failure, defect, signal, interruption, renderer initialization failure, and cleanup-step failure, before awaiting slower client cleanup.
 
 ## Performance
 

@@ -53,6 +53,12 @@ export const HandshakeRejected = Schema.Struct({
 })
 export type HandshakeRejected = typeof HandshakeRejected.Type
 
+export const StartupReady = Schema.Struct({ _tag: Schema.tag("startup-ready") })
+export const StartupFailed = Schema.Struct({
+  _tag: Schema.tag("startup-failed"),
+  error: Schema.String,
+})
+
 export const Ping = Schema.Struct({ _tag: Schema.tag("ping"), id: Schema.String })
 export const Pong = Schema.Struct({ _tag: Schema.tag("pong"), id: Schema.String })
 export const OperationRequest = Schema.Struct({
@@ -129,6 +135,8 @@ export const OperationFailed = Schema.Struct({
 export const ServerMessage = Schema.Union([
   HandshakeAccepted,
   HandshakeRejected,
+  StartupReady,
+  StartupFailed,
   Pong,
   Output,
   InteractiveStarted,
@@ -227,6 +235,11 @@ export const validateHandshake = (
     return { _tag: "CapabilityMismatch" }
   return { _tag: "Accepted" }
 }
+
+export const negotiateCapabilities = (
+  local: ReadonlyArray<string>,
+  remote: ReadonlyArray<string>,
+): ReadonlyArray<string> => local.filter((capability) => remote.includes(capability))
 
 export type LifecycleState = "starting" | "ready" | "grace" | "draining" | "stopped"
 

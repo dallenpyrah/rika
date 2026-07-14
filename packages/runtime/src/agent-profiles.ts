@@ -79,12 +79,17 @@ const definitions = {
 export const resolve = (name: Name, model: ModelRegistry.ModelSelection) => {
   const definition = definitions[name]
   const toolkit = Toolkit.make(...definition.tools)
+  const relayModel = {
+    provider: model.provider,
+    model: model.model,
+    ...(model.registrationKey === undefined ? {} : { registration_key: model.registrationKey }),
+  }
   return {
     name,
     agent: Agent.make(`rika-${name.toLowerCase()}`, { instructions: definition.instructions, model, toolkit }),
     preset: {
       instructions: definition.instructions,
-      model,
+      model: relayModel,
       tool_names: Object.keys(toolkit.tools),
       permissions: [...definition.permissions],
       output_schema_ref: definition.schema,
@@ -110,8 +115,14 @@ export const resolvePainter = Effect.fn("AgentProfiles.resolvePainter")(function
   return resolve("Painter", model)
 })
 
-export const presets = (model: ModelRegistry.ModelSelection, oracleModel: ModelRegistry.ModelSelection = model) =>
-  Object.fromEntries(names.map((name) => [name, resolve(name, name === "Oracle" ? oracleModel : model).preset]))
+export const presets = (
+  model: ModelRegistry.ModelSelection,
+  oracleModel: ModelRegistry.ModelSelection = model,
+  agentModels: Partial<Readonly<Record<Name, ModelRegistry.ModelSelection>>> = {},
+) =>
+  Object.fromEntries(
+    names.map((name) => [name, resolve(name, agentModels[name] ?? (name === "Oracle" ? oracleModel : model)).preset]),
+  )
 
 export const parentPermissions = [...new Set(names.flatMap((name) => definitions[name].permissions))].map((name) => ({
   name,

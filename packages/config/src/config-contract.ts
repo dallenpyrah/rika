@@ -1,7 +1,9 @@
 import { Schema, type Redacted } from "effect"
+import { defaults as modelDefaults, supportedEfforts } from "./models"
 
 export type ModeId = "low" | "medium" | "high" | "ultra"
 export type Role = "main" | "oracle"
+export type AgentId = "librarian" | "painter" | "review" | "readThread" | "task"
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
 export type PermissionDecision = "allow" | "ask" | "deny"
 export type LogLevel = "debug" | "info" | "warning" | "error"
@@ -18,12 +20,19 @@ export interface ModelVariant {
 export interface ModelAlias {
   readonly gateway: string
   readonly candidates: ReadonlyArray<string>
-  readonly compaction: {
-    readonly contextWindow: number
-    readonly reserveTokens: number
+  readonly limits: {
+    readonly maxInputTokens: number
+    readonly maxOutputTokens: number
     readonly keepRecentTokens: number
   }
   readonly variants: Partial<Readonly<Record<Effort, { readonly normal: ModelVariant; readonly fast?: ModelVariant }>>>
+}
+
+export interface ModelAliasInput {
+  readonly gateway?: string
+  readonly candidates?: ReadonlyArray<string>
+  readonly limits?: Partial<ModelAlias["limits"]>
+  readonly variants?: ModelAlias["variants"]
 }
 
 export interface RoleRoute {
@@ -33,7 +42,6 @@ export interface RoleRoute {
 }
 
 export interface ModeConfig {
-  readonly budget: number
   readonly main: RoleRoute
   readonly oracle: RoleRoute
 }
@@ -60,18 +68,22 @@ export interface Settings {
   readonly gateways: Readonly<Record<string, GatewayConnection>>
   readonly models: Readonly<Record<string, ModelAlias>>
   readonly modes: Readonly<Record<ModeId, ModeConfig>>
+  readonly agents: Readonly<Record<AgentId, RoleRoute>>
+  readonly compaction: { readonly summaryModel: RoleRoute }
   readonly keymap: Readonly<Record<string, string>>
   readonly permissions: Readonly<Record<string, PermissionDecision>>
   readonly extensionRoots: ReadonlyArray<string>
   readonly mcp: Readonly<Record<string, McpDefinition>>
   readonly notifications: { readonly enabled: boolean; readonly command?: string }
-  readonly logging: { readonly level: LogLevel; readonly file?: string }
+  readonly logging: { readonly level: LogLevel }
 }
 
 export interface SettingsInput {
   readonly gateways?: Readonly<Record<string, GatewayConnection>>
-  readonly models?: Readonly<Record<string, ModelAlias>>
+  readonly models?: Readonly<Record<string, ModelAliasInput>>
   readonly modes?: Partial<Readonly<Record<ModeId, ModeConfig>>>
+  readonly agents?: Partial<Readonly<Record<AgentId, RoleRoute>>>
+  readonly compaction?: Partial<Settings["compaction"]>
   readonly keymap?: Readonly<Record<string, string>>
   readonly permissions?: Readonly<Record<string, PermissionDecision>>
   readonly extensionRoots?: ReadonlyArray<string>
@@ -115,7 +127,11 @@ export interface ResolvedModelRoute {
   readonly gateway: GatewayConnection
   readonly candidates: ReadonlyArray<string>
   readonly model: string
-  readonly compaction: ModelAlias["compaction"]
+  readonly compaction: {
+    readonly contextWindow: number
+    readonly reserveTokens: number
+    readonly keepRecentTokens: number
+  }
   readonly options: Readonly<Record<string, unknown>>
 }
 
@@ -128,7 +144,7 @@ const exactKeys = (path: string, label: string, value: Record<string, unknown>, 
 }
 
 const positiveInteger = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0
-const efforts: ReadonlyArray<Effort> = ["low", "medium", "high", "xhigh", "max"]
+const efforts: ReadonlyArray<Effort> = supportedEfforts
 const allowedModelOptionKeys = new Set(["maxtokens", "maxoutputtokens", "reasoning", "servicetier"])
 const credentialTerms = new Set([
   "auth",
@@ -188,22 +204,21 @@ const credentialOptionPath = (value: unknown, path: string): string | undefined 
   return undefined
 }
 
-export const resolveModelRoute = (settings: Settings, mode: ModeId, role: Role = "main"): ResolvedModelRoute => {
-  const route = settings.modes[mode][role]
+const resolveRoute = (settings: Settings, route: RoleRoute, owner: string): ResolvedModelRoute => {
   const alias = settings.models[route.alias]
   if (alias === undefined)
-    throw new ModelRouteError({ mode, message: `Mode ${mode} ${role} references missing model alias ${route.alias}` })
+    throw new ModelRouteError({ mode: owner, message: `${owner} references missing model alias ${route.alias}` })
   const gateway = settings.gateways[alias.gateway]
   if (gateway === undefined)
     throw new ModelRouteError({
-      mode,
+      mode: owner,
       message: `Model alias ${route.alias} references missing gateway ${alias.gateway}`,
     })
   const variant = alias.variants[route.effort]?.[route.fast === true ? "fast" : "normal"]
   if (variant === undefined)
     throw new ModelRouteError({
-      mode,
-      message: `Mode ${mode} ${role} requests unavailable ${route.alias}/${route.effort}${route.fast === true ? "/fast" : ""} variant`,
+      mode: owner,
+      message: `${owner} requests unavailable ${route.alias}/${route.effort}${route.fast === true ? "/fast" : ""} variant`,
     })
   return {
     alias: route.alias,
@@ -213,10 +228,26 @@ export const resolveModelRoute = (settings: Settings, mode: ModeId, role: Role =
     gateway,
     candidates: alias.candidates,
     model: alias.candidates[0]!,
-    compaction: alias.compaction,
-    options: variant.options,
+    compaction: {
+      contextWindow: alias.limits.maxInputTokens + alias.limits.maxOutputTokens,
+      reserveTokens: alias.limits.maxOutputTokens,
+      keepRecentTokens: alias.limits.keepRecentTokens,
+    },
+    options: {
+      ...variant.options,
+      [gateway.protocol === "openai" ? "max_output_tokens" : "max_tokens"]: alias.limits.maxOutputTokens,
+    },
   }
 }
+
+export const resolveModelRoute = (settings: Settings, mode: ModeId, role: Role = "main"): ResolvedModelRoute =>
+  resolveRoute(settings, settings.modes[mode][role], `Mode ${mode} ${role}`)
+
+export const resolveAgentRoute = (settings: Settings, agent: AgentId): ResolvedModelRoute =>
+  resolveRoute(settings, settings.agents[agent], `Agent ${agent}`)
+
+export const resolveCompactionSummaryRoute = (settings: Settings): ResolvedModelRoute =>
+  resolveRoute(settings, settings.compaction.summaryModel, "Compaction summary model")
 
 export const decodeSettingsInput = (path: string, value: unknown): SettingsInput => {
   if (!object(value)) throw new ConfigFileError({ path, message: "Configuration must be a JSON object" })
@@ -224,6 +255,8 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
     "gateways",
     "models",
     "modes",
+    "agents",
+    "compaction",
     "keymap",
     "permissions",
     "extensionRoots",
@@ -265,35 +298,47 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
   }
   for (const [name, model] of Object.entries((value.models ?? {}) as Record<string, unknown>)) {
     if (!object(model)) throw new ConfigFileError({ path, message: `Model alias ${name} must be an object` })
-    exactKeys(path, `Model alias ${name}`, model, ["gateway", "candidates", "compaction", "variants"])
+    exactKeys(path, `Model alias ${name}`, model, ["gateway", "candidates", "limits", "variants"])
+    const builtIn = (modelDefaults as Readonly<Record<string, ModelAlias>>)[name]
+    const resolved = {
+      ...builtIn,
+      ...model,
+      limits: { ...builtIn?.limits, ...(object(model.limits) ? model.limits : {}) },
+      variants: { ...builtIn?.variants, ...(object(model.variants) ? model.variants : {}) },
+    }
     if (
-      typeof model.gateway !== "string" ||
-      !Array.isArray(model.candidates) ||
-      model.candidates.length === 0 ||
-      model.candidates.some((id) => typeof id !== "string")
+      typeof resolved.gateway !== "string" ||
+      !Array.isArray(resolved.candidates) ||
+      resolved.candidates.length === 0 ||
+      resolved.candidates.some((id: unknown) => typeof id !== "string")
     )
       throw new ConfigFileError({
         path,
         message: `Model alias ${name} requires gateway and non-empty string candidates`,
       })
-    if (!object(model.compaction))
-      throw new ConfigFileError({ path, message: `Model alias ${name} requires valid operational compaction limits` })
-    const { contextWindow, reserveTokens, keepRecentTokens } = model.compaction
+    if (!object(resolved.limits))
+      throw new ConfigFileError({ path, message: `Model alias ${name} requires valid model limits` })
+    const { maxInputTokens, maxOutputTokens, keepRecentTokens } = resolved.limits
     if (
-      !positiveInteger(contextWindow) ||
-      !positiveInteger(reserveTokens) ||
+      !positiveInteger(maxInputTokens) ||
+      !positiveInteger(maxOutputTokens) ||
       !positiveInteger(keepRecentTokens) ||
-      (reserveTokens as number) + (keepRecentTokens as number) >= (contextWindow as number)
+      (keepRecentTokens as number) >= (maxInputTokens as number) ||
+      (maxInputTokens as number) + (maxOutputTokens as number) > Number.MAX_SAFE_INTEGER
     )
-      throw new ConfigFileError({ path, message: `Model alias ${name} requires valid operational compaction limits` })
-    exactKeys(path, `Model alias ${name} compaction`, model.compaction, [
-      "contextWindow",
-      "reserveTokens",
-      "keepRecentTokens",
-    ])
-    if (!object(model.variants) || Object.keys(model.variants).length === 0)
+      throw new ConfigFileError({ path, message: `Model alias ${name} requires valid model limits` })
+    if (model.limits !== undefined) {
+      if (!object(model.limits))
+        throw new ConfigFileError({ path, message: `Model alias ${name} requires valid model limits` })
+      exactKeys(path, `Model alias ${name} limits`, model.limits, [
+        "maxInputTokens",
+        "maxOutputTokens",
+        "keepRecentTokens",
+      ])
+    }
+    if (!object(resolved.variants) || Object.keys(resolved.variants).length === 0)
       throw new ConfigFileError({ path, message: `Model alias ${name} requires variants` })
-    for (const [effort, variants] of Object.entries(model.variants)) {
+    for (const [effort, variants] of Object.entries(resolved.variants)) {
       if (!efforts.includes(effort as Effort) || !object(variants) || !object(variants.normal))
         throw new ConfigFileError({ path, message: `Model alias ${name} has invalid effort variant ${effort}` })
       exactKeys(path, `Model alias ${name} ${effort}`, variants, ["normal", "fast"])
@@ -301,6 +346,11 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
         if (!object(variant) || !object(variant.options))
           throw new ConfigFileError({ path, message: `Model alias ${name} ${effort} variant requires options` })
         exactKeys(path, `Model alias ${name} ${effort} variant`, variant, ["options"])
+        if ("max_tokens" in variant.options || "max_output_tokens" in variant.options)
+          throw new ConfigFileError({
+            path,
+            message: `Model alias ${name} ${effort} provider output limit must use limits.maxOutputTokens`,
+          })
         const credentialPath = credentialOptionPath(variant.options, `models.${name}.variants.${effort}.options`)
         if (credentialPath !== undefined)
           throw new ConfigFileError({
@@ -312,9 +362,9 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
   }
   for (const [mode, config] of Object.entries((value.modes ?? {}) as Record<string, unknown>)) {
     if (!object(config)) throw new ConfigFileError({ path, message: `Mode ${mode} must be an object` })
-    exactKeys(path, `Mode ${mode}`, config, ["budget", "main", "oracle"])
-    if (!positiveInteger(config.budget) || !object(config.main) || !object(config.oracle))
-      throw new ConfigFileError({ path, message: `Mode ${mode} requires budget, main, and oracle` })
+    exactKeys(path, `Mode ${mode}`, config, ["main", "oracle"])
+    if (!object(config.main) || !object(config.oracle))
+      throw new ConfigFileError({ path, message: `Mode ${mode} requires main and oracle` })
     for (const [role, route] of [
       ["main", config.main],
       ["oracle", config.oracle],
@@ -328,23 +378,51 @@ export const decodeSettingsInput = (path: string, value: unknown): SettingsInput
         throw new ConfigFileError({ path, message: `Mode ${mode} ${role} requires alias and supported effort` })
     }
   }
+  const agents = (value.agents ?? {}) as Record<string, unknown>
+  exactKeys(path, "Agents", agents, ["librarian", "painter", "review", "readThread", "task"])
+  for (const [agent, route] of Object.entries(agents)) {
+    if (!object(route)) throw new ConfigFileError({ path, message: `Agent ${agent} route must be an object` })
+    exactKeys(path, `Agent ${agent}`, route, ["alias", "effort", "fast"])
+    if (
+      typeof route.alias !== "string" ||
+      !efforts.includes(route.effort as Effort) ||
+      (route.fast !== undefined && typeof route.fast !== "boolean")
+    )
+      throw new ConfigFileError({ path, message: `Agent ${agent} requires alias and supported effort` })
+  }
+  if (value.compaction !== undefined) {
+    if (!object(value.compaction)) throw new ConfigFileError({ path, message: "Compaction must be an object" })
+    exactKeys(path, "Compaction", value.compaction, ["summaryModel"])
+    if (value.compaction.summaryModel !== undefined) {
+      if (!object(value.compaction.summaryModel))
+        throw new ConfigFileError({ path, message: "Compaction summary model must be an object" })
+      exactKeys(path, "Compaction summary model", value.compaction.summaryModel, ["alias", "effort", "fast"])
+      const route = value.compaction.summaryModel
+      if (
+        typeof route.alias !== "string" ||
+        !efforts.includes(route.effort as Effort) ||
+        (route.fast !== undefined && typeof route.fast !== "boolean")
+      )
+        throw new ConfigFileError({
+          path,
+          message: "Compaction summary model requires alias and supported effort",
+        })
+    }
+  }
+  if (value.logging !== undefined) {
+    if (!object(value.logging)) throw new ConfigFileError({ path, message: "Logging must be an object" })
+    exactKeys(path, "Logging", value.logging, ["level"])
+    if (
+      value.logging.level !== undefined &&
+      value.logging.level !== "debug" &&
+      value.logging.level !== "info" &&
+      value.logging.level !== "warning" &&
+      value.logging.level !== "error"
+    )
+      throw new ConfigFileError({ path, message: "Logging level must be debug, info, warning, or error" })
+  }
   return value as SettingsInput
 }
-
-const gptCompaction = { contextWindow: 372_000, reserveTokens: 128_000, keepRecentTokens: 32_000 }
-const claudeCompaction = { contextWindow: 1_000_000, reserveTokens: 128_000, keepRecentTokens: 64_000 }
-const gptVariants = Object.fromEntries(
-  efforts.map((effort) => [
-    effort,
-    {
-      normal: { options: { reasoning: { effort }, max_output_tokens: 128_000 } },
-      fast: { options: { reasoning: { effort }, max_output_tokens: 128_000, service_tier: "priority" } },
-    },
-  ]),
-) as ModelAlias["variants"]
-const claudeVariants = Object.fromEntries(
-  efforts.map((effort) => [effort, { normal: { options: { output_config: { effort }, max_tokens: 128_000 } } }]),
-) as ModelAlias["variants"]
 
 export const defaults: Settings = {
   gateways: {
@@ -359,29 +437,21 @@ export const defaults: Settings = {
       auth: { type: "bearer-env", variable: "ANTHROPIC_API_KEY" },
     },
   },
-  models: {
-    luna: { gateway: "openai", candidates: ["gpt-5.6-luna"], compaction: gptCompaction, variants: gptVariants },
-    terra: { gateway: "openai", candidates: ["gpt-5.6-terra"], compaction: gptCompaction, variants: gptVariants },
-    sol: { gateway: "openai", candidates: ["gpt-5.6-sol"], compaction: gptCompaction, variants: gptVariants },
-    fable: {
-      gateway: "anthropic",
-      candidates: ["claude-fable-5", "claude-opus-4-8"],
-      compaction: claudeCompaction,
-      variants: claudeVariants,
-    },
-    opus: {
-      gateway: "anthropic",
-      candidates: ["claude-opus-4-8"],
-      compaction: claudeCompaction,
-      variants: claudeVariants,
-    },
-  },
+  models: modelDefaults,
   modes: {
-    low: { budget: 32, main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
-    medium: { budget: 64, main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
-    high: { budget: 128, main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "fable", effort: "max" } },
-    ultra: { budget: 256, main: { alias: "fable", effort: "max" }, oracle: { alias: "sol", effort: "max" } },
+    low: { main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
+    medium: { main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
+    high: { main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "sol", effort: "max" } },
+    ultra: { main: { alias: "sol", effort: "max" }, oracle: { alias: "sol", effort: "max" } },
   },
+  agents: {
+    librarian: { alias: "sol", effort: "high" },
+    painter: { alias: "sol", effort: "high" },
+    review: { alias: "review", effort: "high" },
+    readThread: { alias: "terra", effort: "medium" },
+    task: { alias: "terra", effort: "medium" },
+  },
+  compaction: { summaryModel: { alias: "terra", effort: "medium" } },
   keymap: { mode: "ctrl+s", palette: "ctrl+p", submit: "enter", newline: "shift+enter", interrupt: "escape" },
   permissions: { read: "allow", search: "allow", write: "allow", shell: "allow", external: "allow" },
   extensionRoots: ["~/.config/rika/extensions", ".rika/extensions"],

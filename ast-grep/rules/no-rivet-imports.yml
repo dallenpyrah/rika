@@ -11,3 +11,4 @@ files:
 ignores:
   - "**/dist/**"
   - "node_modules/**"
+  - "repos/effect/**"

@@ -1,15 +1,39 @@
 import { describe, expect, it } from "@effect/vitest"
-import { ConfigContract } from "../src/index"
+import { ConfigContract, Models } from "../src/index"
 
 describe("ConfigContract", () => {
-  it("defines the exact Amp-style main and Oracle matrix", () => {
+  it("defines GPT-only main, Oracle, and specialized agent routes", () => {
     expect(ConfigContract.defaults.modes).toEqual({
-      low: { budget: 32, main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
-      medium: { budget: 64, main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
-      high: { budget: 128, main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "fable", effort: "max" } },
-      ultra: { budget: 256, main: { alias: "fable", effort: "max" }, oracle: { alias: "sol", effort: "max" } },
+      low: { main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
+      medium: { main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
+      high: { main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "sol", effort: "max" } },
+      ultra: { main: { alias: "sol", effort: "max" }, oracle: { alias: "sol", effort: "max" } },
+    })
+    expect(ConfigContract.defaults.agents).toEqual({
+      librarian: { alias: "sol", effort: "high" },
+      painter: { alias: "sol", effort: "high" },
+      review: { alias: "review", effort: "high" },
+      readThread: { alias: "terra", effort: "medium" },
+      task: { alias: "terra", effort: "medium" },
     })
     expect(ConfigContract.defaults.models.fable?.candidates).toEqual(["claude-fable-5", "claude-opus-4-8"])
+    expect(ConfigContract.defaults.models.review?.candidates).toEqual(["gpt-5.5"])
+    expect(ConfigContract.defaults.models.luna?.limits).toEqual({
+      maxInputTokens: 922_000,
+      maxOutputTokens: 128_000,
+      keepRecentTokens: 32_000,
+    })
+    expect(ConfigContract.defaults.models.review?.limits).toEqual({
+      maxInputTokens: 922_000,
+      maxOutputTokens: 128_000,
+      keepRecentTokens: 32_000,
+    })
+    expect(Models.catalog.gpt56Sol.limits).toEqual({
+      contextWindow: 1_050_000,
+      maxInputTokens: 922_000,
+      maxOutputTokens: 128_000,
+    })
+    expect(Models.catalog.gpt56Sol.source).toBe("https://models.dev")
   })
 
   it.each(["providers", "provider", "model", "oracleModel", "reasoning", "baseUrl", "apiKey"])(
@@ -83,8 +107,6 @@ describe("ConfigContract", () => {
         low: {
           normal: {
             options: {
-              max_tokens: 1,
-              max_output_tokens: 2,
               reasoning: { effort: "low" },
               service_tier: "priority",
             },
@@ -95,6 +117,20 @@ describe("ConfigContract", () => {
     expect(ConfigContract.decodeSettingsInput("settings.json", { models: { moon: model } })).toMatchObject({
       models: { moon: model },
     })
+  })
+
+  it.each(["max_tokens", "max_output_tokens"])("owns provider output option %s through model limits", (key) => {
+    const source = ConfigContract.defaults.models.luna!
+    const model = {
+      ...source,
+      variants: {
+        ...source.variants,
+        low: { normal: { options: { reasoning: { effort: "low" }, [key]: 1 } } },
+      },
+    }
+    expect(() => ConfigContract.decodeSettingsInput("settings.json", { models: { moon: model } })).toThrowError(
+      /limits.maxOutputTokens/,
+    )
   })
 
   it("requires bearer auth to name a valid environment variable", () => {
@@ -129,22 +165,39 @@ describe("ConfigContract", () => {
     ).toThrowError(/unknown key apiKey/)
   })
 
+  it("accepts supported logging levels and rejects custom log paths", () => {
+    expect(ConfigContract.decodeSettingsInput("settings.json", { logging: { level: "debug" } })).toEqual({
+      logging: { level: "debug" },
+    })
+    expect(() => ConfigContract.decodeSettingsInput("settings.json", { logging: { level: "verbose" } })).toThrowError(
+      /Logging level/,
+    )
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", { logging: { level: "info", file: "/tmp/rika.log" } }),
+    ).toThrowError(/unknown key file/)
+  })
+
   it("rejects incomplete and legacy mode shapes", () => {
     expect(() =>
-      ConfigContract.decodeSettingsInput("settings.json", { modes: { low: { budget: 1, model: "luna" } } }),
+      ConfigContract.decodeSettingsInput("settings.json", { modes: { low: { model: "luna" } } }),
     ).toThrowError(/unknown key model/)
     expect(() =>
       ConfigContract.decodeSettingsInput("settings.json", {
-        modes: { low: { budget: 1, main: { alias: "luna", effort: "low" } } },
+        modes: { low: { main: { alias: "luna", effort: "low" } } },
       }),
-    ).toThrowError(/requires budget, main, and oracle/)
+    ).toThrowError(/requires main and oracle/)
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        modes: { low: { budget: 1, main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } } },
+      }),
+    ).toThrowError(/unknown key budget/)
   })
 
-  it("enforces compaction cross-field limits and typed fast availability", () => {
+  it("enforces model limits and typed fast availability", () => {
     const bad = structuredClone(ConfigContract.defaults.models.luna!) as any
-    bad.compaction.reserveTokens = 350_000
+    bad.limits.keepRecentTokens = bad.limits.maxInputTokens
     expect(() => ConfigContract.decodeSettingsInput("settings.json", { models: { bad } })).toThrowError(
-      /valid operational compaction limits/,
+      /valid model limits/,
     )
     const settings: ConfigContract.Settings = {
       ...ConfigContract.defaults,
@@ -158,13 +211,59 @@ describe("ConfigContract", () => {
     )
   })
 
-  it("resolves exact options and operational compaction", () => {
+  it("derives provider output and operational compaction from model limits", () => {
     expect(ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")).toMatchObject({
       alias: "terra",
       model: "gpt-5.6-terra",
       effort: "medium",
       options: { reasoning: { effort: "medium" }, max_output_tokens: 128_000 },
-      compaction: { contextWindow: 372_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
+      compaction: { contextWindow: 1_050_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
     })
+    expect(ConfigContract.resolveAgentRoute(ConfigContract.defaults, "review")).toMatchObject({
+      alias: "review",
+      model: "gpt-5.5",
+      effort: "high",
+    })
+  })
+
+  it("accepts configurable specialized agent routes and rejects unknown agents", () => {
+    const input = {
+      agents: {
+        librarian: { alias: "terra", effort: "low" },
+        readThread: { alias: "sol", effort: "xhigh", fast: true },
+      },
+    } as const
+    expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        agents: { unknown: { alias: "sol", effort: "high" } },
+      }),
+    ).toThrowError(/unknown key unknown/)
+  })
+
+  it("accepts a dedicated compaction summary model route", () => {
+    const input = { compaction: { summaryModel: { alias: "terra", effort: "medium" } } } as const
+    expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)
+    expect(
+      ConfigContract.resolveCompactionSummaryRoute({ ...ConfigContract.defaults, compaction: input.compaction }),
+    ).toMatchObject({ alias: "terra", model: "gpt-5.6-terra", effort: "medium" })
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        compaction: { summaryModel: { alias: "terra", effort: "unsupported" } },
+      }),
+    ).toThrowError(/Compaction summary model requires alias and supported effort/)
+  })
+
+  it("accepts partial operational overrides for built-in models and requires complete custom models", () => {
+    expect(
+      ConfigContract.decodeSettingsInput("settings.json", {
+        models: { luna: { limits: { maxInputTokens: 353_000 } } },
+      }),
+    ).toEqual({ models: { luna: { limits: { maxInputTokens: 353_000 } } } })
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        models: { custom: { limits: { maxInputTokens: 353_000 } } },
+      }),
+    ).toThrowError(/requires gateway and non-empty string candidates/)
   })
 })

@@ -17,8 +17,10 @@ import {
   Schedule,
   Schema,
   Scope,
+  Semaphore,
 } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+import { ChildProcessSpawner } from "effect/unstable/process"
 import * as Socket from "effect/unstable/socket/Socket"
 import { readOrCreateToken, resolve } from "./resident-endpoint"
 
@@ -28,6 +30,9 @@ const transportError = (message: string, reason: ResidentService.ResidentService
   new ResidentService.ResidentServiceError({ reason, message })
 const json = (value: unknown) => JSON.stringify(value)
 const parse = (value: string) => JSON.parse(value) as unknown
+const capabilities = ["ping", "startup-state"] as const
+const maxFrameBytes = 1_048_576
+const outboundCapacity = 256
 const formatOutput = (values: ReadonlyArray<unknown>) =>
   `${values.map((value) => (typeof value === "string" ? value : Formatter.format(value))).join(" ")}\n`
 
@@ -42,6 +47,7 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
 }) {
   const crypto = yield* Crypto.Crypto
   const baseConsole = yield* Console.Console
+  const hostScope = yield* Effect.scope
   const server = yield* BunHttpServer.make({ hostname: "127.0.0.1", port: options.port })
   const operationReady = yield* Deferred.make<Operation.Interface>()
   const serviceNonce = yield* crypto.randomUUIDv4
@@ -54,12 +60,13 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
     json({ _tag: "operation-failed", requestId, error } satisfies ResidentService.ServerMessage)
   const scheduleGrace = (generation: number) =>
     Effect.gen(function* () {
-      const fiber = yield* Effect.forkDetach(
+      const fiber = yield* Effect.forkIn(
         Effect.sleep(options.graceMilliseconds).pipe(
           Effect.andThen(lifecycle.expireGrace(generation)),
           Effect.flatMap((draining) => (draining ? Deferred.succeed(options.stopped, undefined) : Effect.void)),
           Effect.asVoid,
         ),
+        hostScope,
       )
       yield* Ref.set(graceFiber, fiber)
     })
@@ -102,7 +109,20 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
     yield* Deferred.await(ended).pipe(Effect.ensuring(Effect.sync(() => route.sessions.delete(sessionId))))
   })
   const handle = Effect.fn("ResidentTransport.connection")(function* (socket: Socket.Socket) {
-    const writer = yield* socket.writer
+    const rawWriter = yield* socket.writer
+    const outbound = yield* Queue.bounded<string | Socket.CloseEvent>(outboundCapacity)
+    const writer = (frame: string | Socket.CloseEvent) =>
+      typeof frame === "string" && new TextEncoder().encode(frame).byteLength > maxFrameBytes
+        ? Effect.fail(transportError("Resident frame exceeds maximum size"))
+        : Queue.offer(outbound, frame).pipe(
+            Effect.timeoutOrElse({
+              duration: "1 second",
+              orElse: () => Effect.fail(transportError("Resident outbound queue is overloaded")),
+            }),
+            Effect.asVoid,
+          )
+    yield* Effect.forkChild(Effect.forever(Queue.take(outbound).pipe(Effect.flatMap(rawWriter))))
+    const inbound = yield* Semaphore.make(1)
     const attached = yield* Ref.make(false)
     const requests = yield* Ref.make(new Map<string, Fiber.Fiber<void, unknown>>())
     const actions = yield* Ref.make(
@@ -119,268 +139,312 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
     const close = (code: number) => writer(new Socket.CloseEvent(code))
     yield* socket
       .runString((text) =>
-        Effect.gen(function* () {
-          let message: ResidentService.ClientMessage
-          try {
-            message = decodeClient(parse(text))
-          } catch {
-            return yield* close(4400)
-          }
-          if (!(yield* Ref.get(attached))) {
-            if (!("family" in message)) return yield* close(4401)
-            const result = ResidentService.validateHandshake(message, {
-              identity: options.identity,
-              token: options.token,
-              capabilities: ["ping"],
-            })
-            if (result._tag !== "Accepted") return yield* close(result._tag === "UpgradeRequired" ? 4403 : 4401)
-            if (!(yield* lifecycle.tryAttach)) {
-              yield* writer(json({ _tag: "rejected", reason: "draining" } satisfies ResidentService.HandshakeRejected))
-              return yield* close(4409)
+        inbound.withPermits(1)(
+          Effect.gen(function* () {
+            if (new TextEncoder().encode(text).byteLength > maxFrameBytes) return yield* close(4400)
+            let message: ResidentService.ClientMessage
+            try {
+              message = decodeClient(parse(text))
+            } catch {
+              return yield* close(4400)
             }
-            yield* Ref.set(attached, true)
-            yield* Deferred.await(operationReady)
-            const existing = yield* Ref.get(graceFiber)
-            if (existing !== undefined) yield* Fiber.interrupt(existing)
-            yield* Ref.set(graceFiber, undefined)
-            return yield* writer(
-              json({
-                _tag: "accepted",
-                family: "rika-resident",
-                version: ResidentService.protocolVersion,
+            if (!(yield* Ref.get(attached))) {
+              if (!("family" in message)) return yield* close(4401)
+              const result = ResidentService.validateHandshake(message, {
                 identity: options.identity,
-                clientNonce: message.clientNonce,
-                serviceNonce,
-                connectionId,
-                state: "ready",
-                capabilities: ["ping"],
-              } satisfies ResidentService.HandshakeAccepted),
-            )
-          }
-          if (!("_tag" in message)) return
-          if (message._tag === "ping") yield* writer(json({ _tag: "pong", id: message.id }))
-          if (message._tag === "cancel") {
-            const fiber = (yield* Ref.get(requests)).get(message.requestId)
-            if (fiber !== undefined) yield* Fiber.interrupt(fiber)
-          }
-          if (message._tag === "interactive-end") {
-            const active = (yield* Ref.get(routes)).get(message.requestId)?.sessions.get(message.sessionId)
-            if (active !== undefined) yield* Deferred.succeed(active.ended, undefined)
-          }
-          if (message._tag === "cancel-interactive-action") {
-            const active = (yield* Ref.get(actions)).get(message.actionId)
-            if (
-              active !== undefined &&
-              active.requestId === message.requestId &&
-              active.sessionId === message.sessionId
-            )
-              yield* Fiber.interrupt(active.fiber)
-          }
-          if (message._tag === "interactive-action") {
-            const active = (yield* Ref.get(routes)).get(message.requestId)?.sessions.get(message.sessionId)
-            if (active === undefined) return
-            const dispatch = (event: Operation.InteractiveEvent) => {
-              Effect.runFork(
-                writer(
+                token: options.token,
+                capabilities: [],
+              })
+              if (result._tag !== "Accepted") return yield* close(result._tag === "UpgradeRequired" ? 4403 : 4401)
+              if (!(yield* lifecycle.tryAttach)) {
+                yield* writer(
+                  json({ _tag: "rejected", reason: "draining" } satisfies ResidentService.HandshakeRejected),
+                )
+                return yield* close(4409)
+              }
+              yield* Ref.set(attached, true)
+              const negotiated = ResidentService.negotiateCapabilities(capabilities, message.capabilities)
+              const existing = yield* Ref.get(graceFiber)
+              if (existing !== undefined) yield* Fiber.interrupt(existing)
+              yield* Ref.set(graceFiber, undefined)
+              if (!negotiated.includes("startup-state")) yield* Deferred.await(operationReady)
+              yield* writer(
+                json({
+                  _tag: "accepted",
+                  family: "rika-resident",
+                  version: ResidentService.protocolVersion,
+                  identity: options.identity,
+                  clientNonce: message.clientNonce,
+                  serviceNonce,
+                  connectionId,
+                  state: negotiated.includes("startup-state") ? "starting" : "ready",
+                  capabilities: negotiated,
+                } satisfies ResidentService.HandshakeAccepted),
+              )
+              if (negotiated.includes("startup-state")) {
+                yield* Deferred.await(operationReady)
+                yield* writer(json({ _tag: "startup-ready" } satisfies ResidentService.ServerMessage))
+              }
+              return
+            }
+            if (!("_tag" in message)) return
+            if (message._tag === "ping") yield* writer(json({ _tag: "pong", id: message.id }))
+            if (message._tag === "cancel") {
+              const fiber = (yield* Ref.get(requests)).get(message.requestId)
+              if (fiber !== undefined) yield* Fiber.interrupt(fiber)
+            }
+            if (message._tag === "interactive-end") {
+              const active = (yield* Ref.get(routes)).get(message.requestId)?.sessions.get(message.sessionId)
+              if (active !== undefined) yield* Deferred.succeed(active.ended, undefined)
+            }
+            if (message._tag === "cancel-interactive-action") {
+              const active = (yield* Ref.get(actions)).get(message.actionId)
+              if (
+                active !== undefined &&
+                active.requestId === message.requestId &&
+                active.sessionId === message.sessionId
+              )
+                yield* Fiber.interrupt(active.fiber)
+            }
+            if (message._tag === "interactive-action") {
+              const active = (yield* Ref.get(routes)).get(message.requestId)?.sessions.get(message.sessionId)
+              if (active === undefined) return
+              let outputOverflowed = false
+              const dispatch = (event: Operation.InteractiveEvent) => {
+                if (
+                  !Queue.offerUnsafe(
+                    outbound,
+                    json({
+                      _tag: "interactive-event",
+                      requestId: message.requestId,
+                      sessionId: message.sessionId,
+                      actionId: message.actionId,
+                      event,
+                    } satisfies ResidentService.ServerMessage),
+                  )
+                )
+                  outputOverflowed = true
+              }
+              const args = message.arguments
+              const action = (() => {
+                switch (message.method) {
+                  case "initialize":
+                    return active.session.initialize(dispatch)
+                  case "submit":
+                    return active.session.submit(
+                      args[0] as string,
+                      dispatch,
+                      args[1] as "low" | "medium" | "high" | "ultra" | undefined,
+                      args[2] as ReadonlyArray<import("@rika/persistence/turn").PromptPart> | undefined,
+                      args[3] as { readonly reasoningEffort?: string; readonly fastMode?: boolean } | undefined,
+                    )
+                  case "shell":
+                    return active.session.shell(args[0] as string, args[1] as boolean, dispatch)
+                  case "editQueued":
+                    return active.session.editQueued(args[0] as string, args[1] as string, dispatch)
+                  case "dequeue":
+                    return active.session.dequeue(args[0] as string, dispatch)
+                  case "steerQueued":
+                    return active.session.steerQueued(args[0] as string, args[1] as string, dispatch)
+                  case "steer":
+                    return active.session.steer(args[0] as string, dispatch)
+                  case "interruptAndSend":
+                    return active.session.interruptAndSend(args[0] as string, dispatch)
+                  case "cancel":
+                    return active.session.cancel(dispatch)
+                  case "resolvePermission":
+                    return active.session.resolvePermission(
+                      args[0] as string,
+                      args[1] as "permission" | "tool-approval",
+                      args[2] as "allow" | "deny" | "always",
+                      dispatch,
+                    )
+                  case "selectThread":
+                    return active.session.selectThread(args[0] as string, dispatch)
+                  case "previewThread":
+                    return active.session.previewThread(args[0] as string, dispatch)
+                  case "reopenThread":
+                    return active.session.reopenThread(dispatch)
+                  case "followSelected":
+                    return active.session.followSelected(dispatch)
+                  case "replay":
+                    return active.session.replay(args[0] as string, args[1] as string | undefined, dispatch)
+                  default:
+                    return Effect.void
+                }
+              })()
+              const started = yield* Deferred.make<void>()
+              const actionFiber = yield* lifecycle.runWork(
+                hostWork,
+                Deferred.await(started).pipe(
+                  Effect.andThen(
+                    action.pipe(
+                      Effect.andThen(() =>
+                        outputOverflowed
+                          ? Effect.fail(
+                              new Operation.OperationUnavailable({
+                                operation: message.method,
+                                message: "Resident client is too slow to receive interactive events",
+                              }),
+                            )
+                          : writer(
+                              json({
+                                _tag: "action-completed",
+                                requestId: message.requestId,
+                                sessionId: message.sessionId,
+                                actionId: message.actionId,
+                              } satisfies ResidentService.ServerMessage),
+                            ),
+                      ),
+                      Effect.asVoid,
+                    ),
+                  ),
+                  Effect.catch((failure) =>
+                    writer(
+                      json({
+                        _tag: "action-failed",
+                        requestId: message.requestId,
+                        sessionId: message.sessionId,
+                        actionId: message.actionId,
+                        error:
+                          failure instanceof Operation.OperationUnavailable
+                            ? failure
+                            : new Operation.OperationUnavailable({
+                                operation: message.method,
+                                message: String(failure),
+                              }),
+                      } satisfies ResidentService.ServerMessage),
+                    ),
+                  ),
+                  Effect.ensuring(Ref.update(actions, (current) => (current.delete(message.actionId), current))),
+                ),
+              )
+              if (actionFiber === undefined) {
+                yield* writer(
                   json({
-                    _tag: "interactive-event",
+                    _tag: "action-failed",
                     requestId: message.requestId,
                     sessionId: message.sessionId,
                     actionId: message.actionId,
-                    event,
+                    error: new Operation.OperationUnavailable({
+                      operation: message.method,
+                      message: "Resident service is draining",
+                    }),
                   } satisfies ResidentService.ServerMessage),
-                ),
-              )
-            }
-            const args = message.arguments
-            const action = (() => {
-              switch (message.method) {
-                case "initialize":
-                  return active.session.initialize(dispatch)
-                case "submit":
-                  return active.session.submit(
-                    args[0] as string,
-                    dispatch,
-                    args[1] as "low" | "medium" | "high" | "ultra" | undefined,
-                    args[2] as ReadonlyArray<import("@rika/persistence/turn").PromptPart> | undefined,
-                    args[3] as { readonly reasoningEffort?: string; readonly fastMode?: boolean } | undefined,
-                  )
-                case "shell":
-                  return active.session.shell(args[0] as string, args[1] as boolean, dispatch)
-                case "editQueued":
-                  return active.session.editQueued(args[0] as string, args[1] as string, dispatch)
-                case "dequeue":
-                  return active.session.dequeue(args[0] as string, dispatch)
-                case "steerQueued":
-                  return active.session.steerQueued(args[0] as string, args[1] as string, dispatch)
-                case "steer":
-                  return active.session.steer(args[0] as string, dispatch)
-                case "interruptAndSend":
-                  return active.session.interruptAndSend(args[0] as string, dispatch)
-                case "cancel":
-                  return active.session.cancel(dispatch)
-                case "resolvePermission":
-                  return active.session.resolvePermission(
-                    args[0] as string,
-                    args[1] as "permission" | "tool-approval",
-                    args[2] as "allow" | "deny" | "always",
-                    dispatch,
-                  )
-                case "selectThread":
-                  return active.session.selectThread(args[0] as string, dispatch)
-                case "previewThread":
-                  return active.session.previewThread(args[0] as string, dispatch)
-                case "reopenThread":
-                  return active.session.reopenThread(dispatch)
-                case "followSelected":
-                  return active.session.followSelected(dispatch)
-                case "replay":
-                  return active.session.replay(args[0] as string, args[1] as string | undefined, dispatch)
-                default:
-                  return Effect.void
+                )
+                return
               }
-            })()
-            const started = yield* Deferred.make<void>()
-            const actionFiber = yield* lifecycle.runWork(
-              hostWork,
-              Deferred.await(started).pipe(
-                Effect.andThen(
-                  action.pipe(
-                    Effect.andThen(
-                      writer(
-                        json({
-                          _tag: "action-completed",
-                          requestId: message.requestId,
-                          sessionId: message.sessionId,
-                          actionId: message.actionId,
-                        } satisfies ResidentService.ServerMessage),
-                      ),
-                    ),
-                    Effect.asVoid,
-                  ),
-                ),
-                Effect.ensuring(Ref.update(actions, (current) => (current.delete(message.actionId), current))),
-              ),
-            )
-            if (actionFiber === undefined) {
-              yield* writer(
-                json({
-                  _tag: "action-failed",
+              yield* Ref.update(actions, (current) =>
+                current.set(message.actionId, {
                   requestId: message.requestId,
                   sessionId: message.sessionId,
-                  actionId: message.actionId,
-                  error: new Operation.OperationUnavailable({
-                    operation: message.method,
-                    message: "Resident service is draining",
-                  }),
-                } satisfies ResidentService.ServerMessage),
+                  fiber: actionFiber,
+                }),
               )
-              return
+              yield* Deferred.succeed(started, undefined)
             }
-            yield* Ref.update(actions, (current) =>
-              current.set(message.actionId, {
-                requestId: message.requestId,
-                sessionId: message.sessionId,
-                fiber: actionFiber,
-              }),
-            )
-            yield* Deferred.succeed(started, undefined)
-          }
-          if (message._tag === "operation") {
-            requestByInput.set(message.input, message.requestId)
-            const send = (frame: string) => writer(frame).pipe(Effect.catch(() => Effect.void))
-            yield* Ref.update(routes, (current) =>
-              current.set(message.requestId, {
-                send,
-                sessions: new Map(),
-              }),
-            )
-            const fiber = yield* lifecycle.runWork(
-              hostWork,
-              Effect.gen(function* () {
-                const operation = yield* Deferred.await(operationReady)
-                const output = yield* Queue.unbounded<
-                  | { readonly _tag: "output"; readonly channel: "stdout" | "stderr"; readonly text: string }
-                  | { readonly _tag: "finished" }
-                >()
-                const write = (channel: "stdout" | "stderr", values: ReadonlyArray<unknown>) =>
-                  Queue.offerUnsafe(output, { _tag: "output", channel, text: formatOutput(values) })
-                const requestConsole = Object.assign(Object.create(baseConsole) as Console.Console, {
-                  assert: (condition: boolean, ...values: ReadonlyArray<unknown>) => {
-                    if (!condition) write("stderr", values)
-                  },
-                  debug: (...values: ReadonlyArray<unknown>) => write("stdout", values),
-                  error: (...values: ReadonlyArray<unknown>) => write("stderr", values),
-                  info: (...values: ReadonlyArray<unknown>) => write("stdout", values),
-                  log: (...values: ReadonlyArray<unknown>) => write("stdout", values),
-                  warn: (...values: ReadonlyArray<unknown>) => write("stderr", values),
-                })
-                const sender = yield* Effect.forkChild(
-                  Effect.gen(function* () {
-                    while (true) {
-                      const frame = yield* Queue.take(output)
-                      if (frame._tag === "finished") return
-                      yield* send(
-                        json({
-                          _tag: "output",
-                          requestId: message.requestId,
-                          channel: frame.channel,
-                          text: frame.text,
-                        } satisfies ResidentService.ServerMessage),
-                      )
-                    }
-                  }),
-                )
-                const result = yield* Effect.exit(
-                  operation.run(message.input).pipe(Effect.provideService(Console.Console, requestConsole)),
-                )
-                Queue.offerUnsafe(output, { _tag: "finished" })
-                yield* Fiber.join(sender)
-                yield* Exit.match(result, {
-                  onFailure: (cause) => {
-                    const failure = Cause.squash(cause)
-                    const error =
-                      failure instanceof Operation.OperationUnavailable
-                        ? failure
-                        : new Operation.OperationUnavailable({
-                            operation: message.input._tag,
-                            message: String(failure),
-                          })
-                    return send(
-                      json({
-                        _tag: "operation-failed",
-                        requestId: message.requestId,
-                        error,
-                      } satisfies ResidentService.ServerMessage),
-                    )
-                  },
-                  onSuccess: () =>
-                    send(
-                      json({
-                        _tag: "operation-completed",
-                        requestId: message.requestId,
-                      } satisfies ResidentService.ServerMessage),
+            if (message._tag === "operation") {
+              requestByInput.set(message.input, message.requestId)
+              const send = (frame: string) => writer(frame).pipe(Effect.catch(() => Effect.void))
+              yield* Ref.update(routes, (current) =>
+                current.set(message.requestId, {
+                  send,
+                  sessions: new Map(),
+                }),
+              )
+              const fiber = yield* lifecycle.runWork(
+                hostWork,
+                Effect.gen(function* () {
+                  const operation = yield* Deferred.await(operationReady)
+                  const output = yield* Queue.bounded<
+                    | { readonly _tag: "output"; readonly channel: "stdout" | "stderr"; readonly text: string }
+                    | { readonly _tag: "finished" }
+                  >(outboundCapacity)
+                  let outputOverflowed = false
+                  const write = (channel: "stdout" | "stderr", values: ReadonlyArray<unknown>) => {
+                    if (!Queue.offerUnsafe(output, { _tag: "output", channel, text: formatOutput(values) }))
+                      outputOverflowed = true
+                  }
+                  const requestConsole = Object.assign(Object.create(baseConsole) as Console.Console, {
+                    assert: (condition: boolean, ...values: ReadonlyArray<unknown>) => {
+                      if (!condition) write("stderr", values)
+                    },
+                    debug: (...values: ReadonlyArray<unknown>) => write("stdout", values),
+                    error: (...values: ReadonlyArray<unknown>) => write("stderr", values),
+                    info: (...values: ReadonlyArray<unknown>) => write("stdout", values),
+                    log: (...values: ReadonlyArray<unknown>) => write("stdout", values),
+                    warn: (...values: ReadonlyArray<unknown>) => write("stderr", values),
+                  })
+                  const sender = yield* Effect.forkChild(
+                    Effect.gen(function* () {
+                      while (true) {
+                        const frame = yield* Queue.take(output)
+                        if (frame._tag === "finished") return
+                        yield* send(
+                          json({
+                            _tag: "output",
+                            requestId: message.requestId,
+                            channel: frame.channel,
+                            text: frame.text,
+                          } satisfies ResidentService.ServerMessage),
+                        )
+                      }
+                    }),
+                  )
+                  const result = yield* Effect.exit(
+                    operation.run(message.input).pipe(Effect.provideService(Console.Console, requestConsole)),
+                  )
+                  yield* Queue.offer(output, { _tag: "finished" })
+                  yield* Fiber.join(sender)
+                  yield* Exit.match(
+                    outputOverflowed ? Exit.fail("Resident client output queue is overloaded") : result,
+                    {
+                      onFailure: (cause) => {
+                        const failure = Cause.squash(cause)
+                        const error =
+                          failure instanceof Operation.OperationUnavailable
+                            ? failure
+                            : new Operation.OperationUnavailable({
+                                operation: message.input._tag,
+                                message: String(failure),
+                              })
+                        return send(
+                          json({
+                            _tag: "operation-failed",
+                            requestId: message.requestId,
+                            error,
+                          } satisfies ResidentService.ServerMessage),
+                        )
+                      },
+                      onSuccess: () =>
+                        send(
+                          json({
+                            _tag: "operation-completed",
+                            requestId: message.requestId,
+                          } satisfies ResidentService.ServerMessage),
+                        ),
+                    },
+                  )
+                }).pipe(
+                  Effect.ensuring(
+                    Ref.update(requests, (current) => (current.delete(message.requestId), current)).pipe(
+                      Effect.andThen(Ref.update(routes, (current) => (current.delete(message.requestId), current))),
+                      Effect.andThen(Effect.sync(() => requestByInput.delete(message.input))),
                     ),
-                })
-              }).pipe(
-                Effect.ensuring(
-                  Ref.update(requests, (current) => (current.delete(message.requestId), current)).pipe(
-                    Effect.andThen(Ref.update(routes, (current) => (current.delete(message.requestId), current))),
-                    Effect.andThen(Effect.sync(() => requestByInput.delete(message.input))),
                   ),
+                  Effect.asVoid,
                 ),
-                Effect.asVoid,
-              ),
-            )
-            if (fiber === undefined) {
-              yield* Ref.update(routes, (current) => (current.delete(message.requestId), current))
-              requestByInput.delete(message.input)
-              yield* writer(drainingFailure(message.requestId, message.input._tag))
-              return
+              )
+              if (fiber === undefined) {
+                yield* Ref.update(routes, (current) => (current.delete(message.requestId), current))
+                requestByInput.delete(message.input)
+                yield* writer(drainingFailure(message.requestId, message.input._tag))
+                return
+              }
+              yield* Ref.update(requests, (current) => current.set(message.requestId, fiber))
             }
-            yield* Ref.update(requests, (current) => current.set(message.requestId, fiber))
-          }
-        }),
+          }),
+        ),
       )
       .pipe(
         Effect.ensuring(
@@ -435,12 +499,26 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   const connectionScope = yield* Scope.make()
   yield* Effect.addFinalizer(() => Scope.close(connectionScope, Exit.void))
   const socket = yield* Socket.makeWebSocket(options.url).pipe(Effect.provide(BunSocket.layerWebSocketConstructor))
-  const writer = yield* Scope.provide(socket.writer, connectionScope)
+  const rawWriter = yield* Scope.provide(socket.writer, connectionScope)
+  const outbound = yield* Queue.bounded<string | Socket.CloseEvent>(outboundCapacity)
+  const writer = (frame: string | Socket.CloseEvent) =>
+    typeof frame === "string" && new TextEncoder().encode(frame).byteLength > maxFrameBytes
+      ? Effect.fail(transportError("Resident frame exceeds maximum size"))
+      : Queue.offer(outbound, frame).pipe(
+          Effect.timeoutOrElse({
+            duration: "1 second",
+            orElse: () => Effect.fail(transportError("Resident outbound queue is overloaded")),
+          }),
+          Effect.asVoid,
+        )
+  yield* Effect.forkIn(Effect.forever(Queue.take(outbound).pipe(Effect.flatMap(rawWriter))), connectionScope)
   const accepted = yield* Deferred.make<ResidentService.HandshakeAccepted>()
+  const startup = yield* Deferred.make<void, ResidentService.ResidentServiceError>()
   const clientNonce = yield* crypto.randomUUIDv4
   const closed = yield* Deferred.make<void>()
   const connectionFailure = yield* Deferred.make<never, ResidentService.ResidentServiceError>()
-  const pongs = yield* Ref.make(new Map<string, Deferred.Deferred<void>>())
+  const pongs = yield* Ref.make(new Map<string, Deferred.Deferred<void, ResidentService.ResidentServiceError>>())
+  const inbound = yield* Semaphore.make(1)
   const requests = yield* Ref.make(
     new Map<
       string,
@@ -475,122 +553,169 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
     clientNonce,
     clientKind: options.clientKind,
     clientVersion: options.clientVersion,
-    capabilities: ["ping"],
+    capabilities,
   } satisfies ResidentService.Handshake)
   yield* socket
     .runString(
       (frame) =>
-        Effect.try({
-          try: () => decodeServer(parse(frame)),
-          catch: () => transportError("Invalid resident response"),
-        }).pipe(
-          Effect.flatMap((message) =>
-            message._tag === "accepted"
-              ? message.identity !== options.identity || message.clientNonce !== clientNonce
-                ? Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
-                : Deferred.succeed(accepted, message)
-              : message._tag === "rejected"
-                ? Deferred.fail(connectionFailure, transportError("Resident service is draining", "resident-draining"))
-                : message._tag === "pong"
-                  ? Effect.gen(function* () {
-                      const pending = (yield* Ref.get(pongs)).get(message.id)
-                      if (pending !== undefined) yield* Deferred.succeed(pending, undefined)
-                    })
-                  : Effect.gen(function* () {
-                      const request = (yield* Ref.get(requests)).get(message.requestId)
-                      if (request === undefined) return
-                      if (message._tag === "output")
-                        yield* (message.channel === "stdout"
-                          ? request.stdout?.(message.text)
-                          : request.stderr?.(message.text)) ?? Effect.void
-                      if (message._tag === "interactive-event")
-                        request.actions.get(message.actionId)?.dispatch(message.event as Operation.InteractiveEvent)
-                      if (message._tag === "action-completed") {
-                        const action = request.actions.get(message.actionId)
-                        if (action !== undefined) yield* Deferred.succeed(action.done, undefined)
-                      }
-                      if (message._tag === "action-failed") {
-                        const action = request.actions.get(message.actionId)
-                        if (action !== undefined) yield* Deferred.fail(action.done, message.error)
-                      }
-                      if (
-                        message._tag === "interactive-started" &&
-                        request.input._tag === "Interactive" &&
-                        request.interactive !== undefined
-                      ) {
-                        const invoke = Effect.fn("ResidentTransport.interactiveAction")(function* (
-                          method: string,
-                          args: ReadonlyArray<unknown>,
-                          dispatch: (event: Operation.InteractiveEvent) => void,
-                        ) {
-                          const actionId = yield* crypto.randomUUIDv4
-                          const done = yield* Deferred.make<void, Operation.OperationUnavailable>()
-                          request.actions.set(actionId, { done, dispatch })
-                          yield* writer(
-                            json({
-                              _tag: "interactive-action",
-                              requestId: message.requestId,
-                              sessionId: message.sessionId,
-                              actionId,
-                              method,
-                              arguments: args,
-                            } satisfies ResidentService.ClientMessage),
-                          ).pipe(Effect.catch(() => Effect.void))
-                          yield* Effect.raceFirst(Deferred.await(done), Deferred.await(closed)).pipe(
-                            Effect.ensuring(
-                              Deferred.isDone(done).pipe(
-                                Effect.flatMap((completed) =>
-                                  completed
-                                    ? Effect.void
-                                    : sendBestEffort(
-                                        json({
-                                          _tag: "cancel-interactive-action",
-                                          requestId: message.requestId,
-                                          sessionId: message.sessionId,
-                                          actionId,
-                                        } satisfies ResidentService.ClientMessage),
-                                      ),
-                                ),
-                                Effect.andThen(Effect.sync(() => request.actions.delete(actionId))),
-                              ),
-                            ),
-                          )
-                        })
-                        const safeInvoke = (
-                          method: string,
-                          args: ReadonlyArray<unknown>,
-                          dispatch: (event: Operation.InteractiveEvent) => void,
-                        ) => invoke(method, args, dispatch).pipe(Effect.catch(() => Effect.void))
-                        const session: Operation.InteractiveSession = {
-                          initialize: (dispatch) => safeInvoke("initialize", [], dispatch),
-                          submit: (prompt, dispatch, mode, parts, tuning) =>
-                            safeInvoke("submit", [prompt, mode, parts, tuning], dispatch),
-                          shell: (command, incognito, dispatch) => safeInvoke("shell", [command, incognito], dispatch),
-                          editQueued: (turnId, prompt, dispatch) =>
-                            safeInvoke("editQueued", [turnId, prompt], dispatch),
-                          dequeue: (turnId, dispatch) => safeInvoke("dequeue", [turnId], dispatch),
-                          steerQueued: (turnId, text, dispatch) => safeInvoke("steerQueued", [turnId, text], dispatch),
-                          steer: (text, dispatch) => safeInvoke("steer", [text], dispatch),
-                          interruptAndSend: (prompt, dispatch) => safeInvoke("interruptAndSend", [prompt], dispatch),
-                          cancel: (dispatch) => safeInvoke("cancel", [], dispatch),
-                          resolvePermission: (waitId, kind, decision, dispatch) =>
-                            safeInvoke("resolvePermission", [waitId, kind, decision], dispatch),
-                          selectThread: (threadId, dispatch) => safeInvoke("selectThread", [threadId], dispatch),
-                          previewThread: (threadId, dispatch) => safeInvoke("previewThread", [threadId], dispatch),
-                          reopenThread: (dispatch) => safeInvoke("reopenThread", [], dispatch),
-                          followSelected: (dispatch) => safeInvoke("followSelected", [], dispatch),
-                          replay: (turnId, afterCursor, dispatch) =>
-                            safeInvoke("replay", [turnId, afterCursor], dispatch),
-                        }
-                        if (request.interactiveStarted !== undefined)
-                          yield* Deferred.succeed(request.interactiveStarted, {
-                            sessionId: message.sessionId,
-                            session,
+        inbound.withPermits(1)(
+          (new TextEncoder().encode(frame).byteLength > maxFrameBytes
+            ? Effect.fail(transportError("Resident frame exceeds maximum size"))
+            : Effect.try({
+                try: () => decodeServer(parse(frame)),
+                catch: () => transportError("Invalid resident response"),
+              })
+          ).pipe(
+            Effect.tap(() =>
+              Effect.gen(function* () {
+                for (const waiter of (yield* Ref.get(pongs)).values()) yield* Deferred.succeed(waiter, undefined)
+              }),
+            ),
+            Effect.flatMap((message) =>
+              message._tag === "accepted"
+                ? message.identity !== options.identity || message.clientNonce !== clientNonce
+                  ? Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                  : Deferred.succeed(accepted, message).pipe(
+                      Effect.andThen(message.state === "ready" ? Deferred.succeed(startup, undefined) : Effect.void),
+                    )
+                : message._tag === "startup-ready"
+                  ? Deferred.succeed(startup, undefined)
+                  : message._tag === "startup-failed"
+                    ? Deferred.fail(connectionFailure, transportError(message.error))
+                    : message._tag === "rejected"
+                      ? Deferred.fail(
+                          connectionFailure,
+                          transportError("Resident service is draining", "resident-draining"),
+                        )
+                      : message._tag === "pong"
+                        ? Effect.gen(function* () {
+                            const pending = (yield* Ref.get(pongs)).get(message.id)
+                            if (pending !== undefined) yield* Deferred.succeed(pending, undefined)
                           })
-                      }
-                      if (message._tag === "operation-completed") yield* Deferred.succeed(request.done, undefined)
-                      if (message._tag === "operation-failed") yield* Deferred.fail(request.done, message.error)
-                    }),
+                        : Effect.gen(function* () {
+                            const request = (yield* Ref.get(requests)).get(message.requestId)
+                            if (request === undefined) return
+                            if (message._tag === "output")
+                              yield* (message.channel === "stdout"
+                                ? request.stdout?.(message.text)
+                                : request.stderr?.(message.text)) ?? Effect.void
+                            if (message._tag === "interactive-event")
+                              request.actions
+                                .get(message.actionId)
+                                ?.dispatch(message.event as Operation.InteractiveEvent)
+                            if (message._tag === "action-completed") {
+                              const action = request.actions.get(message.actionId)
+                              if (action !== undefined) yield* Deferred.succeed(action.done, undefined)
+                            }
+                            if (message._tag === "action-failed") {
+                              const action = request.actions.get(message.actionId)
+                              if (action !== undefined) yield* Deferred.fail(action.done, message.error)
+                            }
+                            if (
+                              message._tag === "interactive-started" &&
+                              request.input._tag === "Interactive" &&
+                              request.interactive !== undefined
+                            ) {
+                              const invoke = Effect.fn("ResidentTransport.interactiveAction")(function* (
+                                method: string,
+                                args: ReadonlyArray<unknown>,
+                                dispatch: (event: Operation.InteractiveEvent) => void,
+                              ) {
+                                const actionId = yield* crypto.randomUUIDv4
+                                const done = yield* Deferred.make<void, Operation.OperationUnavailable>()
+                                request.actions.set(actionId, { done, dispatch })
+                                yield* writer(
+                                  json({
+                                    _tag: "interactive-action",
+                                    requestId: message.requestId,
+                                    sessionId: message.sessionId,
+                                    actionId,
+                                    method,
+                                    arguments: args,
+                                  } satisfies ResidentService.ClientMessage),
+                                ).pipe(Effect.catch(() => Effect.void))
+                                yield* Effect.raceFirst(
+                                  Deferred.await(done),
+                                  Deferred.await(closed).pipe(
+                                    Effect.andThen(
+                                      Effect.fail(
+                                        new Operation.OperationUnavailable({
+                                          operation: method,
+                                          message: "Resident connection closed before the action outcome was known",
+                                        }),
+                                      ),
+                                    ),
+                                  ),
+                                ).pipe(
+                                  Effect.ensuring(
+                                    Deferred.isDone(done).pipe(
+                                      Effect.flatMap((completed) =>
+                                        completed
+                                          ? Effect.void
+                                          : sendBestEffort(
+                                              json({
+                                                _tag: "cancel-interactive-action",
+                                                requestId: message.requestId,
+                                                sessionId: message.sessionId,
+                                                actionId,
+                                              } satisfies ResidentService.ClientMessage),
+                                            ),
+                                      ),
+                                      Effect.andThen(Effect.sync(() => request.actions.delete(actionId))),
+                                    ),
+                                  ),
+                                )
+                              })
+                              const safeInvoke = (
+                                method: string,
+                                args: ReadonlyArray<unknown>,
+                                dispatch: (event: Operation.InteractiveEvent) => void,
+                              ) =>
+                                invoke(method, args, dispatch).pipe(
+                                  Effect.mapError((error) =>
+                                    error instanceof Operation.OperationUnavailable
+                                      ? error
+                                      : new Operation.OperationUnavailable({
+                                          operation: method,
+                                          message: String(error),
+                                        }),
+                                  ),
+                                )
+                              const session: Operation.InteractiveSession = {
+                                initialize: (dispatch) => safeInvoke("initialize", [], dispatch),
+                                submit: (prompt, dispatch, mode, parts, tuning) =>
+                                  safeInvoke("submit", [prompt, mode, parts, tuning], dispatch),
+                                shell: (command, incognito, dispatch) =>
+                                  safeInvoke("shell", [command, incognito], dispatch),
+                                editQueued: (turnId, prompt, dispatch) =>
+                                  safeInvoke("editQueued", [turnId, prompt], dispatch),
+                                dequeue: (turnId, dispatch) => safeInvoke("dequeue", [turnId], dispatch),
+                                steerQueued: (turnId, text, dispatch) =>
+                                  safeInvoke("steerQueued", [turnId, text], dispatch),
+                                steer: (text, dispatch) => safeInvoke("steer", [text], dispatch),
+                                interruptAndSend: (prompt, dispatch) =>
+                                  safeInvoke("interruptAndSend", [prompt], dispatch),
+                                cancel: (dispatch) => safeInvoke("cancel", [], dispatch),
+                                resolvePermission: (waitId, kind, decision, dispatch) =>
+                                  safeInvoke("resolvePermission", [waitId, kind, decision], dispatch),
+                                selectThread: (threadId, dispatch) => safeInvoke("selectThread", [threadId], dispatch),
+                                previewThread: (threadId, dispatch) =>
+                                  safeInvoke("previewThread", [threadId], dispatch),
+                                reopenThread: (dispatch) => safeInvoke("reopenThread", [], dispatch),
+                                followSelected: (dispatch) => safeInvoke("followSelected", [], dispatch),
+                                replay: (turnId, afterCursor, dispatch) =>
+                                  safeInvoke("replay", [turnId, afterCursor], dispatch),
+                              }
+                              if (request.interactiveStarted !== undefined)
+                                yield* Deferred.succeed(request.interactiveStarted, {
+                                  sessionId: message.sessionId,
+                                  session,
+                                })
+                            }
+                            if (message._tag === "operation-completed") yield* Deferred.succeed(request.done, undefined)
+                            if (message._tag === "operation-failed") yield* Deferred.fail(request.done, message.error)
+                          }),
+            ),
           ),
         ),
       { onOpen: writer(handshake).pipe(Effect.catch(() => Effect.void)) },
@@ -608,8 +733,23 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
           yield* Deferred.fail(connectionFailure, failure)
         }),
       ),
-      Effect.ensuring(Deferred.succeed(closed, undefined)),
-      Effect.forkDetach,
+      Effect.ensuring(
+        Effect.gen(function* () {
+          const failure = transportError("Resident connection closed", "resident-absent")
+          const operationFailure = new Operation.OperationUnavailable({
+            operation: "ResidentConnection",
+            message: failure.message,
+          })
+          for (const waiter of (yield* Ref.get(pongs)).values()) yield* Deferred.fail(waiter, failure)
+          for (const request of (yield* Ref.get(requests)).values()) {
+            yield* Deferred.fail(request.done, operationFailure)
+            if (request.interactiveStarted !== undefined) yield* Deferred.interrupt(request.interactiveStarted)
+            for (const action of request.actions.values()) yield* Deferred.fail(action.done, operationFailure)
+          }
+          yield* Deferred.succeed(closed, undefined)
+        }),
+      ),
+      Effect.forkIn(connectionScope),
     )
   const disconnected = Effect.raceFirst(
     Deferred.await(connectionFailure),
@@ -625,8 +765,14 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
     )
   const response = yield* Effect.raceFirst(Deferred.await(accepted), disconnected).pipe(
     Effect.timeoutOrElse({
-      duration: 5_000,
-      orElse: () => Effect.fail(transportError("Foreign resident listener", "foreign-listener")),
+      duration: "15 seconds",
+      orElse: () => Effect.fail(transportError("Resident startup timed out", "transport-failed")),
+    }),
+  )
+  yield* Effect.raceFirst(Deferred.await(startup), disconnected).pipe(
+    Effect.timeoutOrElse({
+      duration: "15 seconds",
+      orElse: () => Effect.fail(transportError("Resident startup timed out", "transport-failed")),
     }),
   )
   const ping = Effect.acquireUseRelease(
@@ -640,7 +786,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
     ({ completed }) =>
       Deferred.await(completed).pipe(
         Effect.timeoutOrElse({
-          duration: 1_000,
+          duration: "15 seconds",
           orElse: () => Effect.fail(transportError("Resident ping timed out")),
         }),
       ),
@@ -654,7 +800,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   )
   yield* Effect.forkIn(
     ping.pipe(
-      Effect.repeat({ schedule: Schedule.spaced("250 millis") }),
+      Effect.repeat({ schedule: Schedule.spaced("5 seconds") }),
       Effect.catch((cause) => Deferred.fail(connectionFailure, cause)),
     ),
     connectionScope,
@@ -727,36 +873,206 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
         Effect.gen(function* () {
           const endpoint = yield* resolve(input.profile, input.dataRoot)
           const token = yield* readOrCreateToken(endpoint.tokenPath)
+          const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner
+          const parentScope = yield* Effect.scope
           const attach = (role: ResidentService.Connection["role"]) => connect({ ...endpoint, ...input, token, role })
-          const first = yield* Effect.result(attach("attached"))
-          if (first._tag === "Success") return first.success
-          if (first.failure.reason !== "resident-absent") return yield* Effect.fail(first.failure)
-          if (input.startHost === undefined && input.owner === undefined) return yield* Effect.fail(first.failure)
-          if (input.startHost !== undefined) {
-            yield* input.startHost()
-            return yield* attach("attached").pipe(Effect.retry({ times: 400, schedule: Schedule.spaced(25) }))
-          }
-          const stopped = yield* Deferred.make<void>()
-          const ready = yield* Deferred.make<void>()
-          if (input.owner === undefined)
-            return yield* Effect.fail(transportError("Resident owner operation layer is unavailable"))
-          const owner = yield* host({
-            ...endpoint,
-            token,
-            graceMilliseconds: input.graceMilliseconds ?? 500,
-            stopped,
-            ready,
-            owner: input.owner,
-          }).pipe(Effect.scoped, Effect.exit, Effect.forkDetach)
-          const ownsListener = yield* Effect.raceFirst(
-            Deferred.await(ready).pipe(Effect.as(true)),
-            Fiber.join(owner).pipe(Effect.as(false)),
-          )
-          const connection = yield* attach(ownsListener ? "owner" : "attached").pipe(
-            Effect.retry({ times: 20, schedule: Schedule.spaced(25) }),
-            Effect.catch(() => attach("attached")),
-          )
-          return connection
+          const acquire = Effect.fn("ResidentTransport.acquireConnection")(function* () {
+            const first = yield* Effect.result(attach("attached"))
+            if (first._tag === "Success") return first.success
+            if (first.failure.reason !== "resident-absent") return yield* Effect.fail(first.failure)
+            if (input.startHost === undefined && input.owner === undefined) return yield* Effect.fail(first.failure)
+            if (input.startHost !== undefined) {
+              yield* input.startHost()
+              return yield* attach("attached").pipe(Effect.retry({ times: 400, schedule: Schedule.spaced(25) }))
+            }
+            const stopped = yield* Deferred.make<void>()
+            const ready = yield* Deferred.make<void>()
+            if (input.owner === undefined)
+              return yield* Effect.fail(transportError("Resident owner operation layer is unavailable"))
+            const owner = yield* host({
+              ...endpoint,
+              token,
+              graceMilliseconds: input.graceMilliseconds ?? 500,
+              stopped,
+              ready,
+              owner: input.owner,
+            }).pipe(Effect.scoped, Effect.exit, Effect.forkDetach)
+            const ownsListener = yield* Effect.raceFirst(
+              Deferred.await(ready).pipe(Effect.as(true)),
+              Fiber.join(owner).pipe(Effect.as(false)),
+            )
+            return yield* attach(ownsListener ? "owner" : "attached").pipe(
+              Effect.retry({ times: 20, schedule: Schedule.spaced(25) }),
+              Effect.catch(() => attach("attached")),
+            )
+          })
+          const acquireReady = acquire().pipe(
+            Scope.provide(parentScope),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+          ) as Effect.Effect<ResidentService.Connection, ResidentService.ResidentServiceError>
+          const initial = yield* acquireReady
+          const logicalClosed = yield* Deferred.make<void>()
+          const physical = yield* Ref.make(initial)
+          const supervise = Effect.fn("ResidentTransport.superviseInteractive")(function* (
+            operationInput: ResidentService.InteractiveInput,
+            interactive: NonNullable<NonNullable<Parameters<ResidentService.Connection["run"]>[1]>["interactive"]>,
+          ) {
+            const firstSession = yield* Deferred.make<void>()
+            const initialChange = yield* Deferred.make<void>()
+            const sessions = yield* Ref.make<{
+              readonly session: Operation.InteractiveSession | undefined
+              readonly changed: Deferred.Deferred<void>
+            }>({ session: undefined, changed: initialChange })
+            const initialized = yield* Ref.make<((event: Operation.InteractiveEvent) => void) | undefined>(undefined)
+            const selected = yield* Ref.make<
+              { readonly threadId: string; readonly dispatch: (event: Operation.InteractiveEvent) => void } | undefined
+            >(undefined)
+            const awaitSession: Effect.Effect<Operation.InteractiveSession> = Effect.suspend(() =>
+              Ref.get(sessions).pipe(
+                Effect.flatMap((state) =>
+                  state.session === undefined
+                    ? Deferred.await(state.changed).pipe(Effect.andThen(awaitSession))
+                    : Effect.succeed(state.session),
+                ),
+              ),
+            )
+            const invalidate = (session: Operation.InteractiveSession) =>
+              Effect.gen(function* () {
+                const next = yield* Deferred.make<void>()
+                const changed = yield* Ref.modify(sessions, (state) =>
+                  state.session === session
+                    ? [state.changed, { session: undefined, changed: next }]
+                    : [undefined, state],
+                )
+                if (changed !== undefined) yield* Deferred.succeed(changed, undefined)
+              })
+            const retryRead = (
+              invoke: (session: Operation.InteractiveSession) => Effect.Effect<void>,
+            ): Effect.Effect<void> =>
+              Effect.suspend(() =>
+                awaitSession.pipe(
+                  Effect.flatMap((session) =>
+                    invoke(session).pipe(
+                      Effect.catchCause((cause) =>
+                        Cause.hasInterruptsOnly(cause)
+                          ? Effect.failCause(cause)
+                          : invalidate(session).pipe(Effect.andThen(retryRead(invoke))),
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            const mutation = (
+              dispatch: (event: Operation.InteractiveEvent) => void,
+              invoke: (session: Operation.InteractiveSession) => Effect.Effect<void>,
+            ) =>
+              awaitSession.pipe(
+                Effect.flatMap((session) =>
+                  invoke(session).pipe(
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause)
+                        ? Effect.failCause(cause)
+                        : invalidate(session).pipe(
+                            Effect.andThen(
+                              Effect.sync(() =>
+                                dispatch({
+                                  _tag: "ExecutionFailed",
+                                  message:
+                                    "Resident transport disconnected; the action outcome is unknown and was not retried",
+                                }),
+                              ),
+                            ),
+                          ),
+                    ),
+                  ),
+                ),
+              )
+            const stable: Operation.InteractiveSession = {
+              initialize: (dispatch) =>
+                Ref.set(initialized, dispatch).pipe(
+                  Effect.andThen(retryRead((session) => session.initialize(dispatch))),
+                ),
+              submit: (prompt, dispatch, mode, parts, tuning) =>
+                mutation(dispatch, (session) => session.submit(prompt, dispatch, mode, parts, tuning)),
+              shell: (command, incognito, dispatch) =>
+                mutation(dispatch, (session) => session.shell(command, incognito, dispatch)),
+              editQueued: (turnId, prompt, dispatch) =>
+                mutation(dispatch, (session) => session.editQueued(turnId, prompt, dispatch)),
+              dequeue: (turnId, dispatch) => mutation(dispatch, (session) => session.dequeue(turnId, dispatch)),
+              steerQueued: (turnId, text, dispatch) =>
+                mutation(dispatch, (session) => session.steerQueued(turnId, text, dispatch)),
+              steer: (text, dispatch) => mutation(dispatch, (session) => session.steer(text, dispatch)),
+              interruptAndSend: (prompt, dispatch) =>
+                mutation(dispatch, (session) => session.interruptAndSend(prompt, dispatch)),
+              cancel: (dispatch) => mutation(dispatch, (session) => session.cancel(dispatch)),
+              resolvePermission: (waitId, kind, decision, dispatch) =>
+                mutation(dispatch, (session) => session.resolvePermission(waitId, kind, decision, dispatch)),
+              selectThread: (threadId, dispatch) =>
+                Ref.set(selected, { threadId, dispatch }).pipe(
+                  Effect.andThen(retryRead((session) => session.selectThread(threadId, dispatch))),
+                ),
+              previewThread: (threadId, dispatch) => retryRead((session) => session.previewThread(threadId, dispatch)),
+              reopenThread: (dispatch) => retryRead((session) => session.reopenThread(dispatch)),
+              followSelected: (dispatch) => retryRead((session) => session.followSelected(dispatch)),
+              replay: (turnId, afterCursor, dispatch) =>
+                retryRead((session) => session.replay(turnId, afterCursor, dispatch)),
+            }
+            const publish = (session: Operation.InteractiveSession, first: boolean) =>
+              Effect.gen(function* () {
+                if (!first) {
+                  const initializeDispatch = yield* Ref.get(initialized)
+                  if (initializeDispatch !== undefined) yield* session.initialize(initializeDispatch)
+                  const selection = yield* Ref.get(selected)
+                  if (selection !== undefined) yield* session.selectThread(selection.threadId, selection.dispatch)
+                }
+                const changed = yield* Ref.modify(sessions, (state) => [state.changed, { ...state, session }])
+                yield* Deferred.succeed(changed, undefined)
+                if (first) yield* Deferred.succeed(firstSession, undefined)
+              })
+            const runPhysical = (connection: ResidentService.Connection, first: boolean) =>
+              connection
+                .run(operationInput, {
+                  interactive: (_, session) => publish(session, first).pipe(Effect.andThen(connection.closed)),
+                })
+                .pipe(Effect.ensuring(connection.close))
+            const reconnect = (attempt: number): Effect.Effect<void> =>
+              Effect.sleep(Math.min(1_000, 25 * 2 ** Math.min(attempt, 6))).pipe(
+                Effect.andThen(acquireReady),
+                Effect.flatMap((next) => Ref.set(physical, next).pipe(Effect.andThen(loop(next, false)))),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause) ? Effect.interrupt : reconnect(attempt + 1),
+                ),
+              )
+            const loop = (connection: ResidentService.Connection, first: boolean): Effect.Effect<void> =>
+              runPhysical(connection, first).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.gen(function* () {
+                        const current = (yield* Ref.get(sessions)).session
+                        if (current !== undefined) yield* invalidate(current)
+                        return yield* reconnect(0)
+                      }),
+                ),
+              )
+            const supervisor = yield* Effect.forkChild(
+              Effect.raceFirst(loop(initial, true), Deferred.await(logicalClosed)),
+            )
+            yield* Deferred.await(firstSession)
+            yield* interactive(operationInput, stable).pipe(Effect.ensuring(Fiber.interrupt(supervisor)))
+          })
+          return {
+            ...initial,
+            run: (operationInput, options) =>
+              operationInput._tag === "Interactive" && options?.interactive !== undefined
+                ? supervise(operationInput, options.interactive)
+                : initial.run(operationInput, options),
+            closed: Deferred.await(logicalClosed),
+            close: Deferred.succeed(logicalClosed, undefined).pipe(
+              Effect.andThen(Ref.get(physical)),
+              Effect.flatMap((connection) => connection.close),
+            ),
+          } satisfies ResidentService.Connection
         }).pipe(
           Effect.mapError((cause) =>
             cause instanceof ResidentService.ResidentServiceError ? cause : transportError(String(cause)),

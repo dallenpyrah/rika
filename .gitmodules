@@ -1,0 +1,15 @@
+[submodule "repos/effect"]
+	path = repos/effect
+	url = https://github.com/Effect-TS/effect-smol.git
+	branch = main
+	shallow = true
+[submodule "repos/baton"]
+	path = repos/baton
+	url = https://github.com/In-Time-Tec/batonfx.git
+	branch = main
+	shallow = true
+[submodule "repos/relay"]
+	path = repos/relay
+	url = https://github.com/In-Time-Tec/relayfx.git
+	branch = main
+	shallow = true

@@ -23,6 +23,7 @@ Every behavior-bearing service has a test or memory layer. Tests use determinist
 - Resident-service tests covering simultaneous bind races, starting wait, authenticated attachment, final-client grace, grace cancellation, draining, listener retention through database close, stopped replacement, and `SIGKILL` replacement and reconciliation.
 - Identity and authentication tests covering canonical/symlinked roots, separate profiles, owner-only token creation and permissions, token and profile mismatch, unauthenticated information disclosure, token replacement, incompatible protocol versions, stale diagnostics, and a foreign process occupying the endpoint.
 - Protocol tests covering frame limits, malformed frames, request idempotency across reconnect, cursor replay and acknowledgement, duplicate suppression, bounded subscription queues, slow consumers, heartbeat timeout, close codes, and reconnect during service lifecycle transitions.
+- Resident transport tests cover ordered bounded writes, serialized inbound handling, one-second stalls, close-time waiter settlement, two-sided startup capability negotiation, legacy peers, and startup failure classification.
 - Route-pin tests proving every top-level, queued, titled, child, and Workflow execution uses its immutable pre-acceptance route after settings changes and restart, and that malformed or unavailable pins fail before Relay acceptance.
 
 ## Coverage
@@ -56,7 +57,7 @@ Current retained evidence includes extracted-artifact Review text and JSON flows
 
 ## Live Model Verification
 
-Live tests are opt-in and route Effect AI provider registration through the owner's local Vibe proxy. Configuration is read only through the application Effect Config boundary. The suite accepts a base URL and any required secret through environment or a local ignored config file; it never embeds, logs, snapshots, or exports credentials.
+Live tests are opt-in and route Effect AI provider registration through a configured compatible endpoint. Configuration is read only through the application Effect Config boundary. The suite accepts a base URL and any required secret through environment or a local ignored config file; it never embeds, logs, snapshots, or exports credentials.
 
 Live tests cover one short turn, one coding tool call, one multi-turn tool loop, one subagent run, and one workflow smoke. They record redacted model ids, durations, token counts, tool calls, and outcomes. Live results are reported separately from deterministic CI because provider availability and model behavior are nondeterministic.
 

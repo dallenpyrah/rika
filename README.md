@@ -77,52 +77,66 @@ If `~/.local/bin` is not already on your shell path, add it once:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## VibeProxy Gateway configuration
+## Gateway configuration
 
 Rika follows Amp's settings layout. Global settings live at `~/.config/rika/settings.json`; a repository may override
-them with `.rika/settings.json`. Gateway names are arbitrary. To route medium mode through VibeProxy, use:
+them with `.rika/settings.json`. Gateway names are arbitrary. To route medium mode through an OpenAI-compatible service, use:
 
 ```json
 {
   "gateways": {
     "openai": {
       "protocol": "openai",
-      "baseUrl": "http://127.0.0.1:8317/v1",
+      "baseUrl": "http://127.0.0.1:9000/v1",
       "auth": { "type": "bearer-env", "variable": "RIKA_MODEL_API_KEY" }
     }
   },
   "models": {
-    "subscription": {
+    "local": {
       "gateway": "openai",
-      "candidates": ["your-vibe-model-id"],
-      "compaction": { "contextWindow": 372000, "reserveTokens": 128000, "keepRecentTokens": 32000 },
+      "candidates": ["provider-model-id"],
+      "limits": { "maxInputTokens": 84000, "maxOutputTokens": 16000, "keepRecentTokens": 16000 },
       "variants": {
         "medium": {
-          "normal": { "options": { "reasoning": { "effort": "medium" }, "max_output_tokens": 128000 } },
+          "normal": { "options": { "reasoning": { "effort": "medium" } } },
           "fast": {
-            "options": { "reasoning": { "effort": "medium" }, "max_output_tokens": 128000, "service_tier": "priority" }
+            "options": { "reasoning": { "effort": "medium" }, "service_tier": "priority" }
           }
         },
-        "high": { "normal": { "options": { "reasoning": { "effort": "high" }, "max_output_tokens": 128000 } } }
+        "high": { "normal": { "options": { "reasoning": { "effort": "high" } } } }
       }
     }
   },
   "modes": {
     "medium": {
-      "budget": 64,
-      "main": { "alias": "subscription", "effort": "medium" },
-      "oracle": { "alias": "subscription", "effort": "high" }
+      "main": { "alias": "local", "effort": "medium" },
+      "oracle": { "alias": "local", "effort": "high" }
+    }
+  },
+  "compaction": {
+    "summaryModel": { "alias": "local", "effort": "medium" }
+  }
+}
+```
+
+Built-in model limits come from `models.dev`. Custom gateways must define the limits their transport actually supports. A model alias owns `maxInputTokens`, `maxOutputTokens`, and `keepRecentTokens`. Rika derives Baton's internal compaction window and provider output option from those values. Modes and specialist agents do not add separate token limits. `compaction.summaryModel` selects the registered model used for durable checkpoint summaries.
+
+When a compatible Gateway exposes a built-in model with different limits, override only those operational fields:
+
+```json
+{
+  "models": {
+    "luna": {
+      "limits": { "maxInputTokens": 353000, "maxOutputTokens": 128000, "keepRecentTokens": 32000 }
     }
   }
 }
 ```
 
-Mode budgets are measured in thousands of tokens, so `64` means 64,000 execution tokens.
-
-Keep gateway credentials out of JSON. Each `bearer-env` Gateway names the environment variable resolved once at startup. The defaults use `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; VibeProxy configurations may name `RIKA_MODEL_API_KEY` on both protocol Gateways:
+Keep gateway credentials out of JSON. Each `bearer-env` Gateway names the environment variable resolved once at startup. The defaults use `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; custom gateways may name a different environment variable:
 
 ```bash
-export RIKA_MODEL_API_KEY="your-vibe-proxy-key"
+export RIKA_MODEL_API_KEY="your-gateway-key"
 rika config list
 rika doctor
 rika

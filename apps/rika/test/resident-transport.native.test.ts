@@ -77,7 +77,14 @@ const start = (root: string, grace = 350, finalizerDelay = 0, delayedWork = fals
     buffered += new TextDecoder().decode(value.value)
     return readLine()
   }
-  const next = async () => JSON.parse(await readLine()) as Event
+  const next = async () => {
+    const line = await readLine()
+    try {
+      return JSON.parse(line) as Event
+    } catch {
+      throw new Error(`invalid client event: ${line}`)
+    }
+  }
   const send = (command: string) => client.stdin.write(new TextEncoder().encode(`${command}\n`))
   const close = async () => {
     send("close")
@@ -97,7 +104,26 @@ const attached = async (client: ReturnType<typeof start>) => {
   return event
 }
 
+const nextType = async (client: ReturnType<typeof start>, type: string) => {
+  const event = await client.next()
+  return event.type === type ? event : nextType(client, type)
+}
+
 describe("resident WebSocket process transport", () => {
+  test("keeps a healthy connection through a one-second client stall", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rika-resident-"))
+    try {
+      const client = start(root, 2_000)
+      await attached(client)
+      client.send("stall")
+      expect((await client.next()).type).toBe("stall-survived")
+      await client.close()
+    } finally {
+      await chmod(root, 0o700).catch(() => undefined)
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
   test("lets the first one-shot client exit without stopping its distinct host", async () => {
     const root = await mkdtemp(join(tmpdir(), "rika-resident-"))
     try {
@@ -279,18 +305,18 @@ describe("resident WebSocket process transport", () => {
     }
   }, 15_000)
 
-  test("fails an active interactive client when its resident host dies", async () => {
+  test("keeps one interactive callback and restores reads across resident replacements without retrying mutations", async () => {
     const root = await mkdtemp(join(tmpdir(), "rika-resident-"))
     try {
       const client = start(root, 1_000)
-      const event = await attached(client)
-      client.send("blocking-interactive")
-      expect((await client.next()).type).toBe("interactive-callback")
-      process.kill(event.hostPid!, "SIGKILL")
-      await waitUntil(() => !alive(event.hostPid!))
-      const failed = await client.next()
-      expect(failed.type).toBe("blocking-failed")
-      expect(failed.error).toContain("Resident")
+      await attached(client)
+      client.send("reconnect-interactive")
+      expect(await client.next()).toMatchObject({ type: "interactive-callback", callbacks: 1 })
+      expect(await client.next()).toMatchObject({ type: "initial-read", tag: "ThreadsListed" })
+      expect(await nextType(client, "replacement-read")).toMatchObject({ tag: "ThreadsListed" })
+      expect(await nextType(client, "mutation-failed")).toMatchObject({ tag: "ExecutionFailed" })
+      expect(await nextType(client, "post-mutation-read")).toMatchObject({ tag: "ThreadsListed" })
+      expect(await nextType(client, "mutation-attempts")).toMatchObject({ text: "1" })
     } finally {
       await chmod(root, 0o700).catch(() => undefined)
       await rm(root, { recursive: true, force: true })

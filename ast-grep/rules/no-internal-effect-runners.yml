@@ -1,0 +1,13 @@
+id: no-internal-effect-runners
+language: TypeScript
+severity: error
+message: Keep Effects lazy in internal modules; run them only at an application or external-framework boundary.
+rule:
+  pattern: Effect.$RUN($$$ARGS)
+constraints:
+  RUN:
+    regex: "^run"
+files:
+  - "packages/**/src/**/*.ts"
+ignores:
+  - "packages/tui/src/adapter.ts"
