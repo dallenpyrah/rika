@@ -1,11 +1,12 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Crypto, Deferred, Effect, Exit, Fiber, FiberSet, Layer, Ref } from "effect"
+import { Cause, Crypto, Deferred, Effect, Exit, Fiber, FiberSet, Layer, Ref, Schema } from "effect"
 import { provideLayer } from "./layer"
 import {
   canonicalServiceIdentity,
   makeLifecycle,
   negotiateCapabilities,
   protocolVersion,
+  ServerMessage,
   validateHandshake,
 } from "../src/resident-service"
 
@@ -44,7 +45,7 @@ describe("resident service protocol", () => {
       "IdentityMismatch",
     )
     expect(
-      validateHandshake({ ...base, version: { major: 2, minor: 0 } }, { identity: "identity", token: "token" })._tag,
+      validateHandshake({ ...base, version: { major: 1, minor: 0 } }, { identity: "identity", token: "token" })._tag,
     ).toBe("UpgradeRequired")
   })
 
@@ -55,6 +56,18 @@ describe("resident service protocol", () => {
     ])
     expect(negotiateCapabilities(["ping", "startup-state"], ["ping"])).toEqual(["ping"])
     expect(negotiateCapabilities(["ping"], ["ping", "startup-state"])).toEqual(["ping"])
+  })
+
+  it("decodes protocol-v1 interactive events without a frame version", () => {
+    expect(
+      Schema.decodeUnknownSync(ServerMessage)({
+        _tag: "interactive-event",
+        requestId: "request",
+        sessionId: "session",
+        actionId: "action",
+        event: { _tag: "ThreadsListed", threads: [] },
+      }),
+    ).toMatchObject({ _tag: "interactive-event", event: { _tag: "ThreadsListed" } })
   })
 })
 

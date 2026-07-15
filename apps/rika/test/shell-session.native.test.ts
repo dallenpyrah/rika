@@ -20,7 +20,13 @@ import {
   interruptTrackedFibers,
   refreshThreadsOnSwitcherOpen,
   settleTuiInitialization,
+  tuiSignalExitCode,
 } from "../src/main"
+
+test("maps TUI signals to numeric process exit codes", () => {
+  expect(tuiSignalExitCode("SIGINT")).toBe(130)
+  expect(tuiSignalExitCode("SIGTERM")).toBe(143)
+})
 
 test("selects only the credential named by each high and ultra main and Oracle gateway", () => {
   const openai = Redacted.make("openai-sentinel")
@@ -248,6 +254,10 @@ test("drives bypassed recorded and incognito shell commands through Operation an
           )
         else if (
           event._tag !== "ThreadSelected" &&
+          event._tag !== "TranscriptPageReceived" &&
+          event._tag !== "TranscriptPagePrepended" &&
+          event._tag !== "TranscriptPatched" &&
+          event._tag !== "TranscriptResyncRequired" &&
           event._tag !== "ExecutionReplayed" &&
           event._tag !== "ExecutionControlled" &&
           event._tag !== "ExecutionEventReceived" &&

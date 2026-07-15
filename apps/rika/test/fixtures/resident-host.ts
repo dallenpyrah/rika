@@ -46,7 +46,7 @@ const program = Effect.gen(function* () {
                 : interactive(input, {
                     initialize: (dispatch) =>
                       Effect.sync(() => {
-                        const count = input.prompt[0] === "burst-events" ? 2_000 : 1
+                        const count = input.prompt[0] === "burst-events" ? 1_000 : 1
                         for (let index = 0; index < count; index += 1) dispatch({ _tag: "ThreadsListed", threads: [] })
                       }),
                     watchThreads: () => Effect.never,
@@ -66,6 +66,7 @@ const program = Effect.gen(function* () {
                     cancel: () => Effect.void,
                     resolvePermission: () => Effect.void,
                     selectThread: () => Effect.void,
+                    loadOlder: () => Effect.void,
                     previewThread: () => Effect.void,
                     reopenThread: () => Effect.void,
                     followSelected: (dispatch) =>

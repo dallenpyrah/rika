@@ -26,10 +26,29 @@ export interface CreateInput {
   readonly now: number
 }
 
+export const PageCursor = Schema.Struct({ createdAt: Schema.Finite, id: TurnId })
+export interface PageCursor extends Schema.Schema.Type<typeof PageCursor> {}
+
+export interface PageOptions {
+  readonly before?: PageCursor | undefined
+  readonly limit?: number
+}
+
+export interface PageResult {
+  readonly turns: ReadonlyArray<Turn>
+  readonly hasOlder: boolean
+  readonly oldestCursor: PageCursor | undefined
+  readonly newestCursor: PageCursor | undefined
+}
+
+export const defaultPageSize = 50
+export const maximumPageSize = 200
+
 export interface Interface {
   readonly createForSubmission: (input: CreateInput) => Effect.Effect<Turn, RepositoryError>
   readonly get: (id: TurnId) => Effect.Effect<Turn | undefined, RepositoryError>
   readonly list: (threadId: ThreadId) => Effect.Effect<ReadonlyArray<Turn>, RepositoryError>
+  readonly page: (threadId: ThreadId, options?: PageOptions) => Effect.Effect<PageResult, RepositoryError>
   readonly findActive: (threadId: ThreadId) => Effect.Effect<Turn | undefined, RepositoryError>
   readonly listQueued: (threadId: ThreadId) => Effect.Effect<ReadonlyArray<Turn>, RepositoryError>
   readonly listNonterminal: Effect.Effect<ReadonlyArray<Turn>, RepositoryError>
@@ -70,6 +89,10 @@ const ExecutionRouteJson = Schema.fromJsonString(ExecutionRoutePin)
 const repositoryError = (error: unknown) => RepositoryError.make({ message: String(error) })
 const missing = (id: TurnId) => RepositoryError.make({ message: `Turn ${id} does not exist` })
 const clone = (turn: Turn): Turn => structuredClone(turn)
+const pageSize = (limit: number | undefined) =>
+  Math.min(maximumPageSize, Math.max(1, Math.floor(limit ?? defaultPageSize)))
+const cursorFor = (turn: Turn | undefined): PageCursor | undefined =>
+  turn === undefined ? undefined : { createdAt: turn.createdAt, id: turn.id }
 type SubmissionResult = { readonly _tag: "Duplicate" } | { readonly _tag: "Created"; readonly turn: Turn }
 const decode = (row: unknown) =>
   Effect.gen(function* () {
@@ -146,6 +169,26 @@ const makeMemoryImpl = (initial: ReadonlyArray<Turn> = [], preserveUnpinned = fa
           .filter((turn) => turn.threadId === threadId)
           .toSorted((left, right) => left.createdAt - right.createdAt)
           .map(clone)
+      }),
+      page: Effect.fn("TurnRepository.page")(function* (threadId, options = {}) {
+        const limit = pageSize(options.limit)
+        const descending = [...(yield* Ref.get(state)).values()]
+          .filter(
+            (turn) =>
+              turn.threadId === threadId &&
+              (options.before === undefined ||
+                turn.createdAt < options.before.createdAt ||
+                (turn.createdAt === options.before.createdAt && turn.id < options.before.id)),
+          )
+          .toSorted((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+        const hasOlder = descending.length > limit
+        const turns = descending.slice(0, limit).reverse().map(clone)
+        return {
+          turns,
+          hasOlder,
+          oldestCursor: cursorFor(turns[0]),
+          newestCursor: cursorFor(turns.at(-1)),
+        }
       }),
       findActive: Effect.fn("TurnRepository.findActive")(function* (threadId) {
         return [...(yield* Ref.get(state)).values()]
@@ -294,6 +337,24 @@ export const layer = Layer.effect(
             Effect.mapError(repositoryError),
           )
         return yield* Effect.all(rows.map(decode))
+      }),
+      page: Effect.fn("TurnRepository.page")(function* (threadId, options = {}) {
+        const limit = pageSize(options.limit)
+        const rows =
+          options.before === undefined
+            ? yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`.pipe(
+                Effect.mapError(repositoryError),
+              )
+            : yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND (created_at < ${options.before.createdAt} OR (created_at = ${options.before.createdAt} AND id < ${options.before.id})) ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`.pipe(
+                Effect.mapError(repositoryError),
+              )
+        const turns = (yield* Effect.all(rows.slice(0, limit).map(decode))).reverse()
+        return {
+          turns,
+          hasOlder: rows.length > limit,
+          oldestCursor: cursorFor(turns[0]),
+          newestCursor: cursorFor(turns.at(-1)),
+        }
       }),
       findActive: Effect.fn("TurnRepository.findActive")(function* (threadId) {
         const rows =

@@ -20,6 +20,8 @@ Capabilities are enabled only when both peers advertise them. A client and serve
 
 Protocol v1 does not provide durable request idempotency keys, subscriptions, cursors, acknowledgements, bounded delivery windows, negotiated frame limits, reconnect replay, or slow-consumer handling. A logical Interactive client supervisor may reconnect and create a new connection-bound request while preserving its client callback and stable session interface. It restores only repeatable read state and actions. A disconnect or resident drain leaves an in-flight mutation's outcome unknown; the client reports a visible failure and does not resend it.
 
+Protocol v2 keeps the same authenticated WebSocket and mutation rules and adds bounded transcript read-model delivery. Every frame carries the protocol version; page entries and patch frames carry projection revisions. Queue overflow discards superseded read-model deltas and emits one resync requirement. ADR 0014 owns the projection and rendering contract.
+
 ## Consequences
 
 One physical bidirectional connection carries product requests, interactive events, and control messages. Durable Threads and Executions remain in SQLite after transport loss, but transport request state does not. The Interactive client supervisor reconnects with bounded exponential delay, refreshes durable read state on a fresh physical session, and never retries an ambiguous mutation. The protocol makes no request-idempotency, replay, or backpressure guarantee. Browser origins are not supported; this is an owner-authenticated native local protocol. Listener ownership, lifecycle, and token storage are defined by ADR 0012 and specs 05 and 12.

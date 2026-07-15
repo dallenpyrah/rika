@@ -13,3 +13,8 @@
 	url = https://github.com/In-Time-Tec/relayfx.git
 	branch = main
 	shallow = true
+[submodule "repos/opentui"]
+	path = repos/opentui
+	url = https://github.com/anomalyco/opentui.git
+	branch = main
+	shallow = true

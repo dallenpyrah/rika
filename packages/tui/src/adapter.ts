@@ -410,6 +410,42 @@ export interface UnitLineRange {
   readonly targets?: ReadonlyArray<PathTarget>
 }
 
+export const maxMountedTranscriptEntries = 200
+
+export const boundedTranscriptModel = (model: Model): Model => {
+  const limit = maxMountedTranscriptEntries
+  if (model.items.length === 0)
+    return {
+      ...model,
+      entries: model.entries.slice(-limit),
+      blocks: model.blocks.slice(-limit),
+    }
+  const source = (model.items as ReadonlyArray<TranscriptItem>).slice(-limit)
+  const entries: Array<Model["entries"][number]> = []
+  const blocks: Array<Model["blocks"][number]> = []
+  const entryIndices = new Map<number, number>()
+  const blockIndices = new Map<number, number>()
+  const items = source.map((item): TranscriptItem => {
+    if (item._tag === "Entry") {
+      let index = entryIndices.get(item.index)
+      if (index === undefined) {
+        index = entries.length
+        entryIndices.set(item.index, index)
+        entries.push(model.entries[item.index]!)
+      }
+      return { ...item, index }
+    }
+    let index = blockIndices.get(item.index)
+    if (index === undefined) {
+      index = blocks.length
+      blockIndices.set(item.index, index)
+      blocks.push(model.blocks[item.index]!)
+    }
+    return { ...item, index }
+  })
+  return { ...model, entries, blocks, items }
+}
+
 const toolUnitsFor = (model: Model, indices: ReadonlyArray<number>): ReadonlyArray<ToolUnit> =>
   indices.map((index) => {
     const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
@@ -753,6 +789,29 @@ export interface Handlers {
   readonly resize: (width: number, height: number) => void
 }
 
+interface TranscriptRenderableRecord {
+  readonly key: string
+  revision: string
+  readonly renderable: TextRenderable
+}
+
+interface TranscriptRenderableDescriptor {
+  readonly key: string
+  readonly revision: string
+  readonly content: StyledText
+  readonly onMouseDown?: TextRenderable["onMouseDown"]
+}
+
+interface TranscriptRenderInput {
+  readonly entries: Model["entries"]
+  readonly blocks: Model["blocks"]
+  readonly items: Model["items"]
+  readonly toolCallDrafts: Model["toolCallDrafts"]
+  readonly detailSelection: Model["detailSelection"]
+  readonly permissionSelection: number
+  readonly width: number
+}
+
 const mouseSequencePattern = new RegExp(`^(?:${String.fromCharCode(27)}?\\[)?<?\\d+(?:;\\d+)*[Mm]?$`)
 
 const cutoutBackground = (renderer: CliRenderer): RGBA => {
@@ -793,6 +852,8 @@ export class Surface {
   private lastPaste: { readonly text: string; readonly at: number } | undefined
   private model: Model | undefined
   private transcriptChildren: Array<TextRenderable> = []
+  private transcriptRecords = new Map<string, TranscriptRenderableRecord>()
+  private transcriptRenderInput: TranscriptRenderInput | undefined
   private composerDrag: { readonly startY: number; readonly startHeight: number } | undefined
   private sidebarDrag: { readonly startX: number; readonly startWidth: number } | undefined
   private pointerShape = "default"
@@ -1273,14 +1334,79 @@ export class Surface {
     event.preventDefault()
     event.stopPropagation()
   }
-  private setTranscriptChildren(children: Array<TextRenderable>): void {
+  private clearTranscriptChildren(): void {
     this.welcomeChild = undefined
     for (const child of this.transcriptChildren) {
-      this.transcriptContent.remove(child.id)
+      this.transcriptContent.remove(child)
       child.destroy()
     }
+    this.transcriptChildren = []
+    this.transcriptRecords.clear()
+    this.transcriptRenderInput = undefined
+  }
+  private setWelcomeChild(child: TextRenderable): void {
+    this.clearTranscriptChildren()
+    this.transcriptChildren = [child]
+    this.transcriptContent.add(child)
+  }
+  private reconcileTranscript(descriptors: ReadonlyArray<TranscriptRenderableDescriptor>): void {
+    if (this.welcomeChild !== undefined) this.clearTranscriptChildren()
+    const desiredKeys = new Set(descriptors.map((descriptor) => descriptor.key))
+    const selection = this.renderer.getSelection()
+    const selected = new Set(selection?.touchedRenderables ?? [])
+    const pinned = [...this.transcriptRecords.values()].filter(
+      (record) => !desiredKeys.has(record.key) && selected.has(record.renderable),
+    )
+    for (const record of this.transcriptRecords.values()) {
+      if (desiredKeys.has(record.key) || selected.has(record.renderable)) continue
+      this.transcriptContent.remove(record.renderable)
+      record.renderable.destroy()
+      this.transcriptRecords.delete(record.key)
+    }
+    const desired = descriptors.map((descriptor) => {
+      const existing = this.transcriptRecords.get(descriptor.key)
+      if (existing !== undefined) {
+        if (existing.revision !== descriptor.revision) {
+          existing.revision = descriptor.revision
+          existing.renderable.content = descriptor.content
+        }
+        existing.renderable.onMouseDown = descriptor.onMouseDown
+        return existing
+      }
+      const renderable = new TextRenderable(this.renderer, {
+        content: descriptor.content,
+        wrapMode: "word",
+        selectable: true,
+      })
+      renderable.onMouseDown = descriptor.onMouseDown
+      const record = { key: descriptor.key, revision: descriptor.revision, renderable }
+      this.transcriptRecords.set(record.key, record)
+      return record
+    })
+    const records = [...pinned, ...desired]
+    const children = records.map((record) => record.renderable)
+    const current = [...this.transcriptContent.getChildren()]
+    children.forEach((child, index) => {
+      if (current[index] === child) return
+      const previous = current.indexOf(child)
+      if (previous >= 0) current.splice(previous, 1)
+      current.splice(index, 0, child)
+      this.transcriptContent.add(child, index)
+    })
     this.transcriptChildren = children
-    for (const child of children) this.transcriptContent.add(child)
+  }
+  private transcriptChanged(input: TranscriptRenderInput): boolean {
+    const previous = this.transcriptRenderInput
+    return (
+      previous === undefined ||
+      previous.entries !== input.entries ||
+      previous.blocks !== input.blocks ||
+      previous.items !== input.items ||
+      previous.toolCallDrafts !== input.toolCallDrafts ||
+      previous.detailSelection !== input.detailSelection ||
+      previous.permissionSelection !== input.permissionSelection ||
+      previous.width !== input.width
+    )
   }
   private welcomeWidthFor(model: Model): number {
     const sidebarReady = model.changedFilesOpen
@@ -1315,7 +1441,9 @@ export class Surface {
     this.showToast("Selection copied to clipboard")
   }
 
-  update(model: Model): void {
+  update(model: Model, preserveTranscriptAnchor = false): void {
+    const previousScrollHeight = this.transcriptScroll.scrollHeight
+    const previousScrollTop = this.transcriptScroll.scrollTop
     this.model = model
     this.queueHint.bg = cutoutBackground(this.renderer)
     this.modeLabel.bg = cutoutBackground(this.renderer)
@@ -1343,6 +1471,7 @@ export class Surface {
       !model.palette.open &&
       !model.paletteOpen
     if (isWelcome) {
+      this.transcriptRenderInput = undefined
       const welcomeWidth = this.welcomeWidthFor(model)
       const welcomeKey = `${welcomeWidth}:${model.height}:${this.welcomePhase}:${model.mode}`
       const existingWelcome = this.transcriptChildren.length === 1 ? this.welcomeChild : undefined
@@ -1353,7 +1482,7 @@ export class Surface {
           wrapMode: "word",
           selectable: true,
         })
-        this.setTranscriptChildren([child])
+        this.setWelcomeChild(child)
         this.welcomeChild = child
         this.welcomeKey = welcomeKey
       } else if (this.welcomeKey !== welcomeKey) {
@@ -1363,50 +1492,67 @@ export class Surface {
       }
     } else {
       const renderModel = sidebarWidth === 0 && !model.threadSidebar.open ? model : { ...model, width: contentWidth }
-      const built = buildTranscript(
-        renderModel,
-        model.busy ? spinnerFrames[this.loaderPhase % spinnerFrames.length]! : idleSpinnerFrame,
-      )
-      const styledLines = splitStyledLines(built.styled)
-      const children: Array<TextRenderable> = []
-      for (const range of built.ranges) {
-        const header = new TextRenderable(this.renderer, {
-          content: new StyledText(styledLines[range.start] ?? []),
-          wrapMode: "word",
-          selectable: true,
-        })
-        if (range.expandable) {
-          header.onMouseDown = (event) => {
-            if (event.button !== 0) return
-            event.stopPropagation()
-            this.handlers.clickToggle?.(range.unit)
-          }
-        }
-        children.push(header)
-        const body: Array<TextChunk> = []
-        const bodyLines = styledLines.slice(range.start + 1, range.end + 1)
-        for (const [index, line] of bodyLines.entries()) {
-          body.push(...line)
-          if (index < bodyLines.length - 1) body.push(fg(colors.text)("\n"))
-        }
-        if (body.length > 0)
-          children.push(
-            new TextRenderable(this.renderer, { content: new StyledText(body), wrapMode: "word", selectable: true }),
-          )
-        for (const target of range.targets ?? []) {
-          const path = new TextRenderable(this.renderer, {
-            content: new StyledText([fg(colors.blue)(`  ${target.path}`)]),
-            selectable: true,
-          })
-          path.onMouseDown = (event) => {
-            if (event.button !== 0) return
-            event.stopPropagation()
-            this.handlers.openPath?.(target)
-          }
-          children.push(path)
-        }
+      const transcriptInput = {
+        entries: renderModel.entries,
+        blocks: renderModel.blocks,
+        items: renderModel.items,
+        toolCallDrafts: renderModel.toolCallDrafts,
+        detailSelection: renderModel.detailSelection,
+        permissionSelection: renderModel.permissionSelection,
+        width: renderModel.width,
       }
-      this.setTranscriptChildren(children)
+      if (this.transcriptChanged(transcriptInput)) {
+        const built = buildTranscript(
+          boundedTranscriptModel(renderModel),
+          model.busy ? spinnerFrames[this.loaderPhase % spinnerFrames.length]! : idleSpinnerFrame,
+        )
+        const styledLines = splitStyledLines(built.styled)
+        const descriptors: Array<TranscriptRenderableDescriptor> = []
+        for (const range of built.ranges.slice(-maxMountedTranscriptEntries)) {
+          const headerContent = new StyledText(styledLines[range.start] ?? [])
+          descriptors.push({
+            key: `${range.unit}:header`,
+            revision: JSON.stringify(headerContent.chunks),
+            content: headerContent,
+            ...(range.expandable
+              ? {
+                  onMouseDown: (event: MouseEvent) => {
+                    if (event.button !== 0) return
+                    event.stopPropagation()
+                    this.handlers.clickToggle?.(range.unit)
+                  },
+                }
+              : {}),
+          })
+          const body: Array<TextChunk> = []
+          const bodyLines = styledLines.slice(range.start + 1, range.end + 1)
+          for (const [index, line] of bodyLines.entries()) {
+            body.push(...line)
+            if (index < bodyLines.length - 1) body.push(fg(colors.text)("\n"))
+          }
+          if (body.length > 0)
+            descriptors.push({
+              key: `${range.unit}:body`,
+              revision: JSON.stringify(body),
+              content: new StyledText(body),
+            })
+          for (const [index, target] of (range.targets ?? []).entries()) {
+            const content = new StyledText([fg(colors.blue)(`  ${target.path}`)])
+            descriptors.push({
+              key: `${range.unit}:path:${index}`,
+              revision: JSON.stringify({ target, chunks: content.chunks }),
+              content,
+              onMouseDown: (event: MouseEvent) => {
+                if (event.button !== 0) return
+                event.stopPropagation()
+                this.handlers.openPath?.(target)
+              },
+            })
+          }
+        }
+        this.reconcileTranscript(descriptors)
+        this.transcriptRenderInput = transcriptInput
+      }
     }
     if (animateWelcome && this.welcomeTimer === undefined) {
       this.welcomeTimer = this.repeated(80, () => {
@@ -1519,7 +1665,17 @@ export class Surface {
     }
     this.transcriptScroll.stickyScroll = model.scrollFollow
     this.anchorTranscriptAfterLayout()
-    if (model.scrollFollow) this.followTranscriptAfterLayout()
+    if (preserveTranscriptAnchor) {
+      queueMicrotask(() => {
+        if (this.model !== model) return
+        this.scrollProgrammatic = true
+        this.transcriptScroll.scrollTop =
+          previousScrollTop + Math.max(0, this.transcriptScroll.scrollHeight - previousScrollHeight)
+        this.scrollProgrammatic = false
+        this.syncTranscriptScrollbar()
+        this.renderer.requestRender()
+      })
+    } else if (model.scrollFollow) this.followTranscriptAfterLayout()
     else if (Math.abs(this.transcriptScroll.scrollTop - model.scrollOffset) > 1) {
       this.scrollProgrammatic = true
       this.transcriptScroll.scrollTop = model.scrollOffset
@@ -1633,7 +1789,7 @@ export class Surface {
     this.sidebarDrag = undefined
     this.setPointerShape("default")
     this.model = undefined
-    this.setTranscriptChildren([])
+    this.clearTranscriptChildren()
     this.renderer.root.onMouseDrag = undefined
     this.renderer.root.onMouseUp = undefined
     this.renderer.root.onMouseDragEnd = undefined

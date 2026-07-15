@@ -22,7 +22,6 @@ export const targets = {
   },
 }
 
-const platformPackageVersion = "0.4.2"
 const platformPackages = [
   "@opentui/core-darwin-arm64",
   "@opentui/core-darwin-x64",
@@ -35,6 +34,9 @@ const platformPackages = [
 ]
 
 const PackageManifest = Schema.Struct({ name: Schema.String, version: Schema.String })
+const RootPackageManifest = Schema.Struct({
+  workspaces: Schema.Struct({ catalog: Schema.Record(Schema.String, Schema.String) }),
+})
 const Sha256Output = Schema.String.pipe(Schema.check(Schema.isPattern(/^[a-f0-9]{64}$/)))
 const JsonString = Schema.fromJsonString(Schema.String)
 
@@ -150,6 +152,24 @@ const program = Effect.scoped(
     const fileSystem = yield* FileSystem.FileSystem
     const path = yield* Path.Path
     const root = yield* path.fromFileUrl(new URL("..", import.meta.url)).pipe(mapFailure("resolve project root"))
+    const rootManifest = yield* fileSystem.readFileString(path.join(root, "package.json")).pipe(
+      mapFailure("read root package manifest"),
+      Effect.flatMap(
+        Schema.decodeUnknownEffect(Schema.fromJsonString(RootPackageManifest), {
+          errors: "all",
+        }),
+      ),
+      Effect.mapError((error) => failure("decode root package manifest", String(error))),
+    )
+    const platformPackageVersion = rootManifest.workspaces.catalog["@opentui/core"]
+    if (platformPackageVersion === undefined)
+      return yield* failure("read OpenTUI version", "The root catalog does not define @opentui/core")
+    for (const packageName of platformPackages)
+      if (rootManifest.workspaces.catalog[packageName] !== platformPackageVersion)
+        return yield* failure(
+          "validate OpenTUI versions",
+          `${packageName} must match @opentui/core@${platformPackageVersion}`,
+        )
     const output = path.join(root, "artifacts")
     const targetIndex = Bun.argv.indexOf("--target")
     const selected = targetIndex < 0 ? Object.keys(targets) : [Bun.argv[targetIndex + 1] ?? ""]

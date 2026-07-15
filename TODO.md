@@ -120,6 +120,13 @@ This file is the execution ledger. Update it in the same change that changes imp
 
 ## Phase 5: OpenTUI
 
+- [x] Adopt Relay 0.3.0 bidirectional execution-event pages and remove forward-only transcript recovery. Published Relay 0.3.0 and the Rika adapter page test prove the released backward page path.
+- [x] Add the durable semantic transcript projection, keyset Turn/transcript pages, checkpoints, rebuild, and migration proof. SQLite migration 9, memory/service tests, and reopen integration evidence pass.
+- [x] Ship resident protocol v2 transcript page, prepend, keyed patch, bounded delivery, and resync frames. The 1,024-frame resident queue fails closed and emits a typed resync request after overflow.
+- [x] Extract the interactive transcript controller and bound normal frame scheduling to one update per sixteen milliseconds.
+- [x] Replace full transcript child rebuilds with keyed reconciliation, a two-hundred-entry mounted window, anchor-preserving prepend, and a persistent streaming rich-text tail.
+- [x] Upgrade released OpenTUI and every native package to 0.4.3 after the native benchmark stop gate passes; keep the read-only upstream source submodule for research. Native 1/10/100/1,000-entry cases pass with at most 200 mounted entries.
+- [ ] Record 1/10/100/1,000-Turn performance evidence and complete Pilotty, agent-tty, package, and installed-binary acceptance.
 - [x] Connect prompt submission to durable Turn execution and terminal result projection.
 - [x] Port the initial Rika v1 color and spacing tokens.
 - [x] Port the pure view-state model for transcript, palette, mode, input, history, and queue actions.
@@ -284,7 +291,7 @@ PLEASE MAKE SURE AT THE END YOU PUBLISH CHANGES TO BATON AND RELAY, INSTALL RIKA
 
 - [x] Integrate interactive Thread continuation and monotonic durable execution terminal projection.
 
-Phase 0: 0; Phase 1: 3; Phase 2: 0; Phase 3: 2; Phase 4: 2; Phase 5: 1; Phase 6: 0; Phase 7: 0; Phase 8: 3; Phase 9: 1; Phase 10: 1; Phase 11: 4.
+Phase 0: 0; Phase 1: 3; Phase 2: 0; Phase 3: 2; Phase 4: 2; Phase 5: 0; Phase 6: 0; Phase 7: 0; Phase 8: 3; Phase 9: 1; Phase 10: 1; Phase 11: 4.
 
 ## Relay 0.2.0 upgrade and resident-model refactor (2026-07-12)
 

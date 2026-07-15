@@ -3,12 +3,10 @@ import * as BunServices from "@effect/platform-bun/BunServices"
 import { ChildFanOutRuntime, Client, Ids, SQLite } from "@relayfx/sdk/sqlite"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
 import {
-  Cause,
   Config,
   Context,
   Effect,
   FileSystem,
-  Function,
   Layer,
   Logger,
   Schedule,
@@ -58,14 +56,6 @@ const fixtureError = (error: unknown) => FixtureError.make({ message: String(err
 const clientError = (error: unknown) => Client.ClientError.make({ message: String(error) })
 const unused = () => Effect.die("unused client method")
 const unusedStream = () => Stream.die("unused client method")
-const typedRelayLayer = <A, E, R>(layer: Layer.Layer<A, E, R>): Layer.Layer<A, FixtureError, R> =>
-  layer.pipe(
-    Layer.catchCause(
-      (cause): Layer.Layer<unknown, FixtureError, never> =>
-        Layer.unwrap(Effect.fail(fixtureError(Cause.squash(cause)))),
-    ),
-  )
-
 const main = Effect.gen(function* () {
   const database = yield* Config.string("RIKA_MULTI_AGENT_DATABASE").pipe(Config.withDefault("missing.sqlite"))
   const control = yield* Config.string("RIKA_MULTI_AGENT_WORKSPACE").pipe(Config.withDefault("."))
@@ -114,9 +104,11 @@ const main = Effect.gen(function* () {
       }),
     cancel: (childId, reason) => append({ type: "cancel", childId, reason }),
   })
-  const fanOutContext = yield* Layer.build(
-    Function.flow(SQLite.childFanOutLayer, typedRelayLayer)({ filename: database }, handlers),
-  ).pipe(Effect.provide(Context.empty()), Effect.orDie)
+  const fanOutContext = yield* Layer.build(SQLite.childFanOutLayer({ filename: database }, handlers)).pipe(
+    Effect.provide(Context.empty()),
+    Effect.mapError(fixtureError),
+    Effect.orDie,
+  )
   const fanOutLayer = Layer.succeed(ChildFanOutRuntime.Service, Context.get(fanOutContext, ChildFanOutRuntime.Service))
   const clientLayer = Layer.effect(
     Client.Service,
@@ -163,6 +155,7 @@ const main = Effect.gen(function* () {
           getSession: unused,
           listWaits: unused,
           replayExecution: unused,
+          pageExecutionEvents: unused,
           listRunners: unused,
           routeExecution: unused,
           send: unused,
@@ -259,11 +252,11 @@ const main = Effect.gen(function* () {
   )
 }).pipe(Effect.scoped)
 
-BunRuntime.runMain(
-  Effect.scoped(
-    Layer.build(Layer.merge(BunServices.layer, Logger.layer([]))).pipe(
-      Effect.flatMap((services) => main.pipe(Effect.provide(services))),
-    ),
-  ),
-  { disableErrorReporting: true },
+const program = Effect.scoped(
+  Effect.gen(function* () {
+    const context = yield* Layer.build(Layer.merge(BunServices.layer, Logger.layer([])))
+    return yield* Effect.provide(main, context)
+  }),
 )
+
+BunRuntime.runMain(program, { disableErrorReporting: true })

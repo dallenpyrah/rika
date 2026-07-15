@@ -840,7 +840,7 @@ describe("Operation", () => {
       yield* session.cancel(dispatch)
       yield* session.reopenThread(dispatch)
       const dispatched = yield* Ref.get(events)
-      expect(dispatched.some((event) => event._tag === "ThreadSelected")).toBe(true)
+      expect(dispatched.some((event) => event._tag === "TranscriptPageReceived")).toBe(true)
       expect(dispatched.some((event) => event._tag === "QueueChanged")).toBe(true)
       expect(dispatched.some((event) => event._tag === "QueueChanged")).toBe(true)
       expect(dispatched.filter((event) => event._tag === "ExecutionControlled")).toHaveLength(3)
@@ -959,15 +959,17 @@ describe("Operation", () => {
           }),
         },
         {
-          _tag: "ExecutionEventReceived",
+          _tag: "TranscriptPatched",
           threadId: "thread-interactive",
           turnId: "turn-interactive",
+          revision: 1,
           event: { cursor: "cursor-a", sequence: 1, type: "model.output.completed", createdAt: 1, text: "answer" },
         },
         {
-          _tag: "ExecutionEventReceived",
+          _tag: "TranscriptPatched",
           threadId: "thread-interactive",
           turnId: "turn-interactive",
+          revision: 2,
           event: { cursor: "cursor-b", sequence: 2, type: "execution.completed", createdAt: 2 },
         },
         { _tag: "QueueChanged", threadId: "thread-interactive", turns: [] },
@@ -1209,9 +1211,10 @@ describe("Operation", () => {
         message: "Execution failed",
       })
       expect(nonActivation(failedEvent.events)).toContainEqual({
-        _tag: "ExecutionEventReceived",
+        _tag: "TranscriptPatched",
         threadId: "thread-failed-event",
         turnId: "turn-failed-event",
+        revision: 1,
         event: {
           cursor: "failure-cursor",
           sequence: 1,

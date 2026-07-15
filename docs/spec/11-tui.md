@@ -21,6 +21,9 @@ The baseline is Amp CLI's rendered output; Rika never copies Amp branding, produ
 - Pure view state and update functions own interaction semantics.
 - One adapter module owns OpenTUI imports and renderer lifecycle.
 - The TUI consumes product messages, not Relay, Baton, SQL, or provider types.
+- A client controller owns resident events, reducer dispatch, frame scheduling, transcript paging, and resync. The OpenTUI adapter only reconciles pure view state into renderables.
+- Transcript renderables are keyed by semantic entry identifier and revision. Unchanged entries keep the same OpenTUI object identity across updates.
+- The adapter mounts one bounded transcript window with overscan. Loading older entries prepends keys and restores the measured visible anchor.
 - Renderer failures restore the terminal and surface a typed process failure.
 - Resident reconnect does not destroy or recreate OpenTUI. The one client-owned Interactive callback and renderer stay alive while a stable session proxy waits for a replacement resident session and restores read state. An ambiguously interrupted mutation is shown as an execution failure and is not resent.
 - Interactive execution publishes each durable Execution Event as it arrives. `model.output.completed` finalizes assistant content but does not clear working state; only `execution.completed`, `execution.failed`, or `execution.cancelled` makes the TUI terminal, and that state is monotonic against late model events.
@@ -52,10 +55,12 @@ Asynchronously loaded panels never render empty and then populate. Changed files
 
 Transcript follow intent is pure view state while OpenTUI measured content, viewport, and scroll geometry are adapter state. User movement above the physical bottom detaches; reaching the bottom or pressing End reattaches. Detached content and resize preserve the visible anchor, while attached content and resize scroll to the measured bottom after layout. Programmatic movement never changes intent. The transcript content column keeps its minimum height pinned to the viewport height with end-justified children so short transcripts sit against the composer. Working states show the animated blue braille spinner with a dim status label in the bottom-left border embed; idle and terminal states show none. Narrow terminals drop the workspace embed.
 
-Loader animation mutates only the status renderable and requests a frame; it never rebuilds transcript children. Live execution deltas update pure state immediately but coalesce full renderer updates into bounded frames, while terminal and actionable permission events render immediately. Execution-event deduplication uses an indexed, serializable, bounded recent-key window. Terminal events clear working state only when they belong to the active Turn, so replay from an older Turn cannot stop the current spinner.
+Loader animation mutates only the status renderable and requests a frame; it never rebuilds transcript children. Live execution deltas update pure state immediately and the controller coalesces renderer reconciliation into bounded frames, while terminal, actionable permission, page, and resync events render immediately. Reconciliation patches only changed keyed entries and fixed chrome. Removed or scrolled-out entries are detached through OpenTUI's supported child-removal API. The active streaming rich-text tail keeps one renderable and updates its content rather than replacing it. Execution-event deduplication uses an indexed, serializable, bounded recent-key window. Terminal events clear working state only when they belong to the active Turn, so replay from an older Turn cannot stop the current spinner.
+
+OpenTUI source is retained as a read-only research submodule. Rika imports only the released package. The dependency version, every packaged native package, captured visual metadata, and package evidence must agree. An OpenTUI upgrade is blocked until the keyed-window benchmark and native selection, scroll-anchor, resize, paste, mouse, and teardown suites pass.
 
 Every TUI that has the same Thread open continues watching after the current Turn ends. A Turn submitted from another TUI appears with its prompt, live events, and terminal result without reopening the Thread.
 
 ## Proof
 
-Character-frame tests, image captures, pixel comparisons, controller tests, and packaged interactive smoke runs are required.
+Projection, controller, keyed-reconciliation, character-frame, image capture, pixel comparison, Pilotty, agent-tty, and packaged interactive smoke tests are required. Performance proof records input latency, patch latency, mounted entry count, and renderable creation/removal counts at fixed transcript sizes.

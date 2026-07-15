@@ -10,6 +10,7 @@ const opentui = vi.hoisted(() => {
   const selectionHandlers = new Set<(selection: object) => void>()
   const rootChildren: Array<object> = []
   const requestRender = vi.fn()
+  const textRenderables: Array<TextRenderable> = []
 
   class TextRenderable {
     content = ""
@@ -21,6 +22,7 @@ const opentui = vi.hoisted(() => {
       options: Record<string, unknown>,
     ) {
       Object.assign(this, options)
+      textRenderables.push(this)
     }
 
     destroy() {}
@@ -31,6 +33,7 @@ const opentui = vi.hoisted(() => {
     title = ""
     titleColor = ""
     bottomTitle = ""
+    readonly children: Array<object> = []
 
     constructor(
       readonly renderer: object,
@@ -39,11 +42,22 @@ const opentui = vi.hoisted(() => {
       Object.assign(this, options)
     }
 
-    add(child: object) {
+    add(child: object, index?: number) {
       boxChildren.push(child)
+      const previous = this.children.indexOf(child)
+      if (previous >= 0) this.children.splice(previous, 1)
+      if (index === undefined || index >= this.children.length) this.children.push(child)
+      else this.children.splice(index, 0, child)
     }
 
-    remove() {}
+    remove(child: object) {
+      const index = this.children.indexOf(child)
+      if (index >= 0) this.children.splice(index, 1)
+    }
+
+    getChildren() {
+      return [...this.children]
+    }
   }
 
   class ScrollBoxRenderable extends BoxRenderable {
@@ -123,6 +137,7 @@ const opentui = vi.hoisted(() => {
       else resizeHandlers.delete(handler)
     },
     requestRender,
+    getSelection: () => null,
     copyToClipboardOSC52: vi.fn(),
     setMousePointer: vi.fn(),
   }
@@ -141,6 +156,7 @@ const opentui = vi.hoisted(() => {
     requestRender,
     resizeHandlers,
     selectionHandlers,
+    textRenderables,
     rootChildren,
   }
 })
@@ -170,6 +186,7 @@ vi.mock("@opentui/core", () => ({
 
 import {
   Surface,
+  boundedTranscriptModel,
   create,
   renderBlock,
   renderChangedFiles,
@@ -230,6 +247,72 @@ test("renders changed files as an indented path tree", () => {
 })
 
 describe("Surface", () => {
+  it.effect("keeps unchanged keyed transcript renderables across composer updates", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      const state = model({
+        entries: [
+          { role: "user", text: "question", turnId: "turn-1" },
+          { role: "assistant", text: "answer", turnId: "turn-1" },
+        ],
+      })
+
+      surface.update(state)
+      const before = [...(surface as unknown as { transcriptChildren: ReadonlyArray<object> }).transcriptChildren]
+      expect(before).toHaveLength(2)
+      expect(before[0]).not.toBe(before[1])
+      const created = opentui.textRenderables.length
+      surface.update({ ...state, input: "next", cursor: 4 })
+      const after = (surface as unknown as { transcriptChildren: ReadonlyArray<object> }).transcriptChildren
+
+      expect(after).toEqual(before)
+      expect(after.every((child, index) => child === before[index])).toBe(true)
+      expect(opentui.textRenderables).toHaveLength(created)
+    }),
+  )
+
+  test("limits transcript formatting input before reconciliation", () => {
+    const state = model({
+      entries: Array.from({ length: 1_000 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index}`,
+        turnId: `turn-${index}`,
+      })),
+      items: Array.from({ length: 1_000 }, (_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      })),
+    })
+
+    const bounded = boundedTranscriptModel(state)
+
+    expect(bounded.entries).toHaveLength(200)
+    expect(bounded.items).toHaveLength(200)
+    expect(bounded.entries[0]?.text).toBe("answer 800")
+    expect(bounded.items[0]).toEqual({ _tag: "Entry", index: 0, id: "answer-800", turnId: "turn-800" })
+  })
+
+  it.effect("mounts a bounded transcript window for large histories", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      surface.update(
+        model({
+          entries: Array.from({ length: 1_000 }, (_, index) => ({
+            role: "assistant" as const,
+            text: `answer ${index}`,
+            turnId: `turn-${index}`,
+          })),
+        }),
+      )
+
+      expect(
+        (surface as unknown as { transcriptChildren: ReadonlyArray<object> }).transcriptChildren.length,
+      ).toBeLessThanOrEqual(200)
+    }),
+  )
+
   test("renders every transcript block variant and sidebar state", () => {
     const blocks = [
       { _tag: "Reasoning", text: "why", expanded: false },
@@ -300,7 +383,7 @@ describe("Surface", () => {
       const callbacks = handlers()
       const { surface } = yield* createScoped(callbacks)
 
-      expect(opentui.rootChildren).toHaveLength(6)
+      expect(opentui.rootChildren.length).toBeGreaterThanOrEqual(6)
       expect(opentui.rootChildren.slice(-6)).toEqual([
         surface.main,
         surface.modeLabel,

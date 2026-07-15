@@ -1,8 +1,8 @@
 import { CliRenderEvents, Renderable, RendererControlState } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 import { expect, test } from "bun:test"
-import { Data, Effect } from "effect"
-import { Surface } from "../src/adapter"
+import { Data, Duration, Effect } from "effect"
+import { Surface, maxMountedTranscriptEntries } from "../src/adapter"
 import { initial, ready, replaceQueue, update, type Model, type ThreadItem } from "../src/view-state"
 
 class OpenTuiError extends Data.TaggedError("OpenTuiError")<{ readonly cause: unknown }> {}
@@ -67,6 +67,46 @@ test("renders input and resize updates while the renderer remains event-driven",
       }
     }),
   ))
+
+for (const historySize of [1, 10, 100, 1_000] as const) {
+  test(`keeps composer updates bounded with ${historySize} transcript entries`, () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+        const entries = Array.from({ length: historySize }, (_, index) => ({
+          role: "assistant" as const,
+          text: `settled answer ${index}`,
+          turnId: `turn-${index}`,
+        }))
+        const base: Model = { ...initial("/work", "high"), entries }
+        const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+        try {
+          surface.update(base)
+          yield* openTui(() => setup.renderer.idle())
+          const durations = yield* Effect.forEach(
+            Array.from({ length: 40 }, (_, index) => index),
+            (index) =>
+              Effect.sync(() =>
+                surface.update({ ...base, input: `next ${index}`, cursor: `next ${index}`.length }),
+              ).pipe(
+                Effect.timed,
+                Effect.map(([duration]) => Duration.toMillis(duration)),
+              ),
+            { concurrency: 1 },
+          )
+          const p95 = durations.toSorted((left, right) => left - right)[Math.floor(durations.length * 0.95)]!
+          const mounted = (surface as unknown as { readonly transcriptChildren: ReadonlyArray<Renderable> })
+            .transcriptChildren.length
+
+          expect(p95).toBeLessThan(16)
+          expect(mounted).toBeLessThanOrEqual(maxMountedTranscriptEntries)
+        } finally {
+          surface.destroy()
+          setup.renderer.destroy()
+        }
+      }),
+    ))
+}
 
 test("renders autonomous welcome animation frames while otherwise event-driven", () =>
   Effect.runPromise(

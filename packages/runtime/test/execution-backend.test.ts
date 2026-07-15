@@ -6,7 +6,7 @@ import { TestModel } from "@batonfx/test"
 import { Client, Content, Execution, Ids } from "@relayfx/sdk"
 import type { ChildFanOutRuntime, WorkflowDefinitionRuntime } from "@relayfx/sdk/sqlite"
 import { ThreadTools } from "@rika/tools"
-import { Effect, Function, Layer, Logger, Redacted, Ref, Schedule, Schema, Stream } from "effect"
+import { Effect, Layer, Logger, Redacted, Ref, Schedule, Schema, Stream } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
@@ -56,12 +56,15 @@ vi.mock("@relayfx/sdk", (importOriginal) =>
               readonly workflowDefinitionHandlersLayer: Layer.Layer<WorkflowDefinitionRuntime.HandlerService>
             }) => {
               native.runtimeGraphs += 1
-              const childFanOutLayer = Function.flow(sqlite.SQLite.childFanOutLayer, EffectLayer.orDie)
-              const workflowLayer = Function.flow(sqlite.SQLite.workflowLayer, EffectLayer.orDie)
-              const childFanOut = childFanOutLayer({ filename: ":memory:" }, options.childFanOutHandlersLayer)
-              const workflow = workflowLayer({ filename: ":memory:" }, options.workflowDefinitionHandlersLayer).pipe(
-                EffectLayer.provideMerge(childFanOut),
-              )
+              const childFanOut = sqlite.SQLite
+                .childFanOutLayer({ filename: ":memory:" }, options.childFanOutHandlersLayer)
+                .pipe(EffectLayer.orDie)
+              const workflow = sqlite.SQLite
+                .workflowLayer({ filename: ":memory:" }, options.workflowDefinitionHandlersLayer)
+                .pipe(
+                  EffectLayer.orDie,
+                  EffectLayer.provideMerge(childFanOut),
+                )
               return EffectLayer.merge(childFanOut, workflow).pipe(
                 EffectLayer.provideMerge(actual.Client.testLayer(native.client!)),
               )
@@ -206,6 +209,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   readonly streamEvents?: ReadonlyArray<Execution.ExecutionEvent>
   readonly streamFailure?: string
   readonly replayEvents?: ReadonlyArray<Execution.ExecutionEvent>
+  readonly pageEvents?: ReadonlyArray<Execution.ExecutionEvent>
   readonly openWaitIds?: ReadonlyArray<string>
   readonly cancelStatus?: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"
   readonly fail?: "register" | "start" | "lookup" | "replay" | "cancel"
@@ -214,6 +218,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["startExecutionByAgentDefinition"]>[0]>>([])
   const lookups = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["getExecution"]>[0]>>([])
   const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["replayExecution"]>[0]>>([])
+  const pages = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["pageExecutionEvents"]>[0]>>([])
   const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["cancelExecution"]>[0]>>([])
   const nextRevision = yield* Ref.make(40)
   const implementation: Client.Interface = {
@@ -311,6 +316,15 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
             : Effect.succeed({ events: options?.replayEvents ?? [] }),
         ),
       ),
+    pageExecutionEvents: (input) =>
+      Ref.update(pages, (values) => [...values, input]).pipe(
+        Effect.as({
+          events: options?.pageEvents ?? [],
+          has_more: true,
+          oldest_cursor: "oldest",
+          newest_cursor: "newest",
+        }),
+      ),
     listRunners: unused,
     routeExecution: unused,
     send: unused,
@@ -371,7 +385,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     watchExecutions: () => Stream.empty,
     watchPresence: () => Stream.empty,
   }
-  return { implementation, registrations, starts, lookups, replays, cancellations }
+  return { implementation, registrations, starts, lookups, replays, pages, cancellations }
 })
 
 const provideConfiguredBackend = (
@@ -795,6 +809,32 @@ describe("ExecutionBackend Relay client adapter", () => {
         return yield* backend.replay("turn-a")
       }).pipe(provideBackend(fixture.implementation))
       expect(result.status).toBe("cancelled")
+    }),
+  )
+
+  it.effect("pages execution events backward without using unbounded replay", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient({ pageEvents: [relayEvent("model.output.completed", 4)] })
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        if (backend.pageEvents === undefined) return yield* Effect.die("Missing event paging")
+        return yield* backend.pageEvents("turn-a", "backward", "cursor-5", 200)
+      }).pipe(provideBackend(fixture.implementation))
+      expect(result).toMatchObject({
+        events: [{ sequence: 4, type: "model.output.completed" }],
+        hasMore: true,
+        oldestCursor: "oldest",
+        newestCursor: "newest",
+      })
+      expect(yield* Ref.get(fixture.pages)).toEqual([
+        {
+          execution_id: "execution:turn-a",
+          direction: "backward",
+          before_cursor: "cursor-5",
+          limit: 200,
+        },
+      ])
+      expect(yield* Ref.get(fixture.replays)).toEqual([])
     }),
   )
 

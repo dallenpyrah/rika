@@ -11,6 +11,7 @@ A Thread is Rika product state grouping user-visible Turns, metadata, references
 - Child executions are projected beneath their parent Turn.
 - Rika persists the last applied execution cursor with projection updates.
 - Projection application is idempotent.
+- Rika persists a product-owned semantic transcript projection. Relay events remain the execution record; the projection is the bounded read model used by clients.
 
 Normal input accepted while a Turn is active becomes a product-owned Pending Turn. It receives a new top-level Execution only after promotion. Steering is the only user input added to the active Execution.
 
@@ -30,7 +31,11 @@ Durable execution terminal events control Turn terminal state. Model completion 
 
 Relay terminal failure detail is projected verbatim through the runtime boundary. A terminal event clears the active working state, and the app emits a synthetic generic failure only when a failed backend result contains no terminal failure event.
 
-Following consumes Relay's uncapped live execution stream until it observes a canonical terminal event or an explicit externally actionable permission or tool-approval request. Internal waits do not stop top-level or child following. A missing resume cursor replays from the beginning with cursor deduplication, while a transport failure fails the adapter rather than fabricating terminal state. Relay 0.2.10 removes the former implicit 1,000-event stream cap, so terminal content and failure detail remain observable beyond the first replay page.
+Following consumes Relay's uncapped live execution stream until it observes a canonical terminal event or an explicit externally actionable permission or tool-approval request. Internal waits do not stop top-level or child following. A missing resume cursor backfills through Relay's public bidirectional execution-event pages, then resumes the live stream from the newest applied cursor. A transport failure fails the adapter rather than fabricating terminal state.
+
+The transcript projection stores semantic entries with stable keys, revisions, chronological ordering, source cursor bounds, and Schema-encoded product content. Replacing one Turn projection stores its newest checkpoint in the same row and transaction. The append interface applies an event and advances that checkpoint atomically; reapplying the same cursor is a no-op. A projection version mismatch rebuilds from Relay pages without changing canonical execution history.
+
+Thread and transcript reads are keyset pages, never unbounded arrays. The initial read returns the newest fifty entries in chronological order plus the older-page cursor. Loading older history prepends the next chronological page while preserving the visible anchor. Raw Relay event pages never cross the product-facing runtime or resident interfaces.
 
 Deletion removes Rika product metadata and invokes only supported Relay deletion/retention operations. It must not partially erase canonical execution state while presenting success.
 
@@ -38,9 +43,9 @@ Prior-message editing, restoring, and forking create a new branch of Thread stat
 
 ## Streaming
 
-Resident service internals consume Effect Streams. Execution-capable CLI and TUI processes use the local typed WebSocket protocol specified by ADR 0007. The shipped protocol v1 carries requests, interactive events, and actions only for the lifetime of one authenticated connection. It has no durable transport subscriptions, cursors, acknowledgements, reconnect replay, bounded delivery windows, or slow-consumer handling.
+Resident service internals consume Effect Streams. Execution-capable CLI and TUI processes use the local typed WebSocket protocol specified by ADR 0007. Protocol v2 adds Schema-tagged transcript page, prepend, keyed patch, and resync frames. Every frame names its protocol version. Page entries and patch frames carry projection revisions. Normal delivery is bounded; overflow collapses pending transcript deltas into one resync requirement rather than retaining an unbounded event list.
 
-Threads, Turns, execution references, and execution projections remain durable in SQLite when a connection closes. A client-owned Interactive operation keeps one logical session and callback across socket close, heartbeat timeout, resident drain, and resident replacement. Its supervisor reconnects with bounded exponential delay, opens a fresh physical Interactive operation, restores initialization and selected-Thread read state, and swaps the physical session behind the existing client session. Safe read actions may resume on the replacement. An in-flight mutation has an unknown outcome, emits `ExecutionFailed`, and is never resent automatically. Protocol v1 does not promise request idempotency or deduplication across connections. Relay and product persistence continue to own their existing durable execution and projection behavior; the resident transport does not add another replay or idempotency layer.
+Threads, Turns, execution references, and execution projections remain durable in SQLite when a connection closes. A client-owned Interactive operation keeps one logical session and callback across socket close, heartbeat timeout, resident drain, and resident replacement. Its supervisor reconnects with bounded exponential delay, opens a fresh physical Interactive operation, requests the current transcript page and projection revision, and swaps the physical session behind the existing client session. Safe read actions may resume on the replacement. An in-flight mutation has an unknown outcome, emits `ExecutionFailed`, and is never resent automatically. Relay and product persistence continue to own their existing durable execution and projection behavior; the resident transport carries bounded read-model changes but does not become a second durable store.
 
 Rika owns a durable Thread Summary projection for thread-facing views. It combines product Thread metadata with Turn status, last activity, read state, and edit totals derived from normalized execution events. The summary status is `running`, `waiting`, `queued`, or `idle`; ordering is pinned first, then most recent activity, then Thread identifier. Edit totals count unified-diff additions, removals, and paired replacements, and are omitted while historic projection repair is incomplete. Relay remains the execution truth. Rika replaces each per-Turn aggregate from Relay replay so projection is idempotent and restart-repairable.
 

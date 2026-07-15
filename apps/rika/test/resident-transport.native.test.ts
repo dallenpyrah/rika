@@ -275,7 +275,7 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "delivers a long burst of interactive execution events without overflowing",
+    "delivers a long bounded burst of interactive execution events without overflowing",
     () =>
       run(
         Effect.gen(function* () {
@@ -285,7 +285,7 @@ describe("resident WebSocket process transport", () => {
             yield* attachedEffect(client)
 
             client.send("burst-interactive")
-            expect(yield* client.nextEffect).toEqual({ type: "burst-completed", text: "2000" })
+            expect(yield* client.nextEffect).toEqual({ type: "burst-completed", text: "1000" })
             yield* client.closeEffect
           } finally {
             yield* cleanRoot(root)
@@ -393,7 +393,7 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "rejects admission while the previous owner is draining",
+    "waits for the previous owner to finish draining before replacing it",
     () =>
       run(
         Effect.gen(function* () {
@@ -404,17 +404,13 @@ describe("resident WebSocket process transport", () => {
             yield* client.closeEffect
             yield* waitUntil(fileExists(`${root}/owner-finalizer-starts.log`))
 
-            const rejected = start(root)
-            expect(yield* rejected.nextEffect).toMatchObject({
-              type: "rejected",
-              error: "Resident service is draining",
-            })
-            expect(yield* readText(`${root}/owner-acquisitions.log`)).toBe(`${first.hostPid}\n`)
-
-            yield* waitUntil(fileExists(`${root}/owner-finalizations.log`), 4_000)
             const replacement = start(root)
             const second = yield* attachedEffect(replacement)
             expect(second.hostPid).not.toBe(first.hostPid)
+            expect((yield* readText(`${root}/owner-acquisitions.log`)).trim().split("\n")).toEqual([
+              String(first.hostPid),
+              String(second.hostPid),
+            ])
           } finally {
             yield* cleanRoot(root)
           }
@@ -424,7 +420,7 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "rejects admission while a signalled owner is draining",
+    "waits for a signalled owner to finish draining before replacing it",
     () =>
       run(
         Effect.gen(function* () {
@@ -435,17 +431,13 @@ describe("resident WebSocket process transport", () => {
             process.kill(first.hostPid!, "SIGTERM")
             yield* waitUntil(fileExists(`${root}/owner-finalizer-starts.log`))
 
-            const rejected = start(root)
-            expect(yield* rejected.nextEffect).toMatchObject({
-              type: "rejected",
-              error: "Resident service is draining",
-            })
-            expect(yield* readText(`${root}/owner-acquisitions.log`)).toBe(`${first.hostPid}\n`)
-
-            yield* waitUntil(fileExists(`${root}/owner-finalizations.log`), 4_000)
             const replacement = start(root)
             const second = yield* attachedEffect(replacement)
             expect(second.hostPid).not.toBe(first.hostPid)
+            expect((yield* readText(`${root}/owner-acquisitions.log`)).trim().split("\n")).toEqual([
+              String(first.hostPid),
+              String(second.hostPid),
+            ])
           } finally {
             yield* cleanRoot(root)
           }

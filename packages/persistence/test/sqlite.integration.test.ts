@@ -3,6 +3,7 @@ import { expect, test } from "bun:test"
 import { Effect, FileSystem, Layer } from "effect"
 import { Database, Thread, ThreadRepository, ThreadSummaryRepository } from "../src"
 import * as TurnRepository from "../src/turn-repository"
+import * as TranscriptRepository from "../src/transcript-repository"
 import * as Turn from "../src/turn-schema"
 
 const id = Thread.ThreadId.make("thread-a")
@@ -22,12 +23,11 @@ test("creates, persists, and reopens the current schema", () => {
       const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-persistence-" })
       const filename = `${directory}/rika.db`
       const database = Database.layer(filename)
-      const layer = Layer.merge(
+      const layer = Layer.mergeAll(
         ThreadRepository.layer.pipe(Layer.provide(database)),
-        Layer.merge(
-          TurnRepository.layer.pipe(Layer.provide(database)),
-          ThreadSummaryRepository.layer.pipe(Layer.provide(database)),
-        ),
+        TurnRepository.layer.pipe(Layer.provide(database)),
+        ThreadSummaryRepository.layer.pipe(Layer.provide(database)),
+        TranscriptRepository.layer.pipe(Layer.provide(database)),
       )
       yield* Effect.gen(function* () {
         const repository = yield* ThreadRepository.Service
@@ -65,23 +65,42 @@ test("creates, persists, and reopens the current schema", () => {
           now: 5,
         })
         yield* summaries.markRead(id, 6)
+        const transcript = yield* TranscriptRepository.Service
+        const storedTurn = yield* turns.get(Turn.TurnId.make("turn-a"))
+        if (storedTurn === undefined) return yield* Effect.die("turn-a was not stored")
+        yield* transcript.replace(storedTurn, [
+          { cursor: "cursor-a", sequence: 1, type: "execution.completed", createdAt: 4 },
+        ])
+        yield* transcript.append(storedTurn, {
+          cursor: "cursor-b",
+          sequence: 2,
+          type: "model.usage.reported",
+          createdAt: 5,
+        })
+        yield* transcript.append(storedTurn, {
+          cursor: "cursor-b",
+          sequence: 2,
+          type: "model.usage.reported",
+          createdAt: 5,
+        })
       }).pipe(provideLayer(layer))
       const reopenedDatabase = Database.layer(filename)
-      const reopened = Layer.merge(
+      const reopened = Layer.mergeAll(
         ThreadRepository.layer.pipe(Layer.provide(reopenedDatabase)),
-        Layer.merge(
-          TurnRepository.layer.pipe(Layer.provide(reopenedDatabase)),
-          ThreadSummaryRepository.layer.pipe(Layer.provide(reopenedDatabase)),
-        ),
+        TurnRepository.layer.pipe(Layer.provide(reopenedDatabase)),
+        ThreadSummaryRepository.layer.pipe(Layer.provide(reopenedDatabase)),
+        TranscriptRepository.layer.pipe(Layer.provide(reopenedDatabase)),
       )
       return yield* Effect.gen(function* () {
         const repository = yield* ThreadRepository.Service
         const turns = yield* TurnRepository.Service
         const summaries = yield* ThreadSummaryRepository.Service
+        const transcripts = yield* TranscriptRepository.Service
         return {
           thread: yield* repository.get(id),
           turn: yield* turns.get(Turn.TurnId.make("turn-a")),
           summaries: yield* summaries.list(),
+          transcript: yield* transcripts.get(Turn.TurnId.make("turn-a")),
         }
       }).pipe(provideLayer(reopened))
     }),
@@ -112,6 +131,14 @@ test("creates, persists, and reopens the current schema", () => {
                 editTotals: { added: 3, modified: 2, removed: 1 },
               },
             ])
+            expect(result.transcript).toMatchObject({
+              revision: 2,
+              checkpointCursor: "cursor-b",
+              events: [
+                { cursor: "cursor-a", type: "execution.completed" },
+                { cursor: "cursor-b", type: "model.usage.reported" },
+              ],
+            })
           }),
         ),
       ),

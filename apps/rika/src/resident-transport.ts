@@ -1,6 +1,7 @@
 import * as BunHttpServer from "@effect/platform-bun/BunHttpServer"
 import * as BunSocket from "@effect/platform-bun/BunSocket"
 import { Operation, ResidentService } from "@rika/app"
+import * as Thread from "@rika/persistence/thread"
 import {
   Cause,
   Clock,
@@ -13,6 +14,7 @@ import {
   Fiber,
   FiberSet,
   Formatter,
+  Function,
   Layer,
   Queue,
   Ref,
@@ -30,11 +32,23 @@ const decodeClient = Schema.decodeUnknownSync(ResidentService.ClientMessage)
 const decodeServer = Schema.decodeUnknownSync(ResidentService.ServerMessage)
 const transportError = (message: string, reason: ResidentService.ResidentServiceError["reason"] = "transport-failed") =>
   ResidentService.ResidentServiceError.make({ reason, message })
+const mapResidentSocketFailure = (cause: unknown, accepted: boolean): ResidentService.ResidentServiceError => {
+  if (Socket.SocketError.is(cause) && cause.reason._tag === "SocketCloseError") {
+    if (cause.reason.code === 4403) return transportError("Resident protocol upgrade required", "upgrade-required")
+    if (cause.reason.code === 4409) return transportError("Resident service is draining", "resident-draining")
+    if (cause.reason.code === 4401) return transportError("Foreign resident listener", "foreign-listener")
+  }
+  return transportError(String(cause), accepted ? "transport-failed" : "resident-absent")
+}
+export const residentSocketFailure: {
+  (accepted: boolean): (cause: unknown) => ResidentService.ResidentServiceError
+  (cause: unknown, accepted: boolean): ResidentService.ResidentServiceError
+} = Function.dual(2, mapResidentSocketFailure)
 const json = Schema.encodeSync(Schema.UnknownFromJsonString)
 const parse = Schema.decodeSync(Schema.UnknownFromJsonString)
-const capabilities = ["ping", "startup-state"] as const
+const capabilities = ["ping", "startup-state", "transcript-pages-v2"] as const
 const maxFrameBytes = 1_048_576
-const outboundCapacity = 4_096
+const outboundCapacity = 1_024
 const failureKind = (cause: Cause.Cause<unknown>) => {
   const failure = Cause.squash(cause)
   if (failure !== null && typeof failure === "object" && "_tag" in failure && typeof failure._tag === "string")
@@ -246,6 +260,7 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
               let outputOverflowed = false
               let dispatchedEvents = 0
               let overflowAt: number | undefined
+              let overflowThreadId: Thread.ThreadId | undefined
               const dispatch = (event: Operation.InteractiveEvent) => {
                 dispatchedEvents += 1
                 if (
@@ -253,6 +268,7 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                     outbound,
                     json({
                       _tag: "interactive-event",
+                      version: ResidentService.protocolVersion,
                       requestId: message.requestId,
                       sessionId: message.sessionId,
                       actionId: message.actionId,
@@ -262,6 +278,8 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                 ) {
                   outputOverflowed = true
                   overflowAt ??= dispatchedEvents
+                  if ("threadId" in event && event.threadId !== undefined)
+                    overflowThreadId ??= Thread.ThreadId.make(String(event.threadId))
                 }
               }
               const args = message.arguments
@@ -302,6 +320,8 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                     )
                   case "selectThread":
                     return active.session.selectThread(args[0] as string, dispatch)
+                  case "loadOlder":
+                    return active.session.loadOlder(dispatch)
                   case "previewThread":
                     return active.session.previewThread(args[0] as string, dispatch)
                   case "reopenThread":
@@ -326,12 +346,27 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                           ResidentService.ResidentServiceError | Operation.OperationUnavailable
                         > =>
                           outputOverflowed
-                            ? Effect.fail(
-                                Operation.OperationUnavailable.make({
+                            ? Effect.gen(function* () {
+                                if (overflowThreadId !== undefined)
+                                  yield* writer(
+                                    json({
+                                      _tag: "interactive-event",
+                                      version: ResidentService.protocolVersion,
+                                      requestId: message.requestId,
+                                      sessionId: message.sessionId,
+                                      actionId: message.actionId,
+                                      event: {
+                                        _tag: "TranscriptResyncRequired",
+                                        threadId: overflowThreadId,
+                                        reason: "Resident transcript delivery overflowed its bounded queue",
+                                      },
+                                    } satisfies ResidentService.ServerMessage),
+                                  )
+                                return yield* Operation.OperationUnavailable.make({
                                   operation: message.method,
                                   message: "Resident client is too slow to receive interactive events",
-                                }),
-                              )
+                                })
+                              })
                             : Clock.currentTimeMillis.pipe(
                                 Effect.flatMap((completedAt) =>
                                   Effect.logInfo("resident.interactive_action.completed").pipe(
@@ -613,6 +648,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   readonly clientKind: ResidentService.Handshake["clientKind"]
   readonly clientVersion: string
   readonly role: ResidentService.Connection["role"]
+  readonly version?: ResidentService.Handshake["version"]
 }) {
   const crypto = yield* Crypto.Crypto
   const connectionScope = yield* Scope.make()
@@ -670,7 +706,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   )
   const handshake = json({
     family: "rika-resident",
-    version: ResidentService.protocolVersion,
+    version: options.version ?? ResidentService.protocolVersion,
     identity: options.identity,
     token: options.token,
     clientNonce,
@@ -812,6 +848,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                                 resolvePermission: (waitId, kind, decision, dispatch) =>
                                   invoke("resolvePermission", [waitId, kind, decision], dispatch),
                                 selectThread: (threadId, dispatch) => invoke("selectThread", [threadId], dispatch),
+                                loadOlder: (dispatch) => invoke("loadOlder", [], dispatch),
                                 previewThread: (threadId, dispatch) => invoke("previewThread", [threadId], dispatch),
                                 reopenThread: (dispatch) => invoke("reopenThread", [], dispatch),
                                 followSelected: (dispatch) => invoke("followSelected", [], dispatch),
@@ -837,7 +874,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
         Effect.gen(function* () {
           const failure = Schema.is(ResidentService.ResidentServiceError)(cause)
             ? cause
-            : transportError(String(cause), (yield* Deferred.isDone(accepted)) ? "transport-failed" : "resident-absent")
+            : residentSocketFailure(cause, yield* Deferred.isDone(accepted))
           yield* Deferred.fail(connectionFailure, failure)
         }),
       ),
@@ -998,13 +1035,29 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
           const crypto = yield* Crypto.Crypto
           const connectionScope = yield* Scope.make()
           yield* Effect.addFinalizer((exit) => Scope.close(connectionScope, exit))
-          const attach = (role: ResidentService.Connection["role"]) => connect({ ...endpoint, ...input, token, role })
+          const attach = (role: ResidentService.Connection["role"], version?: ResidentService.Handshake["version"]) =>
+            connect({ ...endpoint, ...input, token, role, ...(version === undefined ? {} : { version }) })
           yield* Effect.logInfo("resident.connection.acquiring").pipe(
             Effect.annotateLogs("rika.resident.client.kind", input.clientKind),
           )
+          const attachWhenReady = (
+            role: ResidentService.Connection["role"],
+            version?: ResidentService.Handshake["version"],
+          ) =>
+            attach(role, version).pipe(
+              Effect.retry({
+                times: 400,
+                schedule: Schedule.spaced(25),
+                while: (error) => error.reason === "resident-draining",
+              }),
+            )
           const acquire = Effect.fn("ResidentTransport.acquireConnection")(function* () {
-            const first = yield* Effect.result(attach("attached"))
+            let first = yield* Effect.result(attachWhenReady("attached"))
             if (first._tag === "Success") return first.success
+            if (first.failure.reason === "upgrade-required") {
+              first = yield* Effect.result(attachWhenReady("attached", { major: 1, minor: 0 }))
+              if (first._tag === "Success") return first.success
+            }
             if (first.failure.reason !== "resident-absent") return yield* first.failure
             if (input.startHost === undefined && input.owner === undefined) return yield* first.failure
             if (input.startHost !== undefined) {
@@ -1158,6 +1211,7 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                 Ref.set(selected, { threadId, dispatch }).pipe(
                   Effect.andThen(retryRead(dispatch, (session) => session.selectThread(threadId, dispatch))),
                 ),
+              loadOlder: (dispatch) => retryRead(dispatch, (session) => session.loadOlder(dispatch)),
               previewThread: (threadId, dispatch) =>
                 retryRead(dispatch, (session) => session.previewThread(threadId, dispatch)),
               reopenThread: (dispatch) => retryRead(dispatch, (session) => session.reopenThread(dispatch)),

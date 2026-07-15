@@ -317,15 +317,17 @@ describe("InteractiveSession controls", () => {
           turn: expect.objectContaining({ id: "created-turn", threadId: "created", prompt: "", status: "accepted" }),
         },
         {
-          _tag: "ExecutionEventReceived",
+          _tag: "TranscriptPatched",
           threadId: "created",
           turnId: "created-turn",
+          revision: 1,
           event: { cursor: "output", sequence: 1, type: "model.output.completed", createdAt: 1 },
         },
         {
-          _tag: "ExecutionEventReceived",
+          _tag: "TranscriptPatched",
           threadId: "created",
           turnId: "created-turn",
+          revision: 2,
           event: { cursor: "done", sequence: 2, type: "execution.completed", createdAt: 2 },
         },
         { _tag: "QueueChanged", threadId: "created", turns: [] },
@@ -501,15 +503,17 @@ describe("InteractiveSession controls", () => {
         lastCursor: "queued-done",
       })
       expect(events).toContainEqual({
-        _tag: "ExecutionEventReceived",
+        _tag: "TranscriptPatched",
         threadId: "older",
         turnId: "active",
+        revision: expect.any(Number),
         event: expect.objectContaining({ type: "model.output.completed", text: "created file" }),
       })
       expect(events).toContainEqual({
-        _tag: "ExecutionEventReceived",
+        _tag: "TranscriptPatched",
         threadId: "older",
         turnId: "active",
+        revision: expect.any(Number),
         event: expect.objectContaining({ cursor: "resumed-done", type: "execution.completed" }),
       })
     }),
@@ -688,11 +692,17 @@ describe("InteractiveSession controls", () => {
       yield* session.selectThread(older.id, (event) => events.push(event))
       yield* session.reopenThread((event) => events.push(event))
       yield* session.replay("latest-active", "cursor-7", (event) => events.push(event))
-      expect(events[0]).toMatchObject({ _tag: "ThreadSelected", thread: { id: "older" }, turns: [{ id: "active" }] })
-      expect(events.find((event) => event._tag === "ThreadSelected" && event.thread.id === "latest")).toMatchObject({
-        _tag: "ThreadSelected",
+      expect(events[0]).toMatchObject({
+        _tag: "TranscriptPageReceived",
+        thread: { id: "older" },
+        entries: [{ turn: { id: "active" } }],
+      })
+      expect(
+        events.find((event) => event._tag === "TranscriptPageReceived" && event.thread.id === "latest"),
+      ).toMatchObject({
+        _tag: "TranscriptPageReceived",
         thread: { id: "latest" },
-        turns: [{ id: "latest-active" }],
+        entries: [{ turn: { id: "latest-active" } }],
       })
       expect(events.findLast((event) => event._tag === "ExecutionReplayed")).toMatchObject({
         _tag: "ExecutionReplayed",
@@ -731,11 +741,47 @@ describe("InteractiveSession controls", () => {
         _tag: "QueueChanged",
         turns: [{ id: queued.id, status: "queued" }],
       })
-      expect(events.filter((event) => event._tag === "ExecutionReplayed")).toHaveLength(2)
-      expect(events.findLast((event) => event._tag === "ExecutionReplayed")).toMatchObject({
-        result: { turnId: shell.id, status: "completed", events: [] },
+      expect(events.find((event) => event._tag === "TranscriptPageReceived")).toMatchObject({
+        entries: [
+          { turn: { id: "active" } },
+          { turn: { id: queued.id, status: "queued" }, events: [] },
+          { turn: { id: shell.id, status: "completed" }, events: [] },
+        ],
       })
       expect(yield* Ref.get(controls)).toEqual([["replay", "active", undefined]])
+    }),
+  )
+
+  it.effect("loads only the newest fifty turns and prepends older pages on demand", () =>
+    Effect.gen(function* () {
+      const { session, turns, older } = yield* makeHarness()
+      yield* turns.setStatus(Turn.TurnId.make("active"), "completed", "done", 2)
+      for (let index = 0; index < 60; index += 1) {
+        const created = yield* turns.createForSubmission({
+          id: Turn.TurnId.make(`history-${index.toString().padStart(2, "0")}`),
+          threadId: older.id,
+          prompt: `history ${index}`,
+          now: index + 10,
+        })
+        yield* turns.setStatus(created.id, "completed", undefined, index + 10)
+      }
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* session.selectThread(older.id, (event) => events.push(event))
+      const initial = events.find((event) => event._tag === "TranscriptPageReceived")
+      yield* session.loadOlder((event) => events.push(event))
+      expect(initial?._tag === "TranscriptPageReceived" ? initial.hasOlder : false).toBe(true)
+      expect(initial?._tag === "TranscriptPageReceived" ? initial.entries : []).toHaveLength(50)
+      expect(
+        initial?._tag === "TranscriptPageReceived" ? initial.entries.map((entry) => entry.turn.id).at(-1) : undefined,
+      ).toBe(Turn.TurnId.make("history-59"))
+      const prepended = events.find((event) => event._tag === "TranscriptPagePrepended")
+      expect(prepended?._tag === "TranscriptPagePrepended" ? prepended.hasOlder : true).toBe(false)
+      expect(
+        prepended?._tag === "TranscriptPagePrepended" ? prepended.entries.map((entry) => entry.turn.id) : [],
+      ).toEqual([
+        Turn.TurnId.make("active"),
+        ...Array.from({ length: 10 }, (_, index) => Turn.TurnId.make(`history-${index.toString().padStart(2, "0")}`)),
+      ])
     }),
   )
 

@@ -4,7 +4,9 @@
 
 Every resident-backed Rika client and Resident Rika Service process writes Effect JSON logs beneath `<data-root>/diagnostics`. Client and resident files are separate and include process role, version, process instance, and safe operation identifiers as Effect log annotations. Rika retains normally closed log files for fourteen days. It preserves `.open.jsonl` files left by abrupt termination as crash evidence.
 
-Resident logs record connection attempts and outcomes, accepted operations, interactive action methods and event counts, queue overflow boundaries, thread-host recovery generations, Turn state changes, Relay execution submission and following, selected model identifiers, important durable execution event types, local tool outcomes, durations, and typed failure kinds. Thread, Turn, execution, request, connection, action, event, and tool-call identifiers correlate records without copying payloads. Delta content is not logged.
+Resident logs record connection attempts and outcomes, accepted operations, interactive action methods and event counts, queue overflow boundaries, transcript projection pages and rebuilds, resync requests, thread-host recovery generations, Turn state changes, Relay execution submission and following, selected model identifiers, important durable execution event types, local tool outcomes, durations, and typed failure kinds. Thread, Turn, execution, request, connection, action, event, and tool-call identifiers correlate records without copying payloads. Delta content is not logged.
+
+Runtime logs record transcript page duration and size plus resident queue overflow boundaries. Native benchmark evidence records input and patch latency, mounted transcript entry count, and keyed renderable creates, patches, and removals at fixed history sizes. Labels contain only bounded operation names and status kinds.
 
 `rika diagnostics path` and `rika diagnostics status` inspect this location without connecting to the resident or creating another log. `rika diagnostics export <new-directory>` copies only log files into a private directory for local analysis.
 

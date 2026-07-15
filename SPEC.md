@@ -43,6 +43,7 @@ Read `CONTEXT.md`, `AGENTS.md`, and the owning feature branch before implementat
 | Effect CLI command contracts           | `docs/spec/decisions/0010-effect-cli.md`                            |
 | One resident service per profile root  | `docs/spec/decisions/0012-single-owner-relay-sqlite.md`             |
 | Config-owned gateways and role routes  | `docs/spec/decisions/0013-config-owned-gateways-and-role-routes.md` |
+| Bounded transcript projection          | `docs/spec/decisions/0014-bounded-transcript-projection.md`         |
 
 ## Stop Gates
 

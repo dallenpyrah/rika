@@ -233,7 +233,7 @@ describe("ViewState", () => {
     expect(model.entries.at(-1)).toEqual({ role: "assistant", text: "completion only" })
     model = ViewState.update(model, { _tag: "TurnStarted", turnId: "retry", prompt: "try again" })
     expect(model.entries.at(-1)).toEqual({ role: "user", text: "try again", turnId: "retry" })
-    expect(model.items.at(-1)).toEqual({ _tag: "Entry", index: 3, turnId: "retry" })
+    expect(model.items.at(-1)).toEqual({ _tag: "Entry", index: 3, id: "turn:retry:user", turnId: "retry" })
     expect(model).toMatchObject({ input: "", busy: true })
     model = ViewState.update(ViewState.initial("/work"), { _tag: "AssistantCompleted", text: "standalone" })
     expect(model.entries).toEqual([{ role: "assistant", text: "standalone" }])

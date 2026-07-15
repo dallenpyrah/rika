@@ -1001,6 +1001,28 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               Effect.mapError(error),
             )
         }),
+        pageEvents: Effect.fn("ExecutionBackend.pageEvents")(function* (turnId, direction, cursor, limit) {
+          return yield* client
+            .pageExecutionEvents({
+              execution_id: executionId(turnId),
+              direction,
+              ...(cursor === undefined
+                ? {}
+                : direction === "forward"
+                  ? { after_cursor: cursor }
+                  : { before_cursor: cursor }),
+              ...(limit === undefined ? {} : { limit }),
+            })
+            .pipe(
+              Effect.map((result) => ({
+                events: result.events.map(event),
+                hasMore: result.has_more,
+                ...(result.oldest_cursor === undefined ? {} : { oldestCursor: result.oldest_cursor }),
+                ...(result.newest_cursor === undefined ? {} : { newestCursor: result.newest_cursor }),
+              })),
+              Effect.mapError(error),
+            )
+        }),
         cancel: Effect.fn("ExecutionBackend.cancel")(function* (turnId, cancelledAt) {
           return yield* Effect.gen(function* () {
             const accepted = yield* client.cancelExecution({
@@ -1314,6 +1336,9 @@ export const layer = <
                     .pipe(
                       Effect.andThen(childResult(client, String(childId))),
                       Effect.map((result) => result.output),
+                      Effect.mapError((cause) =>
+                        WorkflowDefinitionRuntime.WorkflowRuntimeError.make({ message: String(cause) }),
+                      ),
                     )
                 },
                 approval: (_parentId: any, operation: any) =>
@@ -1321,9 +1346,23 @@ export const layer = <
                 timer: (_parentId: any, operation: any) => Effect.sleep(`${operation.duration_ms} millis`),
                 branch: () => Effect.succeed(true),
                 structuredCompletion: (_schema: any, value: any) => Effect.succeed(value ?? null),
-                createChildFanOut: (definition: any) => childFanOut.create(definition),
+                createChildFanOut: (definition: any) =>
+                  childFanOut
+                    .create(definition)
+                    .pipe(
+                      Effect.mapError((cause) =>
+                        WorkflowDefinitionRuntime.WorkflowRuntimeError.make({ message: String(cause) }),
+                      ),
+                    ),
                 admitChildFanOut: () => Effect.void,
-                inspectChildFanOut: childFanOut.inspect,
+                inspectChildFanOut: (fanOutId) =>
+                  childFanOut
+                    .inspect(fanOutId)
+                    .pipe(
+                      Effect.mapError((cause) =>
+                        WorkflowDefinitionRuntime.WorkflowRuntimeError.make({ message: String(cause) }),
+                      ),
+                    ),
               })
             }),
           ).pipe(Layer.provide(handlerClientLayer))

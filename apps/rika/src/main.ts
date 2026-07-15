@@ -24,6 +24,7 @@ import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
 import * as ThreadSummaryRepository from "@rika/persistence/thread-summary-repository"
 import * as TurnRepository from "@rika/persistence/turn-repository"
+import * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
@@ -57,6 +58,7 @@ import { Command } from "effect/unstable/cli"
 import { createHash } from "node:crypto"
 import { command, version } from "./command"
 import { renderGoodbye } from "./goodbye"
+import * as InteractiveController from "./interactive-controller"
 import * as Logging from "./logging"
 import { layer as residentLayer, serve as serveResident } from "./resident-transport"
 
@@ -1303,6 +1305,8 @@ export const canonicalDatabaseRoot: {
 export const interruptTrackedFibers = (fibers: Iterable<Fiber.Fiber<void, never>>) =>
   Effect.forEach([...fibers], Fiber.interrupt, { concurrency: "unbounded", discard: true })
 
+export const tuiSignalExitCode = (signal: "SIGINT" | "SIGTERM"): number => (signal === "SIGINT" ? 130 : 143)
+
 const interruptAndClearTrackedFiberImpl = (
   fiber: Fiber.Fiber<void, never>,
   clear: (fiber: Fiber.Fiber<void, never>) => void,
@@ -1423,6 +1427,10 @@ if (import.meta.main) {
     Layer.provide(productDatabase),
     Layer.provide(BunServices.layer),
   )
+  const transcriptRepositoryLayer = TranscriptRepository.layer.pipe(
+    Layer.provide(productDatabase),
+    Layer.provide(BunServices.layer),
+  )
   const resolvedContextLayer = ResolvedContext.layer.pipe(
     Layer.provide(ContextFileSystem.liveLayer),
     Layer.provide(BunServices.layer),
@@ -1443,9 +1451,11 @@ if (import.meta.main) {
         let previewTimer: Fiber.Fiber<void, never> | undefined
         let renderTimer: Fiber.Fiber<void, never> | undefined
         let replayTurns = new Map<string, Turn.Turn>()
+        let loadedTranscriptEntries: ReadonlyArray<TranscriptRepository.Entry> = []
         const fibers = new Set<Fiber.Fiber<void, never>>()
         let followFiber: Fiber.Fiber<void, never> | undefined
         let renderSuppressed = false
+        let loadingOlder = false
         const render = (immediate = false) => {
           if (renderer === undefined || renderSuppressed) return
           if (immediate) {
@@ -1456,7 +1466,7 @@ if (import.meta.main) {
           }
           if (renderTimer !== undefined) return
           renderTimer = fork(
-            Effect.sleep("50 millis").pipe(
+            Effect.sleep("16 millis").pipe(
               Effect.andThen(
                 Effect.sync(() => {
                   renderTimer = undefined
@@ -1468,6 +1478,34 @@ if (import.meta.main) {
         }
         const dispatch = (event: Operation.InteractiveEvent) => {
           if (closed) return
+          if (
+            event._tag === "TranscriptPageReceived" ||
+            event._tag === "TranscriptPagePrepended" ||
+            event._tag === "TranscriptPatched" ||
+            event._tag === "TranscriptResyncRequired"
+          ) {
+            const controlled = InteractiveController.update(
+              { model, replayTurns, entries: loadedTranscriptEntries },
+              event,
+            )
+            model = controlled.state.model
+            replayTurns = new Map(controlled.state.replayTurns)
+            loadedTranscriptEntries = controlled.state.entries
+            if (event._tag === "TranscriptResyncRequired" && model.currentThreadId !== undefined)
+              fork(session.selectThread(model.currentThreadId, dispatch))
+            if (controlled.preserveAnchor) renderer?.surface.update(model, true)
+            else
+              render(
+                event._tag === "TranscriptResyncRequired" ||
+                  (event._tag === "TranscriptPatched" &&
+                    (event.event.type === "execution.completed" ||
+                      event.event.type === "execution.failed" ||
+                      event.event.type === "execution.cancelled" ||
+                      event.event.type === "permission.ask.requested" ||
+                      event.event.type === "tool.approval.requested")),
+              )
+            return
+          }
           if (event._tag === "QueueChanged") {
             if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
               model = ViewState.replaceQueue(
@@ -1608,6 +1646,7 @@ if (import.meta.main) {
           )
         }
         let closing = false
+        let teardownStarted = false
         const goodbye = () => {
           const threadId = model.currentThreadId
           const threadTitle =
@@ -1623,25 +1662,29 @@ if (import.meta.main) {
           )
         }
         const teardown = (showGoodbye: boolean) =>
-          Effect.gen(function* () {
-            yield* Effect.logInfo("tui.teardown.started")
-            closed = true
-            process.off("SIGINT", interrupt)
-            process.off("SIGTERM", close)
-            if (previewTimer !== undefined) yield* Fiber.interrupt(previewTimer)
-            previewTimer = undefined
-            if (renderTimer !== undefined) yield* Fiber.interrupt(renderTimer)
-            renderTimer = undefined
-            renderer?.releaseTerminal()
-            if (initialization !== undefined)
-              yield* Effect.tryPromise({
-                try: () => initialization!,
-                catch: (cause) =>
-                  ExternalBoundaryError.make({ operation: "await TUI initialization", message: String(cause) }),
-              }).pipe(Effect.ignore)
-            yield* interruptTrackedFibers([...fibers])
-            if (showGoodbye) goodbye()
-            yield* Effect.logInfo("tui.teardown.completed")
+          Effect.suspend(() => {
+            if (teardownStarted) return Effect.void
+            teardownStarted = true
+            return Effect.gen(function* () {
+              yield* Effect.logInfo("tui.teardown.started")
+              closed = true
+              process.off("SIGINT", interrupt)
+              process.off("SIGTERM", terminate)
+              if (previewTimer !== undefined) yield* Fiber.interrupt(previewTimer)
+              previewTimer = undefined
+              if (renderTimer !== undefined) yield* Fiber.interrupt(renderTimer)
+              renderTimer = undefined
+              renderer?.releaseTerminal()
+              if (initialization !== undefined)
+                yield* Effect.tryPromise({
+                  try: () => initialization!,
+                  catch: (cause) =>
+                    ExternalBoundaryError.make({ operation: "await TUI initialization", message: String(cause) }),
+                }).pipe(Effect.ignore)
+              yield* interruptTrackedFibers([...fibers])
+              if (showGoodbye) goodbye()
+              yield* Effect.logInfo("tui.teardown.completed")
+            })
           })
         const close = (exitCode?: number) => {
           if (closing) return
@@ -1649,9 +1692,10 @@ if (import.meta.main) {
           if (exitCode !== undefined) process.exitCode = exitCode
           fork(teardown(true).pipe(Effect.andThen(Effect.sync(() => resume(Effect.void)))))
         }
-        const interrupt = () => close(130)
+        const interrupt = () => close(tuiSignalExitCode("SIGINT"))
+        const terminate = () => close(tuiSignalExitCode("SIGTERM"))
         process.once("SIGINT", interrupt)
-        process.once("SIGTERM", close)
+        process.once("SIGTERM", terminate)
         const startSelectedFollow = () => {
           if (followFiber !== undefined) return
           const selectedFollowFiber = fork(session.followSelected(dispatch))
@@ -1849,6 +1893,18 @@ if (import.meta.main) {
             scroll: (offset) => {
               model = ViewState.update(model, { _tag: "ScrollMoved", offset })
               renderer?.surface.update(model)
+              if (offset <= 0 && !loadingOlder) {
+                loadingOlder = true
+                run(
+                  session.loadOlder(dispatch).pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        loadingOlder = false
+                      }),
+                    ),
+                  ),
+                )
+              }
             },
             scrollFollow: () => {
               model = ViewState.update(model, { _tag: "ScrollFollowed" })
@@ -2181,7 +2237,16 @@ if (import.meta.main) {
             ConfigContract.resolveAgentRoute(effectiveConfig.settings, agent),
           ),
         )
-        const repositories = Layer.succeedContext(yield* Layer.build(Layer.merge(repositoryLayer, turnRepositoryLayer)))
+        const repositories = Layer.succeedContext(
+          yield* Layer.build(
+            Layer.mergeAll(
+              repositoryLayer,
+              turnRepositoryLayer,
+              threadSummaryRepositoryLayer,
+              transcriptRepositoryLayer,
+            ),
+          ),
+        )
         const persistedModelRoutes = yield* TurnRepository.Service.pipe(
           Effect.flatMap((turns) => turns.listNonterminal),
           Effect.map(persistedModelRoutesForStartup),
@@ -2259,7 +2324,8 @@ if (import.meta.main) {
         const product = Operation.productLayer({
           repositoryLayer: repositories,
           turnRepositoryLayer: repositories,
-          threadSummaryRepositoryLayer,
+          threadSummaryRepositoryLayer: repositories,
+          transcriptRepositoryLayer: repositories,
           resolvedContextLayer,
           backendLayer: lazyBackendLayer(backendLayer).pipe(
             Layer.catchCause((cause) =>
@@ -2474,7 +2540,8 @@ if (import.meta.main) {
                                   },
                                 }),
                               )
-                              yield* yield* handle.unref
+                              const reref = yield* handle.unref
+                              void reref
                               yield* Effect.logInfo("resident.spawned")
                             }).pipe(
                               Effect.mapError((cause) =>

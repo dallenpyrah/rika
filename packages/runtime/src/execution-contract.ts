@@ -148,6 +148,13 @@ export interface Result {
   readonly events: ReadonlyArray<Event>
 }
 
+export interface EventPage {
+  readonly events: ReadonlyArray<Event>
+  readonly hasMore: boolean
+  readonly oldestCursor?: string
+  readonly newestCursor?: string
+}
+
 export interface Inspection {
   readonly turnId: string
   readonly status: Status
@@ -215,6 +222,12 @@ export interface Interface {
     onEvent?: (event: Event) => void,
   ) => Effect.Effect<Result, BackendError>
   readonly replay: (turnId: string, afterCursor?: string) => Effect.Effect<Result, BackendError>
+  readonly pageEvents?: (
+    turnId: string,
+    direction: "forward" | "backward",
+    cursor?: string,
+    limit?: number,
+  ) => Effect.Effect<EventPage, BackendError>
   readonly cancel: (turnId: string, cancelledAt: number) => Effect.Effect<Result, BackendError>
   readonly inspect: (turnId: string) => Effect.Effect<Inspection | undefined, BackendError>
   readonly steer: (turnId: string, text: string, createdAt: number) => Effect.Effect<void, BackendError>

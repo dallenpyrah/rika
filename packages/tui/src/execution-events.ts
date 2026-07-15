@@ -162,6 +162,7 @@ export const messages = (event: Event): ReadonlyArray<Message> => {
       : [
           {
             _tag: "AssistantStreamed",
+            id: eventId(event, `${event.sequence}:${event.type}`),
             ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
             text: event.text,
           },
@@ -174,6 +175,7 @@ export const messages = (event: Event): ReadonlyArray<Message> => {
     return [
       {
         _tag: "AssistantCompleted",
+        id: eventId(event, `${event.sequence}:${event.type}`),
         ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
         text: event.text ?? "",
       },

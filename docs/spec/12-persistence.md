@@ -22,6 +22,10 @@ The product schema also stores one replaceable activity aggregate per Turn and o
 
 Resident startup repairs missing, incomplete, and cursor-stale aggregates from Relay in batches of 25 with concurrency four. Repair does not delay the initial Thread list. A summary omits unknown edit totals until repair succeeds, publishes a replacement after each committed batch, and retries typed failures on the next startup. The migration is additive and does not mutate Relay state or Thread identifiers.
 
+The product schema also stores a derived transcript read model. Transcript entries belong to a Thread and optional Turn, have a stable semantic key, monotonically increasing revision, chronological ordering key, Schema-encoded content, an optional oldest Relay source cursor, and a newest checkpoint cursor. Each entry stores its projection version. The read model is disposable and rebuildable from Relay; it is not a second execution authority.
+
+Transcript repositories expose only keyset pages. A backward page returns chronological entries, `hasOlder`, and its oldest and newest keys. Limits default to fifty and clamp to two hundred. Turn listing used for transcript construction follows the same bounded keyset rule. No normal TUI path reads every Turn or every projected entry into memory.
+
 ## Rules
 
 - Raw SQLite clients remain inside persistence composition.
@@ -29,6 +33,8 @@ Resident startup repairs missing, incomplete, and cursor-stale aggregates from R
 - Rows are decoded to domain values through Effect Schema.
 - Constraints enforce uniqueness and references.
 - Migrations move forward and ship with the packaged binary.
+- Transcript entry upsert and checkpoint advance share one transaction.
+- Transcript rebuild writes a new projection version before making it visible and can resume after interruption.
 - Transaction boundaries follow product invariants.
 - Rika does not import raw Drizzle APIs.
 - An ambiguous storage failure after Relay acceptance remains reconcilable and does not create a terminal Turn without canonical Relay terminal state.

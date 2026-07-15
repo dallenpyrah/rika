@@ -116,8 +116,8 @@ export type UiEvent = {
   readonly block: TranscriptBlock
 }
 export type TranscriptItem =
-  | { readonly _tag: "Entry"; readonly index: number; readonly turnId?: string }
-  | { readonly _tag: "Block"; readonly index: number; readonly turnId?: string }
+  | { readonly _tag: "Entry"; readonly index: number; readonly id?: string; readonly turnId?: string }
+  | { readonly _tag: "Block"; readonly index: number; readonly id?: string; readonly turnId?: string }
 
 export interface PaletteState {
   readonly open: boolean
@@ -296,8 +296,8 @@ export type Message =
   | { readonly _tag: "ComposerHeightChanged"; readonly height: number }
   | { readonly _tag: "Submitted" }
   | { readonly _tag: "TurnStarted"; readonly turnId: string; readonly prompt: string }
-  | { readonly _tag: "AssistantStreamed"; readonly turnId?: string; readonly text: string }
-  | { readonly _tag: "AssistantCompleted"; readonly turnId?: string; readonly text: string }
+  | { readonly _tag: "AssistantStreamed"; readonly id?: string; readonly turnId?: string; readonly text: string }
+  | { readonly _tag: "AssistantCompleted"; readonly id?: string; readonly turnId?: string; readonly text: string }
   | { readonly _tag: "ExecutionCompleted"; readonly turnId?: string }
   | { readonly _tag: "ExecutionFailed"; readonly turnId?: string; readonly message: string }
   | { readonly _tag: "ExecutionCancelled"; readonly turnId?: string }
@@ -773,6 +773,7 @@ export const update: {
             items.push({
               _tag: "Block",
               index: blocks.length,
+              id: message.event.id,
               ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
             })
             blocks.push(incoming)
@@ -784,6 +785,7 @@ export const update: {
             items.push({
               _tag: "Block",
               index: blocks.length,
+              id: message.event.id,
               ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
             })
             blocks.push(incoming)
@@ -795,6 +797,7 @@ export const update: {
             items.push({
               _tag: "Block",
               index: blocks.length,
+              id: message.event.id,
               ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
             })
             blocks.push(incoming)
@@ -803,6 +806,7 @@ export const update: {
           items.push({
             _tag: "Block",
             index: blocks.length,
+            id: message.event.id,
             ...(message.event.turnId === undefined ? {} : { turnId: message.event.turnId }),
           })
           blocks.push(incoming)
@@ -881,7 +885,10 @@ export const update: {
       return {
         ...model,
         entries: [...model.entries, { role: "user", text: message.prompt, turnId: message.turnId }],
-        items: [...model.items, { _tag: "Entry", index: model.entries.length, turnId: message.turnId }],
+        items: [
+          ...model.items,
+          { _tag: "Entry", index: model.entries.length, id: `turn:${message.turnId}:user`, turnId: message.turnId },
+        ],
         activeTurnId: message.turnId,
         busy: true,
         busyStatus: "Waiting",
@@ -974,6 +981,7 @@ export const update: {
                 {
                   _tag: "Entry",
                   index: entries.length - 1,
+                  ...(message.id === undefined ? {} : { id: message.id }),
                   ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
                 } as const,
               ],
@@ -1005,7 +1013,15 @@ export const update: {
         items:
           index >= 0
             ? model.items
-            : [...model.items, { _tag: "Entry", index: entries.length - 1, turnId: message.turnId }],
+            : [
+                ...model.items,
+                {
+                  _tag: "Entry",
+                  index: entries.length - 1,
+                  ...(message.id === undefined ? {} : { id: message.id }),
+                  turnId: message.turnId,
+                },
+              ],
         busy: model.busy,
         busyStatus: model.busy ? "Working" : undefined,
       }

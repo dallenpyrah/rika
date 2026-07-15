@@ -19,6 +19,12 @@
 - Render work is frame-bounded and does not block durable event consumption.
 - Tool output and model context are bounded.
 - Parallel work has explicit concurrency limits.
+- Opening a Thread loads at most fifty transcript entries before the first interactive frame.
+- The TUI mounts at most two hundred transcript entries, including overscan, regardless of durable history size.
+- A live delta changes only its keyed transcript entry and fixed chrome. It never walks or recreates the complete transcript.
+- Renderer updates are coalesced to at most one normal frame per sixteen milliseconds. Terminal results, permission requests, and resync frames bypass that delay.
+- Resident interactive delivery uses bounded queues. A slow consumer receives a typed resync requirement rather than unbounded buffered history.
+- The transcript benchmark covers 1, 10, 100, and 1,000 Turns. Input dispatch and a one-entry live patch stay under sixteen milliseconds at p95 on the supported packaged development target, and mounted renderable count stays constant after the window is full.
 
 ## Maintainability
 

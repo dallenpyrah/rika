@@ -175,7 +175,13 @@ export const transcriptUnitId: {
   (model: Model, unit: TranscriptUnit): TranscriptUnitId
   (unit: TranscriptUnit): (model: Model) => TranscriptUnitId
 } = Function.dual(2, (model: Model, unit: TranscriptUnit): TranscriptUnitId => {
-  if (unit.kind === "entry") return `entry:${unit.entry}`
+  if (unit.kind === "entry") {
+    const entry = model.entries[unit.entry]
+    const item = orderedTranscriptItems(model).find(
+      (candidate) => candidate._tag === "Entry" && candidate.index === unit.entry,
+    )
+    return `entry:${item?.id ?? `${entry?.turnId ?? "legacy"}:${entry?.role ?? "entry"}:${unit.entry}`}`
+  }
   if (unit.kind === "tool") {
     const ids = unit.blocks.map((index) => {
       const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
@@ -184,6 +190,10 @@ export const transcriptUnitId: {
     return `tool:${ids.join("+")}`
   }
   const block = model.blocks[unit.block] as TranscriptBlock
+  const item = orderedTranscriptItems(model).find(
+    (candidate) => candidate._tag === "Block" && candidate.index === unit.block,
+  )
+  if (item?.id !== undefined) return `block:${item.id}`
   if ("id" in block && typeof block.id === "string") return `block:${block.id}`
   return `block:${block._tag}:${unit.block}`
 })

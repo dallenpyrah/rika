@@ -116,6 +116,29 @@ it.effect("memory turns preserve deterministic identity and status", () =>
   }).pipe(provideLayer(TurnRepository.memoryLayer())),
 )
 
+it.effect("memory pages newest turns without loading the full thread", () =>
+  Effect.gen(function* () {
+    const repository = yield* TurnRepository.Service
+    const threadId = Thread.ThreadId.make("paged-thread")
+    for (let index = 0; index < 5; index += 1) {
+      yield* repository.createForSubmission({
+        id: Turn.TurnId.make(`turn-${index}`),
+        threadId,
+        prompt: `prompt ${index}`,
+        now: index,
+      })
+    }
+    const newest = yield* repository.page(threadId, { limit: 2 })
+    const older = yield* repository.page(threadId, { before: newest.oldestCursor, limit: 2 })
+    const oldest = yield* repository.page(threadId, { before: older.oldestCursor, limit: 2 })
+    expect(newest.turns.map((turn) => turn.id)).toEqual([Turn.TurnId.make("turn-3"), Turn.TurnId.make("turn-4")])
+    expect(newest.hasOlder).toBe(true)
+    expect(older.turns.map((turn) => turn.id)).toEqual([Turn.TurnId.make("turn-1"), Turn.TurnId.make("turn-2")])
+    expect(oldest.turns.map((turn) => turn.id)).toEqual([Turn.TurnId.make("turn-0")])
+    expect(oldest.hasOlder).toBe(false)
+  }).pipe(provideLayer(TurnRepository.memoryLayer())),
+)
+
 it.effect("memory terminal status does not regress to nonterminal", () =>
   Effect.gen(function* () {
     const repository = yield* TurnRepository.Service
@@ -321,6 +344,38 @@ it.effect("sql status updates bind cursor and null cursor", () =>
       yield* repository.setStatus(Turn.TurnId.make("turn-a"), "completed", undefined, 3)
       expect(sql.statements[0]?.parameters).toEqual(["running", "cursor-a", 2, "turn-a", "running"])
       expect(sql.statements[1]?.parameters).toEqual(["completed", null, 3, "turn-a", "completed"])
+    }),
+  ),
+)
+
+it.effect("sql pages turns backward and returns chronological results", () =>
+  sqlTest((sql) =>
+    Effect.gen(function* () {
+      sql.rows(
+        row({ id: "turn-4", created_at: 4, updated_at: 4 }),
+        row({ id: "turn-3", created_at: 3, updated_at: 3 }),
+        row({ id: "turn-2", created_at: 2, updated_at: 2 }),
+      )
+      sql.rows(row({ id: "turn-1", created_at: 1, updated_at: 1 }))
+      const repository = yield* TurnRepository.Service
+      const newest = yield* repository.page(Thread.ThreadId.make("thread-a"), { limit: 2 })
+      const older = yield* repository.page(Thread.ThreadId.make("thread-a"), {
+        before: newest.oldestCursor,
+        limit: 2,
+      })
+      expect(newest.turns.map((turn) => turn.id)).toEqual([Turn.TurnId.make("turn-3"), Turn.TurnId.make("turn-4")])
+      expect(newest.hasOlder).toBe(true)
+      expect(older.turns.map((turn) => turn.id)).toEqual([Turn.TurnId.make("turn-1")])
+      expect(sql.statements).toEqual([
+        {
+          sql: "SELECT * FROM rika_turns WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+          parameters: ["thread-a", 3],
+        },
+        {
+          sql: "SELECT * FROM rika_turns WHERE thread_id = ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?",
+          parameters: ["thread-a", 3, 3, "turn-3", 3],
+        },
+      ])
     }),
   ),
 )

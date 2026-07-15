@@ -14,12 +14,12 @@ import {
   Semaphore,
 } from "effect"
 import { ChildProcessSpawner } from "effect/unstable/process"
-import { Input, OperationUnavailable } from "./operation"
+import { Input, InteractiveEventSchema, OperationUnavailable } from "./operation"
 import type { InteractiveSession, Interface as OperationInterface } from "./operation"
 
 export type InteractiveInput = Extract<Input, { readonly _tag: "Interactive" }>
 
-export const protocolVersion = { major: 1, minor: 0 } as const
+export const protocolVersion = { major: 2, minor: 0 } as const
 
 export const ProtocolVersion = Schema.Struct({ major: Schema.Int, minor: Schema.Int })
 export const ClientKind = Schema.Literals(["interactive", "run", "review", "workflow", "thread-continue", "product"])
@@ -109,10 +109,11 @@ export const InteractiveStarted = Schema.Struct({
 })
 export const InteractiveEvent = Schema.Struct({
   _tag: Schema.tag("interactive-event"),
+  version: Schema.optionalKey(ProtocolVersion),
   requestId: Schema.String,
   sessionId: Schema.String,
   actionId: Schema.String,
-  event: Schema.Unknown,
+  event: InteractiveEventSchema,
 })
 export const ActionCompleted = Schema.Struct({
   _tag: Schema.tag("action-completed"),
