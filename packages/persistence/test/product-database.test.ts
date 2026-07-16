@@ -64,8 +64,11 @@ it.effect("builds the client directory and applies all product migrations in ord
       "6_drop_thread_session_id",
       "7_execution_route_pins",
       "8_review_fan_out_owners",
+      "9_transcript_projection",
+      "10_thread_summaries",
     ])
-    expect(sql.statements.map((statement) => statement.sql)).toEqual([
+    const statements = sql.statements.map((statement) => statement.sql)
+    expect(statements.slice(0, 19)).toEqual([
       "CREATE TABLE rika_workspaces ( path TEXT PRIMARY KEY NOT NULL, created_at INTEGER NOT NULL )",
       "CREATE TABLE rika_threads ( id TEXT PRIMARY KEY NOT NULL, session_id TEXT NOT NULL UNIQUE, workspace TEXT NOT NULL REFERENCES rika_workspaces(path), title TEXT NOT NULL, labels_json TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)), archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL )",
       "CREATE INDEX rika_threads_listing ON rika_threads (pinned DESC, updated_at DESC, id ASC)",
@@ -86,6 +89,10 @@ it.effect("builds the client directory and applies all product migrations in ord
       "ALTER TABLE rika_turns ADD COLUMN execution_route_json TEXT",
       "ALTER TABLE rika_turns ADD COLUMN review_fan_out_id TEXT",
     ])
+    expect(statements).toContain(
+      "CREATE TABLE rika_transcript_checkpoints ( turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE, thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE, model_phase INTEGER NOT NULL DEFAULT -1, revision INTEGER NOT NULL DEFAULT -1, oldest_cursor TEXT, checkpoint_cursor TEXT, cost_usd REAL, updated_at INTEGER NOT NULL )",
+    )
+    expect(statements).not.toContain(expect.stringContaining("projection_version"))
     expect(sql.statements.every((statement) => statement.parameters.length === 0)).toBe(true)
   })
 })

@@ -1,6 +1,6 @@
 # Rika ↔ Amp parity — open issues
 
-Working ledger for the current parity push. Check items off as they are fixed and verified.
+Closed issue notes from the parity push. This file is not a product or architecture source.
 
 ## Bugs
 
@@ -14,9 +14,9 @@ Working ledger for the current parity push. Check items off as they are fixed an
 
 ## Deep-parity features
 
-- [x] 8. Expandable tool sections (Opt+T / Tab navigation): expanded `Edited` shows a syntax-colored diff with line numbers (pierre-style), expanded `Ran N commands` shows each `$ command` with output and exit code, expanded `Explored` lists per-file/search children. (Verified live: Opt+T/click on the Edited group renders the pierre diff; Explored group expands to per-child `✓ Read <path>`. Edit diff source added to the tool `Result` via a new `diff` field.)
+- [x] 8. Expandable tool sections (Opt+T / Tab navigation): expanded single-file `Edited` shows its diff directly, multi-file edits show independently expandable `Edit <path>` children, `Ran N commands` shows independently expandable `$ command` children with output and exact exit code, `Explored` lists per-file/search children, and subagents reveal their task. (Verified with reducer coverage and matched Amp Pilotty captures under `artifacts/transcript-parity/`.)
 - [x] 9. Diff rendering via @pierre/diffs (line numbers, `-`/`+` colored rows, context ellipsis) for edit blocks and the review surface. (Verified: `renderPierreDiff` via `parsePatchFiles` renders numbered rows, red `-`/green `+`, dim context; falls back to the legacy renderer when a patch cannot be parsed.)
-- [x] 10. Edit patches should stream into the transcript while the model writes them (tool-call argument deltas), not appear only after the tool completes. Requires upstream (baton/relay) tool-arg delta events. (Verified: `model.toolcall.delta` events flow to `ToolCallDeltaReceived` → `toolCallDrafts`, rendered as a running `⠿ Editing <path> …` group cleared when the real ToolCall lands; 45 delta events with `{tool_call_id, tool_name, delta}` confirmed in relay.db.)
+- [x] 10. Edit patches stream into the transcript while the model writes them. `model.toolcall.delta` updates the final semantic ToolCall row and its live per-file diff; request and result events update that same stable row. There is no draft row or second reducer.
 - [x] 11. Thread Preview pane in Switch Thread must render the selected thread's actual transcript tail (grouped blocks), not metadata. (Verified live: preview pane renders the selected thread's grouped transcript tail — user prompt, Explored/Edited groups, assistant reply — via a debounced `previewThread` fetch projected through `projectTurn`/`renderTranscriptStyled`.)
 - [x] 12. Right-side sidebar (command-toggled) showing a file tree of the workspace with changed files highlighted (git status). (Verified live: Opt+S opens a right sidebar tree colored by status with `+a -d` numstat counts; transcript shrinks while open.)
 - [x] 13. Model-generated thread titles (amp uses a small model for titling; rika currently uses the first 80 chars of the prompt). Should update the tmux/terminal tab title too. (Verified live: after the first completed turn a LOW-mode background titling generated "Capital of France"/"Edit Greeting String"; terminal title set via OSC; titling errors are swallowed.)
@@ -27,7 +27,7 @@ Working ledger for the current parity push. Check items off as they are fixed an
 ## Upstream (../batonfx, ../relay)
 
 - [x] 15. batonfx: resilient handling of malformed/parallel tool calls (issue 7). (Done: batonfx corrective-turn resilience, 80 core tests green, dist rebuilt.)
-- [x] 16. batonfx/relay: emit tool-call argument delta events so the TUI can stream patches (issue 10). (Done: relay emits `model.toolcall.delta` {tool_call_id, tool_name?, delta, delta_index}; rika consumes it for live `⠿ Editing …` drafts.)
+- [x] 16. batonfx/relay: emit tool-call argument delta events so the TUI can stream patches (issue 10). Relay emits `model.toolcall.delta` `{tool_call_id, tool_name?, delta, delta_index}`; Rika folds it into the final ToolCall projection.
 - [x] 17. relay: clean, fast runner/sharding shutdown — no `No healthy runners available` warning loop, no ~10s teardown hang (issue 2). (Done: entity termination timeout bounded to 2s on embedded runtimes, RunnerStorage-sync warning precisely filtered; cancellation test wall-time 15s → 4s.)
 - [x] 18. relay: cancellation should resolve the active execution cleanly so clients see `cancelled`, not a follow-up error (issue 1). (Done: cancel path verified end-to-end upstream with a running-execution cancellation test; rika shows clean `cancelled`.)
 - [x] 21. fastMode and reasoningEffort must take effect downstream: Opt+D's effort (and each mode's configured `reasoning`) must reach the model request (`reasoning_effort`), and fast mode must request priority serving (`service_tier: "priority"`). Plumb TUI → session → operation → backend start → per-effort/fast variant model registrations selected via `registration_key`; children inherit the parent selection. (Verified on the wire: Opt+D effort → `reasoning_effort: xhigh` and fast mode → `service_tier: "priority"` in the vibe request; each mode's configured `reasoning` now flows as the default — the background titling call went out as `low`. Implemented via per-effort/fast variant registrations selected through `registration_key`; no relay/baton changes required — their selection conversion already preserves the key.)

@@ -29,20 +29,16 @@ test("uses one canonical directory for both resident databases", () =>
             const alias = path.join(root, "alias")
             yield* fs.makeDirectory(other)
             yield* fs.symlink(root, alias)
+            expect(yield* canonicalDatabaseRoot(path.join(root, "rika.db"), path.join(alias, "relay.db"))).toBe(
+              yield* fs.realPath(root),
+            )
             expect(
-              yield* Effect.promise(() =>
-                canonicalDatabaseRoot(path.join(root, "rika.db"), path.join(alias, "relay.db")),
-              ),
-            ).toBe(yield* fs.realPath(root))
-            expect(
-              (yield* Effect.exit(
-                Effect.promise(() => canonicalDatabaseRoot(path.join(root, "rika.db"), path.join(other, "relay.db"))),
-              ))._tag,
+              (yield* Effect.exit(canonicalDatabaseRoot(path.join(root, "rika.db"), path.join(other, "relay.db"))))
+                ._tag,
             ).toBe("Failure")
             expect(
-              (yield* Effect.exit(
-                Effect.promise(() => canonicalDatabaseRoot(path.join(root, "product.db"), path.join(root, "relay.db"))),
-              ))._tag,
+              (yield* Effect.exit(canonicalDatabaseRoot(path.join(root, "product.db"), path.join(root, "relay.db"))))
+                ._tag,
             ).toBe("Failure")
           }),
           context,

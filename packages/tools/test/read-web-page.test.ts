@@ -35,6 +35,8 @@ const apiResponse = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
+const decodeRequestBody = Schema.decodeUnknownSync(Schema.UnknownFromJsonString)
+
 const run = (
   input: ReadWebPage.Input,
   handler: (request: HttpClientRequest.HttpClientRequest) => HttpClientResponse.HttpClientResponse,
@@ -74,7 +76,7 @@ describe("ReadWebPage", () => {
     Effect.gen(function* () {
       let body: unknown
       const content = yield* run({ url: "https://example.com/docs", fullContent: true }, (request) => {
-        if (request.body._tag === "Uint8Array") body = JSON.parse(new TextDecoder().decode(request.body.body))
+        if (request.body._tag === "Uint8Array") body = decodeRequestBody(new TextDecoder().decode(request.body.body))
         return response(request, apiResponse())
       })
       expect(body).toEqual({
@@ -90,7 +92,7 @@ describe("ReadWebPage", () => {
     Effect.gen(function* () {
       let body: unknown
       yield* run({ url: "https://example.com/docs", forceRefetch: true }, (request) => {
-        if (request.body._tag === "Uint8Array") body = JSON.parse(new TextDecoder().decode(request.body.body))
+        if (request.body._tag === "Uint8Array") body = decodeRequestBody(new TextDecoder().decode(request.body.body))
         return response(request, apiResponse())
       })
       expect(body).toEqual({

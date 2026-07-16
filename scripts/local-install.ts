@@ -109,7 +109,7 @@ export const installLocal = Effect.fn("LocalInstall.installLocal")(() =>
       if (!(yield* fileSystem.exists(archive).pipe(mapInstallError("check host archive")))) {
         return yield* installFailure(
           "check host archive",
-          `Host archive not found: ${archive}. Run bun run package:build first.`,
+          `Host archive not found: ${archive}. Run bun run package first.`,
         )
       }
       const parent = path.dirname(installRoot)

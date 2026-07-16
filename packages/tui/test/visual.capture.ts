@@ -16,6 +16,32 @@ export const visualMetadata = {
 } as const
 
 const block = (value: TranscriptBlock): Model => ({ ...initial("/workspace", "high"), blocks: [value] })
+const tool = (
+  id: string,
+  name: string,
+  detail: string,
+  status: Extract<TranscriptBlock, { _tag: "ToolCall" }>["status"],
+  output?: string,
+): Extract<TranscriptBlock, { _tag: "ToolCall" }> => ({
+  _tag: "ToolCall",
+  id,
+  name,
+  input: detail,
+  status,
+  presentation:
+    name === "read_file" || name === "grep"
+      ? {
+          family: "explore",
+          action: name === "grep" ? "grep" : "read",
+          activeLabel: "Exploring",
+          completeLabel: "Explored",
+          counter: name === "grep" ? "search" : "file",
+        }
+      : { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
+  detail,
+  files: [],
+  ...(output === undefined ? {} : { output }),
+})
 const base = (): Model => initial("/workspace", "high")
 const thread = (input: Partial<ThreadItem> & Pick<ThreadItem, "id" | "title">): ThreadItem => ({
   workspace: "/workspace",
@@ -66,7 +92,7 @@ const threadBrowser = (): Model => ({
 })
 
 export const scenarios = (): ReadonlyArray<readonly [string, Model, number, number]> => {
-  const reasoning = block({ _tag: "Reasoning", text: "Inspecting stable inputs", expanded: false })
+  const reasoning = block({ _tag: "Reasoning", text: "Inspecting stable inputs" })
   const restarted = update(
     update(base(), {
       _tag: "EventReplayed",
@@ -110,31 +136,33 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
     ],
     ["reasoning-collapsed", reasoning, 80, 24],
     ["reasoning-expanded", update(reasoning, { _tag: "ReasoningToggled", index: 0 }), 80, 24],
-    ["tool", block({ _tag: "ToolCall", id: "tool-1", name: "Read", input: "src/main.ts", status: "running" }), 80, 24],
+    ["tool", block(tool("tool-1", "read_file", "src/main.ts", "running")), 80, 24],
     [
       "tool-expanded",
-      block({
-        _tag: "ToolCall",
-        id: "tool-1",
-        name: "Read",
-        input: "src/main.ts",
-        output: "contents",
-        status: "complete",
-        expanded: true,
-      }),
+      {
+        ...block(tool("tool-1", "read_file", "src/main.ts", "complete", "contents")),
+        expandedRowKeys: ["tool:tool-1"],
+      },
       80,
       24,
     ],
-    ["diff", block({ _tag: "Diff", path: "src/main.ts", patch: "-old\n+new", expanded: true }), 80, 24],
+    [
+      "diff",
+      { ...block({ _tag: "Diff", path: "src/main.ts", patch: "-old\n+new" }), expandedRowKeys: ["block:Diff:0"] },
+      80,
+      24,
+    ],
     [
       "diff-complex",
-      block({
-        _tag: "Diff",
-        path: "src/renamed.ts",
-        patch:
-          "similarity index 92%\nrename from src/old.ts\nrename to src/renamed.ts\n@@ -1,3 +1,4 @@\n-old red line\n+new green line\n context\n@@ -20,2 +21,3 @@\n-another removal\n+another addition with a deliberately long value that exercises clipping and wrapping behavior across the card width\nBinary files assets/old.png and assets/new.png differ",
-        expanded: true,
-      }),
+      {
+        ...block({
+          _tag: "Diff",
+          path: "src/renamed.ts",
+          patch:
+            "similarity index 92%\nrename from src/old.ts\nrename to src/renamed.ts\n@@ -1,3 +1,4 @@\n-old red line\n+new green line\n context\n@@ -20,2 +21,3 @@\n-another removal\n+another addition with a deliberately long value that exercises clipping and wrapping behavior across the card width\nBinary files assets/old.png and assets/new.png differ",
+        }),
+        expandedRowKeys: ["block:Diff:0"],
+      },
       80,
       24,
     ],
@@ -143,9 +171,9 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
       {
         ...base(),
         blocks: [
-          { _tag: "ToolCall", id: "requested", name: "Grep", input: "TODO", status: "requested" },
-          { _tag: "ToolCall", id: "running", name: "Read", input: "README.md", status: "running" },
-          { _tag: "ToolCall", id: "complete", name: "Write", input: "report.md", output: "done", status: "complete" },
+          tool("requested", "grep", "TODO", "running"),
+          tool("running", "read_file", "README.md", "running"),
+          tool("complete", "edit_file", "report.md", "complete", "done"),
           { _tag: "ToolResult", id: "failed", output: "permission denied", failed: true },
         ],
       },
@@ -307,6 +335,7 @@ export const captureVisuals = Effect.fn("Visual.captureVisuals")(function* (dire
       setup.resize(width, height)
       surface.update({ ...source, width, height })
       yield* Effect.tryPromise(() => setup.flush())
+      yield* Effect.tryPromise(() => setup.renderOnce())
       const frame = stableFrame(setup.captureCharFrame())
       const styles = setup.captureSpans()
       yield* Effect.all(

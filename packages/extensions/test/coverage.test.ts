@@ -5,9 +5,11 @@ import { Crypto, Effect, Layer, PlatformError } from "effect"
 import * as Extensions from "../src"
 import { provideLayer } from "./layer"
 
+const loadEntrypoint = Effect.fn("ExtensionsTest.loadEntrypoint")(() => Effect.tryPromise(() => import("../src/index")))
+
 it.effect("exports every extension namespace from the package entrypoint", () =>
   Effect.gen(function* () {
-    const entrypoint = yield* Effect.promise(() => import("../src/index"))
+    const entrypoint = yield* loadEntrypoint()
     expect(Object.keys(entrypoint).toSorted()).toEqual([
       "ExecutionExtensions",
       "McpConfig",

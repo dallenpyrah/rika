@@ -93,7 +93,7 @@ test("creates, persists, and reopens the current schema", () => {
         const queryPlan = yield* sql`EXPLAIN QUERY PLAN
           SELECT u.unit_json, c.revision, t.prompt
           FROM rika_transcript_units u
-          JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id AND c.projection_version = 2
+          JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id
           JOIN rika_turns t ON t.id = u.turn_id
           WHERE u.thread_id = ${id}
           ORDER BY u.created_at DESC, u.turn_id DESC, u.unit_sequence DESC, u.unit_part DESC, u.unit_key DESC
@@ -105,7 +105,7 @@ test("creates, persists, and reopens the current schema", () => {
         const cursorPlan = yield* sql`EXPLAIN QUERY PLAN
           SELECT u.unit_json, c.revision, t.prompt
           FROM rika_transcript_units u
-          JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id AND c.projection_version = 2
+          JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id
           JOIN rika_turns t ON t.id = u.turn_id
           WHERE u.thread_id = ${id} AND
             (u.created_at, u.turn_id, u.unit_sequence, u.unit_part, u.unit_key) <
@@ -170,7 +170,6 @@ test("creates, persists, and reopens the current schema", () => {
             expect(result.transcript).toMatchObject({
               revision: 2,
               checkpointCursor: "cursor-b",
-              projectionVersion: 2,
               units: [{ content: { _tag: "Entry", role: "user", text: "hello" } }],
             })
           }),
@@ -178,70 +177,6 @@ test("creates, persists, and reopens the current schema", () => {
       ),
     ),
   )
-})
-
-test("treats an outdated transcript projection as rebuildable", () => {
-  const program = Effect.scoped(
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem
-      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-transcript-version-" })
-      const database = Database.layer(`${directory}/rika.db`)
-      const layer = Layer.mergeAll(
-        database,
-        ThreadRepository.layer.pipe(Layer.provide(database)),
-        TurnRepository.layer.pipe(Layer.provide(database)),
-        TranscriptRepository.layer.pipe(Layer.provide(database)),
-      )
-      return yield* Effect.gen(function* () {
-        const threads = yield* ThreadRepository.Service
-        const turns = yield* TurnRepository.Service
-        const transcripts = yield* TranscriptRepository.Service
-        const sql = yield* SqlClient
-        yield* threads.create({ id, workspace: "/work/a", title: "First", now: 1 })
-        yield* turns.createForSubmission({
-          id: Turn.TurnId.make("turn-stale"),
-          threadId: id,
-          prompt: "hello",
-          now: 2,
-        })
-        const turn = yield* turns.get(Turn.TurnId.make("turn-stale"))
-        if (turn === undefined) return yield* Effect.die("turn-stale was not stored")
-        const projection = Transcript.project(turn.id, turn.prompt, [
-          {
-            cursor: "cursor-a",
-            sequence: 1,
-            type: "tool.call.requested",
-            createdAt: 3,
-            data: { tool_call_id: "obsolete", tool_name: "Read", input: "old" },
-          },
-        ])
-        yield* transcripts.replace(turn, projection)
-        yield* sql`UPDATE rika_transcript_checkpoints SET projection_version = 1 WHERE turn_id = ${turn.id}`
-
-        expect(yield* transcripts.get(turn.id)).toBeUndefined()
-        expect((yield* transcripts.page(id)).entries).toEqual([])
-        expect(
-          yield* transcripts.appendAll(turn, [
-            {
-              cursor: "cursor-b",
-              sequence: 2,
-              type: "model.output.completed",
-              createdAt: 4,
-              text: "rebuilt",
-            },
-          ]),
-        ).toMatchObject({
-          projectionVersion: 2,
-          checkpointCursor: "cursor-b",
-          units: [
-            { content: { _tag: "Entry", role: "user", text: "hello" } },
-            { content: { _tag: "Entry", role: "assistant", text: "rebuilt" } },
-          ],
-        })
-      }).pipe(provideLayer(layer))
-    }),
-  )
-  return Effect.runPromise(Effect.scoped(program.pipe(provideLayer(BunServices.layer))))
 })
 
 test("turn SQL mutations, ordering, and rejection branches", () => {

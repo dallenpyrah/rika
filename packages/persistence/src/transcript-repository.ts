@@ -7,9 +7,8 @@ import { Status, Turn, TurnId } from "./turn-schema"
 export interface Projection {
   readonly turn: Turn
   readonly units: ReadonlyArray<Transcript.Unit>
-  readonly drafts: ReadonlyArray<Transcript.Draft>
   readonly revision: number
-  readonly projectionVersion: 2
+  readonly modelPhase: number
   readonly oldestCursor: string | undefined
   readonly checkpointCursor: string | undefined
   readonly costUsd: number | undefined
@@ -19,6 +18,7 @@ export interface Entry {
   readonly turn: Turn
   readonly unit: Transcript.Unit
   readonly projectionRevision: number
+  readonly projectionModelPhase: number
   readonly projectionCostUsd?: number
 }
 
@@ -26,6 +26,7 @@ export const EntrySchema = Schema.Struct({
   turn: Turn,
   unit: Transcript.Unit,
   projectionRevision: Schema.Finite,
+  projectionModelPhase: Schema.Finite,
   projectionCostUsd: Schema.optionalKey(Schema.Finite),
 })
 
@@ -54,6 +55,7 @@ export interface Page {
   readonly entries: ReadonlyArray<Entry>
   readonly hasOlder: boolean
   readonly oldestCursor: PageCursor | undefined
+  readonly threadCostUsd: number
 }
 
 export class RepositoryError extends Schema.TaggedErrorClass<RepositoryError>()("TranscriptRepositoryError", {
@@ -78,9 +80,8 @@ const CheckpointRow = Schema.Struct({
   thread_id: Schema.String,
   prompt: Schema.String,
   status: Schema.String,
-  drafts_json: Schema.String,
+  model_phase: Schema.Finite,
   revision: Schema.Finite,
-  projection_version: Schema.Literal(2),
   oldest_cursor: Schema.NullOr(Schema.String),
   checkpoint_cursor: Schema.NullOr(Schema.String),
   cost_usd: Schema.NullOr(Schema.Finite),
@@ -91,6 +92,7 @@ const CheckpointRow = Schema.Struct({
 const UnitRow = Schema.Struct({
   unit_json: Schema.String,
   projection_revision: Schema.Finite,
+  model_phase: Schema.Finite,
   cost_usd: Schema.NullOr(Schema.Finite),
   prompt: Schema.String,
   status: Schema.String,
@@ -99,7 +101,6 @@ const UnitRow = Schema.Struct({
 })
 
 const UnitJson = Schema.fromJsonString(Transcript.Unit)
-const DraftsJson = Schema.fromJsonString(Schema.Array(Transcript.Draft))
 const error = (cause: unknown) => RepositoryError.make({ message: String(cause) })
 const clone = <A>(value: A): A => structuredClone(value)
 const pageSize = (limit: number | undefined) => Math.min(200, Math.max(1, Math.floor(limit ?? 50)))
@@ -117,9 +118,8 @@ const cursorFor = (entry: Entry | undefined): PageCursor | undefined =>
 const stored = (turn: Turn, projection: Transcript.Projection): Projection => ({
   turn: clone(turn),
   units: clone(projection.units),
-  drafts: clone(projection.drafts),
   revision: projection.revision,
-  projectionVersion: 2,
+  modelPhase: projection.modelPhase,
   oldestCursor: projection.oldestCursor,
   checkpointCursor: projection.checkpointCursor,
   costUsd: projection.costUsd,
@@ -127,8 +127,8 @@ const stored = (turn: Turn, projection: Transcript.Projection): Projection => ({
 
 const source = (projection: Projection): Transcript.Projection => ({
   units: projection.units,
-  drafts: projection.drafts,
   revision: projection.revision,
+  modelPhase: projection.modelPhase,
   ...(projection.oldestCursor === undefined ? {} : { oldestCursor: projection.oldestCursor }),
   ...(projection.checkpointCursor === undefined ? {} : { checkpointCursor: projection.checkpointCursor }),
   ...(projection.costUsd === undefined ? {} : { costUsd: projection.costUsd }),
@@ -197,13 +197,17 @@ const makeMemory = Effect.gen(function* () {
             turn: projection.turn,
             unit,
             projectionRevision: projection.revision,
+            projectionModelPhase: projection.modelPhase,
             ...(projection.costUsd === undefined ? {} : { projectionCostUsd: projection.costUsd }),
           })),
         )
         .filter((entry) => options.before === undefined || before(entry, options.before))
         .toSorted(compareDescending)
       const entries = descending.slice(0, limit).toReversed().map(clone)
-      return { entries, hasOlder: descending.length > limit, oldestCursor: cursorFor(entries[0]) }
+      const threadCostUsd = [...(yield* Ref.get(state)).values()]
+        .filter((projection) => projection.turn.threadId === threadId)
+        .reduce((total, projection) => total + (projection.costUsd ?? 0), 0)
+      return { entries, hasOlder: descending.length > limit, oldestCursor: cursorFor(entries[0]), threadCostUsd }
     }),
   })
 })
@@ -230,7 +234,7 @@ export const layer = Layer.effect(
         SELECT c.*, t.prompt, t.status, t.created_at, t.updated_at
         FROM rika_transcript_checkpoints c
         JOIN rika_turns t ON t.id = c.turn_id
-        WHERE c.turn_id = ${turnId} AND c.projection_version = 2
+        WHERE c.turn_id = ${turnId}
       `.pipe(Effect.mapError(error))
       if (checkpointRows[0] === undefined) return undefined
       const row = yield* Schema.decodeUnknownEffect(CheckpointRow)(checkpointRows[0]).pipe(Effect.mapError(error))
@@ -250,9 +254,8 @@ export const layer = Layer.effect(
       return {
         turn: yield* decodeTurn(row).pipe(Effect.mapError(error)),
         units,
-        drafts: yield* Schema.decodeUnknownEffect(DraftsJson)(row.drafts_json).pipe(Effect.mapError(error)),
         revision: row.revision,
-        projectionVersion: row.projection_version,
+        modelPhase: row.model_phase,
         oldestCursor: row.oldest_cursor ?? undefined,
         checkpointCursor: row.checkpoint_cursor ?? undefined,
         costUsd: row.cost_usd ?? undefined,
@@ -270,12 +273,10 @@ export const layer = Layer.effect(
       turn: Turn,
       projection: Transcript.Projection,
     ) {
-      const drafts = yield* Schema.encodeEffect(DraftsJson)(projection.drafts)
-      yield* sql`INSERT INTO rika_transcript_checkpoints (turn_id, thread_id, drafts_json, revision, projection_version, oldest_cursor, checkpoint_cursor, cost_usd, updated_at)
-          VALUES (${turn.id}, ${turn.threadId}, ${drafts}, ${projection.revision}, 2, ${projection.oldestCursor ?? null}, ${projection.checkpointCursor ?? null}, ${projection.costUsd ?? null}, ${turn.updatedAt})
-          ON CONFLICT(turn_id) DO UPDATE SET thread_id = excluded.thread_id, drafts_json = excluded.drafts_json,
-            revision = excluded.revision, projection_version = excluded.projection_version,
-            oldest_cursor = excluded.oldest_cursor, checkpoint_cursor = excluded.checkpoint_cursor,
+      yield* sql`INSERT INTO rika_transcript_checkpoints (turn_id, thread_id, model_phase, revision, oldest_cursor, checkpoint_cursor, cost_usd, updated_at)
+          VALUES (${turn.id}, ${turn.threadId}, ${projection.modelPhase}, ${projection.revision}, ${projection.oldestCursor ?? null}, ${projection.checkpointCursor ?? null}, ${projection.costUsd ?? null}, ${turn.updatedAt})
+          ON CONFLICT(turn_id) DO UPDATE SET thread_id = excluded.thread_id, model_phase = excluded.model_phase,
+            revision = excluded.revision, oldest_cursor = excluded.oldest_cursor, checkpoint_cursor = excluded.checkpoint_cursor,
             cost_usd = excluded.cost_usd, updated_at = excluded.updated_at`
     }, Effect.mapError(error))
     const storedResult = Effect.fn("TranscriptRepository.storedResult")(function* (turnId: TurnId) {
@@ -325,18 +326,18 @@ export const layer = Layer.effect(
         const limit = pageSize(options.limit)
         const rows =
           options.before === undefined
-            ? yield* sql`SELECT u.unit_json, c.revision AS projection_revision, c.cost_usd,
+            ? yield* sql`SELECT u.unit_json, c.revision AS projection_revision, c.model_phase, c.cost_usd,
                   t.prompt, t.status, t.created_at, t.updated_at
                 FROM rika_transcript_units u
-                JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id AND c.projection_version = 2
+                JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id
                 JOIN rika_turns t ON t.id = u.turn_id
                 WHERE u.thread_id = ${threadId}
                 ORDER BY u.created_at DESC, u.turn_id DESC, u.unit_sequence DESC, u.unit_part DESC, u.unit_key DESC
                 LIMIT ${limit + 1}`.pipe(Effect.mapError(error))
-            : yield* sql`SELECT u.unit_json, c.revision AS projection_revision, c.cost_usd,
+            : yield* sql`SELECT u.unit_json, c.revision AS projection_revision, c.model_phase, c.cost_usd,
                   t.prompt, t.status, t.created_at, t.updated_at
                 FROM rika_transcript_units u
-                JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id AND c.projection_version = 2
+                JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id
                 JOIN rika_turns t ON t.id = u.turn_id
                 WHERE u.thread_id = ${threadId} AND
                   (u.created_at, u.turn_id, u.unit_sequence, u.unit_part, u.unit_key) <
@@ -361,6 +362,7 @@ export const layer = Layer.effect(
                     },
                     unit,
                     projectionRevision: row.projection_revision,
+                    projectionModelPhase: row.model_phase,
                     ...(row.cost_usd === null ? {} : { projectionCostUsd: row.cost_usd }),
                   } satisfies Entry
                 }),
@@ -370,10 +372,17 @@ export const layer = Layer.effect(
           ),
         )
         const chronological = entries.toReversed()
+        const totals = yield* sql`SELECT COALESCE(SUM(cost_usd), 0) AS thread_cost_usd
+          FROM rika_transcript_checkpoints
+          WHERE thread_id = ${threadId}`.pipe(Effect.mapError(error))
+        const total = yield* Schema.decodeUnknownEffect(Schema.Struct({ thread_cost_usd: Schema.Finite }))(
+          totals[0],
+        ).pipe(Effect.mapError(error))
         return {
           entries: chronological,
           hasOlder: rows.length > limit,
           oldestCursor: cursorFor(chronological[0]),
+          threadCostUsd: total.thread_cost_usd,
         }
       }),
     })

@@ -1,5 +1,5 @@
 import { FileFinder } from "@ff-labs/fff-node"
-import { Context, Data, Effect, FileSystem, Layer, Path, PlatformError, Schema } from "effect"
+import { Context, Data, Effect, FileSystem, Layer, Option, Path, PlatformError, Schema } from "effect"
 import { Tool, Toolkit } from "effect/unstable/ai"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as ParallelSearch from "./parallel-search"
@@ -273,16 +273,26 @@ export const layer = (workspace: string) =>
         Effect.sync(() => {
           try {
             const created = FileFinder.create({ basePath: workspace, aiMode: true })
-            return created.ok ? created.value : undefined
+            return created.ok ? Option.some(created.value) : Option.none()
           } catch {
-            return undefined
+            return Option.none()
           }
         }).pipe(
-          Effect.tap((created) =>
-            created === undefined ? Effect.void : Effect.promise(() => created.waitForScan(10_000)),
+          Effect.flatMap((created) =>
+            Option.isNone(created)
+              ? Effect.succeed(Option.none())
+              : Effect.tryPromise({
+                  try: () => created.value.waitForScan(10_000),
+                  catch: operationError,
+                }).pipe(
+                  Effect.as(created),
+                  Effect.catch(() =>
+                    Effect.sync(() => created.value.destroy()).pipe(Effect.as(Option.none<FileFinder>())),
+                  ),
+                ),
           ),
         ),
-        (created) => (created === undefined ? Effect.void : Effect.sync(() => created.destroy())),
+        (created) => (Option.isNone(created) ? Effect.void : Effect.sync(() => created.value.destroy())),
       )
       const resolve = (value: string) =>
         Effect.try({
@@ -312,12 +322,12 @@ export const layer = (workspace: string) =>
       const runProcess = Effect.fn("ToolRuntime.runProcess")(function* (command: string, args: ReadonlyArray<string>) {
         return yield* Effect.scoped(
           Effect.gen(function* () {
-            const process = yield* spawner.spawn(ChildProcess.make(command, args, { cwd: workspace }))
+            const handle = yield* spawner.spawn(ChildProcess.make(command, args, { cwd: workspace }))
             const [stdout, stderr, exitCode] = yield* Effect.all(
               [
-                ProcessRegistry.collectBoundedText(process.stdout, maxOutput),
-                ProcessRegistry.collectBoundedText(process.stderr, maxOutput),
-                process.exitCode,
+                ProcessRegistry.collectBoundedText(handle.stdout, maxOutput),
+                ProcessRegistry.collectBoundedText(handle.stderr, maxOutput),
+                handle.exitCode,
               ],
               { concurrency: 3 },
             )
@@ -331,12 +341,12 @@ export const layer = (workspace: string) =>
           return yield* Effect.gen(function* () {
             switch (request._tag) {
               case "FindFiles":
-                if (finder === undefined)
+                if (Option.isNone(finder))
                   return bounded((yield* listFiles()).filter((file) => file.includes(request.query)).join("\n"))
                 return bounded(
                   yield* Effect.try({
                     try: () => {
-                      const result = finder.fileSearch(request.query, { pageSize: 1_000 })
+                      const result = finder.value.fileSearch(request.query, { pageSize: 1_000 })
                       if (!result.ok) throw new RuntimeOperationError({ message: result.error })
                       return result.value.items.map((item) => item.relativePath).join("\n")
                     },
@@ -344,7 +354,7 @@ export const layer = (workspace: string) =>
                   }),
                 )
               case "Grep": {
-                if (finder === undefined) {
+                if (Option.isNone(finder)) {
                   const expression = request.regex ? new RegExp(request.pattern) : undefined
                   const matches: Array<string> = []
                   for (const file of yield* listFiles()) {
@@ -368,7 +378,7 @@ export const layer = (workspace: string) =>
                 return bounded(
                   yield* Effect.try({
                     try: () => {
-                      const result = finder.grep(request.pattern, {
+                      const result = finder.value.grep(request.pattern, {
                         mode: request.regex ? "regex" : "plain",
                         pageSize: 1_000,
                         maxMatchesPerFile: 1_000,

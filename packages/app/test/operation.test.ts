@@ -844,7 +844,7 @@ describe("Operation", () => {
       expect(dispatched.some((event) => event._tag === "QueueChanged")).toBe(true)
       expect(dispatched.some((event) => event._tag === "QueueChanged")).toBe(true)
       expect(dispatched.filter((event) => event._tag === "ExecutionControlled")).toHaveLength(3)
-      expect(dispatched.some((event) => event._tag === "ExecutionReplayed")).toBe(true)
+      expect(dispatched.some((event) => event._tag === "TranscriptPatched")).toBe(true)
       expect(yield* turns.get(Turn.TurnId.make("active-control"))).toMatchObject({
         status: "cancelled",
         lastCursor: "cancelled",

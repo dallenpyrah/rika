@@ -1,13 +1,12 @@
-import * as BunFileSystem from "@effect/platform-bun/BunFileSystem"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import * as BunSocket from "@effect/platform-bun/BunSocket"
 import { ResidentService } from "@rika/app"
 import { afterEach, describe, expect, test } from "bun:test"
-import { Cause, Config, Data, Effect, Fiber, FileSystem, Layer, Schema } from "effect"
+import { Cause, Config, Data, Effect, Fiber, FileSystem, Layer, Queue, Ref, Schema, Scope, Stream } from "effect"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as Socket from "effect/unstable/socket/Socket"
 import { resolve } from "../src/resident-endpoint"
 
-type Process = ReturnType<typeof Bun.spawn>
 type Event = {
   type: string
   role?: string | undefined
@@ -26,9 +25,6 @@ class FixtureFailure extends Data.TaggedError("FixtureFailure")<{
   readonly cause: unknown
 }> {}
 
-const attempt = <A>(operation: string, evaluate: () => Promise<A>) =>
-  Effect.tryPromise({ try: evaluate, catch: (cause) => new FixtureFailure({ operation, cause }) })
-
 const provide = <A, E, R, ROut, E2, RIn>(effect: Effect.Effect<A, E, R>, layer: Layer.Layer<ROut, E2, RIn>) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -37,8 +33,8 @@ const provide = <A, E, R, ROut, E2, RIn>(effect: Effect.Effect<A, E, R>, layer: 
     }),
   )
 
-const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
-  Effect.runPromise(provide(effect, BunFileSystem.layer))
+const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices | Scope.Scope>) =>
+  Effect.runPromise(provide(effect, BunServices.layer))
 
 const EventSchema = Schema.Struct({
   type: Schema.String,
@@ -55,13 +51,11 @@ const EventSchema = Schema.Struct({
 
 const decodeEvent = Schema.decodeUnknownEffect(Schema.fromJsonString(EventSchema))
 
-const processes: Array<Process> = []
 const hostPids = new Set<number>()
 
 afterEach(() =>
   Effect.runPromise(
     Effect.sync(() => {
-      for (const process of processes.splice(0)) process.kill(9)
       for (const pid of hostPids) {
         try {
           globalThis.process.kill(pid, "SIGKILL")
@@ -98,83 +92,127 @@ const makeRoot = Effect.gen(function* () {
 })
 
 const cleanRoot = (root: string) =>
-  attempt("clean fixture root", () => Bun.$`chmod -R u+rwx ${root}; rm -rf ${root}`.quiet()).pipe(Effect.asVoid)
+  FileSystem.FileSystem.pipe(
+    Effect.flatMap((fileSystem) => fileSystem.remove(root, { recursive: true, force: true })),
+    Effect.mapError((cause) => new FixtureFailure({ operation: "clean fixture root", cause })),
+  )
 
 const readText = (path: string) =>
   Effect.flatMap(FileSystem.FileSystem, (fileSystem) => fileSystem.readFileString(path))
 const fileStat = (path: string) => Effect.flatMap(FileSystem.FileSystem, (fileSystem) => fileSystem.stat(path))
 const fileExists = (path: string) => Effect.flatMap(FileSystem.FileSystem, (fileSystem) => fileSystem.exists(path))
 
-const start = (root: string, grace = 350, finalizerDelay = 0, delayedWork = false, outboundCapacity = 1_024) => {
-  const client = Bun.spawn(["bun", "test/fixtures/resident-client.ts"], {
-    cwd: import.meta.dir.replace(/\/test$/, ""),
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...process.env,
-      RIKA_TEST_RESIDENT_DATA_ROOT: root,
-      RIKA_TEST_RESIDENT_GRACE: String(grace),
-      RIKA_TEST_RESIDENT_FINALIZER_DELAY: String(finalizerDelay),
-      RIKA_TEST_RESIDENT_DELAYED_WORK: delayedWork ? "1" : "0",
-      RIKA_TEST_RESIDENT_OUTBOUND_CAPACITY: String(outboundCapacity),
-    },
-  })
-  processes.push(client)
-  const reader = client.stdout.getReader()
-  let buffered = ""
-  const readLine = (): Effect.Effect<string, FixtureFailure> => {
-    const index = buffered.indexOf("\n")
-    if (index >= 0) {
-      const line = buffered.slice(0, index)
-      buffered = buffered.slice(index + 1)
-      return Effect.succeed(line)
-    }
-    return attempt("read client output", () => reader.read()).pipe(
-      Effect.flatMap((value) =>
-        value.done
-          ? attempt("read client error", () => new Response(client.stderr).text()).pipe(
-              Effect.flatMap((error) =>
-                Effect.fail(new FixtureFailure({ operation: `client exited ${error}`, cause: error })),
-              ),
-            )
-          : Effect.sync(() => {
-              buffered += new TextDecoder().decode(value.value)
-            }).pipe(Effect.andThen(Effect.suspend(readLine))),
-      ),
-    )
-  }
-  const nextEffect = Effect.suspend(readLine).pipe(
-    Effect.flatMap((line) =>
-      decodeEvent(line).pipe(
-        Effect.mapError((cause) => new FixtureFailure({ operation: `decode client event: ${line}`, cause })),
-      ),
-    ),
-  )
-  const next = () => Effect.runPromise(nextEffect)
-  const send = (command: string) => client.stdin.write(new TextEncoder().encode(`${command}\n`))
-  const closeEffect = Effect.gen(function* () {
-    send("close")
-    expect((yield* nextEffect).type).toBe("closed")
-    client.stdin.end()
-    yield* attempt("wait for client exit", () => client.exited)
-  })
-  const close = () => Effect.runPromise(closeEffect)
-  return { client, next, nextEffect, send, close, closeEffect }
+interface ResidentClient {
+  readonly pid: number
+  readonly nextEffect: Effect.Effect<Event, FixtureFailure>
+  readonly send: (command: string) => Effect.Effect<void, FixtureFailure>
+  readonly closeEffect: Effect.Effect<void, FixtureFailure>
+  readonly kill: Effect.Effect<void, FixtureFailure>
+  readonly end: Effect.Effect<void>
+  readonly awaitExit: Effect.Effect<void, FixtureFailure>
 }
 
-const attachedEffect = (client: ReturnType<typeof start>) =>
+const start = Effect.fn("ResidentTransportTest.start")(function* (
+  root: string,
+  grace: number = 350,
+  finalizerDelay: number = 0,
+  delayedWork: boolean = false,
+  outboundCapacity: number = 1_024,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+  const input = yield* Queue.bounded<string, Cause.Done>(32)
+  const events = yield* Queue.bounded<Event, FixtureFailure>(2_048)
+  const errors = yield* Ref.make<ReadonlyArray<string>>([])
+  const client = yield* spawner
+    .spawn(
+      ChildProcess.make("bun", ["test/fixtures/resident-client.ts"], {
+        cwd: import.meta.dir.replace(/\/test$/, ""),
+        stdin: { stream: Stream.fromQueue(input).pipe(Stream.encodeText), endOnDone: true },
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          RIKA_TEST_RESIDENT_DATA_ROOT: root,
+          RIKA_TEST_RESIDENT_GRACE: String(grace),
+          RIKA_TEST_RESIDENT_FINALIZER_DELAY: String(finalizerDelay),
+          RIKA_TEST_RESIDENT_DELAYED_WORK: delayedWork ? "1" : "0",
+          RIKA_TEST_RESIDENT_OUTBOUND_CAPACITY: String(outboundCapacity),
+        },
+        extendEnv: true,
+      }),
+    )
+    .pipe(Effect.mapError((cause) => new FixtureFailure({ operation: "start resident client", cause })))
+  yield* client.stderr.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.runForEach((line) => Ref.update(errors, (lines) => [...lines, line])),
+    Effect.forkScoped,
+  )
+  yield* client.stdout.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.runForEach((line) =>
+      decodeEvent(line).pipe(
+        Effect.mapError((cause) => new FixtureFailure({ operation: `decode client event: ${line}`, cause })),
+        Effect.flatMap((event) => Queue.offer(events, event)),
+      ),
+    ),
+    Effect.forkScoped,
+  )
+  yield* client.exitCode.pipe(
+    Effect.flatMap((exitCode) =>
+      Ref.get(errors).pipe(
+        Effect.flatMap((lines) =>
+          Queue.fail(
+            events,
+            new FixtureFailure({ operation: `resident client exited ${exitCode}`, cause: lines.join("\n") }),
+          ),
+        ),
+      ),
+    ),
+    Effect.forkScoped,
+  )
+  const nextEffect = Queue.take(events)
+  const send = Effect.fn("ResidentTransportTest.send")((command: string) =>
+    Queue.offer(input, `${command}\n`).pipe(
+      Effect.asVoid,
+      Effect.mapError((cause) => new FixtureFailure({ operation: "send resident command", cause })),
+    ),
+  )
+  const awaitExit = client.exitCode.pipe(
+    Effect.asVoid,
+    Effect.mapError((cause) => new FixtureFailure({ operation: "wait for resident client", cause })),
+  )
+  const closeEffect = Effect.gen(function* () {
+    yield* send("close")
+    expect((yield* nextEffect).type).toBe("closed")
+    yield* Queue.end(input)
+  })
+  const kill = client
+    .kill({ killSignal: "SIGKILL" })
+    .pipe(Effect.mapError((cause) => new FixtureFailure({ operation: "kill resident client", cause })))
+  return {
+    pid: Number(client.pid),
+    nextEffect,
+    send,
+    closeEffect,
+    kill,
+    end: Queue.end(input),
+    awaitExit,
+  } satisfies ResidentClient
+})
+
+const attachedEffect = (client: ResidentClient) =>
   Effect.gen(function* () {
     const event = yield* client.nextEffect
     expect(event).toMatchObject({ type: "attached", role: "attached" })
-    expect(event.clientPid).toBe(client.client.pid)
+    expect(event.clientPid).toBe(client.pid)
     expect(event.hostPid).not.toBe(event.clientPid)
     if (event.hostPid === undefined) return yield* Effect.die("attached event omitted host pid")
     hostPids.add(event.hostPid)
     return event
   })
 
-const nextTypeEffect = (client: ReturnType<typeof start>, type: string): Effect.Effect<Event, FixtureFailure> =>
+const nextTypeEffect = (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure> =>
   Effect.gen(function* () {
     const event = yield* client.nextEffect
     return event.type === type ? event : yield* nextTypeEffect(client, type)
@@ -189,7 +227,7 @@ describe("resident WebSocket process transport", () => {
           Effect.gen(function* () {
             const root = yield* makeRoot
             try {
-              const client = start(root, 2_000)
+              const client = yield* start(root, 2_000)
               yield* attachedEffect(client)
               const endpoint = yield* resolve("default", root)
               const token = (yield* readText(endpoint.tokenPath)).trim()
@@ -229,9 +267,9 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 2_000)
+            const client = yield* start(root, 2_000)
             yield* attachedEffect(client)
-            client.send("stall")
+            yield* client.send("stall")
             expect((yield* client.nextEffect).type).toBe("stall-survived")
             yield* client.closeEffect
           } finally {
@@ -249,14 +287,16 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const oneShot = start(root, 1_000)
+            const oneShot = yield* start(root, 1_000)
             const first = yield* attachedEffect(oneShot)
-            yield* oneShot.closeEffect
+            const closing = yield* oneShot.closeEffect.pipe(Effect.forkScoped)
             expect(alive(first.hostPid!)).toBe(true)
 
-            const next = start(root, 1_000)
+            const next = yield* start(root, 1_000)
             expect((yield* attachedEffect(next)).hostPid).toBe(first.hostPid)
-            next.send("ping")
+            yield* Fiber.join(closing)
+            yield* oneShot.awaitExit
+            yield* next.send("ping")
             expect((yield* next.nextEffect).type).toBe("pong")
           } finally {
             yield* cleanRoot(root)
@@ -273,17 +313,17 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root)
+            const client = yield* start(root)
             const event = yield* attachedEffect(client)
 
-            client.send("output")
+            yield* client.send("output")
             expect(yield* client.nextEffect).toEqual({
               type: "output",
               text: `{"hostPid":${event.hostPid}}\n`,
             })
             expect((yield* client.nextEffect).type).toBe("output-completed")
 
-            client.send("interactive")
+            yield* client.send("interactive")
             expect((yield* client.nextEffect).type).toBe("interactive-callback")
             expect(yield* client.nextEffect).toEqual({
               type: "interactive-event",
@@ -306,10 +346,10 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root)
+            const client = yield* start(root)
             yield* attachedEffect(client)
 
-            client.send("rejected-interactive")
+            yield* client.send("rejected-interactive")
             expect(yield* client.nextEffect).toEqual({
               type: "interactive-rejected",
               error: "Interactive setup rejected",
@@ -330,10 +370,10 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root)
+            const client = yield* start(root)
             yield* attachedEffect(client)
 
-            client.send("burst-interactive")
+            yield* client.send("burst-interactive")
             expect(yield* client.nextEffect).toEqual({ type: "burst-completed", text: "1000" })
             yield* client.closeEffect
           } finally {
@@ -351,10 +391,10 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 350, 0, false, 4)
+            const client = yield* start(root, 350, 0, false, 4)
             yield* attachedEffect(client)
 
-            client.send("overflow-interactive")
+            yield* client.send("overflow-interactive")
             const event = yield* client.nextEffect
             expect(event).toMatchObject({
               type: "overflow-completed",
@@ -379,10 +419,10 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 350, 0, false, 4)
+            const client = yield* start(root, 350, 0, false, 4)
             yield* attachedEffect(client)
 
-            client.send("overflow-watch")
+            yield* client.send("overflow-watch")
             const event = yield* client.nextEffect
             expect(event).toMatchObject({
               type: "overflow-watch-finished",
@@ -404,10 +444,10 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root)
+            const client = yield* start(root)
             yield* attachedEffect(client)
 
-            client.send("cancel-action")
+            yield* client.send("cancel-action")
             expect(yield* client.nextEffect).toEqual({
               type: "second-action-event",
               tag: "ThreadsListed",
@@ -429,25 +469,24 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const [a, b] = [start(root), start(root)]
+            const [a, b] = yield* Effect.all([start(root), start(root)], { concurrency: 2 })
             const [aEvent, bEvent] = yield* Effect.all([attachedEffect(a), attachedEffect(b)])
             expect(aEvent.hostPid).toBe(bEvent.hostPid)
             expect(aEvent.id).not.toBe(bEvent.id)
             expect((yield* fileStat(`${root}/resident.token`)).mode & 0o077).toBe(0)
             expect(yield* readText(`${root}/owner-acquisitions.log`)).toBe(`${aEvent.hostPid}\n`)
 
-            a.client.kill(9)
-            yield* attempt("wait for client exit", () => a.client.exited)
+            yield* a.kill
             expect(alive(aEvent.hostPid!)).toBe(true)
-            b.send("ping")
+            yield* b.send("ping")
             expect((yield* b.nextEffect).type).toBe("pong")
 
-            const c = start(root)
+            const c = yield* start(root)
             const cEvent = yield* attachedEffect(c)
             expect(cEvent.hostPid).toBe(aEvent.hostPid)
             yield* b.closeEffect
             expect(alive(aEvent.hostPid!)).toBe(true)
-            c.send("ping")
+            yield* c.send("ping")
             expect((yield* c.nextEffect).type).toBe("pong")
             yield* c.closeEffect
 
@@ -468,23 +507,22 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const starter = start(root, 1_000)
+            const starter = yield* start(root, 1_000)
             const first = yield* attachedEffect(starter)
-            starter.client.kill(9)
-            yield* attempt("wait for client exit", () => starter.client.exited)
+            yield* starter.kill
             expect(alive(first.hostPid!)).toBe(true)
 
-            const survivor = start(root, 1_000)
+            const survivor = yield* start(root, 1_000)
             expect((yield* attachedEffect(survivor)).hostPid).toBe(first.hostPid)
             process.kill(first.hostPid!, "SIGKILL")
             yield* waitUntil(Effect.sync(() => !alive(first.hostPid!)))
 
-            const replacement = start(root, 1_000)
+            const replacement = yield* start(root, 1_000)
             const second = yield* attachedEffect(replacement)
             expect(second.hostPid).not.toBe(first.hostPid)
             const acquisitions = (yield* readText(`${root}/owner-acquisitions.log`)).trim().split("\n")
             expect(acquisitions).toEqual([String(first.hostPid), String(second.hostPid)])
-            replacement.send("ping")
+            yield* replacement.send("ping")
             expect((yield* replacement.nextEffect).type).toBe("pong")
           } finally {
             yield* cleanRoot(root)
@@ -501,12 +539,12 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 100, 1_000)
+            const client = yield* start(root, 100, 1_000)
             const first = yield* attachedEffect(client)
             yield* client.closeEffect
             yield* waitUntil(fileExists(`${root}/owner-finalizer-starts.log`))
 
-            const replacement = start(root)
+            const replacement = yield* start(root)
             const second = yield* attachedEffect(replacement)
             expect(second.hostPid).not.toBe(first.hostPid)
             expect((yield* readText(`${root}/owner-acquisitions.log`)).trim().split("\n")).toEqual([
@@ -528,12 +566,12 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 1_000, 1_000)
+            const client = yield* start(root, 1_000, 1_000)
             const first = yield* attachedEffect(client)
             process.kill(first.hostPid!, "SIGTERM")
             yield* waitUntil(fileExists(`${root}/owner-finalizer-starts.log`))
 
-            const replacement = start(root)
+            const replacement = yield* start(root)
             const second = yield* attachedEffect(replacement)
             expect(second.hostPid).not.toBe(first.hostPid)
             expect((yield* readText(`${root}/owner-acquisitions.log`)).trim().split("\n")).toEqual([
@@ -555,14 +593,14 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 1_000, 750, true)
+            const client = yield* start(root, 1_000, 750, true)
             const first = yield* attachedEffect(client)
-            const existing = start(root, 1_000, 750, true)
+            const existing = yield* start(root, 1_000, 750, true)
             expect((yield* attachedEffect(existing)).hostPid).toBe(first.hostPid)
-            client.send("delayed")
+            yield* client.send("delayed")
             yield* waitUntil(fileExists(`${root}/delayed-work-starts.log`))
             process.kill(first.hostPid!, "SIGTERM")
-            existing.send("rejected")
+            yield* existing.send("rejected")
             expect(yield* existing.nextEffect).toMatchObject({
               type: "rejected-work",
               error: "Resident service is draining",
@@ -586,9 +624,9 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 1_000)
+            const client = yield* start(root, 1_000)
             yield* attachedEffect(client)
-            client.send("reconnect-interactive")
+            yield* client.send("reconnect-interactive")
             expect(yield* client.nextEffect).toMatchObject({
               type: "interactive-callback",
               callbacks: 1,
@@ -624,15 +662,15 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const client = start(root, 250)
+            const client = yield* start(root, 250)
             const event = yield* attachedEffect(client)
-            client.send("blocking-interactive")
+            yield* client.send("blocking-interactive")
             expect((yield* client.nextEffect).type).toBe("interactive-callback")
-            client.send("close")
+            yield* client.send("close")
             const completed = [yield* client.nextEffect, yield* client.nextEffect]
             expect(completed.map((item) => item.type).toSorted()).toEqual(["blocking-completed", "closed"])
-            client.client.stdin.end()
-            yield* attempt("wait for client exit", () => client.client.exited)
+            yield* client.end
+            yield* client.awaitExit
             yield* waitUntil(fileExists(`${root}/owner-finalizations.log`), 4_000)
             expect(yield* readText(`${root}/owner-finalizations.log`)).toBe(`${event.hostPid}\n`)
           } finally {

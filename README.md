@@ -1,139 +1,45 @@
 # Rika
 
-Rika is a local-only durable coding-agent CLI and OpenTUI application built with Effect v4, Effect SQL, Baton, Relay, and OpenTUI.
+Rika is a local coding-agent CLI and terminal application. It uses Baton for the agent loop, Relay for durable execution, Effect SQL for local product state, and OpenTUI for rendering.
 
-The implementation is in its specification and dependency-proof phase. See `PLAN.md`, `TODO.md`, and `docs/features/FEATURES.md` for the execution plan and complete feature ledger.
-
-## Boundaries
-
-- Released Baton and Relay packages are the committed dependency contract; local coordinated development uses an explicit non-persistent link overlay, never copied source.
-
-## Local Framework Development
-
-Use sibling checkouts at `../batonfx` and `../relay` while developing framework and Rika changes together:
-
-```bash
-bun run upstream:link
-bun run upstream:status
-```
-
-`upstream:link` builds Relay's public SDK, registers the required public Baton and Relay packages with Bun, links them into Rika without modifying `package.json` or `bun.lock`, and clears Turbo's local cache. Run it again after changing Relay build output.
-
-Restore the pinned registry dependencies before final package verification:
-
-```bash
-bun run upstream:registry
-```
-
-- Relay owns durable executions and Child Runs.
-- Baton owns the agent loop.
-- Rika owns local product semantics, tools, extensions, persistence, and TUI behavior.
-- Rika does not include Rivet, web, IDE, remote runners, orbs, semantic code search, or ast-grep outline.
-
-## Commands
+## Setup
 
 ```bash
 bun install
-bun run docs:check
-bun run deps:check
-bun run format:check
-bun run lint
-bun run typecheck
-bun run test
-bun run build
+bun run check
+bun run dev
 ```
 
-## Local installation
+The normal repository commands are `build`, `check`, `dev`, `format`, `test`, and `typecheck`.
 
-Keep `rika` as the last promoted local build. This command packages the current working tree for the current host
-before installing it, so it cannot silently reinstall a stale executable:
+## Package and install
+
+Build the current host package, or pass an explicit target:
 
 ```bash
-bun run install:local
+bun run package
+bun run package -- --target linux-x64
+bun run install-local
 rika --version
 ```
 
-`bun run install:local:existing` installs the existing host archive without rebuilding it. Use that only when you
-intentionally want the previously packaged artifact. `bun run package:build` remains available when release work
-needs archives for every supported platform.
+`install-local` restores the pinned registry dependencies, packages the current working tree, and installs it under `~/.local/share/rika/current` with a command at `~/.local/bin/rika`. Set `RIKA_INSTALL_ROOT` or `RIKA_BIN_DIR` to override those locations. `uninstall-local` removes the installed program but keeps Rika state and configuration.
 
-For recoverable local promotions, commit the working tree and optionally create a local tag before installation:
+## Configuration
 
-```bash
-git tag local/2026-07-12-description
-bun run install:local
-```
-
-Git tags point to commits and do not include uncommitted changes.
-
-The defaults are `~/.local/share/rika/current` for the packaged tree and `~/.local/bin/rika` for the command.
-Set `RIKA_INSTALL_ROOT` and `RIKA_BIN_DIR` to override them. The installer keeps OpenTUI's native `node_modules`
-adjacent to the packaged binary and refuses to replace a command it does not own. Remove only the installed program
-and symlink with `bun run uninstall:local`; Rika state and configuration are retained.
-
-If `~/.local/bin` is not already on your shell path, add it once:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-## Gateway configuration
-
-Rika follows Amp's settings layout. Global settings live at `~/.config/rika/settings.json`; a repository may override
-them with `.rika/settings.json`. Gateway names are arbitrary. To route medium mode through an OpenAI-compatible service, use:
+Global settings live at `~/.config/rika/settings.json`. A workspace can override them with `.rika/settings.json`. Credentials stay out of JSON: a gateway names the environment variable that supplies its token.
 
 ```json
 {
   "gateways": {
-    "openai": {
+    "local": {
       "protocol": "openai",
       "baseUrl": "http://127.0.0.1:9000/v1",
       "auth": { "type": "bearer-env", "variable": "RIKA_MODEL_API_KEY" }
     }
-  },
-  "models": {
-    "local": {
-      "gateway": "openai",
-      "candidates": ["provider-model-id"],
-      "limits": { "maxInputTokens": 84000, "maxOutputTokens": 16000, "keepRecentTokens": 16000 },
-      "variants": {
-        "medium": {
-          "normal": { "options": { "reasoning": { "effort": "medium" } } },
-          "fast": {
-            "options": { "reasoning": { "effort": "medium" }, "service_tier": "priority" }
-          }
-        },
-        "high": { "normal": { "options": { "reasoning": { "effort": "high" } } } }
-      }
-    }
-  },
-  "modes": {
-    "medium": {
-      "main": { "alias": "local", "effort": "medium" },
-      "oracle": { "alias": "local", "effort": "high" }
-    }
-  },
-  "compaction": {
-    "summaryModel": { "alias": "local", "effort": "medium" }
   }
 }
 ```
-
-Built-in model limits come from `models.dev`. Custom gateways must define the limits their transport actually supports. A model alias owns `maxInputTokens`, `maxOutputTokens`, and `keepRecentTokens`. Rika derives Baton's internal compaction window and provider output option from those values. Modes and specialist agents do not add separate token limits. `compaction.summaryModel` selects the registered model used for durable checkpoint summaries.
-
-When a compatible Gateway exposes a built-in model with different limits, override only those operational fields:
-
-```json
-{
-  "models": {
-    "luna": {
-      "limits": { "maxInputTokens": 353000, "maxOutputTokens": 128000, "keepRecentTokens": 32000 }
-    }
-  }
-}
-```
-
-Keep gateway credentials out of JSON. Each `bearer-env` Gateway names the environment variable resolved once at startup. The defaults use `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; custom gateways may name a different environment variable:
 
 ```bash
 export RIKA_MODEL_API_KEY="your-gateway-key"
@@ -142,6 +48,4 @@ rika doctor
 rika
 ```
 
-The installed `rika` command and the OpenTUI session use the same resolved settings, durable Relay database, and Baton
-model registration. Workspace settings override global settings without copying credentials into the repository.
-Automatic titles reuse the initiating turn's configured mode route and do not require credentials for another provider.
+Read `PRODUCT.md` for product direction and `CONTEXT.md` for the vocabulary and ownership model.

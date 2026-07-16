@@ -18,6 +18,13 @@ const PromoteTurnFailure = Schema.Struct({
   message: Schema.String,
 })
 
+const PendingTurnMessageJson = Schema.fromJsonString(
+  Schema.Struct({
+    kind: Schema.Literal("pending-turn"),
+    thread_id: Schema.String,
+  }),
+)
+
 export const promoteTurnTool = Tool.make("promote_turn", {
   description: "Claim and start every currently claimable queued Rika turn for a thread",
   parameters: Schema.Struct({ threadId: Schema.String }),
@@ -68,21 +75,10 @@ export const pendingThreadIds = (prompt: Prompt.Prompt): ReadonlyArray<string> =
   const text = JSON.stringify(batch.result ?? null)
   const ids = new Set<string>()
   for (const match of text.matchAll(/\{\\?"kind\\?"\s*:\s*\\?"pending-turn\\?"[^{}]*\}/g)) {
-    const payload = parseJson(match[0].replaceAll('\\"', '"'))
-    if (payload !== undefined && typeof payload.thread_id === "string" && payload.thread_id.length > 0) {
-      ids.add(payload.thread_id)
-    }
+    const payload = Schema.decodeUnknownOption(PendingTurnMessageJson)(match[0].replaceAll('\\"', '"'))
+    if (Option.isSome(payload) && payload.value.thread_id.length > 0) ids.add(payload.value.thread_id)
   }
   return [...ids]
-}
-
-const parseJson = (value: string): Record<string, unknown> | undefined => {
-  try {
-    const parsed: unknown = JSON.parse(value)
-    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined
-  } catch {
-    return undefined
-  }
 }
 
 const usage = (): Response.Usage =>

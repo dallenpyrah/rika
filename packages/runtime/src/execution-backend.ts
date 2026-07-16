@@ -418,78 +418,55 @@ const followExecution = (
     const startedAt = yield* Clock.currentTimeMillis
     yield* Effect.logInfo("execution.follow.started")
     const events: Array<Event> = []
-    const seen = new Set<string>()
     let stoppedAtActionableWait = false
+    let stoppedStatus: Status | undefined
     const append = (item: Execution.ExecutionEvent) => {
       const mapped = event(item)
-      if (seen.has(mapped.cursor)) return mapped
-      seen.add(mapped.cursor)
       events.push(mapped)
       onEvent?.(mapped)
       return mapped
     }
-    const shouldStop = (item: Execution.ExecutionEvent) => {
-      if (
-        item.type === "execution.completed" ||
-        item.type === "execution.failed" ||
-        item.type === "execution.cancelled"
-      ) {
-        return Effect.succeed(true)
-      }
-      if (!stopAtActionableWait || !isActionableWait(event(item))) return Effect.succeed(false)
-      const waitId = item.data?.wait_id
-      if (typeof waitId !== "string") return Effect.succeed(false)
-      return client.inspectExecution(executionId(turnId)).pipe(
-        Effect.map((inspection) => {
-          const actionable = inspection.waiting_on.some((wait) => wait.wait_id === waitId)
-          if (actionable) stoppedAtActionableWait = true
-          return actionable
-        }),
-      )
-    }
-    const attach = (cursor: string | undefined) =>
-      client
-        .streamExecution({
+    const consume = (cursor: string | undefined) =>
+      Stream.runForEachWhile(
+        client.followExecution({
           execution_id: executionId(turnId),
           ...(cursor === undefined ? {} : { after_cursor: cursor }),
-        })
-        .pipe(Stream.takeUntilEffect(shouldStop), Stream.map(append), Stream.runDrain)
-    yield* attach(afterCursor).pipe(
-      Effect.catchTag("EventLogCursorNotFound", () => attach(undefined)),
-      Effect.catchTag("ClientError", (streamError) =>
-        Effect.gen(function* () {
-          const existing = yield* client.getExecution(executionId(turnId))
-          if (
-            existing === undefined ||
-            (existing.status !== "completed" && existing.status !== "failed" && existing.status !== "cancelled")
-          ) {
-            return yield* streamError
-          }
-          const replay = yield* client.replayExecution({ execution_id: executionId(turnId) })
-          for (const item of replay.events) {
-            const mapped = append(item)
-            if (
-              mapped.type === "execution.completed" ||
-              mapped.type === "execution.failed" ||
-              mapped.type === "execution.cancelled"
-            ) {
-              break
-            }
-          }
-          if (
-            events.every(
-              (item) =>
-                item.type !== "execution.completed" &&
-                item.type !== "execution.failed" &&
-                item.type !== "execution.cancelled",
+        }),
+        (item) => {
+          if (item._tag === "reconnecting")
+            return Effect.logWarning("execution.follow.reconnecting").pipe(
+              Effect.annotateLogs({
+                "rika.reconnect.attempt": item.attempt,
+                "rika.reconnect.message": item.message,
+              }),
+              Effect.as(true),
             )
-          ) {
-            return yield* streamError
+          if (item._tag === "stopped") {
+            stoppedAtActionableWait = item.reason._tag === "actionable_wait"
+            if (item.reason._tag === "terminal") stoppedStatus = item.reason.status
+            return Effect.succeed(false)
           }
-        }).pipe(Effect.mapError(() => streamError)),
-      ),
-    )
-    const status = statusFromEvents(events)
+          const mapped = append(item.event)
+          if (
+            mapped.type === "execution.completed" ||
+            mapped.type === "execution.failed" ||
+            mapped.type === "execution.cancelled"
+          )
+            return Effect.succeed(false)
+          if (!stopAtActionableWait || !isActionableWait(mapped)) return Effect.succeed(true)
+          const waitId = mapped.data?.wait_id
+          if (typeof waitId !== "string") return Effect.succeed(true)
+          return client.inspectExecution(executionId(turnId)).pipe(
+            Effect.map((inspection) => {
+              const actionable = inspection.waiting_on.some((wait) => wait.wait_id === waitId)
+              if (actionable) stoppedAtActionableWait = true
+              return !actionable
+            }),
+          )
+        },
+      )
+    yield* consume(afterCursor).pipe(Effect.catchTag("EventLogCursorNotFound", () => consume(undefined)))
+    const status = stoppedStatus ?? statusFromEvents(events)
     yield* Effect.forEach(
       events.filter((item) => observableEventTypes.has(item.type)),
       (item) =>
@@ -724,11 +701,13 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         createFanOut: Effect.fn("ExecutionBackend.createFanOut")(function* (input) {
           const cachedRoute = executionRoutes.get(input.parentTurnId)
           const routePin =
-            input.executionRoute ??
-            cachedRoute ??
-            (options.resolveExecutionRoute === undefined
+            options.modelVariantPolicy === "fixed-selection"
               ? undefined
-              : yield* options.resolveExecutionRoute(input.parentTurnId))
+              : (input.executionRoute ??
+                cachedRoute ??
+                (options.resolveExecutionRoute === undefined
+                  ? undefined
+                  : yield* options.resolveExecutionRoute(input.parentTurnId)))
           const durableRoute =
             routePin === undefined
               ? undefined
@@ -1120,7 +1099,10 @@ export const layer = <
 ) =>
   Layer.unwrap(
     Effect.gen(function* () {
-      const sqliteModule = yield* Effect.promise(() => import("@relayfx/sdk/sqlite"))
+      const sqliteModule = yield* Effect.tryPromise({
+        try: () => import("@relayfx/sdk/sqlite"),
+        catch: error,
+      })
       const promoterRegistry = yield* ThreadHost.makeRegistry
       const promoterRegistryLayer = Layer.succeed(ThreadHost.Registry, promoterRegistry)
       {

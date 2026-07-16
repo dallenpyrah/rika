@@ -1,8 +1,8 @@
-# Rika V2 TODO
+# Rika TODO
 
 Status values: `pending`, `in-progress`, `blocked`, `complete`, `excluded`.
 
-This file is the execution ledger. Update it in the same change that changes implementation status. Detailed product coverage lives in `docs/features/FEATURES.md`.
+This file tracks unfinished implementation and release work. It does not define product behavior or architecture.
 
 ## Phase 0: 0; Phase 1: 3; Phase 2: 0; Phase 3: 2; Phase 4: 2; Phase 5: 1; Phase 6: 0; Phase 7: 0; Phase 8: 3; Phase 9: 1; Phase 10: 1; Phase 11: 4.
 
@@ -15,7 +15,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Create a first-class feature inventory.
 - [x] Record initial architecture decisions.
 - [x] Initialize Git after the foundational files exist.
-- [x] Capture the v1 commit and dirty-worktree reference in `docs/reference/V1_BASELINE.md`.
+- [x] Capture the v1 commit and dirty-worktree reference.
 - [x] Run the first oracle architecture review.
 - [x] Resolve every specification-level critical/high finding from the first oracle review.
 
@@ -92,7 +92,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Define the Rika execution backend contract.
 - [x] Compose Relay embedded SQLite through `@relayfx/sdk` exports only.
 - [x] Register deterministic model layers through Baton/Effect AI package APIs.
-- [x] Replace provider-name routing and legacy model/mode configuration with protocol-discriminated Gateways, exact model variants, complete main/Oracle mode routes, content-addressed registrations, immutable Relay revision pins, and role-specific typed compaction. Published Baton 0.4.3 cannot safely provide pre-output availability-only candidate fallback; ADR 0013 records that limit.
+- [x] Replace provider-name routing and legacy model/mode configuration with protocol-discriminated Gateways, exact model variants, complete main/Oracle mode routes, content-addressed registrations, immutable Relay revision pins, and role-specific typed compaction. Published Baton 0.4.3 cannot safely provide pre-output availability-only candidate fallback.
 - [x] Add configurable GPT-backed Librarian, Painter, Review, ReadThread, and Task routes; persist them in immutable Turn pins and preserve main-route fallback for older pins.
 - [x] Centralize built-in metadata from `models.dev`, expose maximum input, maximum output, and retained recent tokens as the model config contract, derive provider and Baton compaction settings from that source, allow custom Gateway aliases to override transport limits, and remove mode and specialist execution-token budgets.
 - [x] Materialize persisted fan-out overrides into deterministic child-specific Relay definitions and prove concurrent main and Oracle provider execution natively.
@@ -115,14 +115,14 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [ ] Release a Relay composition that shares one SQLite client across the runner, Child Run fan-out host, Workflow host, and Client.
 - [ ] Replace mode-specific backend layers with one process-lifetime runtime graph and persist each Turn's selected route before Relay acceptance.
 - [ ] Replace PID-directory rejection with one authenticated, versioned Resident Rika Service per canonical Profile/data root; converge starters through an OS-owned loopback bind before database startup.
-- [ ] Prove runtime cardinality, concurrent client attachment, lifecycle and grace behavior, protocol auth/version/backpressure, `SIGKILL` replacement, immutable route pins, and acceptance-to-projection kill points from ADRs 0007 and 0012.
+- [ ] Prove runtime cardinality, concurrent client attachment, lifecycle and grace behavior, protocol auth/version/backpressure, `SIGKILL` replacement, immutable route pins, and acceptance-to-projection kill points.
 - [x] Keep parsed help/version/parse paths local and route every product-state operation through the resident so no local SQLite fallback can race service startup.
 
 ## Phase 5: OpenTUI
 
 - [x] Adopt Relay 0.3.0 bidirectional execution-event pages and remove forward-only transcript recovery. Published Relay 0.3.0 and the Rika adapter page test prove the released backward page path.
-- [x] Add the durable versioned Turn transcript cache, keyset Turn/transcript pages, checkpoints, rebuild, and migration proof. SQLite migration 9, memory/service tests, stale-version rebuild, and reopen integration evidence pass.
-- [x] Replace cached Relay event arrays with stable semantic transcript units so raw Relay pages stop at the product boundary described by ADR 0014. Projection, SQLite migration 11/reopen, keyset paging, stale-rebuild, and 450-source-event compaction tests pass.
+- [x] Add the durable Turn transcript projection, keyset Turn/transcript pages, checkpoints, rebuild, and reopen proof. The current SQLite schema, memory/service tests, and reopen integration evidence pass without an older projection format.
+- [x] Replace cached Relay event arrays with stable semantic transcript units so raw Relay pages stop at the product boundary. The one current projection, keyset paging, rebuild, and 450-source-event compaction tests pass.
 - [x] Ship one current resident contract with transcript page, prepend, keyed patch, acknowledged bounded delivery, and resync frames. Exact two-sided wire and capability checks prevent a current client from remaining on a pre-acknowledgement resident; there are no compatibility modes or fallbacks. Native process tests prove a normal 1,000-event burst and both finite and long-lived overflow paths, which interrupt work and emit a typed resync followed by a terminal failure event.
 - [x] Extract the interactive transcript controller and bound normal frame scheduling to one update per sixteen milliseconds.
 - [x] Replace full transcript child rebuilds with keyed reconciliation, a movable two-hundred-entry mounted window, anchor-preserving prepend, and a persistent streaming rich-text tail.
@@ -130,7 +130,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Upgrade released OpenTUI and every native package to 0.4.3 after the native benchmark stop gate passes; keep the read-only upstream source submodule for research. Native 1/10/100/1,000-entry cases pass with at most 200 mounted entries.
 - [x] Refresh 1/10/100/1,000-Turn performance evidence and complete final Pilotty, agent-tty, package, and installed-binary acceptance after the resident and paging fixes. Native cases retain at most 200 mounted entries; packaging smoke passes; the installed binary opens both 10,000-entry sidebars and remains responsive after a completed Turn in Pilotty and agent-tty; the real user profile starts without socket 4403 or a draining loop.
 - [x] Connect prompt submission to durable Turn execution and terminal result projection.
-- [x] Port the initial Rika v1 color and spacing tokens.
+- [x] Port the initial Rika color and spacing tokens.
 - [x] Port the pure view-state model for transcript, palette, mode, input, history, and queue actions.
 - [x] Port the initial input editor behavior.
 - [x] Port the initial transcript rendering.
@@ -155,7 +155,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [x] Remove ast-grep-outline activity.
 - [x] Add character-frame tests.
 - [x] Add deterministic screenshot capture workflow.
-- [x] Render OpenTUI's native cursor for the composer, command palette, and Thread browser query without overriding the terminal's cursor style or resetting unchanged focus, and hide it for non-editable focus states.
+- [x] Render OpenTUI's native cursor position for the composer, command palette, and Thread browser query with a steady block style and one Effect-owned 600-millisecond visibility cadence; wake it on focus, input, paste, and terminal resume, and hide it for non-editable focus states.
 - [ ] Run the TUI oracle review.
 - [x] Join tracked interactive fibers before resuming shutdown; the resident-service change must narrow this to client-owned fibers and protocol disconnect.
 - [x] Await delayed TUI initialization during shutdown, destroy a late renderer, and prevent post-close watcher or session work; service runtime finalization is independently owned.
@@ -213,7 +213,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 
 ## Phase 8: Amp Personal Feature Parity
 
-- [ ] Complete every included row in `docs/features/FEATURES.md`.
+- [ ] Complete the remaining user-facing capability gaps tracked in this file.
 - [x] Keep the command palette focused on Thread switching, mode changes, fast mode, and functional quit.
 - [x] Verify keymap coverage.
 - [x] Restore visible file mention completion, Ctrl+S route selection, and shortcuts help with packaged interaction evidence.
@@ -287,7 +287,7 @@ This file is the execution ledger. Update it in the same change that changes imp
 - [ ] Capture redacted transcripts and tool-call evidence for the pending live agent suite. Packaged config/keymap/doctor tests already prove configured secrets are not disclosed, but no live-model evidence is claimed.
 - [x] Confirm excluded dependencies and features are absent from release archive inventories and packaged tool/UI surfaces.
 - [ ] Run repeated final oracle reviews until no critical/high findings remain.
-- [x] Record local residual risks and release evidence in `docs/reference/RELEASE_EVIDENCE.md`; publication and native-host CI release evidence remain out of scope.
+- [x] Record local residual risks and release evidence; publication and native-host CI release evidence remain out of scope.
 
 PLEASE MAKE SURE AT THE END YOU PUBLISH CHANGES TO BATON AND RELAY, INSTALL RIKA TO MY MACHINE, AND MAKE SURE THEY DEPEND ON PUBLISHED PACKAGES THE LINK IS/WAS ONLY FOR DEV.
 
@@ -308,12 +308,17 @@ Plan of record: the audit at the relay session scratchpad (WI-1..WI-8); Relay 0.
 - [x] WI-5 `Operation.reconcile` shrunk: when the backend exposes the host contract, startup registers the promoter, re-ensures the host entity per non-terminal thread, and sends one time-scoped nudge; the queued-turn drain sweep now runs only on the legacy fallback path. Deviations kept intentionally: the Run-mode synchronous drain loop and the `queueDrain` semaphore stay (single-process dispatch ordering for interactive callbacks is not the host's job).
 - [x] WI-6 Drop `Thread.sessionId` via migration `6_drop_thread_session_id` with a seeded v5 upgrade test.
 - [ ] WI-7 Presence viewer indicator (`pending`, optional).
-- [x] WI-8 Documentation for WI-3..WI-5: spec 05 (Thread Host), spec 08 (promotion mechanics), ADR 0011 (thread host entity), CONTEXT.md vocabulary.
+- [x] Document the Thread Host, promotion mechanics, and vocabulary.
 - [x] Restore fan-out/workflow + suspended-wait-resume + cancel natives on Relay 0.2.0; delete the compatibility seam and capability gates.
 - [x] Pin published Baton 0.4.3 and Relay 0.2.13, simplify `web_search` to a homogeneous non-empty array schema, reconcile deterministic starts after Relay persists a terminal execution, preserve opaque Relay failure detail beyond 1,000 execution events, validate actionable waits against current Relay state, reject inert child fan-outs, keep deterministic test-model selection fixed across TUI reasoning modes, route every child compaction policy through an isolated durable Session, and clear terminal TUI working state without duplicate generic failures. The generic known-tool malformed-argument recovery seam remains blocked upstream in Effect AI 4.0.0-beta.93.
 
 ## Amp thread UI parity (2026-07-15)
 
+- [x] Replace the raw-message and tool-draft reducers with one semantic projection used by initial load, prepend, live events, replay, and Thread preview.
+- [x] Keep assistant phases, tools, and child rows in source order and load the initial page through a full Turn boundary.
+- [x] Stream `apply_patch` argument deltas as live per-file diffs on the final ToolCall row, then reconcile returned unified diffs in place.
+- [x] Match Amp tool naming and grouping for explore, shell, process wait, edit, direct, generic, and subagent rows; keep parent and nested expansion state independent.
+- [x] Record matched packaged Rika and installed Amp transcript captures at 200×66 in `artifacts/transcript-parity/`.
 - [x] Replace the switcher and `@@` popup with the shared responsive Amp-style Thread browser and preview.
 - [x] Add the 36-column `Ctrl+\` Thread sidebar with keyboard, mouse, live status, and unread state.
 - [x] Persist restart-repairable Thread Summary activity and edit totals.

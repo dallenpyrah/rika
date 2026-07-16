@@ -50,11 +50,12 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
           createdAt: 1,
           data: { wait_id: "wait-1", title: "Allow work" },
         },
+        { cursor: "resumed-input", sequence: 2, type: "model.input.prepared", createdAt: 2 },
         {
           cursor: "resumed-2",
-          sequence: 2,
+          sequence: 3,
           type: "model.output.completed",
-          createdAt: 2,
+          createdAt: 3,
           text: "resumed output",
         },
       ])
@@ -101,6 +102,27 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
         Turn.TurnId.make("turn-0"),
         Turn.TurnId.make("turn-0"),
       ])
+    }),
+  )
+
+  test.effect("returns one page-independent thread cost and restores projection fold state", () =>
+    Effect.gen(function* () {
+      const repository = yield* TranscriptRepository.Service
+      const firstTurn = turn(21)
+      const secondTurn = turn(22)
+      const first = {
+        ...Transcript.project(firstTurn.id, firstTurn.prompt, [
+          { cursor: "phase", sequence: 0, type: "model.input.prepared", createdAt: 0 },
+        ]),
+        costUsd: 1.25,
+      }
+      const second = { ...Transcript.empty(secondTurn.id, secondTurn.prompt), costUsd: 2.5 }
+      yield* repository.replace(firstTurn, first)
+      yield* repository.replace(secondTurn, second)
+      const stored = yield* repository.get(firstTurn.id)
+      const page = yield* repository.page(Thread.ThreadId.make("thread-a"), { limit: 1 })
+      expect(stored).toMatchObject({ modelPhase: 0 })
+      expect(page.threadCostUsd).toBe(3.75)
     }),
   )
 })

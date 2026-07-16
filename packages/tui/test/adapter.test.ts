@@ -2,6 +2,18 @@ import { describe, expect, test, vi } from "vitest"
 import { it } from "@effect/vitest"
 import { Effect } from "effect"
 
+const shell = (id: string, command: string, output: string) => ({
+  _tag: "ToolCall" as const,
+  id,
+  name: "shell",
+  input: JSON.stringify({ command }),
+  output,
+  status: "complete" as const,
+  presentation: { family: "shell" as const, action: "command", activeLabel: "Running", completeLabel: "Ran" },
+  detail: command,
+  files: [],
+})
+
 const opentui = vi.hoisted(() => {
   const boxChildren: Array<object> = []
   const keyHandlers = new Set<(key: object) => void>()
@@ -32,6 +44,8 @@ const opentui = vi.hoisted(() => {
     plainText = ""
     cursorOffset = 0
     focused = false
+    showCursor = true
+    declare cursorStyle: unknown
 
     setText(text: string) {
       this.plainText = text
@@ -168,7 +182,7 @@ const opentui = vi.hoisted(() => {
     ScrollBoxRenderable,
     TextRenderable,
     boxChildren,
-    createCliRenderer: vi.fn((): Promise<typeof renderer> => Promise.resolve(renderer)),
+    createCliRenderer: vi.fn(() => Effect.runPromise(Effect.succeed(renderer))),
     keyHandlers,
     pasteHandlers,
     renderer,
@@ -206,6 +220,7 @@ vi.mock("@opentui/core", () => ({
 
 import {
   Surface,
+  buildTranscript,
   boundedTranscriptModel,
   create,
   renderBlock,
@@ -231,10 +246,7 @@ const thread = (input: Partial<ThreadItem> & Pick<ThreadItem, "id" | "title">): 
 })
 
 const createScoped = (callbacks: Parameters<typeof create>[0]) =>
-  Effect.acquireRelease(
-    Effect.promise(() => create(callbacks)),
-    (created) => Effect.sync(created.releaseTerminal),
-  )
+  Effect.acquireRelease(create(callbacks), (created) => Effect.sync(created.releaseTerminal))
 
 test("renders changed files as an indented path tree", () => {
   const rendered = renderChangedFiles(
@@ -258,12 +270,19 @@ test("renders changed files as an indented path tree", () => {
       .chunks,
   ).toEqual([
     { text: "src/", fg: opentui.RGBA.fromIndex(8) },
-    { text: "\n", fg: opentui.RGBA.defaultForeground() },
-    { text: "  ", fg: opentui.RGBA.defaultForeground() },
+    { text: "\n", fg: opentui.RGBA.fromIndex(7) },
+    { text: "  ", fg: opentui.RGBA.fromIndex(7) },
     { text: "main.ts", fg: opentui.RGBA.fromIndex(3) },
     { text: " +3", fg: opentui.RGBA.fromIndex(2) },
     { text: " -1", fg: opentui.RGBA.fromIndex(1) },
   ])
+})
+
+test("renders base transcript text with an explicit terminal palette color", () => {
+  const chunks = renderTranscriptStyled(model({ entries: [{ role: "assistant", text: "answer" }] })).chunks
+  const answer = chunks.find((chunk) => chunk.text.includes("answer"))
+
+  expect(answer?.fg).toEqual(opentui.RGBA.fromIndex(7))
 })
 
 describe("Surface", () => {
@@ -279,8 +298,12 @@ describe("Surface", () => {
 
       surface.update(state)
       const before = [...(surface as unknown as { transcriptChildren: ReadonlyArray<object> }).transcriptChildren]
-      expect(before).toHaveLength(2)
-      expect(before[0]).not.toBe(before[1])
+      expect(before).toHaveLength(3)
+      expect(before[0]).not.toBe(before[2])
+      const gap = (before[1] as { content: { chunks: ReadonlyArray<{ text: string }> } }).content.chunks
+        .map((chunk) => chunk.text)
+        .join("")
+      expect(gap).toBe(" ")
       const created = opentui.textRenderables.length
       surface.update({ ...state, input: "next", cursor: 4 })
       const after = (surface as unknown as { transcriptChildren: ReadonlyArray<object> }).transcriptChildren
@@ -333,16 +356,40 @@ describe("Surface", () => {
 
       expect(
         (surface as unknown as { transcriptChildren: ReadonlyArray<object> }).transcriptChildren.length,
-      ).toBeLessThanOrEqual(200)
+      ).toBeLessThanOrEqual(400)
     }),
   )
 
   test("renders every transcript block variant and sidebar state", () => {
     const blocks = [
-      { _tag: "Reasoning", text: "why", expanded: false },
-      { _tag: "Reasoning", text: "why", expanded: true },
-      { _tag: "ToolCall", id: "1", name: "Read", input: "a", status: "running" },
-      { _tag: "ToolCall", id: "2", name: "Write", input: "b", status: "complete" },
+      { _tag: "Reasoning", text: "why" },
+      { _tag: "Reasoning", text: "why" },
+      {
+        _tag: "ToolCall",
+        id: "1",
+        name: "read_file",
+        input: "a",
+        status: "running",
+        presentation: {
+          family: "explore",
+          action: "read",
+          activeLabel: "Exploring",
+          completeLabel: "Explored",
+          counter: "file",
+        },
+        detail: "a",
+        files: [],
+      },
+      {
+        _tag: "ToolCall",
+        id: "2",
+        name: "write_file",
+        input: "b",
+        status: "complete",
+        presentation: { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
+        detail: "b",
+        files: [],
+      },
       { _tag: "ToolResult", id: "1", output: "ok", failed: false },
       { _tag: "ToolResult", id: "2", output: "bad", failed: true },
       { _tag: "Diff", path: "a", patch: "+x" },
@@ -359,7 +406,7 @@ describe("Surface", () => {
         recovery: "Press Enter to retry.",
       },
       { _tag: "Permission", id: "p", kind: "tool-approval", title: "Write", detail: "a", status: "pending" },
-      { _tag: "ChildAgent", name: "child", summary: "work", status: "running" },
+      { _tag: "ChildAgent", id: "child", name: "child", summary: "work", status: "running", activity: [] },
       { _tag: "Workflow", name: "flow", step: "wait", status: "waiting" },
       { _tag: "ImageAttachment", name: "a.png", mediaType: "image/png" },
       { _tag: "ImageAttachment", name: "partial.png", mediaType: "image/png", width: 2 },
@@ -396,10 +443,151 @@ describe("Surface", () => {
       name: "Plugin-defined tool",
       input: "opaque input",
       status: "running",
+      presentation: { family: "generic", action: "tool", activeLabel: "Running tool", completeLabel: "Ran tool" },
+      detail: "opaque input",
+      files: [],
     })
 
     expect(rendered).toBe("⠿ Plugin-defined tool [running] ▸")
     expect(rendered).not.toMatch(/rivet|semantic[- ]search|ast[- ]grep[- ]outline/i)
+  })
+
+  test("expands grouped tools and each nested command independently", () => {
+    const collapsedChild = model({
+      blocks: [shell("one", "bun test", "passed"), shell("two", "bun run lint", "clean")],
+      expandedRowKeys: ["tool:one+two"],
+    })
+    const collapsed = buildTranscript(collapsedChild)
+    expect(collapsed.ranges.map((range) => range.unit)).toEqual(["tool:one+two", "tool-child:one", "tool-child:two"])
+    expect(collapsed.styled.chunks.map((chunk) => chunk.text).join("")).not.toContain("passed")
+    const expanded = buildTranscript({
+      ...collapsedChild,
+      expandedRowKeys: ["tool:one+two", "tool-child:one"],
+    })
+    expect(expanded.styled.chunks.map((chunk) => chunk.text).join("")).toContain("passed")
+    expect(expanded.styled.chunks.map((chunk) => chunk.text).join("")).not.toContain("clean")
+  })
+
+  test("uses the tool presentation label for a single created file", () => {
+    const rendered = buildTranscript(
+      model({
+        blocks: [
+          {
+            _tag: "ToolCall",
+            id: "create",
+            name: "create_file",
+            input: JSON.stringify({ path: "src/new.ts" }),
+            status: "complete",
+            presentation: { family: "edit", action: "create", activeLabel: "Creating", completeLabel: "Created" },
+            detail: "src/new.ts",
+            files: [
+              {
+                key: "create:0",
+                path: "src/new.ts",
+                kind: "add",
+                patch: "--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+new",
+                additions: 1,
+                deletions: 0,
+                preview: false,
+                status: "complete",
+              },
+            ],
+          },
+        ],
+      }),
+    )
+
+    expect(rendered.styled.chunks.map((chunk) => chunk.text).join("")).toContain("Created src/new.ts +1")
+  })
+
+  test("matches Amp edit, wait, explore, and subagent row shapes", () => {
+    const presentation = {
+      edit: { family: "edit" as const, action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
+      direct: { family: "direct" as const, action: "status", activeLabel: "Waiting for", completeLabel: "Waited for" },
+      explore: {
+        family: "explore" as const,
+        action: "grep",
+        activeLabel: "Exploring",
+        completeLabel: "Explored",
+        counter: "search" as const,
+      },
+      agent: {
+        family: "agent" as const,
+        action: "task",
+        activeLabel: "Subagent working",
+        completeLabel: "Subagent finished",
+      },
+    }
+    const patch = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new"
+    const state = model({
+      blocks: [
+        {
+          _tag: "ToolCall",
+          id: "patch",
+          name: "apply_patch",
+          input: "{}",
+          status: "running",
+          presentation: presentation.edit,
+          detail: "",
+          files: [
+            {
+              key: "patch:0",
+              path: "src/a.ts",
+              kind: "update",
+              patch,
+              additions: 1,
+              deletions: 1,
+              preview: true,
+              status: "running",
+            },
+          ],
+        },
+        {
+          _tag: "ToolCall",
+          id: "wait",
+          name: "shell_command_status",
+          input: JSON.stringify({ processId: "1" }),
+          output: "done",
+          status: "complete",
+          presentation: presentation.direct,
+          detail: "bun test",
+          files: [],
+        },
+        {
+          _tag: "ToolCall",
+          id: "grep",
+          name: "grep",
+          input: JSON.stringify({ path: "src", pattern: "needle" }),
+          output: "src/a.ts:1:needle",
+          status: "failed",
+          presentation: presentation.explore,
+          detail: 'src "needle"',
+          files: [],
+        },
+        {
+          _tag: "ToolCall",
+          id: "task",
+          name: "task",
+          input: "{}",
+          output: "child result",
+          status: "complete",
+          presentation: presentation.agent,
+          detail: "Fix packaging integration tests",
+          files: [],
+        },
+      ],
+      expandedRowKeys: ["tool:grep", "tool:task"],
+    })
+    const built = buildTranscript(state)
+    const text = built.styled.chunks.map((chunk) => chunk.text).join("")
+    expect(text).toContain("Editing src/a.ts +1 -1 ▾\n")
+    expect(text).toContain("- old")
+    expect(text).not.toContain("Edit src/a.ts")
+    expect(text).toContain("Waited for bun test ▸")
+    expect(text).toContain('✕ Grep src "needle" src/a.ts:1:needle')
+    expect(text).toContain("Subagent finished ▾")
+    expect(text).toContain("Fix packaging integration tests")
+    expect(text).not.toContain("Subagent finished Fix packaging integration tests")
   })
 
   it.effect("constructs the render tree and forwards key and resize events", () =>
@@ -437,6 +625,34 @@ describe("Surface", () => {
         eventType: "repeat",
       })
       expect(callbacks.resize).toHaveBeenLastCalledWith(101, 37)
+    }),
+  )
+
+  it.effect("uses a steady block cursor and wakes it on key and paste input", () =>
+    Effect.gen(function* () {
+      const callbacks = { key: vi.fn(), paste: vi.fn(), resize: vi.fn() }
+      const { surface } = yield* createScoped(callbacks)
+      surface.update(model({ input: "draft", cursor: 5 }))
+
+      expect(surface.composerEditor.cursorStyle).toEqual({ style: "block", blinking: false })
+      expect(surface.composerEditor.showCursor).toBe(true)
+
+      surface.composerEditor.showCursor = false
+      for (const listener of opentui.keyHandlers)
+        listener({
+          name: "x",
+          ctrl: false,
+          option: false,
+          super: false,
+          shift: false,
+          sequence: "x",
+          eventType: "press",
+        })
+      expect(surface.composerEditor.showCursor).toBe(true)
+
+      surface.composerEditor.showCursor = false
+      for (const listener of opentui.pasteHandlers) listener({ bytes: new TextEncoder().encode("pasted text") })
+      expect(surface.composerEditor.showCursor).toBe(true)
     }),
   )
 
@@ -603,7 +819,7 @@ describe("Surface", () => {
       expect(inputText()).toBe("abcd")
       expect(surface.inputBox.title).toBe("")
       expect(modeLabelText()).toBe(" medium ")
-      expect(surface.inputBox.borderColor).toEqual(opentui.RGBA.defaultForeground())
+      expect(surface.inputBox.borderColor).toEqual(opentui.RGBA.fromIndex(7))
       expect(surface.inputBox.bottomTitle).toBe("")
       expect(surface.workspaceLabel.content).toEqual(
         expect.objectContaining({ chunks: [expect.objectContaining({ text: " /workspace " })] }),
@@ -645,7 +861,7 @@ describe("Surface", () => {
         surface.update(model({ mode, busy: true, reasoningEffort: defaultReasoningEffort(mode) }))
         expect(surface.inputBox.title).toBe("")
         expect(modeLabelText()).toBe(` $···· ─ ${mode} `)
-        expect(surface.inputBox.borderColor).toEqual(opentui.RGBA.defaultForeground())
+        expect(surface.inputBox.borderColor).toEqual(opentui.RGBA.fromIndex(7))
         expect(surface.statusLabel.content).toEqual(
           expect.objectContaining({
             chunks: expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(" Waiting ") })]),
@@ -764,17 +980,16 @@ it.effect("releases renderer terminal modes once when initialization fails after
   Effect.gen(function* () {
     opentui.renderer.destroy.mockClear()
 
-    yield* Effect.promise(() =>
-      expect(
-        create({
-          key: vi.fn(),
-          resize: () => {
-            throw new Error("resize failed")
-          },
-        }),
-      ).rejects.toThrow("resize failed"),
+    const error = yield* Effect.flip(
+      create({
+        key: vi.fn(),
+        resize: () => {
+          throw new Error("resize failed")
+        },
+      }),
     )
 
+    expect(String(error)).toContain("resize failed")
     expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
   }),
 )
@@ -798,6 +1013,18 @@ it.effect("releases terminal modes once before other cleanup and prevents editor
     expect(opentui.renderer.suspend).toHaveBeenCalledTimes(1)
     expect(opentui.renderer.resume).not.toHaveBeenCalled()
     expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
+  }),
+)
+
+it.effect("wakes the typing cursor after the terminal resumes", () =>
+  Effect.gen(function* () {
+    const created = yield* createScoped(handlers())
+    created.surface.update(model({ input: "draft", cursor: 5 }))
+    created.surface.composerEditor.showCursor = false
+
+    created.resumeTerminal()
+
+    expect(created.surface.composerEditor.showCursor).toBe(true)
   }),
 )
 

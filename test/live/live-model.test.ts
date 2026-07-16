@@ -1,11 +1,9 @@
 import { Agent, ModelRegistry, Tool, Toolkit } from "@batonfx/core"
 import { withOpenAiCompatible } from "@batonfx/providers/openai-compat"
+import * as BunServices from "@effect/platform-bun/BunServices"
 import { resolve } from "../../packages/runtime/src/agent-profiles"
 import { describe, expect, it } from "@effect/vitest"
-import { Config, Effect, Option, Redacted, Schema } from "effect"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { Config, Effect, FileSystem, Option, Path, Redacted, Schema } from "effect"
 
 const config = Effect.runSync(
   Config.all({
@@ -59,10 +57,15 @@ describe("configured OpenAI-compatible live model", () => {
 
   liveIt("uses a coding tool in a disposable repository", () =>
     Effect.acquireUseRelease(
-      Effect.tryPromise(() => mkdtemp(join(tmpdir(), "rika-live-"))),
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        return yield* fileSystem.makeTempDirectory({ prefix: "rika-live-" })
+      }),
       (directory) =>
         Effect.gen(function* () {
-          yield* Effect.tryPromise(() => mkdir(join(directory, ".git")))
+          const fileSystem = yield* FileSystem.FileSystem
+          const path = yield* Path.Path
+          yield* fileSystem.makeDirectory(path.join(directory, ".git"))
           const createFile = Tool.make("create_file", {
             description: "Create one UTF-8 file in the disposable repository",
             parameters: Schema.Struct({ path: Schema.String, content: Schema.String }),
@@ -78,20 +81,22 @@ describe("configured OpenAI-compatible live model", () => {
           const result = yield* run(agent, "Implement the requested answer.ts file.").pipe(
             Effect.provide(
               toolkit.toLayer({
-                create_file: ({ path, content }) =>
-                  Effect.tryPromise(() => writeFile(join(directory, path), content, { flag: "wx" })).pipe(
-                    Effect.as(path),
-                    Effect.orDie,
-                  ),
+                create_file: ({ path: filename, content }) =>
+                  fileSystem
+                    .writeFileString(path.join(directory, filename), content, { flag: "wx" })
+                    .pipe(Effect.as(filename), Effect.orDie),
               }),
             ),
           )
-          const content = yield* Effect.tryPromise(() => readFile(join(directory, "answer.ts"), "utf8"))
+          const content = yield* fileSystem.readFileString(path.join(directory, "answer.ts"))
           expect(content).toBe("export const answer = 42\n")
           expect(normalize(result).toolCalls).toEqual(["create_file"])
         }),
-      (directory) => Effect.promise(() => rm(directory, { recursive: true, force: true })),
-    ),
+      (directory) =>
+        FileSystem.FileSystem.pipe(
+          Effect.flatMap((fileSystem) => fileSystem.remove(directory, { recursive: true, force: true })),
+        ),
+    ).pipe(Effect.provide(BunServices.layer)),
   )
 
   liveIt("retains multi-turn context", () =>

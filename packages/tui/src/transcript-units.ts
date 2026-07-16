@@ -1,4 +1,4 @@
-import { Function } from "effect"
+import { Function, Option, Schema } from "effect"
 import type { Model, TranscriptBlock, TranscriptItem } from "./view-state"
 
 export type ToolGroupKind = "explore" | "edit" | "shell" | "other"
@@ -23,7 +23,8 @@ export type TranscriptUnitId = string
 const readToolNames = new Set(["read_file", "read", "view_file"])
 const searchToolNames = new Set(["grep", "find_files", "glob", "list_dir", "codebase_search"])
 const editToolNames = new Set(["edit_file", "create_file", "apply_patch", "write_file"])
-const shellToolNames = new Set(["shell", "shell_command_status", "bash", "run_command"])
+const shellToolNames = new Set(["shell", "bash", "run_command"])
+const ToolInputJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
 export interface PathTarget {
   readonly path: string
@@ -37,14 +38,8 @@ export interface ToolDetail {
   readonly target?: PathTarget
 }
 
-const inputValue = (input: string): Record<string, unknown> => {
-  try {
-    const value = JSON.parse(input)
-    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
-  } catch {
-    return {}
-  }
-}
+const inputValue = (input: string): Record<string, unknown> =>
+  Option.getOrElse(Schema.decodeUnknownOption(ToolInputJson)(input), () => ({}))
 
 const stringValue = (value: Record<string, unknown>, keys: ReadonlyArray<string>): string | undefined => {
   for (const key of keys) if (typeof value[key] === "string" && value[key].length > 0) return value[key]
@@ -56,8 +51,8 @@ export const toolDetail: {
   (block: number, call: Extract<TranscriptBlock, { _tag: "ToolCall" }>): ToolDetail
 } = Function.dual(2, (block: number, call: Extract<TranscriptBlock, { _tag: "ToolCall" }>): ToolDetail => {
   const input = inputValue(call.input)
-  const kind = toolKind(call.name)
-  const path = stringValue(input, ["path", "file_path", "file"])
+  const kind = toolKind(call.name, undefined)
+  const path = call.files[0]?.path ?? stringValue(input, ["path", "file_path", "file"])
   const target =
     path === undefined
       ? undefined
@@ -65,18 +60,26 @@ export const toolDetail: {
           path,
           ...(typeof input.offset === "number" ? { line: input.offset } : {}),
         }
-  if (kind === "read") return { block, label: `Read ${path ?? call.name}`, ...(target === undefined ? {} : { target }) }
+  if (kind === "read") {
+    const verb =
+      call.presentation.action === "media" ? "Viewed" : call.presentation.action === "git-status" ? "Checked" : "Read"
+    return { block, label: `${verb} ${call.detail || path || call.name}`, ...(target === undefined ? {} : { target }) }
+  }
   if (kind === "search") {
     const query = stringValue(input, ["pattern", "query", "glob", "path"])
     return {
       block,
-      label: `${call.name === "grep" ? "Grep" : "Searched"} ${query ?? "workspace"}`,
+      label: `${call.presentation.action === "grep" ? "Grep" : "Searched"} ${call.detail || query || "workspace"}`,
       ...(target === undefined ? {} : { target }),
     }
   }
-  if (kind === "edit") return { block, label: `Edit ${path ?? call.name}`, ...(target === undefined ? {} : { target }) }
-  if (kind === "shell") return { block, label: `$ ${stringValue(input, ["command", "cmd", "script"]) ?? call.input}` }
-  return { block, label: call.name }
+  if (kind === "edit")
+    return { block, label: `Edit ${path ?? (call.detail || call.name)}`, ...(target === undefined ? {} : { target }) }
+  if (kind === "shell") return { block, label: `$ ${call.detail || call.input}` }
+  return {
+    block,
+    label: `${call.status === "running" ? call.presentation.activeLabel : call.presentation.completeLabel}${call.detail.length === 0 ? "" : ` ${call.detail}`}`,
+  }
 })
 
 export const toolDetails: {
@@ -90,18 +93,33 @@ export const toolDetails: {
     ),
 )
 
-export const toolKind = (rawName: string): ToolKind => {
+type ToolFamily = Extract<TranscriptBlock, { _tag: "ToolCall" }>["presentation"]["family"]
+
+const toolKindImpl = (rawName: string, family: ToolFamily | undefined): ToolKind => {
   const name = rawName.toLowerCase()
-  return readToolNames.has(name)
-    ? "read"
-    : searchToolNames.has(name)
-      ? "search"
-      : editToolNames.has(name)
-        ? "edit"
-        : shellToolNames.has(name)
-          ? "shell"
-          : "other"
+  return family === "explore"
+    ? readToolNames.has(name) || name === "view_media" || name === "git_status"
+      ? "read"
+      : "search"
+    : family === "edit"
+      ? "edit"
+      : family === "shell"
+        ? "shell"
+        : readToolNames.has(name)
+          ? "read"
+          : searchToolNames.has(name)
+            ? "search"
+            : editToolNames.has(name)
+              ? "edit"
+              : shellToolNames.has(name)
+                ? "shell"
+                : "other"
 }
+
+export const toolKind: {
+  (family: ToolFamily | undefined): (rawName: string) => ToolKind
+  (rawName: string, family: ToolFamily | undefined): ToolKind
+} = Function.dual(2, toolKindImpl)
 
 const groupOf = (kind: ToolKind): ToolGroupKind => (kind === "read" || kind === "search" ? "explore" : kind)
 
@@ -147,7 +165,7 @@ export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => 
     }
     const block = model.blocks[item.index] as TranscriptBlock
     if (block._tag === "ToolCall") {
-      toolRun.push({ index: item.index, kind: toolKind(block.name) })
+      toolRun.push({ index: item.index, kind: toolKind(block.name, block.presentation.family) })
       continue
     }
     if (block._tag === "ToolResult") continue
@@ -166,10 +184,33 @@ export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => 
 }
 
 export const isExpandableUnit = (unit: TranscriptUnit): boolean =>
-  unit.kind === "tool" || unit.kind === "reasoning" || unit.kind === "diff"
+  unit.kind === "tool" || unit.kind === "reasoning" || unit.kind === "diff" || unit.kind === "childAgent"
 
 export const expandableUnits = (model: Model): ReadonlyArray<TranscriptUnit> =>
   transcriptUnits(model).filter(isExpandableUnit)
+
+export const expandableRowIds = (model: Model): ReadonlyArray<TranscriptUnitId> => {
+  const ids: Array<TranscriptUnitId> = []
+  for (const unit of expandableUnits(model)) {
+    const id = transcriptUnitId(model, unit)
+    ids.push(id)
+    if (unit.kind !== "tool" || !model.expandedRowKeys.includes(id)) continue
+    if (unit.group === "edit") {
+      const files = unit.blocks.flatMap((index) => {
+        const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
+        return block.files
+      })
+      if (files.length > 1) for (const file of files) ids.push(`file:${file.key}`)
+      continue
+    }
+    if (unit.group === "shell" && unit.blocks.length > 1)
+      for (const index of unit.blocks) {
+        const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
+        if (block.output !== undefined && block.output.length > 0) ids.push(`tool-child:${block.id}`)
+      }
+  }
+  return ids
+}
 
 export const transcriptUnitId: {
   (model: Model, unit: TranscriptUnit): TranscriptUnitId

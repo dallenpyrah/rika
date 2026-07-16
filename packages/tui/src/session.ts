@@ -1,5 +1,5 @@
 import { Function } from "effect"
-import type { Mode, PermissionDecision, PromptPart, ReasoningEffort, UiEvent } from "./view-state"
+import type { Mode, PermissionDecision, PromptPart, ReasoningEffort } from "./view-state"
 
 export interface ModelTuning {
   readonly reasoningEffort?: ReasoningEffort
@@ -40,7 +40,6 @@ export interface Adapter {
   readonly cancel?: () => void
   readonly decidePermission?: (id: string, kind: "permission" | "tool-approval", decision: PermissionDecision) => void
   readonly selectThread?: (id: string) => void
-  readonly replay?: (cursor: string | undefined, emit: (event: UiEvent) => void) => void
 }
 
 export const execute: {

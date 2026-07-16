@@ -25,6 +25,38 @@ const thread = (
   ...input,
 })
 
+const readCall = (
+  id: string,
+  detail: string,
+  status: "running" | "complete" = "running",
+): Extract<ViewState.TranscriptBlock, { _tag: "ToolCall" }> => ({
+  _tag: "ToolCall",
+  id,
+  name: "read_file",
+  input: detail,
+  status,
+  presentation: {
+    family: "explore",
+    action: "read",
+    activeLabel: "Exploring",
+    completeLabel: "Explored",
+    counter: "file",
+  },
+  detail,
+  files: [],
+})
+
+const editFile = (id: string, path: string) => ({
+  key: id,
+  path,
+  kind: "update" as const,
+  patch: `--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+new`,
+  additions: 1,
+  deletions: 1,
+  preview: false,
+  status: "complete" as const,
+})
+
 describe("ViewState", () => {
   test("exposes only thread switch, mode change, fast mode, and quit in the command palette", () => {
     expect(Palette.commands).toEqual([
@@ -193,7 +225,8 @@ describe("ViewState", () => {
     let model = ViewState.replaceQueue(ViewState.initial("/work"), [{ id: "queued", prompt: "old" }])
     model = ViewState.update(model, { _tag: "ReasoningStreamed", text: "details" })
     model = ViewState.update(model, { _tag: "ReasoningToggled", index: 0 })
-    expect(model.blocks).toEqual([{ _tag: "Reasoning", text: "details", expanded: true }])
+    expect(model.blocks).toEqual([{ _tag: "Reasoning", text: "details" }])
+    expect(model.expandedRowKeys).toEqual(["block:Reasoning:0"])
     expect(model.queue).toEqual([{ id: "queued", prompt: "old" }])
     model = ViewState.update(model, { _tag: "ScrollMoved", offset: 4 })
     expect(model.scrollFollow).toBe(false)
@@ -260,7 +293,22 @@ describe("ViewState", () => {
     model = ViewState.update(model, { _tag: "ReasoningStreamed", text: "files" })
     model = ViewState.update(model, {
       _tag: "BlockAdded",
-      block: { _tag: "ToolCall", id: "1", name: "Read", input: "a.ts", status: "running" },
+      block: {
+        _tag: "ToolCall",
+        id: "1",
+        name: "read_file",
+        input: "a.ts",
+        status: "running",
+        presentation: {
+          family: "explore",
+          action: "read",
+          activeLabel: "Exploring",
+          completeLabel: "Explored",
+          counter: "file",
+        },
+        detail: "a.ts",
+        files: [],
+      },
     })
     model = ViewState.update(model, {
       _tag: "BlockAdded",
@@ -405,9 +453,9 @@ describe("ViewState", () => {
     let model = {
       ...ViewState.initial("/work"),
       blocks: [
-        { _tag: "Reasoning", text: "why", expanded: false },
-        { _tag: "ToolCall", id: "1", name: "read_file", input: "a", status: "complete", expanded: false },
-        { _tag: "Diff", path: "a", patch: "+a", expanded: false },
+        { _tag: "Reasoning", text: "why" },
+        readCall("1", "a", "complete"),
+        { _tag: "Diff", path: "a", patch: "+a" },
       ],
     } as ViewState.Model
     model = ViewState.update(
@@ -416,19 +464,40 @@ describe("ViewState", () => {
     )
     expect(model).toMatchObject({
       detailSelection: "block:Diff:2",
-      blocks: [{ expanded: false }, {}, { expanded: true }],
+      expandedRowKeys: ["block:Diff:2"],
     })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "tab", shift: true }) })
     expect(model.detailSelection).toBe("tool:1")
     model = ViewState.update(model, { _tag: "DetailToggled", id: "tool:1" })
     expect(model).toMatchObject({
       detailSelection: "tool:1",
-      blocks: [{ expanded: false }, { expanded: true }, { expanded: true }],
+      expandedRowKeys: ["block:Diff:2", "tool:1"],
     })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "tab" }) })
     expect(model.detailSelection).toBe("block:Diff:2")
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "tab" }) })
     expect(model.detailSelection).toBe("block:Reasoning:0")
+  })
+
+  test("toggles an expanded edit group's file rows independently", () => {
+    const call: Extract<ViewState.TranscriptBlock, { _tag: "ToolCall" }> = {
+      _tag: "ToolCall",
+      id: "patch",
+      name: "apply_patch",
+      input: "{}",
+      status: "complete",
+      presentation: { family: "edit", action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
+      detail: "",
+      files: [editFile("patch:0", "src/a.ts"), editFile("patch:1", "src/b.ts")],
+    }
+    const parent = "tool:patch"
+    const child = "file:patch:0"
+    const model = ViewState.update(
+      { ...ViewState.initial("/work"), blocks: [call], expandedRowKeys: [parent] },
+      { _tag: "DetailToggled", id: child },
+    )
+
+    expect(model).toMatchObject({ detailSelection: child, expandedRowKeys: [parent, child] })
   })
 
   test("navigates threads, selects permissions, and deduplicates replay", () => {
@@ -449,7 +518,7 @@ describe("ViewState", () => {
     const event = {
       id: "stable",
       cursor: "42",
-      block: { _tag: "ChildAgent", name: "review", summary: "checking", status: "running" },
+      block: { _tag: "ChildAgent", id: "review", name: "review", summary: "checking", status: "running", activity: [] },
     } as const
     model = ViewState.update(model, { _tag: "EventReplayed", event })
     const replayed = ViewState.update(model, { _tag: "EventReplayed", event })

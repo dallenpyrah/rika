@@ -111,19 +111,14 @@ test("awaits delayed TUI initialization and tears down its renderer before lease
     Effect.scoped(
       Effect.gen(function* () {
         const creation = yield* Deferred.make<{ readonly renderer: string }>()
-        const context = yield* Effect.context<never>()
         yield* Effect.addFinalizer(() => Effect.sync(() => events.push("lease-finalized")).pipe(Effect.asVoid))
-        const initialization = Effect.promise(() =>
-          settleTuiInitialization(
-            Effect.runPromiseWith(context)(Deferred.await(creation)),
-            () => closed,
-            () =>
-              Effect.runPromiseWith(context)(
-                Effect.sync(() => events.push("renderer-stopped", "renderer-idle", "renderer-destroyed")).pipe(
-                  Effect.asVoid,
-                ),
-              ),
-          ),
+        const initialization = settleTuiInitialization(
+          Deferred.await(creation),
+          () => closed,
+          () =>
+            Effect.sync(() => events.push("renderer-stopped", "renderer-idle", "renderer-destroyed")).pipe(
+              Effect.asVoid,
+            ),
         ).pipe(
           Effect.tap((created) =>
             created !== undefined && !closed ? Effect.sync(() => events.push("post-close-work-started")) : Effect.void,
@@ -224,7 +219,7 @@ test("drives bypassed recorded and incognito shell commands through Operation an
       if (session === undefined) return yield* Effect.die("Missing interactive session")
 
       const setup = yield* Effect.acquireRelease(
-        Effect.promise(() => createTestRenderer({ width: 100, height: 30 })),
+        Effect.tryPromise(() => createTestRenderer({ width: 100, height: 30 })),
         (value) => Effect.sync(() => value.renderer.destroy()),
       )
       let model = ViewState.initial(workspace)
@@ -260,9 +255,7 @@ test("drives bypassed recorded and incognito shell commands through Operation an
           event._tag !== "TranscriptPagePrepended" &&
           event._tag !== "TranscriptPatched" &&
           event._tag !== "TranscriptResyncRequired" &&
-          event._tag !== "ExecutionReplayed" &&
           event._tag !== "ExecutionControlled" &&
-          event._tag !== "ExecutionEventReceived" &&
           event._tag !== "ThreadsListed" &&
           event._tag !== "ThreadTitled" &&
           event._tag !== "ThreadActivated" &&
@@ -277,7 +270,7 @@ test("drives bypassed recorded and incognito shell commands through Operation an
         if (classified._tag !== "Shell") return yield* Effect.die("Expected shell prompt")
         yield* session.shell(classified.command, classified.incognito, dispatch)
         surface.update(model)
-        yield* Effect.promise(() => setup.renderOnce())
+        yield* Effect.tryPromise(() => setup.renderOnce())
         return setup.captureCharFrame()
       })
 

@@ -19,6 +19,68 @@ describe("tool contracts", () => {
     )
   })
 
+  it("defines an Amp presentation for every built-in tool", () => {
+    expect(Catalog.definitions.every((definition) => definition.presentation !== undefined)).toBe(true)
+    expect(Catalog.get("apply_patch")?.presentation).toMatchObject({ family: "edit" })
+    expect(Catalog.get("read_file")?.presentation).toMatchObject({ family: "explore", action: "read" })
+    expect(Catalog.get("shell_command_status")?.presentation).toMatchObject({ family: "direct", action: "status" })
+    expect(Catalog.get("oracle")?.presentation).toMatchObject({
+      family: "agent",
+      activeLabel: "Oracle exploring",
+      completeLabel: "Oracle has spoken",
+    })
+  })
+
+  it("names Amp-compatible dynamic tools and subagents", () => {
+    expect(
+      [
+        "Read",
+        "Grep",
+        "glob",
+        "Bash",
+        "shell_command",
+        "run_terminal_command",
+        "write_file",
+        "finder",
+        "review",
+        "transfer_to_oracle",
+        "transfer_to_librarian",
+        "spawn_child_run",
+        "skill",
+        "list_agent_modes",
+        "load_plugin",
+        "archive_current_thread",
+        "create_thread",
+        "send_message_to_thread",
+        "send_message_to_puck",
+        "slack_read",
+        "slack_write",
+      ].map((name) => [name, Catalog.resolvePresentation(name).completeLabel]),
+    ).toEqual([
+      ["Read", "Explored"],
+      ["Grep", "Explored"],
+      ["glob", "Explored"],
+      ["Bash", "Ran"],
+      ["shell_command", "Ran"],
+      ["run_terminal_command", "Ran"],
+      ["write_file", "Created"],
+      ["finder", "Searched codebase"],
+      ["review", "Reviewed code"],
+      ["transfer_to_oracle", "Oracle has spoken"],
+      ["transfer_to_librarian", "Librarian researched"],
+      ["spawn_child_run", "Subagent finished"],
+      ["skill", "Explored"],
+      ["list_agent_modes", "Checked available agent modes"],
+      ["load_plugin", "Loaded plugin"],
+      ["archive_current_thread", "Archived this thread"],
+      ["create_thread", "Created thread"],
+      ["send_message_to_thread", "Sent message to thread"],
+      ["send_message_to_puck", "Sent message to Puck"],
+      ["slack_read", "Slack"],
+      ["slack_write", "Slack"],
+    ])
+  })
+
   it.effect("substitutes the runtime through its test layer", () =>
     Effect.gen(function* () {
       const runtime = yield* Runtime.Service

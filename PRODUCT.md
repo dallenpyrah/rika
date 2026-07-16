@@ -1,40 +1,23 @@
 # Rika Product
 
-Rika is a personal, local-only coding agent that lives in the terminal. It combines an Amp-quality interaction model with Effect-native architecture, Baton agent execution, Relay durability, Effect SQL persistence, and OpenTUI rendering.
+Rika is a personal coding agent for one developer working in local repositories. It combines a clear terminal interface with durable threads, parallel agent work, approvals, and restart-safe workflows. The goal is to make substantial coding work understandable while it runs and recoverable when a process stops.
 
-Rika is for one owner working in local repositories. It is not a hosted collaboration product and does not include accounts, pricing, remote control, web clients, IDE clients, or remote development environments.
+## Audience
 
-## Product Promise
+Rika is for a technical owner who prefers a local CLI and TUI, controls the workspace and credentials, and wants automation without operating a hosted Rika service.
 
-Rika can inspect, edit, review, test, and extend local software projects through durable agent threads. Active work, parallel subagents, approvals, and workflows survive process termination and resume from local SQLite state.
+## Direction
 
-## Design Principles
+- Keep product state and authority local.
+- Make ongoing and completed agent work easy to inspect in the terminal.
+- Preserve durable work across process failure without duplicating execution authority.
+- Expose typed tools and clear permission choices rather than unrestricted model access.
+- Keep model routes configurable while modes describe stable user intent.
+- Consume framework behavior through released package contracts.
+- Prefer one current pre-1.0 contract over compatibility layers.
 
-- Local-first means local authority, local storage, and no mandatory Rika service.
-- Modes describe outcomes and autonomy, not provider implementation details.
-- The TUI makes agent work legible while it happens.
-- Tools are typed capabilities, not arbitrary model privileges.
-- Durable work has one authority and one replay story.
-- Framework capabilities are consumed through package contracts rather than copied.
-- The simplest architecture that supports durable multi-agent work wins.
+## Boundaries
 
-## Modes
+Rika owns local product semantics, workspace policy, configuration, projections, tools, extensions, persistence, and terminal behavior. Relay owns durable execution. Baton owns the agent loop. OpenTUI stays behind the rendering adapter.
 
-| Mode     | Intent                                | Initial route  |
-| -------- | ------------------------------------- | -------------- |
-| `low`    | Small, precisely scoped work          | GPT-5.6 Terra  |
-| `medium` | Default multi-file work               | GPT-5.6 Luna   |
-| `high`   | Difficult and subtle work             | GPT-5.6 Sol    |
-| `ultra`  | Architecture and open-ended discovery | Claude Fable 5 |
-
-Oracle routes are mode-dependent and may use Claude Sonnet 5, Claude Opus 4.8, or GPT-5.6 Sol. Stable mode meanings do not change when provider routing changes.
-
-## Non-Goals
-
-- Amp protocol or branding compatibility.
-- Hosted thread URLs or social sharing.
-- Enterprise administration.
-- Remote agents or sandbox orchestration.
-- WebSocket transport when no process boundary exists.
-- A generic public agent SDK.
-- Provider-specific user-facing model configuration as the default interaction.
+Rika is not a hosted collaboration service, public agent SDK, account or billing system, web or IDE client, remote runner, sandbox platform, or social sharing product. It does not copy another product's branding or protocol, and it does not include model-visible semantic code search or an ast-grep outline tool.

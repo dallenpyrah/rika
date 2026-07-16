@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import * as Transcript from "@rika/transcript"
 import { ExecutionEvents, Session, ViewState } from "../src"
 
 test("routes session actions only through available adapter callbacks", () => {
@@ -45,7 +46,11 @@ test("routes session actions only through available adapter callbacks", () => {
 test("projects incremental replay by cursor without duplicates", () => {
   let model = ViewState.initial("/work")
   const events = [
-    { id: "1", cursor: "10", block: { _tag: "ChildAgent", name: "child", summary: "work", status: "running" } },
+    {
+      id: "1",
+      cursor: "10",
+      block: { _tag: "ChildAgent", id: "child", name: "child", summary: "work", status: "running", activity: [] },
+    },
     { id: "2", cursor: "11", block: { _tag: "Workflow", name: "flow", step: "wait", status: "waiting" } },
   ] as const
   for (const event of [...events, events[1]]) model = ViewState.update(model, { _tag: "EventReplayed", event })
@@ -61,16 +66,26 @@ test("restarts through the shared event mapper and preserves transcript across q
     { cursor: "4", sequence: 4, type: "workflow.waiting", content: [{ workflow: "delivery", step: "approval" }] },
     { cursor: "5", sequence: 5, type: "model.output.completed", text: "hello" },
   ] as const
+  const source = events.map((event) => Object.assign({}, event, { createdAt: event.sequence }))
+  let projection = Transcript.empty("turn", "prompt")
   let live = ViewState.initial("/work")
-  for (const event of events) live = ExecutionEvents.project(live, [event])
+  for (const event of source) {
+    projection = Transcript.applyEvent(projection, event)
+    live = ExecutionEvents.projectUnits(live, projection.units)
+  }
   live = ViewState.replaceQueue(live, [{ id: "later", prompt: "later" }])
-  live = ExecutionEvents.project(live, [
-    { cursor: "6", sequence: 6, type: "tool.started", content: [{ id: "t", name: "Read", input: "a.ts" }] },
-  ])
+  projection = Transcript.applyEvent(projection, {
+    cursor: "6",
+    sequence: 6,
+    type: "tool.started",
+    createdAt: 6,
+    content: [{ id: "t", name: "Read", input: "a.ts" }],
+  })
+  live = ExecutionEvents.projectUnits(live, projection.units)
   live = ViewState.replaceQueue(live, [])
-  const reopened = ExecutionEvents.project(ViewState.initial("/work"), events)
+  const reopened = ExecutionEvents.projectUnits(ViewState.initial("/work"), projection.units)
   expect(live.entries).toEqual(reopened.entries)
-  expect(live.blocks.slice(0, 3)).toEqual([...reopened.blocks])
-  expect(live.blocks.at(-1)).toMatchObject({ _tag: "ToolCall", id: "t" })
+  expect(live.blocks).toEqual(reopened.blocks)
+  expect(live.blocks.at(-1)).toMatchObject({ _tag: "ToolCall", id: "turn:t" })
   expect(live.blocks.some((block) => (block as ViewState.TranscriptBlock)._tag === "Queued")).toBe(false)
 })

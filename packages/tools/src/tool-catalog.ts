@@ -3,12 +3,36 @@ import { Schema } from "effect"
 export const Permission = Schema.Literals(["allow", "ask"])
 export type Permission = typeof Permission.Type
 
+export const Presentation = Schema.Struct({
+  family: Schema.Literals(["explore", "shell", "edit", "agent", "direct", "generic"]),
+  action: Schema.String,
+  activeLabel: Schema.String,
+  completeLabel: Schema.String,
+  counter: Schema.optionalKey(
+    Schema.Literals([
+      "file",
+      "media file",
+      "web page",
+      "thread",
+      "skill",
+      "guidance file",
+      "search",
+      "web search",
+      "review",
+      "GitHub check",
+      "list",
+    ]),
+  ),
+})
+export type Presentation = typeof Presentation.Type
+
 export const Definition = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
   permission: Permission,
   timeoutMillis: Schema.Finite,
   outputLimit: Schema.Finite,
+  presentation: Presentation,
 })
 export type Definition = typeof Definition.Type
 
@@ -19,6 +43,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 20_000,
+    presentation: {
+      family: "explore",
+      action: "search",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "search",
+    },
   },
   {
     name: "grep",
@@ -26,6 +57,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "explore",
+      action: "grep",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "search",
+    },
   },
   {
     name: "read_file",
@@ -33,6 +71,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "explore",
+      action: "read",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "file",
+    },
   },
   {
     name: "create_file",
@@ -40,6 +85,7 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 4_000,
+    presentation: { family: "edit", action: "create", activeLabel: "Creating", completeLabel: "Created" },
   },
   {
     name: "edit_file",
@@ -47,6 +93,7 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 4_000,
+    presentation: { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
   },
   {
     name: "apply_patch",
@@ -54,6 +101,7 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 4_000,
+    presentation: { family: "edit", action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
   },
   {
     name: "shell",
@@ -61,6 +109,7 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 120_000,
     outputLimit: 40_000,
+    presentation: { family: "shell", action: "command", activeLabel: "Running", completeLabel: "Ran" },
   },
   {
     name: "shell_command_status",
@@ -68,6 +117,7 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 40_000,
+    presentation: { family: "direct", action: "status", activeLabel: "Waiting for", completeLabel: "Waited for" },
   },
   {
     name: "git_status",
@@ -75,6 +125,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 20_000,
+    presentation: {
+      family: "explore",
+      action: "git-status",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "file",
+    },
   },
   {
     name: "web_search",
@@ -82,6 +139,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 30_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "direct",
+      action: "web-search",
+      activeLabel: "Web Search",
+      completeLabel: "Web Search",
+      counter: "web search",
+    },
   },
   {
     name: "read_web_page",
@@ -89,6 +153,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 30_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "direct",
+      action: "read-web-page",
+      activeLabel: "Read",
+      completeLabel: "Read",
+      counter: "web page",
+    },
   },
   {
     name: "view_media",
@@ -96,6 +167,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 30_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "explore",
+      action: "media",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "media file",
+    },
   },
   {
     name: "find_thread",
@@ -103,6 +181,13 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 20_000,
+    presentation: {
+      family: "explore",
+      action: "find-thread",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "thread",
+    },
   },
   {
     name: "read_thread",
@@ -110,6 +195,12 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 10_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "direct",
+      action: "read-thread",
+      activeLabel: "Reading Thread",
+      completeLabel: "Read Thread",
+    },
   },
   {
     name: "oracle",
@@ -117,6 +208,12 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 120_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "agent",
+      action: "oracle",
+      activeLabel: "Oracle exploring",
+      completeLabel: "Oracle has spoken",
+    },
   },
   {
     name: "librarian",
@@ -124,6 +221,12 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 120_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "agent",
+      action: "librarian",
+      activeLabel: "Librarian researching",
+      completeLabel: "Librarian researched",
+    },
   },
   {
     name: "painter",
@@ -131,6 +234,7 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 120_000,
     outputLimit: 20_000,
+    presentation: { family: "direct", action: "painter", activeLabel: "Painter", completeLabel: "Painter" },
   },
   {
     name: "task",
@@ -138,7 +242,99 @@ export const definitions: ReadonlyArray<Definition> = [
     permission: "allow",
     timeoutMillis: 120_000,
     outputLimit: 40_000,
+    presentation: {
+      family: "agent",
+      action: "task",
+      activeLabel: "Subagent working",
+      completeLabel: "Subagent finished",
+    },
   },
 ]
 
 export const get = (name: string) => definitions.find((definition) => definition.name === name)
+
+const agentPresentation = (action: string, activeLabel: string, completeLabel: string): Presentation => ({
+  family: "agent",
+  action,
+  activeLabel,
+  completeLabel,
+})
+
+export const resolvePresentation = (rawName: string): Presentation => {
+  const name = rawName.toLowerCase()
+  const defined = get(name)?.presentation
+  if (defined !== undefined) return defined
+  if (name === "read" || name === "view_file" || name === "get_diagnostics")
+    return { family: "explore", action: "read", activeLabel: "Exploring", completeLabel: "Explored", counter: "file" }
+  if (name === "grep" || name === "glob" || name === "ripgrep")
+    return {
+      family: "explore",
+      action: name === "grep" || name === "ripgrep" ? "grep" : "search",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "search",
+    }
+  if (name === "bash" || name === "shell_command" || name === "run_terminal_command")
+    return { family: "shell", action: "command", activeLabel: "Running", completeLabel: "Ran" }
+  if (name === "write_file")
+    return { family: "edit", action: "create", activeLabel: "Creating", completeLabel: "Created" }
+  if (name === "finder" || name === "search" || name.includes("codebase"))
+    return agentPresentation("finder", "Searching codebase", "Searched codebase")
+  if (name === "review" || name.includes("review"))
+    return agentPresentation("review", "Reviewing code", "Reviewed code")
+  if (name.startsWith("transfer_to_")) {
+    const profile = name.slice("transfer_to_".length)
+    if (profile === "oracle") return agentPresentation("oracle", "Oracle exploring", "Oracle has spoken")
+    if (profile === "librarian") return agentPresentation("librarian", "Librarian researching", "Librarian researched")
+    return agentPresentation(profile, `Subagent (${profile}) working`, `Subagent (${profile}) finished`)
+  }
+  if (name === "spawn_child_run") return agentPresentation("task", "Subagent working", "Subagent finished")
+  if (name === "skill")
+    return {
+      family: "explore",
+      action: "skill",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "skill",
+    }
+  if (name === "list_agent_modes")
+    return {
+      family: "direct",
+      action: "agent-modes",
+      activeLabel: "Checking available agent modes",
+      completeLabel: "Checked available agent modes",
+    }
+  if (name === "load_plugin")
+    return { family: "direct", action: "load-plugin", activeLabel: "Loading plugin", completeLabel: "Loaded plugin" }
+  if (name === "archive_current_thread")
+    return {
+      family: "direct",
+      action: "archive-thread",
+      activeLabel: "Archiving this thread",
+      completeLabel: "Archived this thread",
+    }
+  if (name === "create_thread")
+    return {
+      family: "direct",
+      action: "create-thread",
+      activeLabel: "Creating thread",
+      completeLabel: "Created thread",
+    }
+  if (name === "send_message_to_thread")
+    return {
+      family: "direct",
+      action: "message-thread",
+      activeLabel: "Sending message to thread",
+      completeLabel: "Sent message to thread",
+    }
+  if (name === "send_message_to_puck")
+    return {
+      family: "direct",
+      action: "message-puck",
+      activeLabel: "Sending message to Puck",
+      completeLabel: "Sent message to Puck",
+    }
+  if (name === "slack_read" || name === "slack_write")
+    return { family: "direct", action: name, activeLabel: "Slack", completeLabel: "Slack" }
+  return { family: "generic", action: "tool", activeLabel: "Running tool", completeLabel: "Ran tool" }
+}

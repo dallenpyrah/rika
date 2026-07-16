@@ -112,13 +112,13 @@ export const layer = Layer.effect(
     )
     return Service.of({
       start: Effect.fn("ProcessRegistry.start")(function* (command, args, cwd) {
-        const process = yield* spawner
+        const handle = yield* spawner
           .spawn(ChildProcess.make(command, args, { cwd }))
           .pipe(Effect.provideService(Scope.Scope, scope))
         const output = yield* Ref.make<PendingOutput>({ stdout: "", stderr: "", truncated: false })
         const exit = yield* Deferred.make<number>()
         const processId = String(nextId++)
-        yield* Ref.update(entries, (current) => new Map(current).set(processId, { process, output, exit }))
+        yield* Ref.update(entries, (current) => new Map(current).set(processId, { process: handle, output, exit }))
         yield* Effect.forkIn(
           Effect.gen(function* () {
             const stdoutDecoder = new TextDecoder()
@@ -135,9 +135,9 @@ export const layer = Layer.effect(
               ).pipe(Effect.ensuring(Ref.update(output, (pending) => appendOutput(pending, channel, decoder.decode()))))
             const [stdoutExit, stderrExit, processExit] = yield* Effect.all(
               [
-                Effect.exit(drain("stdout", stdoutDecoder, process.stdout)),
-                Effect.exit(drain("stderr", stderrDecoder, process.stderr)),
-                Effect.exit(process.exitCode),
+                Effect.exit(drain("stdout", stdoutDecoder, handle.stdout)),
+                Effect.exit(drain("stderr", stderrDecoder, handle.stderr)),
+                Effect.exit(handle.exitCode),
               ],
               { concurrency: 3 },
             )

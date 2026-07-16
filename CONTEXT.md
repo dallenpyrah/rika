@@ -1,73 +1,28 @@
 # Rika Context
 
-This file is Rika's canonical vocabulary. Implementation details belong in specs and ADRs.
+## Vocabulary
 
-## Product
+- **Workspace:** the local directory tree a Thread may inspect and change.
+- **Thread:** a durable user-facing conversation and work record in one Workspace.
+- **Turn:** one user instruction and its top-level Execution.
+- **Pending Turn:** a durable instruction waiting for its own Execution while another Turn is active.
+- **Thread Host:** the Relay entity that wakes and claims Pending Turns. It drives promotion but owns no product state.
+- **Execution:** Relay-owned durable work for a Turn, Child Run, or workflow step.
+- **Child Run:** a durable child Execution with narrowed instructions or capabilities. User-facing copy may say subagent.
+- **Workflow:** versioned Rika data compiled to Relay durable operations.
+- **Mode:** a stable behavior profile that selects model routes and reasoning behavior.
+- **Gateway:** a configured connection to a model service. Credentials come from the environment.
+- **Resolved Context:** the guidance, mentions, skills, memory, and Thread references selected for an Execution.
+- **Thread Projection:** disposable Rika read state derived from product metadata and Relay events. It is not execution truth.
+- **Resident Rika Service:** the single execution and persistence owner for a Profile and canonical data root.
+- **Profile:** a named local configuration identity and canonical data root, not a Mode.
 
-**Rika**: The local-only personal coding-agent CLI and TUI.
+## Ownership
 
-**Workspace**: The local directory tree within which a Thread may inspect and modify files.
+- **Rika** owns Threads, Turns, Workspaces, modes, configuration, projections, tools, extensions, and terminal behavior.
+- **Relay** owns durable executions, children, waits, joins, cancellation, replay, and workflow runtime state.
+- **Baton** owns model turns, tool-call protocol, steering, compaction, skills integration, and agent events.
+- **Effect SQL** owns the API used for Rika's SQLite persistence.
+- **OpenTUI** renders the terminal only through the TUI adapter.
 
-**Thread**: A durable user-facing conversation and work ledger associated with a Workspace.
-
-**Turn**: One user instruction and the agent execution it starts within a Thread.
-
-**Pending Turn**: A durable user instruction accepted while another Turn is active and waiting to receive its own top-level Execution.
-
-**Thread Host**: The perpetual Relay entity that durably drives one Thread: it wakes on delivered promotion messages and claims Pending Turns. It is not a Turn, not a session, and never owns product state.
-
-**Execution**: Relay-owned durable work for a Turn, child run, or workflow step.
-
-**Child Run**: A durable Relay execution spawned by another execution with narrowed instructions, tools, mode, budget, or output contract. User-facing copy may say subagent.
-
-**Workflow**: A versioned Rika definition of durable sequence, parallelism, branches, joins, waits, retries, budgets, cancellation, and compensation compiled to Relay operations.
-
-**Agent Mode**: A stable Rika behavior profile controlling model routing, reasoning, autonomy, budget, and default tools.
-
-**Model Route**: Product configuration resolved through Baton to an Effect AI language-model layer.
-
-**Gateway**: A named, protocol-discriminated connection to a model service. Gateway authentication is explicitly absent or supplied by the application environment.
-
-**Tool**: A typed capability an agent may invoke to observe or change the Workspace or another external system.
-
-**Permission Decision**: The canonical Baton/Relay policy result for a proposed tool call: allow, deny, or ask. An accepted ask may be remembered as always according to the published framework contract.
-
-**Resolved Context**: The deterministic guidance, mentioned content, skills, optional thread memory, and thread references selected for an execution.
-
-**Artifact**: A durable product output such as a patch, image, report, citation bundle, or exported transcript.
-
-**Execution Event**: A Relay/Baton fact about durable execution progress.
-
-**Thread Projection**: Rika-owned read state derived from execution events and product metadata for terminal rendering and search.
-
-**Execution Cursor**: The durable position after which execution events are replayed.
-
-**Live Transport**: A Rika-owned WebSocket boundary used only when execution and control streaming crosses a process boundary. In-process streams remain Effect Streams. Provider and MCP transports follow their package contracts.
-
-**Resident Rika Service**: The one execution-capable Rika process for a canonical Profile and data root. It owns product and Relay persistence, runtime fibers, and the local authenticated Live Transport; CLI and TUI processes attach as clients.
-
-**Profile**: The named local Rika configuration identity whose canonical data root contains its product and Relay state. It is not an Agent Mode or model profile.
-
-**Skill**: A lazily activated instruction and resource package discovered from supported local skill directories.
-
-**Plugin**: Trusted local TypeScript extension code that can register tools, policies, commands, agents, modes, or UI actions.
-
-**MCP Server**: A local command or remote Model Context Protocol endpoint whose tools are adapted into Baton tools under Rika policy.
-
-## Framework Boundaries
-
-**Baton**: The package dependency that owns the non-durable agent loop, model/tool protocol, steering, permissions seams, compaction, and agent events.
-
-**Relay**: The package dependency that owns durable executions, child runs, waits, joins, replay, and workflow runtime state.
-
-**Effect SQL**: The persistence API Rika uses for product-owned SQLite state.
-
-**OpenTUI**: The terminal renderer confined to the Rika TUI adapter.
-
-## Avoided Vocabulary
-
-- Do not call a Thread a session or chat in product contracts.
-- Do not call a Child Run an actor.
-- Do not call a Model Route a provider client.
-- Do not call a Thread Projection canonical execution truth.
-- Do not use orb, hosted control plane, remote runner, or Rivet vocabulary.
+Do not call a Thread a session or chat in product contracts, a Child Run an actor, or a Thread Projection canonical execution state.

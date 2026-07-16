@@ -1,86 +1,130 @@
-import { exists } from "node:fs/promises"
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { binary, run, sandbox, type Sandbox } from "./process"
+import { Effect, FileSystem, Schema } from "effect"
+import { run, runSignaled, runTest, sandbox, type Sandbox } from "./process"
+
+const NamedItemsJson = Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String })))
+const NamedItemJson = Schema.fromJsonString(Schema.Struct({ name: Schema.String }))
+const ThreadJson = Schema.fromJsonString(Schema.Struct({ id: Schema.String }))
+const ExportJson = Schema.fromJsonString(Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) }))
+const EventJson = Schema.fromJsonString(Schema.Struct({ type: Schema.String }))
 
 let context: Sandbox
 
-beforeAll(async () => {
-  context = await sandbox()
-})
-afterAll(async () => context.dispose())
+beforeAll(() =>
+  runTest(
+    sandbox.pipe(
+      Effect.tap((created) =>
+        Effect.sync(() => {
+          context = created
+        }),
+      ),
+    ),
+  ),
+)
+afterAll(() => runTest(context.dispose))
 
 describe("packaged CLI contract", () => {
-  test("help, version, and parser failures have stable exit behavior", async () => {
-    const parsing = await sandbox()
-    const help = await run(parsing, ["--help"])
-    expect(help.exitCode).toBe(0)
-    expect(help.stdout).toContain("Local durable coding agent")
-    expect((await run(parsing, ["--version"])).stdout).toContain("0.0.0")
-    for (const args of [["run", "--mode", "impossible"]]) {
-      const result = await run(parsing, args)
-      expect(result.exitCode).not.toBe(0)
-      expect(result.stderr.length + result.stdout.length).toBeGreaterThan(0)
-    }
-    expect(await exists(parsing.env.RIKA_DATABASE!)).toBe(false)
-    expect(await exists(parsing.env.RIKA_RELAY_DATABASE!)).toBe(false)
-    await parsing.dispose()
-  }, 20_000)
+  test(
+    "help, version, and parser failures have stable exit behavior",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem
+          const parsing = yield* sandbox
+          const help = yield* run(parsing, ["--help"])
+          expect(help.exitCode).toBe(0)
+          expect(help.stdout).toContain("Local durable coding agent")
+          expect((yield* run(parsing, ["--version"])).stdout).toContain("0.0.0")
+          const invalid = yield* run(parsing, ["run", "--mode", "impossible"])
+          expect(invalid.exitCode).not.toBe(0)
+          expect(invalid.stderr.length + invalid.stdout.length).toBeGreaterThan(0)
+          expect(yield* fileSystem.exists(parsing.env.RIKA_DATABASE!)).toBe(false)
+          expect(yield* fileSystem.exists(parsing.env.RIKA_RELAY_DATABASE!)).toBe(false)
+          yield* parsing.dispose
+        }),
+      ),
+    20_000,
+  )
 
-  test("tools list and show expose the packaged catalog", async () => {
-    const listed = await run(context, ["tools", "list"])
-    expect(listed.exitCode).toBe(0)
-    const tools = JSON.parse(listed.stdout)
-    expect(tools.some((tool: { name: string }) => tool.name === "read_file")).toBe(true)
-    const shown = await run(context, ["tools", "show", "read_file"])
-    expect(shown.exitCode).toBe(0)
-    expect(JSON.parse(shown.stdout).name).toBe("read_file")
-    expect((await run(context, ["tools", "show", "missing-tool"])).exitCode).not.toBe(0)
-  }, 20_000)
+  test(
+    "tools list and show expose the packaged catalog",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const listed = yield* run(context, ["tools", "list"])
+          expect(listed.exitCode).toBe(0)
+          const tools = Schema.decodeUnknownSync(NamedItemsJson)(listed.stdout)
+          expect(tools.some((tool) => tool.name === "read_file")).toBe(true)
+          const shown = yield* run(context, ["tools", "show", "read_file"])
+          expect(shown.exitCode).toBe(0)
+          expect(Schema.decodeUnknownSync(NamedItemJson)(shown.stdout).name).toBe("read_file")
+          expect((yield* run(context, ["tools", "show", "missing-tool"])).exitCode).not.toBe(0)
+        }),
+      ),
+    20_000,
+  )
 
-  test("config, keymap, and doctor never disclose configured secrets", async () => {
-    context.env.PARALLEL_API_KEY = "e2e-super-secret"
-    for (const args of [["config", "list"], ["config", "keymap"], ["doctor"]]) {
-      const result = await run(context, args)
-      expect(result.exitCode).toBe(0)
-      expect(`${result.stdout}${result.stderr}`).not.toContain("e2e-super-secret")
-    }
-  }, 20_000)
+  test(
+    "config, keymap, and doctor never disclose configured secrets",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          context.env.PARALLEL_API_KEY = "e2e-super-secret"
+          for (const args of [["config", "list"], ["config", "keymap"], ["doctor"]]) {
+            const result = yield* run(context, args)
+            expect(result.exitCode).toBe(0)
+            expect(`${result.stdout}${result.stderr}`).not.toContain("e2e-super-secret")
+          }
+        }),
+      ),
+    20_000,
+  )
 
-  test("continue, fork, export, and usage work across real processes", async () => {
-    const created = JSON.parse((await run(context, ["threads", "new"])).stdout)
-    const continued = await run(context, ["threads", "continue", created.id])
-    expect(continued.exitCode).toBe(0)
-    const forked = JSON.parse((await run(context, ["threads", "fork", created.id])).stdout)
-    expect(forked.id).not.toBe(created.id)
-    const exported = await run(context, ["threads", "export", created.id, "--format", "json"])
-    expect(exported.exitCode).toBe(0)
-    expect(JSON.parse(exported.stdout).thread.id).toBe(created.id)
-    const usage = await run(context, ["threads", "usage", created.id])
-    expect(usage.exitCode).toBe(0)
-    expect(JSON.parse(usage.stdout)).toBeDefined()
-  }, 20_000)
+  test(
+    "continue, fork, export, and usage work across real processes",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const created = Schema.decodeUnknownSync(ThreadJson)((yield* run(context, ["threads", "new"])).stdout)
+          const continued = yield* run(context, ["threads", "continue", created.id])
+          expect(continued.exitCode).toBe(0)
+          const forked = Schema.decodeUnknownSync(ThreadJson)(
+            (yield* run(context, ["threads", "fork", created.id])).stdout,
+          )
+          expect(forked.id).not.toBe(created.id)
+          const exported = yield* run(context, ["threads", "export", created.id, "--format", "json"])
+          expect(exported.exitCode).toBe(0)
+          expect(Schema.decodeUnknownSync(ExportJson)(exported.stdout).thread.id).toBe(created.id)
+          const usage = yield* run(context, ["threads", "usage", created.id])
+          expect(usage.exitCode).toBe(0)
+          expect(Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(usage.stdout)).toBeDefined()
+        }),
+      ),
+    20_000,
+  )
 
-  test("execute streams JSONL and rejects malformed JSON input", async () => {
-    const streamed = await run(context, ["--execute", "--stream-json", "hello"])
-    expect(streamed.exitCode).toBe(0)
-    const events = streamed.stdout.split("\n").map((line) => JSON.parse(line))
-    expect(events.some((event) => event.type === "execution.completed")).toBe(true)
-    const malformed = await run(context, ["--execute", "--stream-json", "--stream-json-input"], { input: "not-json\n" })
-    expect(malformed.exitCode).not.toBe(0)
-  }, 20_000)
+  test(
+    "execute streams JSONL and rejects malformed JSON input",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const streamed = yield* run(context, ["--execute", "--stream-json", "hello"])
+          expect(streamed.exitCode).toBe(0)
+          const events = streamed.stdout.split("\n").map((line) => Schema.decodeUnknownSync(EventJson)(line))
+          expect(events.some((event) => event.type === "execution.completed")).toBe(true)
+          const malformed = yield* run(context, ["--execute", "--stream-json", "--stream-json-input"], {
+            input: "not-json\n",
+          })
+          expect(malformed.exitCode).not.toBe(0)
+        }),
+      ),
+    20_000,
+  )
 
-  test("SIGINT tears down an interactive terminal process", async () => {
-    const child = Bun.spawn([binary], {
-      cwd: context.workspace,
-      env: { ...context.env, TERM: "xterm-256color" },
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    await Bun.sleep(300)
-    child.kill("SIGINT")
-    const exited = await Promise.race([child.exited, Bun.sleep(5_000).then(() => -1)])
-    if (exited === -1) child.kill("SIGKILL")
-    expect(exited).not.toBe(-1)
-  })
+  test("SIGINT tears down an interactive terminal process", () =>
+    runTest(
+      Effect.gen(function* () {
+        yield* runSignaled(context, [], "SIGINT")
+      }),
+    ))
 })

@@ -22,9 +22,6 @@ class TestFailure extends Data.TaggedError("TestFailure")<{ readonly operation: 
 
 const workspaces: Array<string> = []
 
-const attempt = <A>(operation: string, evaluate: () => Promise<A>) =>
-  Effect.tryPromise({ try: evaluate, catch: (cause) => new TestFailure({ operation, cause }) })
-
 const provide = <A, E, R, ROut, E2, RIn>(effect: Effect.Effect<A, E, R>, layer: Layer.Layer<ROut, E2, RIn>) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -190,10 +187,8 @@ test("rejects workspace symlinks that resolve outside the workspace before openi
       const outside = path.join(outsideRoot, "outside.ts")
       yield* fileSystem.writeFileString(outside, "private\ncontent\n")
       yield* fileSystem.symlink(outside, path.join(root, "link.ts"))
-      const resolved = yield* Effect.exit(
-        attempt("resolve workspace file", () => resolveWorkspaceFile(root, { path: "link.ts" })),
-      )
-      const counted = yield* Effect.exit(attempt("count added lines", () => countAddedLinesFromFile(root, "link.ts")))
+      const resolved = yield* Effect.exit(resolveWorkspaceFile(root, { path: "link.ts" }))
+      const counted = yield* Effect.exit(countAddedLinesFromFile(root, "link.ts"))
       expect(resolved).toMatchObject({ _tag: "Failure" })
       expect(counted).toMatchObject({ _tag: "Failure" })
     }),
@@ -209,7 +204,7 @@ test("loads counts from a repository without HEAD and streams untracked text cou
       yield* fileSystem.writeFileString(path.join(root, "staged.ts"), "one\ntwo\nthree\n")
       yield* fileSystem.writeFileString(path.join(root, "untracked.ts"), "one\ntwo")
       yield* command("git", "-C", root, "add", "staged.ts")
-      expect(yield* attempt("read changed files", () => readChangedFiles(root))).toEqual([
+      expect(yield* readChangedFiles(root)).toEqual([
         { path: "staged.ts", status: "A", added: 3, removed: 0 },
         { path: "untracked.ts", status: "??", added: 2, removed: 0 },
       ])
@@ -260,7 +255,7 @@ test("extracts a clipboard image in a fresh workspace with the path passed outsi
         (script, destination) => {
           receivedScript = script
           receivedPath = destination
-          return run(fileSystem.writeFile(destination, Uint8Array.from([1, 2, 3])).pipe(Effect.as(0)))
+          return fileSystem.writeFile(destination, Uint8Array.from([1, 2, 3])).pipe(Effect.as(0))
         },
       )
       expect(relative).toBe(".rika/pasted/paste-42.png")
@@ -323,7 +318,7 @@ test.each([
       const relative = yield* pasteClipboardPng(
         root,
         () => 7,
-        (_script, destination) => run(fileSystem.writeFile(destination, output).pipe(Effect.as(exit))),
+        (_script, destination) => fileSystem.writeFile(destination, output).pipe(Effect.as(exit)),
       )
       expect(relative).toBeUndefined()
       expect(yield* fileSystem.exists(absolute)).toBe(false)
@@ -336,16 +331,12 @@ test("removes clipboard output when extraction throws", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
       const path = yield* Path.Path
-      const context = yield* Effect.context<BunServices.BunServices>()
       const root = yield* workspace("rika-clipboard-")
       const absolute = path.join(root, ".rika", "pasted", "paste-9.png")
       const relative = yield* pasteClipboardPng(
         root,
         () => 9,
-        () =>
-          Effect.runPromiseWith(context)(
-            Effect.fail(new TestFailure({ operation: "extract clipboard", cause: "unavailable" })),
-          ),
+        () => Effect.fail(new TestFailure({ operation: "extract clipboard", cause: "unavailable" })),
       )
       expect(relative).toBeUndefined()
       expect(yield* fileSystem.exists(absolute)).toBe(false)

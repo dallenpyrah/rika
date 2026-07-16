@@ -1,5 +1,8 @@
+import * as BunHttpServer from "@effect/platform-bun/BunHttpServer"
 import { OAuth } from "@batonfx/mcp"
-import { Context, Effect, FileSystem, Layer, Option, Path, Redacted, Schema } from "effect"
+import { Cause, Context, Deferred, Effect, FileSystem, Function, Layer, Option, Path, Redacted, Schema } from "effect"
+import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 export class Error extends Schema.TaggedErrorClass<Error>()("@rika/extensions/McpOAuthError", {
   server: Schema.String,
@@ -16,48 +19,66 @@ export class Host extends Context.Service<Host, HostInterface>()("@rika/extensio
 
 export const hostTestLayer = (implementation: HostInterface) => Layer.succeed(Host, Host.of(implementation))
 
-export const hostLayer = Layer.succeed(
+interface BrowserCommand {
+  readonly command: string
+  readonly args: ReadonlyArray<string>
+}
+
+const browserCommandImpl = (platform: NodeJS.Platform, url: string): BrowserCommand => ({
+  command: platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open",
+  args: platform === "win32" ? ["/c", "start", "", url] : [url],
+})
+
+export const browserCommand: {
+  (url: string): (platform: NodeJS.Platform) => BrowserCommand
+  (platform: NodeJS.Platform, url: string): BrowserCommand
+} = Function.dual(2, browserCommandImpl)
+
+export const hostLayer = Layer.effect(
   Host,
-  Host.of({
-    open: Effect.fn("McpOAuthHost.open")((url) =>
-      Effect.gen(function* () {
-        const exitCode = yield* Effect.tryPromise({
-          try: () => {
-            const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open"
-            const args = process.platform === "win32" ? ["/c", "start", "", url] : [url]
-            const child = Bun.spawn([command, ...args], { stdout: "ignore", stderr: "ignore" })
-            return child.exited
-          },
-          catch: (cause) => Error.make({ server: url, operation: "open-browser", message: String(cause) }),
-        })
-        if (exitCode !== 0) {
-          return yield* Error.make({ server: url, operation: "open-browser", message: "browser command failed" })
-        }
-      }),
-    ),
-    callback: Effect.fn("McpOAuthHost.callback")((redirectUrl) =>
-      Effect.callback<string, Error>((resume) => {
-        let server: ReturnType<typeof Bun.serve> | undefined
-        try {
-          const target = new URL(redirectUrl)
-          const active = Bun.serve({
-            hostname: target.hostname,
-            port: Number(target.port),
-            fetch(request) {
-              const url = new URL(request.url)
-              if (url.pathname !== target.pathname) return new Response("Not found", { status: 404 })
-              resume(Effect.succeed(url.toString()))
-              queueMicrotask(() => active.stop())
-              return new Response("Authentication complete. You may close this window.")
-            },
-          })
-          server = active
-        } catch (cause) {
-          resume(Effect.fail(Error.make({ server: redirectUrl, operation: "callback", message: String(cause) })))
-        }
-        return Effect.sync(() => server?.stop())
-      }),
-    ),
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+    const failure = (server: string, operation: string, cause: unknown) =>
+      Error.make({ server, operation, message: String(cause) })
+    return Host.of({
+      open: Effect.fn("McpOAuthHost.open")((url) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const { command, args } = browserCommand(process.platform, url)
+            const child = yield* spawner
+              .spawn(ChildProcess.make(command, args, { stdout: "ignore", stderr: "ignore" }))
+              .pipe(Effect.mapError((cause) => failure(url, "open-browser", cause)))
+            const exitCode = yield* child.exitCode.pipe(Effect.mapError((cause) => failure(url, "open-browser", cause)))
+            if (exitCode !== 0)
+              return yield* Error.make({ server: url, operation: "open-browser", message: "browser command failed" })
+          }),
+        ),
+      ),
+      callback: Effect.fn("McpOAuthHost.callback")((redirectUrl) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const target = yield* Effect.try({
+              try: () => new URL(redirectUrl),
+              catch: (cause) => failure(redirectUrl, "callback", cause),
+            })
+            const completed = yield* Deferred.make<string>()
+            const server = yield* BunHttpServer.make({
+              hostname: target.hostname,
+              port: Number(target.port),
+            }).pipe(Effect.catchCause((cause) => Effect.fail(failure(redirectUrl, "callback", Cause.pretty(cause)))))
+            const app = Effect.gen(function* () {
+              const request = yield* HttpServerRequest.HttpServerRequest
+              const url = new URL(request.url, target)
+              if (url.pathname !== target.pathname) return HttpServerResponse.text("Not found", { status: 404 })
+              yield* Deferred.succeed(completed, url.toString())
+              return HttpServerResponse.text("Authentication complete. You may close this window.")
+            })
+            yield* server.serve(app)
+            return yield* Deferred.await(completed)
+          }),
+        ),
+      ),
+    })
   }),
 )
 

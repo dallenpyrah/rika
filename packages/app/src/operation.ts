@@ -585,12 +585,6 @@ export const reconcile = Effect.fn("Operation.reconcilePublic")(function* (
 })
 
 export type InteractiveEvent =
-  | {
-      readonly _tag: "ExecutionEventReceived"
-      readonly threadId: Thread.ThreadId
-      readonly turnId: Turn.TurnId
-      readonly event: ExecutionBackend.Event
-    }
   | { readonly _tag: "ThreadsListed"; readonly threads: ReadonlyArray<ThreadSummary.ThreadSummary> }
   | {
       readonly _tag: "TranscriptPatched"
@@ -621,6 +615,7 @@ export type InteractiveEvent =
       readonly thread: Thread.Thread
       readonly entries: ReadonlyArray<TranscriptRepository.Entry>
       readonly hasOlder: boolean
+      readonly threadCostUsd: number
       readonly oldestCursor?: TranscriptRepository.PageCursor
     }
   | {
@@ -628,13 +623,8 @@ export type InteractiveEvent =
       readonly threadId: Thread.ThreadId
       readonly entries: ReadonlyArray<TranscriptRepository.Entry>
       readonly hasOlder: boolean
+      readonly threadCostUsd: number
       readonly oldestCursor?: TranscriptRepository.PageCursor
-    }
-  | {
-      readonly _tag: "ExecutionReplayed"
-      readonly threadId: Thread.ThreadId
-      readonly turnId: Turn.TurnId
-      readonly result: ExecutionBackend.Result
     }
   | { readonly _tag: "ShellPermissionRequested"; readonly id: string; readonly command: string }
   | { readonly _tag: "ShellCompleted"; readonly command: string; readonly text: string; readonly incognito: boolean }
@@ -666,12 +656,6 @@ const enqueueTranscriptPatch = (
   })
 
 export const InteractiveEventSchema = Schema.Union([
-  Schema.Struct({
-    _tag: Schema.tag("ExecutionEventReceived"),
-    threadId: Thread.ThreadId,
-    turnId: Turn.TurnId,
-    event: ExecutionBackend.Event,
-  }),
   Schema.Struct({
     _tag: Schema.tag("TranscriptPatched"),
     threadId: Thread.ThreadId,
@@ -706,6 +690,7 @@ export const InteractiveEventSchema = Schema.Union([
     thread: Thread.Thread,
     entries: Schema.Array(TranscriptRepository.EntrySchema),
     hasOlder: Schema.Boolean,
+    threadCostUsd: Schema.Finite,
     oldestCursor: Schema.optionalKey(TranscriptRepository.PageCursor),
   }),
   Schema.Struct({
@@ -713,17 +698,8 @@ export const InteractiveEventSchema = Schema.Union([
     threadId: Thread.ThreadId,
     entries: Schema.Array(TranscriptRepository.EntrySchema),
     hasOlder: Schema.Boolean,
+    threadCostUsd: Schema.Finite,
     oldestCursor: Schema.optionalKey(TranscriptRepository.PageCursor),
-  }),
-  Schema.Struct({
-    _tag: Schema.tag("ExecutionReplayed"),
-    threadId: Thread.ThreadId,
-    turnId: Turn.TurnId,
-    result: Schema.Struct({
-      turnId: Schema.String,
-      status: ExecutionBackend.Status,
-      events: Schema.Array(ExecutionBackend.Event),
-    }),
   }),
   Schema.Struct({ _tag: Schema.tag("ShellPermissionRequested"), id: Schema.String, command: Schema.String }),
   Schema.Struct({
@@ -1526,33 +1502,58 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           }
           if ((yield* Ref.get(selectionRequest)) !== request) return
           const page = yield* transcripts.page(thread.id, { ...(before === undefined ? {} : { before }), limit: 50 })
-          const hasOlder = page.hasOlder || (yield* Ref.get(transcriptHasUnprojectedTurns))
+          const olderPages: Array<typeof page.entries> = []
+          let entryCount = page.entries.length
+          let oldestEntry = page.entries[0]
+          let oldestCursor = page.oldestCursor
+          let storedHasOlder = page.hasOlder
+          if (before === undefined)
+            while (
+              storedHasOlder &&
+              oldestCursor !== undefined &&
+              (entryCount < 200 || oldestEntry?.unit.key !== `turn:${oldestEntry?.turn.id}:user`)
+            ) {
+              const older = yield* transcripts.page(thread.id, {
+                before: oldestCursor,
+                limit: entryCount < 200 ? Math.min(50, 200 - entryCount) : 50,
+              })
+              if (older.entries.length === 0) break
+              olderPages.push(older.entries)
+              entryCount += older.entries.length
+              oldestEntry = older.entries[0] ?? oldestEntry
+              oldestCursor = older.oldestCursor
+              storedHasOlder = older.hasOlder
+            }
+          const entries = olderPages.length === 0 ? page.entries : olderPages.toReversed().flat().concat(page.entries)
+          const hasOlder = storedHasOlder || (yield* Ref.get(transcriptHasUnprojectedTurns))
           const completedAt = yield* Clock.currentTimeMillis
-          yield* Ref.set(transcriptCursor, page.oldestCursor)
+          yield* Ref.set(transcriptCursor, oldestCursor)
           yield* Ref.set(transcriptHasOlder, hasOlder)
           if (before === undefined) {
             yield* Ref.set(interactiveThread, thread)
             dispatch({
               _tag: "TranscriptPageReceived",
               thread,
-              entries: page.entries,
+              entries,
               hasOlder,
-              ...(page.oldestCursor === undefined ? {} : { oldestCursor: page.oldestCursor }),
+              threadCostUsd: page.threadCostUsd,
+              ...(oldestCursor === undefined ? {} : { oldestCursor }),
             })
             dispatch({ _tag: "QueueChanged", threadId: thread.id, turns: yield* turns.listQueued(thread.id) })
           } else
             dispatch({
               _tag: "TranscriptPagePrepended",
               threadId: thread.id,
-              entries: page.entries,
+              entries,
               hasOlder,
-              ...(page.oldestCursor === undefined ? {} : { oldestCursor: page.oldestCursor }),
+              threadCostUsd: page.threadCostUsd,
+              ...(oldestCursor === undefined ? {} : { oldestCursor }),
             })
           yield* Effect.logInfo("transcript.page.loaded").pipe(
             Effect.annotateLogs({
               "rika.thread.id": String(thread.id),
               "rika.transcript.page.kind": before === undefined ? "initial" : "prepend",
-              "rika.transcript.page.units": page.entries.length,
+              "rika.transcript.page.units": entries.length,
               "rika.transcript.page.has_older": hasOlder,
               "rika.duration.ms": completedAt - loadedAt,
             }),
@@ -1895,12 +1896,15 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 const turnId = Turn.TurnId.make(id)
                 const thread = yield* Ref.get(interactiveThread)
                 if (thread === undefined) return yield* operationError("No thread selected")
-                dispatch({
-                  _tag: "ExecutionReplayed",
-                  threadId: thread.id,
-                  turnId,
-                  result: yield* backend.replay(id, cursor),
-                })
+                const result = yield* backend.replay(id, cursor)
+                for (const event of result.events)
+                  dispatch({
+                    _tag: "TranscriptPatched",
+                    threadId: thread.id,
+                    turnId,
+                    event,
+                    revision: event.sequence,
+                  })
               }),
             ),
         }

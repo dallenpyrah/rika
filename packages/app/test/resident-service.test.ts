@@ -79,6 +79,7 @@ describe("resident service protocol", () => {
         },
         entries: [],
         hasOlder: false,
+        threadCostUsd: 0,
       },
     })
     const encoded = Schema.encodeSync(ServerMessage)(message)

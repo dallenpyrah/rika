@@ -3,6 +3,7 @@
 
 
 
+
  Δ src/renamed.ts ▾
   0  0  similarity index 92%
   1  1  rename from src/old.ts
@@ -16,7 +17,6 @@
     21 +another addition with a deliberately long value that exercises
  clipping …
  21 22  Binary files assets/old.png and assets/new.png differ
-   src/renamed.ts
 ╭─────────────────────────────────────────────────────────────────────── high ─╮
 │                                                                              │
 │                                                                              │

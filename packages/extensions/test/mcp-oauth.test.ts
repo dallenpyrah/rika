@@ -1,61 +1,52 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
+import * as BunHttpServer from "@effect/platform-bun/BunHttpServer"
 import { OAuth } from "@batonfx/mcp"
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Fiber, FileSystem, Layer, Option, Redacted } from "effect"
+import { Context, Effect, Fiber, FileSystem, Layer, Option, Redacted, Ref } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { McpOAuth } from "../src"
+
+const spawnerLayer = (exitCode: Ref.Ref<number>) =>
+  Layer.effect(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.ChildProcessSpawner.pipe(
+      Effect.map((spawner) =>
+        ChildProcessSpawner.make(() =>
+          Ref.get(exitCode).pipe(
+            Effect.flatMap((code) =>
+              spawner.spawn(ChildProcess.make("sh", ["-c", `exit ${code}`], { stdout: "ignore", stderr: "ignore" })),
+            ),
+          ),
+        ),
+      ),
+    ),
+  ).pipe(Layer.provide(BunServices.layer))
 
 describe("McpOAuth", () => {
   it.effect("opens the browser and maps command failures", () =>
     Effect.gen(function* () {
-      const original = Bun.spawn
-      yield* Effect.acquireRelease(
-        Effect.sync(() => Object.assign(Bun, { spawn: () => original(["sh", "-c", "exit 0"]) })),
-        () => Effect.sync(() => Object.assign(Bun, { spawn: original })),
-      )
-      const context = yield* Layer.build(McpOAuth.hostLayer)
+      const exitCode = yield* Ref.make(0)
+      const context = yield* Layer.build(McpOAuth.hostLayer.pipe(Layer.provide(spawnerLayer(exitCode))))
       const host = Context.get(context, McpOAuth.Host)
       yield* host.open("https://example.test/authorize")
-      Object.assign(Bun, { spawn: () => original(["sh", "-c", "exit 1"]) })
+      yield* Ref.set(exitCode, 1)
       const error = yield* Effect.flip(host.open("https://example.test/authorize"))
       expect(error.operation).toBe("open-browser")
     }),
   )
 
-  it.effect("selects the browser command for every supported platform", () =>
-    Effect.gen(function* () {
-      const originalSpawn = Bun.spawn
-      const originalPlatform = process.platform
-      const commands: Array<Array<string>> = []
-      yield* Effect.acquireRelease(
-        Effect.sync(() =>
-          Object.assign(Bun, {
-            spawn: (command: Array<string>) => {
-              commands.push(command)
-              return originalSpawn(["sh", "-c", "exit 0"])
-            },
-          }),
-        ),
-        () =>
-          Effect.sync(() => {
-            Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true })
-            Object.assign(Bun, { spawn: originalSpawn })
-          }),
-      )
-      const context = yield* Layer.build(McpOAuth.hostLayer)
-      const host = Context.get(context, McpOAuth.Host)
-      yield* Effect.forEach(["darwin", "win32", "linux"], (platform) =>
-        Effect.sync(() => {
-          Object.defineProperty(process, "platform", { value: platform, configurable: true })
-        }).pipe(Effect.andThen(host.open("https://example.test/authorize"))),
-      )
-      expect(commands).toEqual([
-        ["open", "https://example.test/authorize"],
-        ["cmd", "/c", "start", "", "https://example.test/authorize"],
-        ["xdg-open", "https://example.test/authorize"],
-      ])
-    }),
-  )
+  it("selects the browser command for every supported platform", () => {
+    expect(
+      (["darwin", "win32", "linux"] as const).map((platform) =>
+        McpOAuth.browserCommand(platform, "https://example.test/authorize"),
+      ),
+    ).toEqual([
+      { command: "open", args: ["https://example.test/authorize"] },
+      { command: "cmd", args: ["/c", "start", "", "https://example.test/authorize"] },
+      { command: "xdg-open", args: ["https://example.test/authorize"] },
+    ])
+  })
 
   it.layer(BunServices.layer)((test) => {
     test.effect("persists redacted tokens in a protected file and removes individual servers", () =>
@@ -103,7 +94,7 @@ describe("McpOAuth", () => {
     )
   })
 
-  it.layer(FetchHttpClient.layer)((test) => {
+  it.layer(Layer.merge(FetchHttpClient.layer, BunServices.layer))((test) => {
     test.effect("hosts the real callback path, rejects other paths, and maps bind errors", () =>
       Effect.gen(function* () {
         const context = yield* Layer.build(McpOAuth.hostLayer)
@@ -117,9 +108,8 @@ describe("McpOAuth", () => {
         )
         expect(yield* response.text).toContain("Authentication complete")
         expect(yield* Fiber.join(callback)).toContain("code=ok")
-        const occupied = Bun.serve({ hostname: "127.0.0.1", port: 17839, fetch: () => new Response() })
+        yield* BunHttpServer.make({ hostname: "127.0.0.1", port: 17839 })
         const error = yield* Effect.flip(host.callback("http://127.0.0.1:17839/oauth/callback"))
-        occupied.stop()
         expect(error.operation).toBe("callback")
         expect(error.message).not.toContain("secret")
       }),

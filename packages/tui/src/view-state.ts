@@ -3,7 +3,7 @@ import { Function, Schema } from "effect"
 import type { Key } from "./keys"
 import { isPrintable } from "./keys"
 import { filter, type PaletteAction } from "./palette"
-import { expandableUnits, transcriptUnitId, unitToggleTargets } from "./transcript-units"
+import { expandableRowIds, transcriptUnitId, transcriptUnits } from "./transcript-units"
 
 export const Mode = Schema.Literals(["low", "medium", "high", "ultra"])
 export const ReasoningEffort = Schema.Literals(["low", "medium", "high", "xhigh"])
@@ -217,6 +217,7 @@ export const Model = Schema.Struct({
   queueSelection: Schema.optional(Schema.String),
   queue: Schema.Array(Schema.Unknown),
   detailSelection: Schema.optional(Schema.String),
+  expandedRowKeys: Schema.Array(Schema.String),
   seenEventIds: Schema.Array(Schema.String),
   seenExecutionEventKeys: Schema.Array(Schema.String),
   activeTurnId: Schema.optional(Schema.String),
@@ -229,9 +230,6 @@ export const Model = Schema.Struct({
   changedFiles: ChangedFilesSchema,
   sidebarWidth: Schema.Finite,
   threadLoading: Schema.Boolean,
-  toolCallDrafts: Schema.Array(
-    Schema.Struct({ id: Schema.String, name: Schema.optional(Schema.String), text: Schema.String }),
-  ),
   threadPreview: ThreadPreviewSchema,
 })
 export type Model = typeof Model.Type
@@ -291,7 +289,6 @@ export type Message =
       readonly threadId: string
       readonly turns: ReadonlyArray<{ readonly prompt: string; readonly events: ReadonlyArray<unknown> }>
     }
-  | { readonly _tag: "ToolCallDeltaReceived"; readonly id: string; readonly name?: string; readonly delta: string }
 
 export interface QueueItem {
   readonly id: string
@@ -363,6 +360,7 @@ export const initial: {
     permissionSelection: 0,
     queueSelection: undefined,
     queue: [],
+    expandedRowKeys: [],
     seenEventIds: [],
     seenExecutionEventKeys: [],
     activeTurnId: undefined,
@@ -373,7 +371,6 @@ export const initial: {
     sidebarWidth: 36,
     threadLoading: false,
     threadPreview: idle,
-    toolCallDrafts: [],
   }),
 )
 
@@ -791,13 +788,6 @@ export const update: {
           items,
           seenEventIds: [...model.seenEventIds, message.event.id],
           eventCursor: message.event.cursor,
-          ...(incoming._tag === "ToolCall"
-            ? {
-                toolCallDrafts: (
-                  model.toolCallDrafts as ReadonlyArray<{ id: string; name?: string; text: string }>
-                ).filter((draft) => draft.id !== incoming.id),
-              }
-            : {}),
           ...(model.busy
             ? {
                 busyStatus:
@@ -851,7 +841,6 @@ export const update: {
             historySearch: "",
             busy: true,
             busyStatus: "Waiting",
-            toolCallDrafts: [],
           }
     case "TurnStarted":
       if (model.entries.some((entry) => entry.role === "user" && entry.turnId === message.turnId))
@@ -882,7 +871,7 @@ export const update: {
       if (last?._tag === "Reasoning" && lastItem?._tag === "Block")
         blocks[lastItem.index] = { ...last, text: last.text + message.text }
       else {
-        blocks.push({ _tag: "Reasoning", text: message.text, expanded: false })
+        blocks.push({ _tag: "Reasoning", text: message.text })
         return {
           ...model,
           blocks,
@@ -892,18 +881,17 @@ export const update: {
       }
       return { ...model, blocks, ...(model.busy ? { busyStatus: "Thinking" } : {}) }
     }
-    case "ReasoningToggled":
-      return {
-        ...model,
-        blocks: model.blocks.map((block, index) =>
-          index === message.index && (block as TranscriptBlock)._tag === "Reasoning"
-            ? {
-                ...(block as Extract<TranscriptBlock, { _tag: "Reasoning" }>),
-                expanded: !(block as Extract<TranscriptBlock, { _tag: "Reasoning" }>).expanded,
-              }
-            : block,
-        ),
-      }
+    case "ReasoningToggled": {
+      const unit = transcriptUnits(model).find(
+        (candidate) => candidate.kind === "reasoning" && candidate.block === message.index,
+      )
+      if (unit === undefined) return model
+      const id = transcriptUnitId(model, unit)
+      const expanded = new Set(model.expandedRowKeys)
+      if (expanded.has(id)) expanded.delete(id)
+      else expanded.add(id)
+      return { ...model, expandedRowKeys: [...expanded] }
+    }
     case "QueuedEdited":
       return {
         ...model,
@@ -1036,30 +1024,25 @@ export const update: {
     case "UsageReported":
       return message.costUsd === undefined ? model : { ...model, costUsd: (model.costUsd ?? 0) + message.costUsd }
     case "DetailMoved": {
-      const units = expandableUnits(model)
-      const count = units.length
+      const ids = expandableRowIds(model)
+      const count = ids.length
       if (count === 0) return model
-      const current = units.findIndex((unit) => transcriptUnitId(model, unit) === model.detailSelection)
+      const current = ids.indexOf(model.detailSelection ?? "")
       const nextIndex =
         current < 0 ? (message.offset < 0 ? count - 1 : 0) : (((current + message.offset) % count) + count) % count
-      return { ...model, detailSelection: transcriptUnitId(model, units[nextIndex]!) }
+      return { ...model, detailSelection: ids[nextIndex]! }
     }
     case "DetailToggled": {
-      const units = expandableUnits(model)
       const id = message.id ?? model.detailSelection
       if (id === undefined) return model
-      const unit = units.find((candidate) => transcriptUnitId(model, candidate) === id)
-      if (unit === undefined) return model
-      const targets = new Set(unitToggleTargets(unit))
-      const groupExpanded = [...targets].some(
-        (blockIndex) => (model.blocks[blockIndex] as TranscriptBlock & { expanded?: boolean }).expanded === true,
-      )
+      if (!expandableRowIds(model).includes(id)) return model
+      const expanded = new Set(model.expandedRowKeys)
+      if (expanded.has(id)) expanded.delete(id)
+      else expanded.add(id)
       return {
         ...model,
         detailSelection: id,
-        blocks: model.blocks.map((block, blockIndex) =>
-          targets.has(blockIndex) ? { ...(block as object), expanded: !groupExpanded } : block,
-        ),
+        expandedRowKeys: [...expanded],
       }
     }
     case "FastModeToggled":
@@ -1094,20 +1077,6 @@ export const update: {
           turns: message.turns.map((turn) => ({ prompt: turn.prompt, events: [...turn.events] })),
         }),
       }
-    case "ToolCallDeltaReceived": {
-      const drafts = model.toolCallDrafts as ReadonlyArray<{ id: string; name?: string; text: string }>
-      const index = drafts.findIndex((draft) => draft.id === message.id)
-      const previous = index >= 0 ? drafts[index]! : undefined
-      const name = message.name ?? previous?.name
-      const updated = {
-        id: message.id,
-        text: (previous?.text ?? "") + message.delta,
-        ...(name === undefined ? {} : { name }),
-      }
-      const next = previous === undefined ? [...drafts, updated] : drafts.slice()
-      if (previous !== undefined) next[index] = updated
-      return { ...model, toolCallDrafts: next }
-    }
     case "ComposerReplaced":
       return { ...model, input: message.text, cursor: message.text.length, pastedText: [] }
     case "KeyPressed": {

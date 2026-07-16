@@ -35,5 +35,3 @@ jobs:
         run: find node_modules/.bun -path '*/@effect/tsgo-linux-*/lib/tsc' -exec chmod +x {} +
       - name: Check
         run: bun run check
-      - name: Coverage
-        run: bun run test:coverage

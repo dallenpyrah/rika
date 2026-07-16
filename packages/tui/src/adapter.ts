@@ -21,8 +21,10 @@ import {
 } from "@opentui/core"
 import type { ColorInput, KeyEvent, MouseEvent, PasteEvent } from "@opentui/core"
 import cliSpinners from "cli-spinners"
-import { Clock, Effect, Fiber, Function, Schedule } from "effect"
+import * as Transcript from "@rika/transcript"
+import { Clock, Effect, Fiber, Function, Option, Schedule, Schema } from "effect"
 import stringWidth from "string-width"
+import { cursorBlink } from "./cursor-blink"
 import { fromOpenTui, type Key } from "./keys"
 import {
   composerHeight,
@@ -42,7 +44,7 @@ import {
   type TranscriptItem,
 } from "./view-state"
 import type { ThreadItem, TranscriptBlock } from "./view-state"
-import { projectTurn, type Event } from "./execution-events"
+import { projectUnits, type Event } from "./execution-events"
 import { filter, type Command } from "./palette"
 import { colors, spacing } from "./theme"
 import { renderMarkdown, renderMarkdownStyled } from "./markdown-renderer"
@@ -63,6 +65,13 @@ import {
 export const spinnerFrames: ReadonlyArray<string> = cliSpinners.dots.frames
 export const spinnerInterval = 160
 export const idleSpinnerFrame = "⠿"
+
+export class AdapterError extends Schema.TaggedErrorClass<AdapterError>()("TuiAdapterError", {
+  message: Schema.String,
+}) {}
+
+const adapterError = (cause: unknown) => AdapterError.make({ message: String(cause) })
+
 export const loaderFrame: {
   (phase: string | undefined, frame: number): string
   (frame: number): (phase: string | undefined) => string
@@ -79,14 +88,14 @@ export const renderBlock: {
   (block: TranscriptBlock, width = 80): string => {
     switch (block._tag) {
       case "Reasoning":
-        return block.expanded ? `◇ Reasoning\n  ${block.text}` : "◇ Reasoning (collapsed)"
+        return `◇ Reasoning\n  ${block.text}`
       case "ToolCall": {
         return renderTool(block, width)
       }
       case "ToolResult":
         return `${block.failed ? "✕" : "✓"} Result\n  ${block.output}`
       case "Diff":
-        return block.expanded === true ? `Δ ${block.path} ▾\n${renderDiff(block.patch, width)}` : `Δ ${block.path} ▸`
+        return `Δ ${block.path}\n${renderDiff(block.patch, width)}`
       case "ContextUsage":
         return `◷ Context ${block.text}${block.cost === undefined ? "" : ` · ${block.cost}`}`
       case "Compaction":
@@ -351,14 +360,10 @@ export const renderTranscript = (model: Model): string => {
   return welcome + ordered.join("\n\n")
 }
 
-const toolInputValue = (input: string): Record<string, unknown> => {
-  try {
-    const parsed = JSON.parse(input)
-    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {}
-  } catch {
-    return {}
-  }
-}
+const ToolInputJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+
+const toolInputValue = (input: string): Record<string, unknown> =>
+  Option.getOrElse(Schema.decodeUnknownOption(ToolInputJson)(input), () => ({}))
 
 const inputString = (value: Record<string, unknown>, keys: ReadonlyArray<string>): string | undefined => {
   for (const key of keys) {
@@ -386,14 +391,18 @@ const diffCounts = (patch: string): readonly [number, number] => {
 
 const shellCommandText = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): string => {
   const value = toolInputValue(block.input)
-  return inputString(value, ["command", "cmd", "script"]) ?? block.input
+  return block.detail || inputString(value, ["command", "cmd", "script"]) || block.input
 }
+
+const shellExitCode = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): number | undefined =>
+  block.process?.exitCode
 
 const exploreChildLabel = (unit: ToolUnit): string => {
   const value = toolInputValue(unit.block.input)
-  if (unit.kind === "read") return `Read ${inputString(value, ["path", "file_path", "file"]) ?? unit.block.name}`
+  if (unit.kind === "read")
+    return `Read ${unit.block.detail || inputString(value, ["path", "file_path", "file"]) || unit.block.name}`
   const pattern = inputString(value, ["pattern", "query", "glob", "path"])
-  return `${unit.block.name === "grep" ? "Grep" : "Searched"} ${pattern ?? ""}`.trimEnd()
+  return `${unit.block.presentation.action === "grep" ? "Grep" : "Searched"} ${unit.block.detail || pattern || ""}`.trimEnd()
 }
 
 const plural = (count: number, singular: string): string => `${count} ${singular}${count === 1 ? "" : "s"}`
@@ -408,6 +417,7 @@ export interface UnitLineRange {
   readonly end: number
   readonly unit: string
   readonly expandable: boolean
+  readonly gapBefore?: boolean
   readonly targets?: ReadonlyArray<PathTarget>
 }
 
@@ -460,7 +470,7 @@ export const boundedTranscriptModel: {
 const toolUnitsFor = (model: Model, indices: ReadonlyArray<number>): ReadonlyArray<ToolUnit> =>
   indices.map((index) => {
     const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
-    return { kind: toolKind(block.name), block, index }
+    return { kind: toolKind(block.name, undefined), block, index }
   })
 
 export const buildTranscript: {
@@ -486,7 +496,9 @@ export const buildTranscript: {
     const statusIcon = (failed: boolean, running: boolean): TextChunk =>
       running ? fg(colors.blue)(spinnerFrame) : failed ? fg(colors.red)("✕") : fg(colors.green)("✓")
     const marker = (expanded: boolean): TextChunk => fg(colors.subtle)(expanded ? " ▾" : " ▸")
+    const rowExpanded = (id: string): boolean => model.expandedRowKeys.includes(id)
     const highlight = (text: string) => append(bold(fg(colors.blue)(text)))
+    let nestedRanges: Array<UnitLineRange> = []
     const renderEntryBody = (index: number) => {
       const entry = model.entries[index]!
       if (entry.role === "assistant") {
@@ -518,16 +530,19 @@ export const buildTranscript: {
         append(italic(fg(colors.green)(current)))
       })
     }
-    const renderExploreBody = (units: ReadonlyArray<ToolUnit>, selected: boolean) => {
-      const files = units.filter((unit) => unit.kind === "read").length
-      const searches = units.length - files
+    const renderExploreBody = (units: ReadonlyArray<ToolUnit>, selected: boolean, expanded: boolean) => {
       const failed = units.some((unit) => unit.block.status === "failed")
       const running = units.some((unit) => unit.block.status === "running")
-      const expanded = units.some((unit) => unit.block.expanded === true)
-      const counts = [
-        ...(files > 0 ? [plural(files, "file")] : []),
-        ...(searches > 0 ? [plural(searches, "search").replace("searchs", "searches")] : []),
-      ].join(", ")
+      const counters = new Map<string, number>()
+      for (const unit of units) {
+        const counter = unit.block.presentation.counter ?? (unit.kind === "read" ? "file" : "search")
+        counters.set(counter, (counters.get(counter) ?? 0) + 1)
+      }
+      const counts = [...counters]
+        .map(([counter, count]) =>
+          counter === "search" ? plural(count, counter).replace("searchs", "searches") : plural(count, counter),
+        )
+        .join(", ")
       if (selected)
         highlight(
           `${iconChar(failed, running, spinnerFrame)} ${running ? "Exploring" : "Explored"} ${counts.length > 0 ? counts : "workspace"}${markerText(expanded)}`,
@@ -541,29 +556,54 @@ export const buildTranscript: {
       if (expanded)
         for (const unit of units) {
           append(fg(colors.text)("\n "))
+          const start = line
           append(statusIcon(unit.block.status === "failed", unit.block.status === "running"))
           const label = exploreChildLabel(unit)
+          const childId = `tool-child:${unit.block.id}`
           const verbEnd = label.indexOf(" ")
           if (verbEnd === -1) append(fg(colors.text)(` ${label}`))
           else {
             append(fg(colors.text)(` ${label.slice(0, verbEnd)}`))
             append(dim(fg(colors.text)(label.slice(verbEnd))))
           }
+          const output =
+            unit.block.status === "failed"
+              ? unit.block.output?.split("\n").find((value) => value.length > 0)
+              : undefined
+          if (output !== undefined) append(dim(fg(colors.text)(` ${output}`)))
+          const detail = toolDetails(model, { kind: "tool", group: "explore", blocks: [unit.index], diffs: [] })[0]
+          nestedRanges.push({
+            start,
+            end: line,
+            unit: childId,
+            expandable: false,
+            ...(detail?.target === undefined ? {} : { targets: [detail.target] }),
+          })
         }
     }
-    const renderEditBody = (units: ReadonlyArray<ToolUnit>, diffs: ReadonlyArray<number>, selected: boolean) => {
+    const renderEditBody = (
+      units: ReadonlyArray<ToolUnit>,
+      diffs: ReadonlyArray<number>,
+      selected: boolean,
+      expanded: boolean,
+    ) => {
       const failed = units.some((unit) => unit.block.status === "failed")
       const running = units.some((unit) => unit.block.status === "running")
-      const expanded = units.some((unit) => unit.block.expanded === true)
       const paths = [
         ...new Set(
-          units.map(
-            (unit) => inputString(toolInputValue(unit.block.input), ["path", "file_path", "file"]) ?? unit.block.name,
+          units.flatMap((unit) =>
+            unit.block.files.length > 0
+              ? unit.block.files.map((file) => file.path)
+              : [inputString(toolInputValue(unit.block.input), ["path", "file_path", "file"]) ?? unit.block.name],
           ),
         ),
       ]
       let added = 0
       let removed = 0
+      for (const file of units.flatMap((unit) => unit.block.files)) {
+        added += file.additions
+        removed += file.deletions
+      }
       for (const diffIndex of diffs) {
         const diff = model.blocks[diffIndex] as Extract<TranscriptBlock, { _tag: "Diff" }>
         const [a, r] = diffCounts(diff.patch)
@@ -571,14 +611,20 @@ export const buildTranscript: {
         removed += r
       }
       const label = paths.length === 1 ? paths[0] : plural(paths.length, "file")
+      const verb =
+        paths.length === 1 && units.length === 1
+          ? running
+            ? units[0]!.block.presentation.activeLabel
+            : units[0]!.block.presentation.completeLabel
+          : running
+            ? "Editing"
+            : "Edited"
       const counts = added > 0 || removed > 0 ? ` +${added} -${removed}` : ""
       if (selected)
-        highlight(
-          `${iconChar(failed, running)} ${running ? "Editing" : "Edited"} ${label}${counts}${markerText(expanded)}`,
-        )
+        highlight(`${iconChar(failed, running, spinnerFrame)} ${verb} ${label}${counts}${markerText(expanded)}`)
       else {
         append(statusIcon(failed, running))
-        append(fg(colors.text)(running ? " Editing" : " Edited"))
+        append(fg(colors.text)(` ${verb}`))
         append(dim(fg(colors.text)(` ${label}`)))
         if (added > 0 || removed > 0) {
           append(fg(colors.green)(` +${added}`))
@@ -586,21 +632,56 @@ export const buildTranscript: {
         }
         append(marker(expanded))
       }
-      if (expanded)
+      if (expanded) {
+        const files = units.flatMap((unit) => unit.block.files)
+        if (files.length === 1) {
+          const file = files[0]!
+          if (file.patch.length > 0) {
+            append(fg(colors.text)("\n"))
+            appendAll(renderPierreDiff(file.patch, model.width) ?? renderDiffStyled(file.patch, model.width))
+          }
+        } else {
+          for (const file of files) {
+            append(fg(colors.text)("\n  "))
+            const start = line
+            const childId = `file:${file.key}`
+            const childExpanded = rowExpanded(childId) || running
+            append(statusIcon(file.status === "failed", file.status === "running"))
+            append(fg(colors.text)(` Edit ${file.path}`))
+            if (file.additions > 0) append(fg(colors.green)(` +${file.additions}`))
+            if (file.deletions > 0) append(fg(colors.red)(` -${file.deletions}`))
+            append(marker(childExpanded))
+            if (childExpanded && file.patch.length > 0) {
+              append(fg(colors.text)("\n"))
+              appendAll(renderPierreDiff(file.patch, model.width) ?? renderDiffStyled(file.patch, model.width))
+            }
+            nestedRanges.push({ start, end: line, unit: childId, expandable: true, targets: [{ path: file.path }] })
+          }
+        }
         for (const diffIndex of diffs) {
           const diff = model.blocks[diffIndex] as Extract<TranscriptBlock, { _tag: "Diff" }>
           append(fg(colors.text)("\n"))
+          const start = line
           appendAll(renderPierreDiff(diff.patch, model.width) ?? renderDiffStyled(diff.patch, model.width))
+          nestedRanges.push({
+            start,
+            end: line,
+            unit: `diff-child:${diffIndex}`,
+            expandable: false,
+            targets: [{ path: diff.path }],
+          })
         }
+      }
     }
-    const renderShellSingleBody = (unit: ToolUnit, selected: boolean) => {
+    const renderShellSingleBody = (unit: ToolUnit, selected: boolean, expanded: boolean) => {
       const command = shellCommandText(unit.block)
       const failed = unit.block.status === "failed"
-      const expanded = unit.block.expanded === true
       const lines = command.split("\n")
+      const expandable = unit.block.output !== undefined && unit.block.output.length > 0
+      const exitCode = shellExitCode(unit.block)
       if (selected) {
-        const exit = failed ? " (exit code: 1)" : ""
-        highlight(`$ ${lines.join("\n    ")}${exit}${markerText(expanded)}`)
+        const exit = failed ? ` (exit code: ${exitCode ?? 1})` : ""
+        highlight(`$ ${lines.join("\n    ")}${exit}${expandable ? markerText(expanded) : ""}`)
       } else {
         lines.forEach((current, lineIndex) => {
           if (lineIndex === 0) {
@@ -608,22 +689,21 @@ export const buildTranscript: {
             append(fg(colors.text)(current))
           } else append(fg(colors.text)(`\n    ${current}`))
         })
-        if (failed) append(fg(colors.red)(" (exit code: 1)"))
-        append(marker(expanded))
+        if (failed) append(fg(colors.red)(` (exit code: ${exitCode ?? 1})`))
+        if (expandable) append(marker(expanded))
       }
       if (expanded && unit.block.output !== undefined) {
         append(fg(colors.text)("\n"))
         append(dim(fg(colors.text)(unit.block.output.split("\n").slice(0, 12).join("\n"))))
       }
     }
-    const renderShellBody = (units: ReadonlyArray<ToolUnit>, selected: boolean) => {
+    const renderShellBody = (units: ReadonlyArray<ToolUnit>, selected: boolean, expanded: boolean) => {
       if (units.length === 1) {
-        renderShellSingleBody(units[0]!, selected)
+        renderShellSingleBody(units[0]!, selected, expanded)
         return
       }
       const failedCount = units.filter((unit) => unit.block.status === "failed").length
       const running = units.some((unit) => unit.block.status === "running")
-      const expanded = units.some((unit) => unit.block.expanded === true)
       if (selected)
         highlight(
           `${iconChar(failedCount > 0, running)} ${running ? "Running" : "Ran"} ${plural(units.length, "command")}${failedCount > 0 ? `, ${failedCount} failed` : ""}${markerText(expanded)}`,
@@ -637,31 +717,47 @@ export const buildTranscript: {
       }
       if (expanded)
         for (const unit of units) {
-          append(fg(colors.text)("\n "))
-          append(statusIcon(unit.block.status === "failed", unit.block.status === "running"))
-          append(fg(colors.muted)(` $ ${shellCommandText(unit.block).split("\n")[0]}`))
+          append(fg(colors.text)("\n   "))
+          const start = line
+          const childId = `tool-child:${unit.block.id}`
+          const childExpanded = rowExpanded(childId)
+          const expandable = unit.block.output !== undefined && unit.block.output.length > 0
+          append(fg(colors.text)(`$ ${shellCommandText(unit.block).split("\n")[0]}`))
+          if (unit.block.status === "failed") append(fg(colors.red)(` (exit code: ${shellExitCode(unit.block) ?? 1})`))
+          if (expandable) append(marker(childExpanded))
+          if (expandable && childExpanded) {
+            append(fg(colors.text)("\n   "))
+            append(dim(fg(colors.text)(unit.block.output!.split("\n").slice(0, 12).join("\n   "))))
+          }
+          nestedRanges.push({ start, end: line, unit: childId, expandable })
         }
     }
-    const renderOtherToolBody = (unit: ToolUnit, selected: boolean) => {
+    const renderOtherToolBody = (unit: ToolUnit, selected: boolean, expanded: boolean) => {
       const failed = unit.block.status === "failed"
       const running = unit.block.status === "running"
-      const expanded = unit.block.expanded === true
+      const label = running ? unit.block.presentation.activeLabel : unit.block.presentation.completeLabel
+      const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
+      const agent = unit.block.presentation.family === "agent"
+      const expandable = agent
+        ? unit.block.detail.length > 0
+        : unit.block.output !== undefined && unit.block.output.length > 0
       if (selected)
         highlight(
-          `${iconChar(failed, running)} ${running ? "Running tool" : "Ran tool"} ${unit.block.name}${markerText(expanded)}`,
+          `${iconChar(failed, running, spinnerFrame)} ${label}${agent ? "" : detail}${expandable ? markerText(expanded) : ""}`,
         )
       else {
         append(statusIcon(failed, running))
-        append(fg(colors.text)(running ? " Running tool " : " Ran tool "))
-        append(fg(colors.text)(unit.block.name))
-        append(marker(expanded))
+        append(fg(colors.text)(` ${label}`))
+        if (!agent && detail.length > 0) append(dim(fg(colors.text)(detail)))
+        if (expandable) append(marker(expanded))
       }
-      if (expanded && unit.block.output !== undefined) {
+      if (expanded && agent && unit.block.detail.length > 0) append(dim(fg(colors.text)(`\n  ${unit.block.detail}`)))
+      else if (expanded && unit.block.output !== undefined) {
         append(fg(colors.text)("\n"))
         append(dim(fg(colors.text)(unit.block.output.split("\n").slice(0, 12).join("\n"))))
       }
     }
-    const renderChildAgentBody = (block: Extract<TranscriptBlock, { _tag: "ChildAgent" }>) => {
+    const renderChildAgentBody = (block: Extract<TranscriptBlock, { _tag: "ChildAgent" }>, expanded: boolean) => {
       const running = block.status === "running"
       const name = block.name.replace(/^rika-/, "")
       const display = name.charAt(0).toUpperCase() + name.slice(1)
@@ -677,11 +773,15 @@ export const buildTranscript: {
             : `${display} ${running ? "working" : block.status === "failed" ? "failed" : "finished"}`
       append(statusIcon(block.status === "failed", running))
       append(fg(colors.text)(` ${phrase}`))
-      append(marker(false))
+      append(marker(expanded))
+      if (expanded) {
+        if (block.summary.length > 0) append(dim(fg(colors.text)(`\n  ${block.summary}`)))
+        for (const activity of block.activity) append(dim(fg(colors.text)(`\n  ${activity}`)))
+      }
     }
-    const renderDiffBody = (index: number, selected: boolean) => {
+    const renderDiffBody = (index: number, selected: boolean, expanded: boolean) => {
       const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "Diff" }>
-      if (block.expanded === true) {
+      if (expanded) {
         append(bold(fg(selected ? colors.blue : colors.muted)(`Δ ${block.path} ▾\n`)))
         appendAll(renderPierreDiff(block.patch, model.width) ?? renderDiffStyled(block.patch, model.width))
         return
@@ -717,29 +817,34 @@ export const buildTranscript: {
     for (const unit of units) {
       const expandable = isExpandableUnit(unit)
       const id = transcriptUnitId(model, unit)
+      const expanded =
+        rowExpanded(id) ||
+        (unit.kind === "tool" &&
+          unit.group === "edit" &&
+          unit.blocks.some(
+            (block) => (model.blocks[block] as Extract<TranscriptBlock, { _tag: "ToolCall" }>).status === "running",
+          ))
       const selected = expandable && model.detailSelection === id
-      if (
-        unit.kind === "reasoning" &&
-        (model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "Reasoning" }>).expanded !== true
-      )
-        continue
+      if (unit.kind === "reasoning" && !expanded) continue
       newBlockGap()
       const start = line
+      nestedRanges = []
       if (unit.kind === "entry") renderEntryBody(unit.entry)
       else if (unit.kind === "reasoning") renderReasoningBody(unit.block, selected)
       else if (unit.kind === "childAgent")
-        renderChildAgentBody(model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "ChildAgent" }>)
-      else if (unit.kind === "diff") renderDiffBody(unit.block, selected)
+        renderChildAgentBody(model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "ChildAgent" }>, expanded)
+      else if (unit.kind === "diff") renderDiffBody(unit.block, selected, expanded)
       else if (unit.kind === "block") renderPlainBlock(unit.block)
-      else if (unit.group === "explore") renderExploreBody(toolUnitsFor(model, unit.blocks), selected)
-      else if (unit.group === "edit") renderEditBody(toolUnitsFor(model, unit.blocks), unit.diffs, selected)
-      else if (unit.group === "shell") renderShellBody(toolUnitsFor(model, unit.blocks), selected)
-      else for (const toolUnit of toolUnitsFor(model, unit.blocks)) renderOtherToolBody(toolUnit, selected)
+      else if (unit.group === "explore") renderExploreBody(toolUnitsFor(model, unit.blocks), selected, expanded)
+      else if (unit.group === "edit") renderEditBody(toolUnitsFor(model, unit.blocks), unit.diffs, selected, expanded)
+      else if (unit.group === "shell") renderShellBody(toolUnitsFor(model, unit.blocks), selected, expanded)
+      else for (const toolUnit of toolUnitsFor(model, unit.blocks)) renderOtherToolBody(toolUnit, selected, expanded)
       ranges.push({
         start,
-        end: line,
+        end: nestedRanges.length === 0 ? line : start,
         unit: id,
         expandable,
+        gapBefore: renderedUnits > 1,
         ...(unit.kind === "tool"
           ? {
               targets: toolDetails(model, unit).flatMap((detail) =>
@@ -750,33 +855,7 @@ export const buildTranscript: {
             ? { targets: [{ path: (model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "Diff" }>).path }] }
             : {}),
       })
-    }
-    for (const draft of model.toolCallDrafts as ReadonlyArray<{ id: string; name?: string; text: string }>) {
-      newBlockGap()
-      const start = line
-      const kind = toolKind(draft.name ?? "")
-      if (kind === "shell") {
-        const command = /"(?:command|cmd|script)"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(draft.text)?.[1] ?? ""
-        append(dim(fg(colors.text)("$ ")))
-        append(fg(colors.text)(command.replace(/\\n/g, " ")))
-        append(dim(fg(colors.text)(" …")))
-      } else if (kind === "edit") {
-        const path = /"(?:path|file_path|file)"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(draft.text)?.[1]
-        append(fg(colors.blue)(spinnerFrame))
-        append(fg(colors.text)(" Editing"))
-        append(dim(fg(colors.text)(` ${path ?? "…"}`)))
-        append(dim(fg(colors.text)(" …")))
-        const tail = draft.text.split("\n").slice(-6).join("\n")
-        if (tail.length > 0) {
-          append(fg(colors.text)("\n"))
-          append(dim(fg(colors.text)(tail.slice(-Math.max(1, model.width * 6)))))
-        }
-      } else {
-        append(fg(colors.blue)(spinnerFrame))
-        append(fg(colors.text)(` Running tool ${draft.name ?? "…"}`))
-        append(dim(fg(colors.text)(" …")))
-      }
-      ranges.push({ start, end: line, unit: `draft:${draft.id}`, expandable: false })
+      ranges.push(...nestedRanges)
     }
     return { styled: new StyledText(chunks), ranges }
   },
@@ -834,7 +913,7 @@ interface TranscriptRenderInput {
   readonly entries: Model["entries"]
   readonly blocks: Model["blocks"]
   readonly items: Model["items"]
-  readonly toolCallDrafts: Model["toolCallDrafts"]
+  readonly expandedRowKeys: Model["expandedRowKeys"]
   readonly detailSelection: Model["detailSelection"]
   readonly permissionSelection: number
   readonly width: number
@@ -842,7 +921,7 @@ interface TranscriptRenderInput {
 }
 
 const mouseSequencePattern = new RegExp(`^(?:${String.fromCharCode(27)}?\\[)?<?\\d+(?:;\\d+)*[Mm]?$`)
-const typingCursorStyle = { style: "default" } as const
+const typingCursorStyle = { style: "block", blinking: false } as const
 
 const cutoutBackground = (renderer: CliRenderer): RGBA => {
   const background: unknown = Reflect.get(renderer, "backgroundColor")
@@ -933,6 +1012,8 @@ export class Surface {
   private scrollGeneration = 0
   private destroyed = false
   private focusedEditor: ProjectedEditorRenderable | undefined
+  private cursorTimer: Fiber.Fiber<void> | undefined
+  private cursorGeneration = 0
 
   constructor(
     private readonly renderer: CliRenderer,
@@ -1126,7 +1207,7 @@ export class Surface {
       scrollY: true,
       viewportCulling: true,
       verticalScrollbarOptions: { marginRight: 1 },
-      onMouseScroll: () => queueMicrotask(() => this.refreshSidebarWindow()),
+      onMouseScroll: () => this.defer(() => this.refreshSidebarWindow()),
     })
     this.changedFilesBox.onWindowChanged = () => this.refreshSidebarWindow()
     this.changedFilesBefore = new BoxRenderable(renderer, { height: 0, flexShrink: 0 })
@@ -1210,6 +1291,7 @@ export class Surface {
   private readonly onKey = (key: KeyEvent) => {
     const mapped = fromOpenTui(key)
     if (this.suppressMouseJunk(mapped)) return
+    this.wakeCursor()
     if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "pageup") {
       this.transcriptScroll.stickyScroll = false
       const amount = Math.max(1, this.transcriptScroll.viewport.height - 1)
@@ -1291,13 +1373,13 @@ export class Surface {
   }
   private queueTranscriptScroll(action: () => void): void {
     const generation = this.scrollGeneration
-    queueMicrotask(() => {
+    this.defer(() => {
       if (this.destroyed || generation !== this.scrollGeneration) return
       action()
     })
   }
   private anchorTranscriptAfterLayout(): void {
-    queueMicrotask(() => {
+    this.defer(() => {
       if (this.model === undefined) return
       this.syncTranscriptScrollbar()
     })
@@ -1305,7 +1387,7 @@ export class Surface {
   private followTranscriptAfterLayout(): void {
     if (this.scrollFramePending) return
     this.scrollFramePending = true
-    queueMicrotask(() => {
+    this.defer(() => {
       this.scrollFramePending = false
       if (this.model?.scrollFollow !== true) return
       this.scrollProgrammatic = true
@@ -1322,6 +1404,10 @@ export class Surface {
 
   private cancelTimer(timer: Fiber.Fiber<void> | undefined): void {
     timer?.interruptUnsafe()
+  }
+
+  private defer(action: () => void): void {
+    Effect.runFork(Effect.yieldNow.pipe(Effect.andThen(Effect.sync(action))))
   }
 
   private delayed(duration: number, action: () => void): Fiber.Fiber<void> {
@@ -1385,12 +1471,15 @@ export class Surface {
   private readonly onPaste = (event: PasteEvent) => {
     const mediaType = event.metadata?.mimeType?.toLowerCase()
     if (event.metadata?.kind === "binary" || mediaType?.startsWith("image/") === true) {
-      if (event.bytes.length > 0)
+      if (event.bytes.length > 0) {
+        this.wakeCursor()
         this.handlers.pasteImage?.(mediaType === undefined ? { bytes: event.bytes } : { bytes: event.bytes, mediaType })
+      }
       return
     }
     const text = stripAnsiSequences(decodePasteBytes(event.bytes))
     if (text.length === 0) return
+    this.wakeCursor()
     const now = Effect.runSync(Clock.currentTimeMillis)
     const attachment = this.model?.pastedText.findLast(
       (candidate) => candidate.type === "text" && candidate.value === text,
@@ -1560,7 +1649,7 @@ export class Surface {
       previous.entries !== input.entries ||
       previous.blocks !== input.blocks ||
       previous.items !== input.items ||
-      previous.toolCallDrafts !== input.toolCallDrafts ||
+      previous.expandedRowKeys !== input.expandedRowKeys ||
       previous.detailSelection !== input.detailSelection ||
       previous.permissionSelection !== input.permissionSelection ||
       previous.width !== input.width ||
@@ -1715,7 +1804,7 @@ export class Surface {
         entries: renderModel.entries,
         blocks: renderModel.blocks,
         items: renderModel.items,
-        toolCallDrafts: renderModel.toolCallDrafts,
+        expandedRowKeys: renderModel.expandedRowKeys,
         detailSelection: renderModel.detailSelection,
         permissionSelection: renderModel.permissionSelection,
         width: renderModel.width,
@@ -1729,6 +1818,12 @@ export class Surface {
         const styledLines = splitStyledLines(built.styled)
         const descriptors: Array<TranscriptRenderableDescriptor> = []
         for (const range of built.ranges.slice(-maxMountedTranscriptEntries)) {
+          if (range.gapBefore === true)
+            descriptors.push({
+              key: `${range.unit}:gap`,
+              revision: "gap",
+              content: new StyledText([fg(colors.text)(" ")]),
+            })
           const headerContent = new StyledText(styledLines[range.start] ?? [])
           descriptors.push({
             key: `${range.unit}:header`,
@@ -1756,19 +1851,6 @@ export class Surface {
               revision: JSON.stringify(body),
               content: new StyledText(body),
             })
-          for (const [index, target] of (range.targets ?? []).entries()) {
-            const content = new StyledText([fg(colors.blue)(`  ${target.path}`)])
-            descriptors.push({
-              key: `${range.unit}:path:${index}`,
-              revision: JSON.stringify({ target, chunks: content.chunks }),
-              content,
-              onMouseDown: (event: MouseEvent) => {
-                if (event.button !== 0) return
-                event.stopPropagation()
-                this.handlers.openPath?.(target)
-              },
-            })
-          }
         }
         this.reconcileTranscript(descriptors)
         this.transcriptRenderInput = transcriptInput
@@ -2045,14 +2127,43 @@ export class Surface {
 
   private focusEditor(editor: ProjectedEditorRenderable | undefined): void {
     if (editor === this.focusedEditor) return
+    this.stopCursorBlink()
     this.focusedEditor?.blur()
     this.focusedEditor = editor
     this.focusedEditor?.focus()
+    if (this.focusedEditor !== undefined) this.startCursorBlink(this.focusedEditor)
+  }
+
+  private stopCursorBlink(): void {
+    this.cursorGeneration += 1
+    this.cancelTimer(this.cursorTimer)
+    this.cursorTimer = undefined
+  }
+
+  private startCursorBlink(editor: ProjectedEditorRenderable): void {
+    editor.showCursor = true
+    if (this.destroyed || this.options.animate === false) return
+    const generation = this.cursorGeneration
+    this.cursorTimer = Effect.runFork(
+      cursorBlink(
+        Effect.sync(() => {
+          if (this.destroyed || this.cursorGeneration !== generation || this.focusedEditor !== editor) return
+          editor.showCursor = !editor.showCursor
+        }),
+      ),
+    )
+  }
+
+  wakeCursor(): void {
+    const editor = this.focusedEditor
+    this.stopCursorBlink()
+    if (editor !== undefined) this.startCursorBlink(editor)
   }
 
   destroy(): void {
     this.destroyed = true
     this.scrollGeneration += 1
+    this.stopCursorBlink()
     if (this.transcriptAnchorFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.transcriptAnchorFrame)
     this.transcriptAnchorFrame = undefined
     this.transcriptAnchorScrollBy = 0
@@ -2306,7 +2417,14 @@ const previewTranscriptLines = (
   if (preview.threadId !== selected.id || preview.turns.length === 0) return undefined
   let previewModel: Model = { ...initial(model.workspace, model.mode), width: Math.max(8, width), height: 200 }
   preview.turns.forEach((turn, index) => {
-    previewModel = projectTurn(previewModel, `preview-${index}`, turn.prompt, turn.events as ReadonlyArray<Event>)
+    previewModel = projectUnits(
+      previewModel,
+      Transcript.project(
+        `preview-${index}`,
+        turn.prompt,
+        (turn.events as ReadonlyArray<Event>).map((event) => Object.assign({}, event, { createdAt: event.sequence })),
+      ).units,
+    )
   })
   const lines = splitStyledLines(renderTranscriptStyled(previewModel)).map((line) => clipStyledLine(line, width))
   const rows = Math.max(1, maxRows)
@@ -2822,56 +2940,62 @@ const welcomeContent = (width: number, height: number, phase: number, mode: Mode
 }
 
 export const create = (handlers: Handlers) =>
-  Effect.runPromise(
-    Effect.tryPromise(() =>
+  Effect.tryPromise({
+    try: () =>
       createCliRenderer({
         screenMode: "alternate-screen",
         exitOnCtrlC: false,
         useMouse: true,
         enableMouseMovement: true,
       }),
-    ).pipe(
-      Effect.map((renderer) => {
-        let surface: Surface | undefined
-        let released = false
-        const releaseTerminal = () => {
-          if (released) return
-          released = true
-          try {
-            surface?.destroy()
-          } catch {
-          } finally {
+    catch: adapterError,
+  }).pipe(
+    Effect.flatMap((renderer) =>
+      Effect.try({
+        try: () => {
+          let surface: Surface | undefined
+          let released = false
+          const releaseTerminal = () => {
+            if (released) return
+            released = true
             try {
-              renderer.destroy()
-            } catch {}
+              surface?.destroy()
+            } catch {
+            } finally {
+              try {
+                renderer.destroy()
+              } catch {}
+            }
           }
-        }
-        const suspendTerminal = () => {
-          if (released) return
+          const suspendTerminal = () => {
+            if (released) return
+            try {
+              renderer.suspend()
+            } catch (cause) {
+              releaseTerminal()
+              throw cause
+            }
+          }
+          const resumeTerminal = () => {
+            if (released) return
+            try {
+              renderer.resume()
+              surface?.wakeCursor()
+            } catch (cause) {
+              releaseTerminal()
+              throw cause
+            }
+          }
           try {
-            renderer.suspend()
+            handlers.resize(renderer.terminalWidth, renderer.terminalHeight)
+            surface = new Surface(renderer, handlers)
+            return { surface, releaseTerminal, suspendTerminal, resumeTerminal }
           } catch (cause) {
             releaseTerminal()
             throw cause
           }
-        }
-        const resumeTerminal = () => {
-          if (released) return
-          try {
-            renderer.resume()
-          } catch (cause) {
-            releaseTerminal()
-            throw cause
-          }
-        }
-        try {
-          handlers.resize(renderer.terminalWidth, renderer.terminalHeight)
-          surface = new Surface(renderer, handlers)
-          return { surface, releaseTerminal, suspendTerminal, resumeTerminal }
-        } catch (cause) {
-          releaseTerminal()
-          throw cause
-        }
+        },
+        catch: adapterError,
       }),
     ),
   )

@@ -66,7 +66,7 @@ const program = Effect.gen(function* () {
     }),
   )
   yield* Effect.sleep("500 millis")
-  yield* child.kill({ signal: "SIGTERM" })
+  yield* child.kill({ killSignal: "SIGTERM" })
   yield* Effect.exit(child.exitCode).pipe(
     Effect.timeout("5 seconds"),
     Effect.mapError(() => failure("Artifact did not tear down after SIGTERM")),

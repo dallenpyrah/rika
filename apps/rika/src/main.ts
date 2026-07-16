@@ -26,10 +26,11 @@ import * as ThreadSummaryRepository from "@rika/persistence/thread-summary-repos
 import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import * as Turn from "@rika/persistence/turn"
+import * as Transcript from "@rika/transcript"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
 import { MediaView, ParallelSearch, ReadWebPage, Runtime as ToolRuntime, ThreadTools } from "@rika/tools"
-import { ExecutionEvents, Session, ViewState } from "@rika/tui"
+import { Session, ViewState } from "@rika/tui"
 import { create as createTui } from "@rika/tui/adapter"
 import type { PathTarget } from "@rika/tui"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
@@ -46,6 +47,7 @@ import {
   FileSystem,
   Function,
   Layer,
+  Option,
   Path,
   Redacted,
   Ref,
@@ -53,6 +55,7 @@ import {
   Schedule,
   Schema,
   Scope,
+  Stream,
 } from "effect"
 import { Command } from "effect/unstable/cli"
 import { createHash } from "node:crypto"
@@ -167,17 +170,9 @@ const resolveWorkspaceFileImpl = Effect.fn("Main.resolveWorkspaceFile")(function
 })
 
 export const resolveWorkspaceFile: {
-  (target: PathTarget): (workspace: string) => Promise<string>
-  (workspace: string, target: PathTarget): Promise<string>
-} = Function.dual(2, (workspace: string, target: PathTarget) =>
-  Effect.runPromise(
-    Effect.scoped(
-      Layer.build(BunServices.layer).pipe(
-        Effect.flatMap((context) => resolveWorkspaceFileImpl(workspace, target).pipe(Effect.provideContext(context))),
-      ),
-    ),
-  ),
-)
+  (target: PathTarget): (workspace: string) => Effect.Effect<string, WorkspaceFileError, FileSystem.FileSystem>
+  (workspace: string, target: PathTarget): Effect.Effect<string, WorkspaceFileError, FileSystem.FileSystem>
+} = Function.dual(2, (workspace: string, target: PathTarget) => resolveWorkspaceFileImpl(workspace, target))
 
 const editorArgumentsImpl = (editor: string, path: string, line?: number, column?: number): Array<string> => {
   const location = line === undefined ? path : `${path}:${line}${column === undefined ? "" : `:${column}`}`
@@ -228,48 +223,39 @@ class OperationProductError extends Schema.TaggedErrorClass<OperationProductErro
 const materializePromptPartsImpl = (parts: ReadonlyArray<ViewState.PromptPart>, workspace: string) =>
   Effect.forEach(
     parts,
-    (part): Effect.Effect<Turn.PromptPart, PromptAttachmentError> => {
+    (part): Effect.Effect<Turn.PromptPart, PromptAttachmentError, FileSystem.FileSystem> => {
       if (part.type === "text") return Effect.succeed(part)
       const path = part.path.startsWith("/") ? part.path : `${workspace}/${part.path}`
-      const file = Bun.file(path)
-      return Effect.tryPromise({
-        try: () => file.exists(),
-        catch: (cause) =>
-          PromptAttachmentError.make({
-            path: part.path,
-            message: `Image attachment could not be read: ${String(cause)}`,
-          }),
-      }).pipe(
-        Effect.flatMap((exists) =>
-          !exists || file.size === 0
+      const failure = (cause: unknown) =>
+        PromptAttachmentError.make({
+          path: part.path,
+          message: `Image attachment could not be read: ${String(cause)}`,
+        })
+      return FileSystem.FileSystem.pipe(
+        Effect.flatMap((fileSystem) =>
+          Effect.all([fileSystem.stat(path), fileSystem.readFile(path)]).pipe(Effect.mapError(failure)),
+        ),
+        Effect.flatMap(([info, bytes]) =>
+          info.type !== "File" || bytes.byteLength === 0
             ? Effect.fail(
                 PromptAttachmentError.make({
                   path: part.path,
                   message: `Image attachment is missing or empty: ${part.path}`,
                 }),
               )
-            : Effect.succeed(imageMediaType(path)),
+            : Effect.succeed({ mediaType: imageMediaType(path), bytes }),
         ),
-        Effect.flatMap((mediaType) =>
+        Effect.flatMap(({ mediaType, bytes }) =>
           !mediaType.startsWith("image/")
             ? Effect.fail(
                 PromptAttachmentError.make({ path: part.path, message: `Unsupported image attachment: ${part.path}` }),
               )
-            : Effect.tryPromise({
-                try: () => file.arrayBuffer(),
-                catch: (cause) =>
-                  PromptAttachmentError.make({
-                    path: part.path,
-                    message: `Image attachment could not be read: ${String(cause)}`,
-                  }),
-              }).pipe(
-                Effect.map((bytes) => ({
-                  type: "image" as const,
-                  mediaType,
-                  data: Buffer.from(bytes).toString("base64"),
-                  filename: part.path,
-                })),
-              ),
+            : Effect.succeed({
+                type: "image" as const,
+                mediaType,
+                data: Buffer.from(bytes).toString("base64"),
+                filename: part.path,
+              }),
         ),
       )
     },
@@ -343,24 +329,38 @@ const countAddedLinesFromFileImpl = (workspace: string, path: string) =>
   )
 
 export const countAddedLinesFromFile: {
-  (path: string): (workspace: string) => Promise<number>
-  (workspace: string, path: string): Promise<number>
-} = Function.dual(2, (workspace: string, path: string) =>
-  Effect.runPromise(
-    Effect.scoped(
-      Layer.build(BunServices.layer).pipe(
-        Effect.flatMap((context) => countAddedLinesFromFileImpl(workspace, path).pipe(Effect.provideContext(context))),
-      ),
-    ),
-  ),
-)
+  (path: string): (workspace: string) => ReturnType<typeof countAddedLinesFromFileImpl>
+  (workspace: string, path: string): ReturnType<typeof countAddedLinesFromFileImpl>
+} = Function.dual(2, countAddedLinesFromFileImpl)
 
 const gitOutput = (arguments_: ReadonlyArray<string>) => {
-  const child = Bun.spawn([...arguments_], { stdout: "pipe", stderr: "ignore" })
-  return Effect.tryPromise({
-    try: () => Promise.all([new Response(child.stdout).text(), child.exited]),
-    catch: (cause) => ExternalBoundaryError.make({ operation: arguments_.join(" "), message: String(cause) }),
-  })
+  const [executable, ...args] = arguments_
+  if (executable === undefined)
+    return Effect.fail(ExternalBoundaryError.make({ operation: "run command", message: "Missing command" }))
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      const child = yield* spawner.spawn(ChildProcess.make(executable, args, { stdout: "pipe", stderr: "ignore" }))
+      return yield* Effect.all([Stream.mkString(Stream.decodeText(child.stdout)), child.exitCode], { concurrency: 2 })
+    }).pipe(
+      Effect.mapError((cause) =>
+        ExternalBoundaryError.make({ operation: arguments_.join(" "), message: String(cause) }),
+      ),
+    ),
+  )
+}
+
+const childExit = (operation: string, arguments_: ReadonlyArray<string>, options: ChildProcess.CommandOptions) => {
+  const [executable, ...args] = arguments_
+  if (executable === undefined)
+    return Effect.fail(ExternalBoundaryError.make({ operation, message: "Missing command" }))
+  return Effect.scoped(
+    ChildProcessSpawner.ChildProcessSpawner.pipe(
+      Effect.flatMap((spawner) => spawner.spawn(ChildProcess.make(executable, args, options))),
+      Effect.flatMap((child) => child.exitCode),
+      Effect.mapError((cause) => ExternalBoundaryError.make({ operation, message: String(cause) })),
+    ),
+  )
 }
 
 const readChangedFilesEffect = Effect.fn("Main.readChangedFiles")(function* (workspace: string) {
@@ -404,19 +404,27 @@ const readChangedFilesEffect = Effect.fn("Main.readChangedFiles")(function* (wor
   )
 })
 
-export const readChangedFiles = (workspace: string): Promise<ReadonlyArray<ViewState.ChangedFile>> =>
-  Effect.runPromise(
-    Effect.scoped(
-      Layer.build(BunServices.layer).pipe(
-        Effect.flatMap((context) => readChangedFilesEffect(workspace).pipe(Effect.provideContext(context))),
+export const readChangedFiles = readChangedFilesEffect
+
+type ClipboardPngExtractor = (
+  script: string,
+  path: string,
+) => Effect.Effect<number, globalThis.Error, ChildProcessSpawner.ChildProcessSpawner>
+
+const runClipboardPngExtractor: ClipboardPngExtractor = (script, path) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      const child = yield* spawner.spawn(
+        ChildProcess.make("osascript", ["-e", script, "--", path], { stdout: "ignore", stderr: "ignore" }),
+      )
+      return yield* child.exitCode
+    }).pipe(
+      Effect.mapError((cause) =>
+        ExternalBoundaryError.make({ operation: "extract clipboard image", message: String(cause) }),
       ),
     ),
   )
-
-type ClipboardPngExtractor = (script: string, path: string) => Promise<number>
-
-const runClipboardPngExtractor: ClipboardPngExtractor = (script, path) =>
-  Bun.spawn(["osascript", "-e", script, "--", path], { stdout: "ignore", stderr: "ignore" }).exited
 
 const pasteClipboardPngImpl = (
   workspace: string,
@@ -424,24 +432,15 @@ const pasteClipboardPngImpl = (
   extract: ClipboardPngExtractor = runClipboardPngExtractor,
 ) =>
   Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
     const relative = `.rika/pasted/paste-${now()}.png`
     const absolute = `${workspace}/${relative}`
     yield* mkdir(`${workspace}/.rika/pasted`, { recursive: true })
-    yield* Effect.tryPromise({
-      try: () => Bun.write(absolute, new Uint8Array()),
-      catch: (cause) => ExternalBoundaryError.make({ operation: "write clipboard image", message: String(cause) }),
-    })
+    yield* fileSystem.writeFile(absolute, new Uint8Array())
     const script = `on run argv\nset pngData to (the clipboard as «class PNGf»)\nset theFile to (POSIX file (item 1 of argv))\nset fh to open for access theFile with write permission\nset eof fh to 0\nwrite pngData to fh\nclose access fh\nend run`
-    const exit = yield* Effect.tryPromise({
-      try: () => extract(script, absolute),
-      catch: (cause) => ExternalBoundaryError.make({ operation: "extract clipboard image", message: String(cause) }),
-    }).pipe(Effect.orElseSucceed(() => -1))
-    const file = Bun.file(absolute)
-    const exists = yield* Effect.tryPromise({
-      try: () => file.exists(),
-      catch: (cause) => ExternalBoundaryError.make({ operation: "inspect clipboard image", message: String(cause) }),
-    })
-    const extracted = exit === 0 && exists && file.size > 0
+    const exit = yield* extract(script, absolute).pipe(Effect.orElseSucceed(() => -1))
+    const info = yield* fileSystem.stat(absolute).pipe(Effect.option)
+    const extracted = exit === 0 && Option.isSome(info) && info.value.type === "File" && info.value.size > 0
     if (!extracted) yield* rm(absolute, { force: true })
     return extracted ? relative : undefined
   }).pipe(Effect.orElseSucceed(() => undefined))
@@ -477,11 +476,9 @@ export const pastedImagePath: {
 
 const persistPastedImageImpl = (workspace: string, relative: string, bytes: Uint8Array) =>
   Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
     yield* mkdir(`${workspace}/.rika/pasted`, { recursive: true })
-    yield* Effect.tryPromise({
-      try: () => Bun.write(`${workspace}/${relative}`, bytes),
-      catch: (cause) => ExternalBoundaryError.make({ operation: "write pasted image", message: String(cause) }),
-    })
+    yield* fileSystem.writeFile(`${workspace}/${relative}`, bytes)
     return true
   }).pipe(Effect.orElseSucceed(() => false))
 
@@ -559,11 +556,14 @@ export const parseTestModelScript = (json: string) =>
 
 export const buildTestModelScript: (
   json: string,
-) => Effect.Effect<ReadonlyArray<TestModelTypes.Step>, Error | Schema.SchemaError> = Effect.fn(
+) => Effect.Effect<ReadonlyArray<TestModelTypes.Step>, ExternalBoundaryError | Schema.SchemaError> = Effect.fn(
   "Main.buildTestModelScript",
 )(function* (json: string) {
   const script = yield* parseTestModelScript(json)
-  const { TestModel } = yield* Effect.promise(() => import("@batonfx/test"))
+  const { TestModel } = yield* Effect.tryPromise({
+    try: () => import("@batonfx/test"),
+    catch: (cause) => ExternalBoundaryError.make({ operation: "load test model", message: String(cause) }),
+  })
   return script.map((turn) => {
     const options = turn.delayMs === undefined ? {} : { delay: turn.delayMs }
     if ("object" in turn) return TestModel.object(turn.object, options)
@@ -600,15 +600,13 @@ const sanitizedFetchLayer = Layer.effect(
         if (!contentType.includes("application/json")) return Effect.succeed(response)
         return response.text.pipe(
           Effect.map((text) => {
-            try {
-              const sanitized = JSON.stringify(sanitizeChatCompletion(JSON.parse(text)))
-              return HttpClientResponse.fromWeb(
-                response.request,
-                new Response(sanitized, { status: response.status, headers: { "content-type": contentType } }),
-              )
-            } catch {
-              return response
-            }
+            const decoded = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(text)
+            if (Option.isNone(decoded)) return response
+            const sanitized = Schema.encodeSync(Schema.UnknownFromJsonString)(sanitizeChatCompletion(decoded.value))
+            return HttpClientResponse.fromWeb(
+              response.request,
+              new Response(sanitized, { status: response.status, headers: { "content-type": contentType } }),
+            )
           }),
           Effect.orElseSucceed(() => response),
         )
@@ -944,13 +942,19 @@ const configuredBackendLayerImpl = (
       let additionalRegistrations: Array<ModelRegistry.Registration> = []
       let modelVariantPolicy: RelayExecutionBackend.ModelVariantPolicy = "registration-key"
       if (testScript._tag === "Some") {
-        const { TestModel } = yield* Effect.promise(() => import("@batonfx/test"))
+        const { TestModel } = yield* Effect.tryPromise({
+          try: () => import("@batonfx/test"),
+          catch: (cause) => ExternalBoundaryError.make({ operation: "load test model", message: String(cause) }),
+        })
         const fixture = yield* TestModel.make(yield* buildTestModelScript(testScript.value))
         registration = fixture.registration
         selection = fixture.selection
         modelVariantPolicy = "fixed-selection"
       } else if (testResponse._tag === "Some") {
-        const { TestModel } = yield* Effect.promise(() => import("@batonfx/test"))
+        const { TestModel } = yield* Effect.tryPromise({
+          try: () => import("@batonfx/test"),
+          catch: (cause) => ExternalBoundaryError.make({ operation: "load test model", message: String(cause) }),
+        })
         const fixture = yield* TestModel.make(Array.from({ length: 4 }, () => TestModel.text(testResponse.value)))
         registration = fixture.registration
         selection = fixture.selection
@@ -1288,19 +1292,9 @@ const canonicalDatabaseRootImpl = Effect.fn("Main.canonicalDatabaseRoot")(functi
 })
 
 export const canonicalDatabaseRoot: {
-  (relayDatabase: string): (productDatabase: string) => Promise<string>
-  (productDatabase: string, relayDatabase: string): Promise<string>
-} = Function.dual(2, (productDatabase: string, relayDatabase: string) =>
-  Effect.runPromise(
-    Effect.scoped(
-      Layer.build(BunServices.layer).pipe(
-        Effect.flatMap((context) =>
-          canonicalDatabaseRootImpl(productDatabase, relayDatabase).pipe(Effect.provideContext(context)),
-        ),
-      ),
-    ),
-  ),
-)
+  (relayDatabase: string): (productDatabase: string) => ReturnType<typeof canonicalDatabaseRootImpl>
+  (productDatabase: string, relayDatabase: string): ReturnType<typeof canonicalDatabaseRootImpl>
+} = Function.dual(2, canonicalDatabaseRootImpl)
 
 export const interruptTrackedFibers = (fibers: Iterable<Fiber.Fiber<void, never>>) =>
   Effect.forEach([...fibers], Fiber.interrupt, { concurrency: "unbounded", discard: true })
@@ -1330,31 +1324,26 @@ export const refreshThreadsOnSwitcherOpen: {
   (wasOpen: boolean, isOpen: boolean, initialize: Effect.Effect<void, never>): Effect.Effect<void, never>
 } = Function.dual(3, refreshThreadsOnSwitcherOpenImpl)
 
-const settleTuiInitializationImpl = <T>(
-  task: Promise<T>,
+const settleTuiInitializationImpl = <T, E, E2>(
+  task: Effect.Effect<T, E, never>,
   isClosed: () => boolean,
-  destroy: (value: T) => Promise<void>,
+  destroy: (value: T) => Effect.Effect<void, E2, never>,
 ) =>
-  Effect.tryPromise({
-    try: () => task,
-    catch: (cause) => ExternalBoundaryError.make({ operation: "initialize TUI", message: String(cause) }),
-  }).pipe(
-    Effect.flatMap((value) =>
-      !isClosed()
-        ? Effect.succeed(value)
-        : Effect.tryPromise({
-            try: () => destroy(value),
-            catch: (cause) => ExternalBoundaryError.make({ operation: "destroy TUI", message: String(cause) }),
-          }).pipe(Effect.as(undefined)),
-    ),
+  task.pipe(
+    Effect.flatMap((value) => (!isClosed() ? Effect.succeed(value) : destroy(value).pipe(Effect.as(undefined)))),
   )
 
 export const settleTuiInitialization: {
-  <T>(isClosed: () => boolean, destroy: (value: T) => Promise<void>): (task: Promise<T>) => Promise<T | undefined>
-  <T>(task: Promise<T>, isClosed: () => boolean, destroy: (value: T) => Promise<void>): Promise<T | undefined>
-} = Function.dual(3, <T>(task: Promise<T>, isClosed: () => boolean, destroy: (value: T) => Promise<void>) =>
-  Effect.runPromise(settleTuiInitializationImpl(task, isClosed, destroy)),
-)
+  <T, E2>(
+    isClosed: () => boolean,
+    destroy: (value: T) => Effect.Effect<void, E2, never>,
+  ): <E>(task: Effect.Effect<T, E, never>) => Effect.Effect<T | undefined, E | E2>
+  <T, E, E2>(
+    task: Effect.Effect<T, E, never>,
+    isClosed: () => boolean,
+    destroy: (value: T) => Effect.Effect<void, E2, never>,
+  ): Effect.Effect<T | undefined, E | E2>
+} = Function.dual(3, settleTuiInitializationImpl)
 
 if (import.meta.main) {
   const environment = Effect.runSync(
@@ -1445,14 +1434,16 @@ if (import.meta.main) {
       const fork = Effect.runForkWith(context)
       return yield* Effect.callback<void, Operation.OperationUnavailable>((resume) => {
         let model = ViewState.initial(input.workspace ?? process.cwd(), input.mode ?? "medium")
-        let renderer: Awaited<ReturnType<typeof createTui>> | undefined
-        let initialization: Promise<void> | undefined
+        let renderer: Effect.Success<ReturnType<typeof createTui>> | undefined
+        let initialization: Fiber.Fiber<void, never> | undefined
         let closed = false
         let previewTimer: Fiber.Fiber<void, never> | undefined
         let renderTimer: Fiber.Fiber<void, never> | undefined
         let replayTurns = new Map<string, Turn.Turn>()
         let loadedTranscriptEntries: ReadonlyArray<TranscriptRepository.Entry> = []
         let projectionRevisions = new Map<string, number>()
+        let transcriptProjections = new Map<string, Transcript.Projection>()
+        let threadCostUsd = 0
         const fibers = new Set<Fiber.Fiber<void, never>>()
         let followFiber: Fiber.Fiber<void, never> | undefined
         let renderSuppressed = false
@@ -1486,13 +1477,22 @@ if (import.meta.main) {
             event._tag === "TranscriptResyncRequired"
           ) {
             const controlled = InteractiveController.update(
-              { model, replayTurns, entries: loadedTranscriptEntries, revisions: projectionRevisions },
+              {
+                model,
+                replayTurns,
+                entries: loadedTranscriptEntries,
+                revisions: projectionRevisions,
+                projections: transcriptProjections,
+                threadCostUsd,
+              },
               event,
             )
             model = controlled.state.model
             replayTurns = new Map(controlled.state.replayTurns)
             loadedTranscriptEntries = controlled.state.entries
             projectionRevisions = new Map(controlled.state.revisions)
+            transcriptProjections = new Map(controlled.state.projections)
+            threadCostUsd = controlled.state.threadCostUsd
             if (event._tag === "TranscriptResyncRequired" && model.currentThreadId !== undefined)
               fork(session.selectThread(model.currentThreadId, dispatch))
             if (controlled.preserveAnchor) renderer?.surface.update(model, true)
@@ -1527,12 +1527,15 @@ if (import.meta.main) {
             if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
               model = ViewState.replaceTurnPrompt(model, event.turnId, event.prompt)
           } else if (event._tag === "TurnStarted") {
-            if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+            if (model.currentThreadId === undefined || model.currentThreadId === event.threadId) {
+              replayTurns.set(event.turn.id, event.turn)
+              transcriptProjections.set(event.turn.id, Transcript.empty(event.turn.id, event.turn.prompt))
               model = ViewState.update(model, {
                 _tag: "TurnStarted",
                 turnId: event.turn.id,
                 prompt: event.turn.prompt,
               })
+            }
           } else if (event._tag === "ThreadsListed") {
             model = ViewState.update(model, {
               _tag: "ThreadsReplaced",
@@ -1550,6 +1553,10 @@ if (import.meta.main) {
             })
           } else if (event._tag === "ThreadSelected") {
             replayTurns = new Map(event.turns.map((turn) => [turn.id, turn]))
+            loadedTranscriptEntries = []
+            projectionRevisions = new Map()
+            transcriptProjections = new Map()
+            threadCostUsd = 0
             const activeTurn = event.turns.find(
               (turn) => turn.status === "accepted" || turn.status === "running" || turn.status === "waiting",
             )
@@ -1577,16 +1584,6 @@ if (import.meta.main) {
               },
               threadPreview: ViewState.idle,
             }
-          } else if (event._tag === "ExecutionReplayed") {
-            if (model.currentThreadId !== event.threadId) return
-            const turn = replayTurns.get(event.result.turnId)
-            model =
-              turn === undefined
-                ? ExecutionEvents.project(model, event.result.events)
-                : ExecutionEvents.projectTurn(model, turn.id, turn.prompt, event.result.events)
-          } else if (event._tag === "ExecutionEventReceived") {
-            if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
-              model = ExecutionEvents.project(model, [{ ...event.event, turnId: event.turnId }])
           } else if (event._tag === "ExecutionControlled") {
             if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
             if (event.action === "cancelled" && model.busy)
@@ -1639,16 +1636,7 @@ if (import.meta.main) {
           } else {
             model = ViewState.update(model, event)
           }
-          render(
-            event._tag === "ExecutionFailed" ||
-              event._tag === "ExecutionControlled" ||
-              (event._tag === "ExecutionEventReceived" &&
-                (event.event.type === "execution.completed" ||
-                  event.event.type === "execution.failed" ||
-                  event.event.type === "execution.cancelled" ||
-                  event.event.type === "permission.ask.requested" ||
-                  event.event.type === "tool.approval.requested")),
-          )
+          render(event._tag === "ExecutionFailed" || event._tag === "ExecutionControlled")
         }
         let closing = false
         let teardownStarted = false
@@ -1680,12 +1668,7 @@ if (import.meta.main) {
               if (renderTimer !== undefined) yield* Fiber.interrupt(renderTimer)
               renderTimer = undefined
               renderer?.releaseTerminal()
-              if (initialization !== undefined)
-                yield* Effect.tryPromise({
-                  try: () => initialization!,
-                  catch: (cause) =>
-                    ExternalBoundaryError.make({ operation: "await TUI initialization", message: String(cause) }),
-                }).pipe(Effect.ignore)
+              if (initialization !== undefined) yield* Fiber.await(initialization)
               yield* interruptTrackedFibers([...fibers])
               if (showGoodbye) goodbye()
               yield* Effect.logInfo("tui.teardown.completed")
@@ -1744,11 +1727,11 @@ if (import.meta.main) {
                     }),
                   ),
                 )
-          const fiber = fork(effect)
+          const fiber = fork(effect.pipe(provideLayerScoped(BunServices.layer)))
           fibers.add(fiber)
           fork(Fiber.await(fiber).pipe(Effect.tap(() => Effect.sync(() => fibers.delete(fiber)))))
         }
-        const run = <E>(effect: Effect.Effect<void, E, FileSystem.FileSystem>) => {
+        const run = <E>(effect: Effect.Effect<void, E, BunServices.BunServices>) => {
           const fiber = fork(
             effect.pipe(
               provideLayerScoped(BunServices.layer),
@@ -1800,6 +1783,7 @@ if (import.meta.main) {
           Clock.currentTimeMillis.pipe(
             Effect.flatMap((now) =>
               Effect.gen(function* () {
+                const fileSystem = yield* FileSystem.FileSystem
                 if (editor === undefined) {
                   renderer?.surface.showToast("Set VISUAL or EDITOR to edit the prompt", "#e06c75")
                   return
@@ -1807,20 +1791,14 @@ if (import.meta.main) {
                 const relative = `.rika/compose-${now}.md`
                 const file = `${model.workspace}/${relative}`
                 yield* mkdir(`${model.workspace}/.rika`, { recursive: true })
-                yield* Effect.tryPromise({
-                  try: () => Bun.write(file, ViewState.displayInput(model)),
-                  catch: (cause) => ExternalBoundaryError.make({ operation: "write composer", message: String(cause) }),
-                })
+                yield* fileSystem.writeFileString(file, ViewState.displayInput(model))
                 renderer?.suspendTerminal()
-                yield* Effect.tryPromise({
-                  try: () =>
-                    Bun.spawn([editor, file], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited,
-                  catch: (cause) => ExternalBoundaryError.make({ operation: "run editor", message: String(cause) }),
+                yield* childExit("run editor", [editor, file], {
+                  stdin: "inherit",
+                  stdout: "inherit",
+                  stderr: "inherit",
                 }).pipe(Effect.ensuring(Effect.sync(() => renderer?.resumeTerminal())))
-                const edited = yield* Effect.tryPromise({
-                  try: () => Bun.file(file).text(),
-                  catch: (cause) => ExternalBoundaryError.make({ operation: "read composer", message: String(cause) }),
-                })
+                const edited = yield* fileSystem.readFileString(file)
                 yield* rm(file, { force: true })
                 model = ViewState.update(model, { _tag: "ComposerReplaced", text: edited.replace(/\n$/, "") })
                 renderer?.surface.update(model)
@@ -1839,30 +1817,20 @@ if (import.meta.main) {
                 onSuccess: (path) =>
                   Effect.gen(function* () {
                     if (editor === undefined) {
-                      const exit = yield* Effect.tryPromise({
-                        try: () =>
-                          Bun.spawn(defaultOpenArguments(path), {
-                            stdin: "ignore",
-                            stdout: "ignore",
-                            stderr: "ignore",
-                          }).exited,
-                        catch: () =>
-                          ExternalBoundaryError.make({ operation: "open file", message: "Could not open file" }),
+                      const exit = yield* childExit("open file", defaultOpenArguments(path), {
+                        stdin: "ignore",
+                        stdout: "ignore",
+                        stderr: "ignore",
                       }).pipe(Effect.orElseSucceed(() => -1))
                       if (exit === 0) return
                       renderer?.surface.showToast("Could not open the file in the default application", "#e06c75")
                       return
                     }
                     renderer?.suspendTerminal()
-                    yield* Effect.tryPromise({
-                      try: () =>
-                        Bun.spawn(editorArguments(editor, path, target.line, target.column), {
-                          stdin: "inherit",
-                          stdout: "inherit",
-                          stderr: "inherit",
-                        }).exited,
-                      catch: (cause) =>
-                        ExternalBoundaryError.make({ operation: "open editor", message: String(cause) }),
+                    yield* childExit("open editor", editorArguments(editor, path, target.line, target.column), {
+                      stdin: "inherit",
+                      stdout: "inherit",
+                      stderr: "inherit",
                     }).pipe(
                       Effect.ensuring(
                         Effect.sync(() => {
@@ -1887,299 +1855,306 @@ if (import.meta.main) {
           cancel: () => run(session.cancel(dispatch)),
           decidePermission: (id, kind, decision) => run(session.resolvePermission(id, kind, decision, dispatch)),
           selectThread: (id) => run(session.selectThread(id, dispatch).pipe(loadSelected)),
-          replay: (cursor) => {
-            const turnId = model.activeTurnId
-            if (turnId !== undefined) run(session.replay(turnId, cursor, dispatch))
-          },
         }
-        initialization = settleTuiInitialization(
-          createTui({
-            openPath,
-            scroll: (offset) => {
-              model = ViewState.update(model, { _tag: "ScrollMoved", offset })
-              renderer?.surface.update(model)
-              if (offset <= 0 && !loadingOlder) {
-                loadingOlder = true
-                run(
-                  session.loadOlder(dispatch).pipe(
-                    Effect.ensuring(
-                      Effect.sync(() => {
-                        loadingOlder = false
-                      }),
+        initialization = fork(
+          settleTuiInitialization(
+            createTui({
+              openPath,
+              scroll: (offset) => {
+                model = ViewState.update(model, { _tag: "ScrollMoved", offset })
+                renderer?.surface.update(model)
+                if (offset <= 0 && !loadingOlder) {
+                  loadingOlder = true
+                  run(
+                    session.loadOlder(dispatch).pipe(
+                      Effect.ensuring(
+                        Effect.sync(() => {
+                          loadingOlder = false
+                        }),
+                      ),
                     ),
-                  ),
-                )
-              }
-            },
-            scrollGeometry: (offset) => {
-              model = ViewState.update(model, { _tag: "ScrollMoved", offset })
-            },
-            scrollFollow: () => {
-              model = ViewState.update(model, { _tag: "ScrollFollowed" })
-              renderer?.surface.update(model)
-            },
-            paste: (text) => {
-              model = ViewState.update(model, { _tag: "Pasted", text })
-              renderer?.surface.update(model)
-            },
-            expandPaste: (token) => {
-              model = ViewState.update(model, { _tag: "PastedTextExpanded", token })
-              renderer?.surface.update(model)
-            },
-            pasteImage: (image) => {
-              if (image !== undefined) {
-                const path = pastedImagePath(image.bytes, image.mediaType)
-                if (path === undefined) {
-                  renderer?.surface.showToast("Pasted image must be a non-empty PNG, JPEG, GIF, or WebP")
+                  )
+                }
+              },
+              scrollGeometry: (offset) => {
+                model = ViewState.update(model, { _tag: "ScrollMoved", offset })
+              },
+              scrollFollow: () => {
+                model = ViewState.update(model, { _tag: "ScrollFollowed" })
+                renderer?.surface.update(model)
+              },
+              paste: (text) => {
+                model = ViewState.update(model, { _tag: "Pasted", text })
+                renderer?.surface.update(model)
+              },
+              expandPaste: (token) => {
+                model = ViewState.update(model, { _tag: "PastedTextExpanded", token })
+                renderer?.surface.update(model)
+              },
+              pasteImage: (image) => {
+                if (image !== undefined) {
+                  const path = pastedImagePath(image.bytes, image.mediaType)
+                  if (path === undefined) {
+                    renderer?.surface.showToast("Pasted image must be a non-empty PNG, JPEG, GIF, or WebP")
+                    return
+                  }
+                  model = ViewState.update(model, { _tag: "ImageInserted", path })
+                  renderer?.surface.update(model)
+                  run(
+                    persistPastedImage(model.workspace, path, image.bytes).pipe(
+                      Effect.tap((persisted) =>
+                        Effect.sync(() => {
+                          if (persisted) return
+                          model = ViewState.update(model, { _tag: "ImageRemoved", path })
+                          renderer?.surface.update(model)
+                          renderer?.surface.showToast("Pasted image could not be saved")
+                        }),
+                      ),
+                      Effect.asVoid,
+                    ),
+                  )
                   return
                 }
-                model = ViewState.update(model, { _tag: "ImageInserted", path })
-                renderer?.surface.update(model)
                 run(
-                  persistPastedImage(model.workspace, path, image.bytes).pipe(
-                    Effect.tap((persisted) =>
+                  pasteClipboardPng(model.workspace).pipe(
+                    Effect.tap((path) =>
                       Effect.sync(() => {
-                        if (persisted) return
-                        model = ViewState.update(model, { _tag: "ImageRemoved", path })
+                        if (path === undefined) {
+                          renderer?.surface.showToast("Clipboard does not contain a supported non-empty PNG image")
+                          return
+                        }
+                        model = ViewState.update(model, { _tag: "ImageInserted", path })
                         renderer?.surface.update(model)
-                        renderer?.surface.showToast("Pasted image could not be saved")
                       }),
                     ),
                     Effect.asVoid,
                   ),
                 )
-                return
-              }
-              run(
-                pasteClipboardPng(model.workspace).pipe(
-                  Effect.tap((path) =>
-                    Effect.sync(() => {
-                      if (path === undefined) {
-                        renderer?.surface.showToast("Clipboard does not contain a supported non-empty PNG image")
+              },
+              clickToggle: (unit) => {
+                model = ViewState.update(model, { _tag: "DetailToggled", id: unit })
+                renderer?.surface.update(model)
+              },
+              key: (key) => {
+                if (key.ctrl && key.name === "c" && !model.busy) {
+                  close(130)
+                  return
+                }
+                if (key.ctrl && key.name === "g") {
+                  run(editComposer())
+                  return
+                }
+                const wasChangedFilesOpen = model.changedFilesOpen
+                const wasThreadSwitcherOpen = model.threadSwitcher.open
+                const beforePreviewId = model.threadSwitcher.open
+                  ? ViewState.selectedThreadMetadata(model)?.id
+                  : undefined
+                const submitting = key.name === "return" && !key.shift && !key.ctrl && ViewState.canSubmit(model)
+                const prompt = submitting ? model.input : undefined
+                const parts = prompt === undefined ? undefined : ViewState.promptParts(prompt, model.pastedText)
+                const submittedPrompt =
+                  prompt === undefined ? undefined : ViewState.expandPastedText(prompt, model.pastedText)
+                model = ViewState.update(model, { _tag: "KeyPressed", key })
+                if (submitting) model = ViewState.update(model, { _tag: "Submitted" })
+                if (!wasChangedFilesOpen && model.changedFilesOpen)
+                  model = ViewState.update(model, { _tag: "ChangedFilesRequested" })
+                const afterPreviewId = model.threadSwitcher.open
+                  ? ViewState.selectedThreadMetadata(model)?.id
+                  : undefined
+                if (afterPreviewId !== undefined && afterPreviewId !== beforePreviewId)
+                  model = ViewState.update(model, { _tag: "ThreadPreviewRequested" })
+                renderer?.surface.update(model)
+                run(
+                  refreshThreadsOnSwitcherOpen(
+                    wasThreadSwitcherOpen,
+                    model.threadSwitcher.open,
+                    session.initialize(dispatch),
+                  ),
+                )
+                if (key.alt && key.name === "d")
+                  renderer?.surface.showToast(`Reasoning effort: ${model.reasoningEffort}`, "#58a6ff")
+                if (!wasChangedFilesOpen && model.changedFilesOpen) run(loadChangedFiles())
+                if (afterPreviewId !== undefined && afterPreviewId !== beforePreviewId) {
+                  if (previewTimer !== undefined) fork(Fiber.interrupt(previewTimer))
+                  const selectedPreviewTimer = fork(
+                    Effect.sleep("120 millis").pipe(
+                      Effect.andThen(session.previewThread(afterPreviewId, dispatch)),
+                      Effect.ensuring(
+                        Effect.sync(() => {
+                          if (previewTimer === selectedPreviewTimer) previewTimer = undefined
+                        }),
+                      ),
+                    ),
+                  )
+                  previewTimer = selectedPreviewTimer
+                }
+                if (submittedPrompt !== undefined && submittedPrompt.length > 0 && parts !== undefined)
+                  Session.execute(adapter, {
+                    _tag: "Submit",
+                    prompt: submittedPrompt,
+                    parts,
+                    mode: model.mode,
+                    tuning: { reasoningEffort: model.reasoningEffort, fastMode: model.fastMode },
+                  })
+                const action = model.pendingAction as Session.Action | undefined
+                if (action !== undefined) {
+                  Session.execute(adapter, action)
+                  model = ViewState.update(model, { _tag: "PaletteActionConsumed" })
+                }
+              },
+              resize: (width, height) => {
+                model = ViewState.update(model, { _tag: "Resized", width, height })
+                renderer?.surface.update(model)
+              },
+              composerResize: (height) => {
+                model = ViewState.update(model, { _tag: "ComposerHeightChanged", height })
+                renderer?.surface.update(model)
+              },
+              sidebarResize: (width) => {
+                model = ViewState.update(model, { _tag: "SidebarWidthChanged", width })
+                renderer?.surface.update(model)
+              },
+              threadSidebarSelect: (index) => {
+                model = ViewState.update(model, { _tag: "ThreadSidebarSelectionConfirmed", index })
+                renderer?.surface.update(model)
+                const action = model.pendingAction as Session.Action | undefined
+                if (action !== undefined) {
+                  Session.execute(adapter, action)
+                  model = ViewState.update(model, { _tag: "PaletteActionConsumed" })
+                }
+              },
+              threadPreviewScroll: (offset) => {
+                model = ViewState.update(model, { _tag: "ThreadPreviewScrolled", offset })
+                renderer?.surface.update(model)
+              },
+            }),
+            () => closed,
+            (created) => Effect.sync(() => created.releaseTerminal()),
+          ).pipe(
+            Effect.tap((created) =>
+              Effect.sync(() => {
+                if (created === undefined) return
+                renderer = created
+                if (closed) {
+                  created.releaseTerminal()
+                  return
+                }
+                model = ViewState.update(model, { _tag: "FilesRequested" })
+                created.surface.update(model)
+                run(Effect.logInfo("tui.renderer.started"))
+                if (closed) return
+                run(session.watchThreads(dispatch))
+                run(watchChangedFiles)
+                run(
+                  Effect.gen(function* () {
+                    const [gitText, gitExit] = yield* gitOutput([
+                      "git",
+                      "-C",
+                      model.workspace,
+                      "ls-files",
+                      "--cached",
+                      "--others",
+                      "--exclude-standard",
+                    ])
+                    if (gitExit === 0) {
+                      const files = gitText.split("\n").filter((line) => line.length > 0)
+                      if (files.length > 0) {
+                        model = ViewState.update(model, { _tag: "FilesReplaced", files: files.toSorted() })
+                        created.surface.update(model)
                         return
                       }
-                      model = ViewState.update(model, { _tag: "ImageInserted", path })
-                      renderer?.surface.update(model)
-                    }),
-                  ),
-                  Effect.asVoid,
-                ),
-              )
-            },
-            clickToggle: (unit) => {
-              model = ViewState.update(model, { _tag: "DetailToggled", id: unit })
-              renderer?.surface.update(model)
-            },
-            key: (key) => {
-              if (key.ctrl && key.name === "c" && !model.busy) {
-                close(130)
-                return
-              }
-              if (key.ctrl && key.name === "g") {
-                run(editComposer())
-                return
-              }
-              const wasChangedFilesOpen = model.changedFilesOpen
-              const wasThreadSwitcherOpen = model.threadSwitcher.open
-              const beforePreviewId = model.threadSwitcher.open
-                ? ViewState.selectedThreadMetadata(model)?.id
-                : undefined
-              const submitting = key.name === "return" && !key.shift && !key.ctrl && ViewState.canSubmit(model)
-              const prompt = submitting ? model.input : undefined
-              const parts = prompt === undefined ? undefined : ViewState.promptParts(prompt, model.pastedText)
-              const submittedPrompt =
-                prompt === undefined ? undefined : ViewState.expandPastedText(prompt, model.pastedText)
-              model = ViewState.update(model, { _tag: "KeyPressed", key })
-              if (submitting) model = ViewState.update(model, { _tag: "Submitted" })
-              if (!wasChangedFilesOpen && model.changedFilesOpen)
-                model = ViewState.update(model, { _tag: "ChangedFilesRequested" })
-              const afterPreviewId = model.threadSwitcher.open ? ViewState.selectedThreadMetadata(model)?.id : undefined
-              if (afterPreviewId !== undefined && afterPreviewId !== beforePreviewId)
-                model = ViewState.update(model, { _tag: "ThreadPreviewRequested" })
-              renderer?.surface.update(model)
-              run(
-                refreshThreadsOnSwitcherOpen(
-                  wasThreadSwitcherOpen,
-                  model.threadSwitcher.open,
-                  session.initialize(dispatch),
-                ),
-              )
-              if (key.alt && key.name === "d")
-                renderer?.surface.showToast(`Reasoning effort: ${model.reasoningEffort}`, "#58a6ff")
-              if (!wasChangedFilesOpen && model.changedFilesOpen) run(loadChangedFiles())
-              if (afterPreviewId !== undefined && afterPreviewId !== beforePreviewId) {
-                if (previewTimer !== undefined) fork(Fiber.interrupt(previewTimer))
-                const selectedPreviewTimer = fork(
-                  Effect.sleep("120 millis").pipe(
-                    Effect.andThen(session.previewThread(afterPreviewId, dispatch)),
-                    Effect.ensuring(
+                    }
+                    const initialized = yield* Effect.try({
+                      try: () => FileFinder.create({ basePath: model.workspace, aiMode: true }),
+                      catch: (cause) =>
+                        ExternalBoundaryError.make({ operation: "create file finder", message: String(cause) }),
+                    }).pipe(Effect.orElseSucceed(() => undefined))
+                    if (initialized?.ok !== true) {
+                      const files = yield* Effect.tryPromise({
+                        try: () =>
+                          Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: model.workspace, onlyFiles: true })),
+                        catch: (cause) =>
+                          ExternalBoundaryError.make({ operation: "scan workspace files", message: String(cause) }),
+                      })
+                      model = ViewState.update(model, { _tag: "FilesReplaced", files: files.toSorted() })
+                      created.surface.update(model)
+                      return
+                    }
+                    yield* Effect.tryPromise({
+                      try: () => initialized.value.waitForScan(10_000),
+                      catch: (cause) =>
+                        ExternalBoundaryError.make({ operation: "scan file index", message: String(cause) }),
+                    }).pipe(
+                      Effect.andThen(
+                        Effect.sync(() => {
+                          const result = initialized.value.glob("**/*", { pageSize: 10_000 })
+                          if (!result.ok) throw new Error(result.error)
+                          model = ViewState.update(model, {
+                            _tag: "FilesReplaced",
+                            files: result.value.items.map((item) => item.relativePath),
+                          })
+                          created.surface.update(model)
+                        }),
+                      ),
+                      Effect.ensuring(Effect.sync(() => initialized.value.destroy())),
+                    )
+                  }).pipe(Effect.asVoid),
+                )
+                run(
+                  gitOutput(["git", "-C", model.workspace, "symbolic-ref", "--short", "HEAD"]).pipe(
+                    Effect.tap(([text, exit]) =>
                       Effect.sync(() => {
-                        if (previewTimer === selectedPreviewTimer) previewTimer = undefined
+                        const branch = text.trim()
+                        if (exit === 0 && branch.length > 0 && branch !== "HEAD") {
+                          model = ViewState.update(model, { _tag: "BranchDetected", branch })
+                          created.surface.update(model)
+                        }
                       }),
+                    ),
+                    Effect.asVoid,
+                  ),
+                )
+                run(
+                  session.initialize(dispatch).pipe(
+                    Effect.andThen(
+                      input.last === true
+                        ? loadSelected(session.reopenThread(dispatch))
+                        : input.threadId === undefined
+                          ? Effect.void
+                          : loadSelected(session.selectThread(input.threadId, dispatch)),
+                    ),
+                    Effect.andThen(
+                      initialSubmitAction(input.prompt, model.mode) === undefined
+                        ? Effect.void
+                        : Effect.sync(() => {
+                            Session.execute(adapter, initialSubmitAction(input.prompt, model.mode)!)
+                          }),
                     ),
                   ),
                 )
-                previewTimer = selectedPreviewTimer
-              }
-              if (submittedPrompt !== undefined && submittedPrompt.length > 0 && parts !== undefined)
-                Session.execute(adapter, {
-                  _tag: "Submit",
-                  prompt: submittedPrompt,
-                  parts,
-                  mode: model.mode,
-                  tuning: { reasoningEffort: model.reasoningEffort, fastMode: model.fastMode },
-                })
-              const action = model.pendingAction as Session.Action | undefined
-              if (action !== undefined) {
-                Session.execute(adapter, action)
-                model = ViewState.update(model, { _tag: "PaletteActionConsumed" })
-              }
-            },
-            resize: (width, height) => {
-              model = ViewState.update(model, { _tag: "Resized", width, height })
-              renderer?.surface.update(model)
-            },
-            composerResize: (height) => {
-              model = ViewState.update(model, { _tag: "ComposerHeightChanged", height })
-              renderer?.surface.update(model)
-            },
-            sidebarResize: (width) => {
-              model = ViewState.update(model, { _tag: "SidebarWidthChanged", width })
-              renderer?.surface.update(model)
-            },
-            threadSidebarSelect: (index) => {
-              model = ViewState.update(model, { _tag: "ThreadSidebarSelectionConfirmed", index })
-              renderer?.surface.update(model)
-              const action = model.pendingAction as Session.Action | undefined
-              if (action !== undefined) {
-                Session.execute(adapter, action)
-                model = ViewState.update(model, { _tag: "PaletteActionConsumed" })
-              }
-            },
-            threadPreviewScroll: (offset) => {
-              model = ViewState.update(model, { _tag: "ThreadPreviewScrolled", offset })
-              renderer?.surface.update(model)
-            },
-          }),
-          () => closed,
-          (created) => {
-            created.releaseTerminal()
-            return Promise.resolve()
-          },
-        )
-          .then((created) => {
-            if (created === undefined) return
-            renderer = created
-            if (closed) {
-              created.releaseTerminal()
-              return
-            }
-            model = ViewState.update(model, { _tag: "FilesRequested" })
-            created.surface.update(model)
-            run(Effect.logInfo("tui.renderer.started"))
-            if (closed) return
-            run(session.watchThreads(dispatch))
-            run(watchChangedFiles)
-            run(
-              Effect.gen(function* () {
-                const [gitText, gitExit] = yield* gitOutput([
-                  "git",
-                  "-C",
-                  model.workspace,
-                  "ls-files",
-                  "--cached",
-                  "--others",
-                  "--exclude-standard",
-                ])
-                if (gitExit === 0) {
-                  const files = gitText.split("\n").filter((line) => line.length > 0)
-                  if (files.length > 0) {
-                    model = ViewState.update(model, { _tag: "FilesReplaced", files: files.toSorted() })
-                    created.surface.update(model)
-                    return
-                  }
-                }
-                const initialized = yield* Effect.try({
-                  try: () => FileFinder.create({ basePath: model.workspace, aiMode: true }),
-                  catch: (cause) =>
-                    ExternalBoundaryError.make({ operation: "create file finder", message: String(cause) }),
-                }).pipe(Effect.orElseSucceed(() => undefined))
-                if (initialized?.ok !== true) {
-                  const files = yield* Effect.tryPromise({
-                    try: () => Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: model.workspace, onlyFiles: true })),
-                    catch: (cause) =>
-                      ExternalBoundaryError.make({ operation: "scan workspace files", message: String(cause) }),
-                  })
-                  model = ViewState.update(model, { _tag: "FilesReplaced", files: files.toSorted() })
-                  created.surface.update(model)
-                  return
-                }
-                yield* Effect.tryPromise({
-                  try: () => initialized.value.waitForScan(10_000),
-                  catch: (cause) =>
-                    ExternalBoundaryError.make({ operation: "scan file index", message: String(cause) }),
-                }).pipe(
-                  Effect.andThen(
-                    Effect.sync(() => {
-                      const result = initialized.value.glob("**/*", { pageSize: 10_000 })
-                      if (!result.ok) throw new Error(result.error)
-                      model = ViewState.update(model, {
-                        _tag: "FilesReplaced",
-                        files: result.value.items.map((item) => item.relativePath),
-                      })
-                      created.surface.update(model)
-                    }),
+              }),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.sync(() => {
+                if (closed) return
+                resume(
+                  Effect.logError("tui.renderer.failed").pipe(
+                    Effect.annotateLogs("rika.failure.kind", failureKind(cause)),
+                    Effect.andThen(
+                      Effect.fail(
+                        Operation.OperationUnavailable.make({
+                          operation: "Interactive",
+                          message: Cause.pretty(cause),
+                        }),
+                      ),
+                    ),
                   ),
-                  Effect.ensuring(Effect.sync(() => initialized.value.destroy())),
                 )
-              }).pipe(Effect.asVoid),
-            )
-            run(
-              gitOutput(["git", "-C", model.workspace, "symbolic-ref", "--short", "HEAD"]).pipe(
-                Effect.tap(([text, exit]) =>
-                  Effect.sync(() => {
-                    const branch = text.trim()
-                    if (exit === 0 && branch.length > 0 && branch !== "HEAD") {
-                      model = ViewState.update(model, { _tag: "BranchDetected", branch })
-                      created.surface.update(model)
-                    }
-                  }),
-                ),
-                Effect.asVoid,
-              ),
-            )
-            run(
-              session.initialize(dispatch).pipe(
-                Effect.andThen(
-                  input.last === true
-                    ? loadSelected(session.reopenThread(dispatch))
-                    : input.threadId === undefined
-                      ? Effect.void
-                      : loadSelected(session.selectThread(input.threadId, dispatch)),
-                ),
-                Effect.andThen(
-                  initialSubmitAction(input.prompt, model.mode) === undefined
-                    ? Effect.void
-                    : Effect.sync(() => {
-                        Session.execute(adapter, initialSubmitAction(input.prompt, model.mode)!)
-                      }),
-                ),
-              ),
-            )
-          })
-          .catch((cause) => {
-            if (closed) return
-            resume(
-              Effect.logError("tui.renderer.failed").pipe(
-                Effect.annotateLogs("rika.failure.kind", cause instanceof Error ? cause.name : typeof cause),
-                Effect.andThen(
-                  Effect.fail(
-                    Operation.OperationUnavailable.make({ operation: "Interactive", message: String(cause) }),
-                  ),
-                ),
-              ),
-            )
-          })
+              }),
+            ),
+            Effect.asVoid,
+          ),
+        )
         return teardown(false)
       })
     })

@@ -14,6 +14,7 @@
     "typecheck": "bun ../../node_modules/typescript/lib/tsc.js --noEmit"
   },
   "dependencies": {
+    "@rika/tools": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

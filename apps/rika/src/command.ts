@@ -1,5 +1,5 @@
 import * as Operation from "@rika/app/operation"
-import { Console, Effect, Option, Schema, Stream } from "effect"
+import { Console, Effect, Option, Schema, Stdio, Stream } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { command as ConfigCommand } from "./commands/config"
 import { command as DiagnosticsCommand } from "./commands/diagnostics"
@@ -26,6 +26,7 @@ const streamFlags = {
 
 const optionalValue = <A>(value: Option.Option<A>): A | undefined => Option.getOrUndefined(value)
 type RunOperation = Extract<Operation.Input, { readonly _tag: "Run" }>
+const JsonLine = Schema.UnknownFromJsonString
 
 const runInput = (values: {
   readonly mode: Option.Option<"low" | "medium" | "high" | "ultra">
@@ -68,12 +69,11 @@ export const parseJsonLines = (input: string): ReadonlyArray<string> =>
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line, index) => {
-      let value: unknown
-      try {
-        value = JSON.parse(line)
-      } catch {
+      const decoded = Schema.decodeUnknownOption(JsonLine)(line)
+      if (Option.isNone(decoded)) {
         throw Operation.InvalidInput.make({ message: `Invalid JSON on stdin line ${index + 1}` })
       }
+      const value = decoded.value
       if (typeof value === "string") return value
       if (typeof value === "object" && value !== null && "prompt" in value && typeof value.prompt === "string")
         return value.prompt
@@ -83,34 +83,50 @@ export const parseJsonLines = (input: string): ReadonlyArray<string> =>
     })
 
 export function readStreamInput(
-  stdin?: AsyncIterable<unknown>,
+  stdin: AsyncIterable<unknown>,
 ): (input: RunOperation) => Effect.Effect<RunOperation, Operation.InvalidInput>
+export function readStreamInput(): (
+  input: RunOperation,
+) => Effect.Effect<RunOperation, Operation.InvalidInput, Stdio.Stdio>
 export function readStreamInput(
   input: RunOperation,
-  stdin?: AsyncIterable<unknown>,
+  stdin: AsyncIterable<unknown>,
 ): Effect.Effect<RunOperation, Operation.InvalidInput>
+export function readStreamInput(input: RunOperation): Effect.Effect<RunOperation, Operation.InvalidInput, Stdio.Stdio>
 export function readStreamInput(
   inputOrStdin?: RunOperation | AsyncIterable<unknown>,
-  stdin: AsyncIterable<unknown> = process.stdin,
+  stdin?: AsyncIterable<unknown>,
 ):
-  | Effect.Effect<RunOperation, Operation.InvalidInput>
-  | ((input: RunOperation) => Effect.Effect<RunOperation, Operation.InvalidInput>) {
+  | Effect.Effect<RunOperation, Operation.InvalidInput, Stdio.Stdio>
+  | ((input: RunOperation) => Effect.Effect<RunOperation, Operation.InvalidInput, Stdio.Stdio>) {
   if (inputOrStdin === undefined || !("_tag" in inputOrStdin)) {
     const selectedStdin = inputOrStdin ?? stdin
-    return (input) => readStreamInput(input, selectedStdin)
+    return selectedStdin === undefined
+      ? (input) => readStreamInput(input)
+      : (input) => readStreamInput(input, selectedStdin)
   }
   const input = inputOrStdin
   if (!input.streamJsonInput || input.prompt.length > 0) return Effect.succeed(input)
-  return Stream.fromAsyncIterable(stdin, (cause) =>
-    Operation.InvalidInput.make({ message: `Unable to read JSON input: ${String(cause)}` }),
-  ).pipe(
-    Stream.runFold(
-      () => "",
-      (text, chunk) => text + String(chunk),
-    ),
-    Effect.flatMap((text) =>
+  const stdinText =
+    stdin === undefined
+      ? Stdio.Stdio.pipe(
+          Effect.flatMap((stdio) => Stream.mkString(Stream.decodeText(stdio.stdin))),
+          Effect.mapError((cause) =>
+            Operation.InvalidInput.make({ message: `Unable to read JSON input: ${String(cause)}` }),
+          ),
+        )
+      : Stream.fromAsyncIterable(stdin, (cause) =>
+          Operation.InvalidInput.make({ message: `Unable to read JSON input: ${String(cause)}` }),
+        ).pipe(
+          Stream.runFold(
+            () => "",
+            (accumulated, chunk) => accumulated + String(chunk),
+          ),
+        )
+  return stdinText.pipe(
+    Effect.flatMap((content) =>
       Effect.try({
-        try: () => ({ ...input, prompt: [...input.prompt, ...parseJsonLines(text)] }),
+        try: () => ({ ...input, prompt: [...input.prompt, ...parseJsonLines(content)] }),
         catch: (cause) =>
           Schema.is(Operation.InvalidInput)(cause)
             ? cause

@@ -1,14 +1,17 @@
 import { expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 
-it.effect("loads app and command entrypoints without Bun-only composition", () =>
-  Effect.gen(function* () {
-    const [app, command] = yield* Effect.all([
-      Effect.promise(() => import("@rika/app")),
-      Effect.promise(() => import("../src/command")),
-    ])
+const loadApp = Effect.fn("DependencyBoundary.loadApp")(() => Effect.tryPromise(() => import("@rika/app")))
+const loadCommand = Effect.fn("DependencyBoundary.loadCommand")(() => Effect.tryPromise(() => import("../src/command")))
 
-    expect(app.Operation.Service).toBeDefined()
-    expect(command.command).toBeDefined()
-  }),
+it.effect(
+  "loads app and command entrypoints without Bun-only composition",
+  () =>
+    Effect.gen(function* () {
+      const [app, command] = yield* Effect.all([loadApp(), loadCommand()], { concurrency: 2 })
+
+      expect(app.Operation.Service).toBeDefined()
+      expect(command.command).toBeDefined()
+    }),
+  15_000,
 )

@@ -94,50 +94,11 @@ const reviewFanOutOwners = Effect.gen(function* () {
 
 const transcriptProjection = Effect.gen(function* () {
   const sql = yield* SqlClient
-  yield* sql`CREATE TABLE rika_transcript_entries (
-    turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
-    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    prompt TEXT NOT NULL,
-    status TEXT NOT NULL,
-    events_json TEXT NOT NULL DEFAULT '[]',
-    revision INTEGER NOT NULL DEFAULT 1,
-    projection_version INTEGER NOT NULL DEFAULT 1,
-    oldest_cursor TEXT,
-    checkpoint_cursor TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  )`
-  yield* sql`CREATE INDEX rika_transcript_page ON rika_transcript_entries (thread_id, created_at DESC, turn_id DESC)`
-})
-
-const threadSummaries = Effect.gen(function* () {
-  const sql = yield* SqlClient
-  yield* sql`CREATE TABLE rika_thread_turn_activity (
-    turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
-    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    projected_cursor TEXT,
-    complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)),
-    added INTEGER NOT NULL DEFAULT 0 CHECK (added >= 0),
-    modified INTEGER NOT NULL DEFAULT 0 CHECK (modified >= 0),
-    removed INTEGER NOT NULL DEFAULT 0 CHECK (removed >= 0),
-    last_event_at INTEGER,
-    updated_at INTEGER NOT NULL
-  )`
-  yield* sql`CREATE INDEX rika_thread_turn_activity_summary ON rika_thread_turn_activity (thread_id, last_event_at DESC)`
-  yield* sql`CREATE TABLE rika_thread_read_state (
-    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    last_read_at INTEGER NOT NULL
-  )`
-})
-
-const semanticTranscriptProjection = Effect.gen(function* () {
-  const sql = yield* SqlClient
   yield* sql`CREATE TABLE rika_transcript_checkpoints (
     turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
     thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    drafts_json TEXT NOT NULL DEFAULT '[]',
+    model_phase INTEGER NOT NULL DEFAULT -1,
     revision INTEGER NOT NULL DEFAULT -1,
-    projection_version INTEGER NOT NULL DEFAULT 2,
     oldest_cursor TEXT,
     checkpoint_cursor TEXT,
     cost_usd REAL,
@@ -162,6 +123,26 @@ const semanticTranscriptProjection = Effect.gen(function* () {
   )`
 })
 
+const threadSummaries = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`CREATE TABLE rika_thread_turn_activity (
+    turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
+    projected_cursor TEXT,
+    complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)),
+    added INTEGER NOT NULL DEFAULT 0 CHECK (added >= 0),
+    modified INTEGER NOT NULL DEFAULT 0 CHECK (modified >= 0),
+    removed INTEGER NOT NULL DEFAULT 0 CHECK (removed >= 0),
+    last_event_at INTEGER,
+    updated_at INTEGER NOT NULL
+  )`
+  yield* sql`CREATE INDEX rika_thread_turn_activity_summary ON rika_thread_turn_activity (thread_id, last_event_at DESC)`
+  yield* sql`CREATE TABLE rika_thread_read_state (
+    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
+    last_read_at INTEGER NOT NULL
+  )`
+})
+
 const migrations = SqliteMigrator.fromRecord({
   "1_product_baseline": baseline,
   "2_turns": turns,
@@ -173,7 +154,6 @@ const migrations = SqliteMigrator.fromRecord({
   "8_review_fan_out_owners": reviewFanOutOwners,
   "9_transcript_projection": transcriptProjection,
   "10_thread_summaries": threadSummaries,
-  "11_semantic_transcript_projection": semanticTranscriptProjection,
 })
 const migrate = SqliteMigrator.layer({ loader: migrations, table: "rika_migrations" })
 

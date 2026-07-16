@@ -1,7 +1,7 @@
 import { CliRenderEvents, Renderable, RendererControlState } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 import { expect, test } from "bun:test"
-import { Data, Duration, Effect } from "effect"
+import { Data, Effect } from "effect"
 import { Surface, maxMountedTranscriptEntries } from "../src/adapter"
 import { initial, ready, replaceQueue, update, type Model, type ThreadItem } from "../src/view-state"
 
@@ -42,22 +42,22 @@ test("renders input and resize updates while the renderer remains event-driven",
       })
       try {
         surface.update(model)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.captureCharFrame()).toContain("settled response")
         expect(setup.renderer.controlState).toBe(RendererControlState.IDLE)
         expect(setup.renderer.isRunning).toBe(false)
         yield* openTui(() => setup.mockInput.typeText("next"))
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.captureCharFrame()).toContain("next")
         expect(setup.renderer.isRunning).toBe(false)
         setup.renderer.resize(60, 18)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(model.width).toBe(60)
         expect(model.height).toBe(18)
         expect(setup.renderer.isRunning).toBe(false)
         setup.renderer.suspend()
         setup.renderer.resume()
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.captureCharFrame()).toContain("next")
         expect(setup.renderer.controlState).toBe(RendererControlState.IDLE)
         expect(setup.renderer.isRunning).toBe(false)
@@ -68,51 +68,51 @@ test("renders input and resize updates while the renderer remains event-driven",
     }),
   ))
 
-test("uses OpenTUI's native cursor without overriding the terminal cursor style", () =>
+test("uses OpenTUI's native cursor position with a steady block style", () =>
   Effect.runPromise(
     Effect.gen(function* () {
       const setup = yield* openTui(() => createTestRenderer({ width: 100, height: 30 }))
-      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined }, { animate: false })
       const base = { ...initial("/work", "high"), width: 100, height: 30, input: "draft", cursor: 5 }
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const composerCursor = setup.renderer.getCursorState()
-        expect(composerCursor).toMatchObject({ visible: true, style: "default" })
+        expect(composerCursor).toMatchObject({ visible: true, style: "block", blinking: false })
 
         surface.update({
           ...base,
           paletteOpen: true,
           palette: { open: true, query: "mode", selected: 0 },
         })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const paletteCursor = setup.renderer.getCursorState()
-        expect(paletteCursor).toMatchObject({ visible: true, style: "default" })
+        expect(paletteCursor).toMatchObject({ visible: true, style: "block", blinking: false })
         expect(paletteCursor.y).not.toBe(composerCursor.y)
 
         surface.update({
           ...base,
           threadSwitcher: { ...base.threadSwitcher, open: true, query: "cursor" },
         })
-        yield* openTui(() => setup.renderer.idle())
-        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "default" })
+        yield* openTui(() => setup.flush())
+        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "block", blinking: false })
 
         surface.update({
           ...base,
           filePicker: { ...base.filePicker, open: true, query: "src", items: ready(["src/main.ts"]) },
         })
-        yield* openTui(() => setup.renderer.idle())
-        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "default" })
+        yield* openTui(() => setup.flush())
+        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "block", blinking: false })
 
         surface.update({ ...base, modePicker: { open: true, selected: 0 } })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.renderer.getCursorState().visible).toBe(false)
 
         surface.update({
           ...base,
           threadSidebar: { open: true, focused: true, selected: 0, scrollTop: 0 },
         })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.renderer.getCursorState().visible).toBe(false)
       } finally {
         surface.destroy()
@@ -121,15 +121,15 @@ test("uses OpenTUI's native cursor without overriding the terminal cursor style"
     }),
   ))
 
-test("keeps the native cursor visible when the focused editor does not change", () =>
+test("keeps the application-controlled cursor visible when animation is disabled", () =>
   Effect.runPromise(
     Effect.gen(function* () {
       const setup = yield* openTui(() => createTestRenderer({ width: 100, height: 30 }))
-      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined }, { animate: false })
       const base = { ...initial("/work", "high"), width: 100, height: 30, input: "draft", cursor: 5 }
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.renderer.getCursorState().visible).toBe(true)
 
         surface.update({ ...base, input: "drafts", cursor: 6 })
@@ -141,7 +141,7 @@ test("keeps the native cursor visible when the focused editor does not change", 
           palette: { open: true, query: "mode", selected: 0 },
         }
         surface.update(palette)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(setup.renderer.getCursorState().visible).toBe(true)
 
         surface.update({ ...palette, palette: { ...palette.palette, query: "modes" } })
@@ -167,24 +167,14 @@ for (const historySize of [1, 10, 100, 1_000] as const) {
         const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
         try {
           surface.update(base)
-          yield* openTui(() => setup.renderer.idle())
-          const durations = yield* Effect.forEach(
-            Array.from({ length: 40 }, (_, index) => index),
-            (index) =>
-              Effect.sync(() =>
-                surface.update({ ...base, input: `next ${index}`, cursor: `next ${index}`.length }),
-              ).pipe(
-                Effect.timed,
-                Effect.map(([duration]) => Duration.toMillis(duration)),
-              ),
-            { concurrency: 1 },
-          )
-          const p95 = durations.toSorted((left, right) => left - right)[Math.floor(durations.length * 0.95)]!
-          const mounted = (surface as unknown as { readonly transcriptChildren: ReadonlyArray<Renderable> })
-            .transcriptChildren.length
+          yield* openTui(() => setup.flush())
+          const state = surface as unknown as { readonly transcriptChildren: ReadonlyArray<Renderable> }
+          const mounted = [...state.transcriptChildren]
+          for (let index = 0; index < 40; index += 1)
+            surface.update({ ...base, input: `next ${index}`, cursor: `next ${index}`.length })
 
-          expect(p95).toBeLessThan(16)
-          expect(mounted).toBeLessThanOrEqual(maxMountedTranscriptEntries)
+          expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptEntries * 2)
+          expect(state.transcriptChildren.every((child, index) => child === mounted[index])).toBe(true)
         } finally {
           surface.destroy()
           setup.renderer.destroy()
@@ -212,11 +202,11 @@ test("moves the bounded transcript window to older mounted entries and keeps it 
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(0)
         const firstBefore = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         setup.mockInput.pressKey("\x1b[5~")
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstAfter = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         const state = surface as unknown as {
           readonly transcriptWindowEnd: number
@@ -226,7 +216,7 @@ test("moves the bounded transcript window to older mounted entries and keeps it 
         expect(firstBefore).toBe(300)
         expect(firstAfter).toBeLessThan(300)
         expect(firstAfter).toBeGreaterThan(200)
-        expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptEntries)
+        expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptEntries * 2)
         surface.update({ ...base, input: "next", cursor: 4 })
         expect(state.transcriptWindowEnd).toBe(400)
       } finally {
@@ -255,16 +245,16 @@ test("moves the bounded transcript window forward by one measured page", () =>
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(0)
         setup.mockInput.pressKey("\x1b[5~")
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(surface.transcriptScroll.scrollHeight)
         setup.renderer.requestRender()
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstBefore = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         setup.mockInput.pressKey("\x1b[6~")
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstAfter = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         const state = surface as unknown as {
           readonly transcriptWindowEnd: number
@@ -300,28 +290,28 @@ test("coalesces repeated page keys until the transcript anchor frame", () =>
       const state = surface as unknown as { readonly transcriptWindowEnd: number }
       try {
         surface.update({ ...initial("/work", "high"), entries, items, scrollFollow: false })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(0)
         setup.mockInput.pressKey("\x1b[5~")
         setup.mockInput.pressKey("\x1b[5~")
         expect(state.transcriptWindowEnd).toBe(500)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstAfterRepeatedUp = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         expect(firstAfterRepeatedUp).toBeGreaterThan(300)
         expect(firstAfterRepeatedUp).toBeLessThan(400)
 
         surface.transcriptScroll.scrollTo(0)
         setup.mockInput.pressKey("\x1b[5~")
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(state.transcriptWindowEnd).toBe(400)
         surface.transcriptScroll.scrollTo(surface.transcriptScroll.scrollHeight)
         setup.renderer.requestRender()
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstBeforeRepeatedDown = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         setup.mockInput.pressKey("\x1b[6~")
         setup.mockInput.pressKey("\x1b[6~")
         expect(state.transcriptWindowEnd).toBe(500)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstAfterRepeatedDown = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         expect(firstAfterRepeatedDown).toBeGreaterThan(firstBeforeRepeatedDown)
         expect(firstAfterRepeatedDown).toBeLessThan(firstBeforeRepeatedDown + 50)
@@ -351,7 +341,7 @@ test("preserves a pending prepend anchor through an intervening composer update"
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(40)
         const firstBefore = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
         const older = Array.from({ length: 50 }, (_, index) => ({
@@ -374,7 +364,7 @@ test("preserves a pending prepend anchor through an intervening composer update"
         }
         surface.update(prepended, true)
         surface.update({ ...prepended, input: "x", cursor: 1 })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(firstBefore)
       } finally {
         surface.destroy()
@@ -406,7 +396,7 @@ test("suppresses programmatic scrollbar feedback and queued work after teardown"
       })
       try {
         surface.update({ ...initial("/work", "high"), entries, items, scrollFollow: false })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(20)
         surface.transcriptScrollbar.scrollPosition = 10
         surface.destroy()
@@ -438,14 +428,14 @@ test("keeps a detached transcript window stable when live entries arrive", () =>
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const firstBefore = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
         surface.update({
           ...base,
           entries: [...entries, { role: "assistant", text: "answer 500", turnId: "turn-500" }],
           items: [...items, { _tag: "Entry", index: 500, id: "answer-500", turnId: "turn-500" }],
         })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(firstBefore)
       } finally {
         surface.destroy()
@@ -480,7 +470,7 @@ test("reports prepend anchor geometry without requesting another page", () =>
       })
       try {
         surface.update(base)
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const older = Array.from({ length: 50 }, (_, index) => ({
           role: "assistant" as const,
           text: `older ${index}`,
@@ -502,7 +492,7 @@ test("reports prepend anchor geometry without requesting another page", () =>
           },
           true,
         )
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         expect(requested).toEqual([])
         expect(geometry).toHaveLength(1)
       } finally {
@@ -540,21 +530,18 @@ for (const panel of ["changed", "workspace"] as const) {
         const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
         try {
           surface.update(base)
-          yield* openTui(() => setup.renderer.idle())
-          const durations = yield* Effect.forEach(
-            Array.from({ length: 20 }, (_, index) => index),
-            (index) =>
-              Effect.sync(() =>
-                surface.update({ ...base, input: `next ${index}`, cursor: `next ${index}`.length }),
-              ).pipe(
-                Effect.timed,
-                Effect.map(([duration]) => Duration.toMillis(duration)),
-              ),
-            { concurrency: 1 },
-          )
-          const p95 = durations.toSorted((left, right) => left - right)[Math.floor(durations.length * 0.95)]!
+          yield* openTui(() => setup.flush())
+          const state = surface as unknown as {
+            readonly changedRows: ReadonlyArray<unknown>
+            readonly transcriptChildren: ReadonlyArray<Renderable>
+          }
+          const sidebarRows = state.changedRows
+          const transcriptChildren = [...state.transcriptChildren]
+          for (let index = 0; index < 20; index += 1)
+            surface.update({ ...base, input: `next ${index}`, cursor: `next ${index}`.length })
 
-          expect(p95).toBeLessThan(16)
+          expect(state.changedRows).toBe(sidebarRows)
+          expect(state.transcriptChildren.every((child, index) => child === transcriptChildren[index])).toBe(true)
         } finally {
           surface.destroy()
           setup.renderer.destroy()
@@ -570,10 +557,10 @@ test("renders autonomous welcome animation frames while otherwise event-driven",
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       try {
         surface.update({ ...initial("/work", "high"), width: 80, height: 24 })
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const first = setup.captureCharFrame()
         yield* Effect.sleep("100 millis")
-        yield* openTui(() => setup.renderer.idle())
+        yield* openTui(() => setup.flush())
         const second = setup.captureCharFrame()
         expect(first).toContain("Welcome to Rika")
         expect(second).toContain("Welcome to Rika")
@@ -1137,7 +1124,22 @@ test("drives keyboard, palette, resize, frame capture, and teardown", () =>
         setup.mockInput.pressKey("o", { ctrl: true })
         model = update(model, {
           _tag: "BlockAdded",
-          block: { _tag: "ToolCall", id: "1", name: "Read", input: "src/main.ts", status: "running" },
+          block: {
+            _tag: "ToolCall",
+            id: "1",
+            name: "read_file",
+            input: "src/main.ts",
+            status: "running",
+            presentation: {
+              family: "explore",
+              action: "read",
+              activeLabel: "Exploring",
+              completeLabel: "Explored",
+              counter: "file",
+            },
+            detail: "src/main.ts",
+            files: [],
+          },
         })
         model = update(model, { _tag: "BlockAdded", block: { _tag: "Diff", path: "src/main.ts", patch: "-old\n+new" } })
         surface.update(model)

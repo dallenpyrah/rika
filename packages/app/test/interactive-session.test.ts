@@ -789,10 +789,7 @@ describe("InteractiveSession controls", () => {
         thread: { id: "latest" },
         entries: [{ turn: { id: "latest-active" } }],
       })
-      expect(events.findLast((event) => event._tag === "ExecutionReplayed")).toMatchObject({
-        _tag: "ExecutionReplayed",
-        result: { turnId: "latest-active", lastCursor: "cursor-7" },
-      })
+      expect(events.filter((event) => event._tag === "TranscriptPatched")).toEqual([])
       expect(yield* Ref.get(controls)).toEqual([
         ["replay", "active", undefined],
         ["replay", "latest-active", undefined],

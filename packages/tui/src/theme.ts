@@ -1,8 +1,8 @@
 import { RGBA } from "@opentui/core"
 
 export const colors = {
-  text: RGBA.defaultForeground(),
-  subtle: RGBA.fromIndex(7),
+  text: RGBA.fromIndex(7),
+  subtle: RGBA.fromIndex(8),
   muted: RGBA.fromIndex(8),
   surface: RGBA.defaultBackground(),
   teal: RGBA.fromIndex(6),

@@ -1,34 +1,58 @@
 import { expect, test } from "bun:test"
-import { binary } from "./process"
+import { Effect, FileSystem, Path, Schema } from "effect"
+import { run, runTest, sandbox } from "./process"
 
-const run = (database: string, args: ReadonlyArray<string>) => {
-  const result = Bun.spawnSync([binary, ...args], {
-    env: { ...process.env, RIKA_DATABASE: database },
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  if (result.exitCode !== 0) throw new Error(result.stderr.toString())
-  return result.stdout.toString().trim()
-}
+const ThreadJson = Schema.fromJsonString(Schema.Struct({ id: Schema.String }))
+const ThreadsJson = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      title: Schema.String,
+      pinned: Schema.Boolean,
+      labels: Schema.Array(Schema.String),
+    }),
+  ),
+)
 
-test("packaged thread lifecycle persists across processes", async () => {
-  const directory = await Bun.fileURLToPath(new URL(`file://${await Bun.$`mktemp -d`.text()}`.trim()))
-  const database = `${directory}/nested/rika.db`
-  run(database, ["--help"])
-  expect(await Bun.file(`${directory}/nested`).exists()).toBe(false)
-  const created = JSON.parse(run(database, ["threads", "new"]))
-  run(database, ["threads", "rename", created.id, "Durable thread"])
-  run(database, ["threads", "label", created.id, "local", "durable"])
-  run(database, ["threads", "pin", created.id])
-  const listed = JSON.parse(run(database, ["threads", "list"]))
-  expect(listed).toHaveLength(1)
-  expect(listed[0].title).toBe("Durable thread")
-  expect(listed[0].pinned).toBe(true)
-  run(database, ["threads", "archive", created.id])
-  expect(JSON.parse(run(database, ["threads", "list"]))).toEqual([])
-  const searched = JSON.parse(run(database, ["threads", "search", "durable", "--include-archived"]))
-  expect(searched[0].labels).toEqual(["local", "durable"])
-  run(database, ["threads", "unarchive", created.id])
-  run(database, ["threads", "delete", created.id])
-  expect(JSON.parse(run(database, ["threads", "list", "--include-archived"]))).toEqual([])
-}, 30_000)
+test(
+  "packaged thread lifecycle persists across processes",
+  () =>
+    runTest(
+      Effect.acquireUseRelease(
+        sandbox,
+        (context) =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem
+            const path = yield* Path.Path
+            const database = path.join(context.root, "nested", "rika.db")
+            context.env.RIKA_DATABASE = database
+            context.env.RIKA_RELAY_DATABASE = path.join(context.root, "nested", "relay.db")
+            yield* run(context, ["--help"])
+            expect(yield* fileSystem.exists(path.dirname(database))).toBe(false)
+            const created = Schema.decodeUnknownSync(ThreadJson)((yield* run(context, ["threads", "new"])).stdout)
+            yield* run(context, ["threads", "rename", created.id, "Durable thread"])
+            yield* run(context, ["threads", "label", created.id, "local", "durable"])
+            yield* run(context, ["threads", "pin", created.id])
+            const listed = Schema.decodeUnknownSync(ThreadsJson)((yield* run(context, ["threads", "list"])).stdout)
+            expect(listed).toHaveLength(1)
+            expect(listed[0]!.title).toBe("Durable thread")
+            expect(listed[0]!.pinned).toBe(true)
+            yield* run(context, ["threads", "archive", created.id])
+            expect(Schema.decodeUnknownSync(ThreadsJson)((yield* run(context, ["threads", "list"])).stdout)).toEqual([])
+            const searched = Schema.decodeUnknownSync(ThreadsJson)(
+              (yield* run(context, ["threads", "search", "durable", "--include-archived"])).stdout,
+            )
+            expect(searched[0]!.labels).toEqual(["local", "durable"])
+            yield* run(context, ["threads", "unarchive", created.id])
+            yield* run(context, ["threads", "delete", created.id])
+            expect(
+              Schema.decodeUnknownSync(ThreadsJson)(
+                (yield* run(context, ["threads", "list", "--include-archived"])).stdout,
+              ),
+            ).toEqual([])
+          }),
+        (context) => context.dispose,
+      ),
+    ),
+  30_000,
+)

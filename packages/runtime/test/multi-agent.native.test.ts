@@ -1,23 +1,9 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, test } from "bun:test"
-import { Deferred, Effect, FileSystem, Layer, Path, Schema } from "effect"
+import { Effect, FileSystem, Layer, Path, Schema } from "effect"
+import { FixtureProcessError, spawnFixtureProcess } from "./process-protocol"
 
 const script = new URL("../../app/test/multi-agent-process.ts", import.meta.url).pathname
-
-class ProtocolError extends Schema.TaggedErrorClass<ProtocolError>()("MultiAgentProtocolError", {
-  message: Schema.String,
-}) {}
-
-const Response = Schema.Struct({
-  id: Schema.optional(Schema.String),
-  type: Schema.optional(Schema.String),
-  pid: Schema.optional(Schema.Finite),
-  ok: Schema.optional(Schema.Boolean),
-  value: Schema.optional(Schema.Unknown),
-  error: Schema.optional(Schema.String),
-})
-const decodeResponse = Schema.decodeEffect(Schema.fromJsonString(Response))
-const encodeRequest = Schema.encodeEffect(Schema.UnknownFromJsonString)
 
 const runNative = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof BunServices.layer>>) =>
   Effect.runPromise(
@@ -37,89 +23,35 @@ const Inspection = Schema.UndefinedOr(
 )
 const RunResult = Schema.Union([Inspection, Schema.Undefined])
 const Projection = Schema.Array(Schema.Struct({ childId: Schema.String, state: Schema.String }))
-const VisibleRows = Schema.Array(
+const VisibleRow = Schema.Struct({
+  type: Schema.String,
+  fanOutId: Schema.optional(Schema.String),
+  childId: Schema.optional(Schema.String),
+})
+const VisibleRowJson = Schema.fromJsonString(VisibleRow)
+const ReleaseJson = Schema.fromJsonString(
   Schema.Struct({
-    type: Schema.String,
-    fanOutId: Schema.optional(Schema.String),
-    childId: Schema.optional(Schema.String),
+    status: Schema.String,
+    output: Schema.Array(Schema.TaggedStruct("text", { text: Schema.String })),
+    completedAt: Schema.Finite,
   }),
 )
 
-const startHost = Effect.fn("MultiAgentTest.startHost")(function* (database: string, workspace: string) {
-  const proc = yield* Effect.acquireRelease(
-    Effect.sync(() =>
-      Bun.spawn([process.execPath, script], {
-        cwd: process.cwd(),
-        env: { ...process.env, RIKA_MULTI_AGENT_DATABASE: database, RIKA_MULTI_AGENT_WORKSPACE: workspace },
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      }),
-    ),
-    (process) =>
-      Effect.sync(() => {
-        if (process.exitCode === null && process.signalCode === null) process.kill("SIGKILL")
-      }),
-  )
-  const ready = yield* Deferred.make<number, ProtocolError>()
-  const pending = new Map<string, Deferred.Deferred<unknown, ProtocolError>>()
-  let sequence = 0
-  let buffer = ""
-  const reader = proc.stdout.getReader()
-  const consume: Effect.Effect<void, ProtocolError> = Effect.gen(function* () {
-    const result = yield* Effect.tryPromise({
-      try: () => reader.read(),
-      catch: (error) => ProtocolError.make({ message: String(error) }),
-    }).pipe(Effect.orElseSucceed(() => ({ done: true as const, value: undefined })))
-    if (result.done) return
-    buffer += new TextDecoder().decode(result.value)
-    let newline = buffer.indexOf("\n")
-    while (newline >= 0) {
-      const message = yield* decodeResponse(buffer.slice(0, newline)).pipe(
-        Effect.mapError((error) => ProtocolError.make({ message: String(error) })),
-      )
-      buffer = buffer.slice(newline + 1)
-      if (message.type === "ready" && message.pid !== undefined) yield* Deferred.succeed(ready, message.pid)
-      if (message.id !== undefined) {
-        const waiter = pending.get(message.id)
-        if (waiter !== undefined) {
-          pending.delete(message.id)
-          if (message.ok === true) yield* Deferred.succeed(waiter, message.value)
-          else yield* Deferred.fail(waiter, ProtocolError.make({ message: message.error ?? "request failed" }))
-        }
-      }
-      newline = buffer.indexOf("\n")
-    }
-    yield* Effect.suspend(() => consume)
+const startHost = (database: string, workspace: string) =>
+  spawnFixtureProcess({
+    script,
+    label: "multi-agent fixture",
+    environment: { RIKA_MULTI_AGENT_DATABASE: database, RIKA_MULTI_AGENT_WORKSPACE: workspace },
   })
-  yield* consume.pipe(Effect.forkScoped)
-  const request = Effect.fn("MultiAgentTest.request")(function* <A>(
-    schema: Schema.Codec<A>,
-    type: string,
-    value?: unknown,
-  ) {
-    const id = `request-${++sequence}`
-    const deferred = yield* Deferred.make<unknown, ProtocolError>()
-    pending.set(id, deferred)
-    const encoded = yield* encodeRequest({ id, type, value }).pipe(
-      Effect.mapError((error) => ProtocolError.make({ message: String(error) })),
-    )
-    proc.stdin.write(`${encoded}\n`)
-    const response = yield* Deferred.await(deferred)
-    return yield* Schema.decodeUnknownEffect(schema)(response).pipe(
-      Effect.mapError((error) => ProtocolError.make({ message: String(error) })),
-    )
-  })
-  return { proc, ready: Deferred.await(ready), request }
-})
 
 function waitFor<A>(
-  read: Effect.Effect<A, ProtocolError>,
+  read: Effect.Effect<A, FixtureProcessError>,
   accept: (value: A) => boolean,
   remaining = 500,
-): Effect.Effect<A, ProtocolError> {
+): Effect.Effect<A, FixtureProcessError> {
   return Effect.gen(function* () {
-    if (remaining === 0) return yield* ProtocolError.make({ message: "timed out waiting for Rika multi-agent state" })
+    if (remaining === 0)
+      return yield* FixtureProcessError.make({ message: "timed out waiting for Rika multi-agent state" })
     const value = yield* read
     if (accept(value)) return value
     yield* Effect.sleep("20 millis")
@@ -150,7 +82,7 @@ test(
           const release = (name: string, ordinal: number, status = "completed") =>
             fileSystem.writeFileString(
               path.join(directory, `child:parent-${name}:${name}-${ordinal}.json`),
-              JSON.stringify({
+              Schema.encodeSync(ReleaseJson)({
                 status,
                 output: [{ _tag: "text", text: `output-${ordinal}` }],
                 completedAt: 200 + ordinal,
@@ -159,23 +91,17 @@ test(
           const visible = fileSystem.readFileString(path.join(directory, "visible.ndjson")).pipe(
             Effect.orElseSucceed(() => ""),
             Effect.flatMap((text) =>
-              Schema.decodeUnknownEffect(VisibleRows)(
-                text.trim() === ""
-                  ? []
-                  : text
-                      .trim()
-                      .split("\n")
-                      .map((line) => JSON.parse(line)),
+              Effect.forEach(text.trim() === "" ? [] : text.trim().split("\n"), (line) =>
+                Schema.decodeUnknownEffect(VisibleRowJson)(line),
               ),
             ),
-            Effect.mapError((error) => ProtocolError.make({ message: String(error) })),
+            Effect.mapError((error) => FixtureProcessError.make({ message: String(error) })),
           )
           let host = yield* startHost(database, directory)
           const firstPid = yield* host.ready
           yield* host.request(RunResult, "run", input("restart", "all")).pipe(Effect.forkScoped)
           yield* waitFor(visible, (rows) => rows.filter((row) => row.type === "dispatch").length === 2)
-          host.proc.kill("SIGKILL")
-          yield* Effect.promise(() => host.proc.exited)
+          yield* host.kill
 
           host = yield* startHost(database, directory)
           expect(yield* host.ready).not.toBe(firstPid)

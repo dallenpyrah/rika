@@ -1,83 +1,185 @@
-import { afterAll, beforeEach, describe, expect, test } from "bun:test"
-import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import * as BunServices from "@effect/platform-bun/BunServices"
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+import { Config, Effect, FileSystem, Path, Stream } from "effect"
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
-const root = new URL("../..", import.meta.url).pathname
-const temporary = await mkdtemp(join(tmpdir(), "rika-local-install-"))
-const installRoot = join(temporary, "install", "current")
-const binDir = join(temporary, "bin")
-const home = join(temporary, "home")
-const state = join(temporary, "state")
-const env = { ...process.env, HOME: home, RIKA_INSTALL_ROOT: installRoot, RIKA_BIN_DIR: binDir }
-const runScript = (name: string) => Bun.spawnSync(["bun", "run", `scripts/${name}.ts`], { cwd: root, env })
-const runRika = (args: string[]) =>
-  Bun.spawnSync(["rika", ...args], {
-    cwd: temporary,
+interface InstallTestContext {
+  readonly root: string
+  readonly temporary: string
+  readonly installRoot: string
+  readonly binDir: string
+  readonly home: string
+  readonly state: string
+  readonly env: Record<string, string | undefined>
+}
+
+interface ProcessResult {
+  readonly stdout: string
+  readonly stderr: string
+  readonly exitCode: number
+}
+
+let context: InstallTestContext
+
+const runTest = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer), Effect.scoped))
+
+const runChild = Effect.fn("LocalInstallTest.runChild")(function* (
+  executable: string,
+  args: ReadonlyArray<string>,
+  options: { readonly cwd: string; readonly env: Record<string, string | undefined> },
+) {
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      const child = yield* spawner.spawn(
+        ChildProcess.make(executable, args, {
+          cwd: options.cwd,
+          env: options.env,
+          extendEnv: true,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        }),
+      )
+      const [stdout, stderr, exitCode] = yield* Effect.all(
+        [
+          Stream.mkString(Stream.decodeText(child.stdout)),
+          Stream.mkString(Stream.decodeText(child.stderr)),
+          child.exitCode,
+        ],
+        { concurrency: 3 },
+      )
+      return { stdout, stderr, exitCode: Number(exitCode) } satisfies ProcessResult
+    }),
+  )
+})
+
+const runScript = (name: string) =>
+  runChild("bun", ["run", `scripts/${name}.ts`], { cwd: context.root, env: context.env })
+
+const runRika = (args: ReadonlyArray<string>) =>
+  runChild("rika", args, {
+    cwd: context.temporary,
     env: {
-      ...env,
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
-      RIKA_DATABASE: join(state, "rika.db"),
-      RIKA_RELAY_DATABASE: join(state, "relay.db"),
+      ...context.env,
+      RIKA_DATABASE: `${context.state}/rika.db`,
+      RIKA_RELAY_DATABASE: `${context.state}/relay.db`,
       RIKA_TEST_MODEL_RESPONSE: "deterministic response",
     },
   })
 
-beforeEach(async () => {
-  await rm(installRoot, { recursive: true, force: true })
-  await rm(binDir, { recursive: true, force: true })
-  await rm(state, { recursive: true, force: true })
-  await mkdir(home, { recursive: true })
-})
+beforeAll(() =>
+  runTest(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const root = yield* path.fromFileUrl(new URL("../..", import.meta.url))
+      const temporary = yield* fileSystem.makeTempDirectory({ prefix: "rika-local-install-" })
+      const binDir = path.join(temporary, "bin")
+      const inheritedPath = yield* Config.string("PATH").pipe(Config.withDefault(""))
+      context = {
+        root,
+        temporary,
+        installRoot: path.join(temporary, "install", "current"),
+        binDir,
+        home: path.join(temporary, "home"),
+        state: path.join(temporary, "state"),
+        env: {
+          HOME: path.join(temporary, "home"),
+          PATH: `${binDir}:${inheritedPath}`,
+          RIKA_INSTALL_ROOT: path.join(temporary, "install", "current"),
+          RIKA_BIN_DIR: binDir,
+        },
+      }
+    }),
+  ),
+)
 
-afterAll(async () => {
-  await rm(temporary, { recursive: true, force: true })
-})
+beforeEach(() =>
+  runTest(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      yield* Effect.forEach([context.installRoot, context.binDir, context.state], (target) =>
+        fileSystem.remove(target, { recursive: true, force: true }),
+      )
+      yield* fileSystem.makeDirectory(context.home, { recursive: true })
+    }),
+  ),
+)
+
+afterAll(() =>
+  runTest(
+    FileSystem.FileSystem.pipe(
+      Effect.flatMap((fileSystem) => fileSystem.remove(context.temporary, { recursive: true, force: true })),
+    ),
+  ),
+)
 
 describe("local packaged installation", () => {
-  test("installs, runs by PATH name, reinstalls, and uninstalls idempotently", async () => {
-    const installed = runScript("install-local")
-    expect(installed.exitCode, installed.stderr.toString()).toBe(0)
-    expect((await lstat(join(binDir, "rika"))).isSymbolicLink()).toBe(true)
-    expect(await readlink(join(binDir, "rika"))).toBe(join(installRoot, "bin", "rika"))
-    expect((await lstat(join(installRoot, "bin", "node_modules"))).isDirectory()).toBe(true)
-    for (const args of [["--version"], ["--help"], ["tools", "list"]]) {
-      const result = runRika(args)
-      expect(result.exitCode, `${args.join(" ")}\n${result.stderr}`).toBe(0)
-    }
-    const executed = runRika(["run", "--ephemeral", "say hi"])
-    expect(executed.exitCode, executed.stderr.toString()).toBe(0)
-    expect(executed.stdout.toString()).toContain("deterministic response")
-    expect(executed.stderr.toString()).not.toContain("TypeError: members.map is not a function")
-    expect(executed.stderr.toString()).not.toContain("requires Crypto")
-    const reinstalled = runScript("install-local")
-    expect(reinstalled.exitCode, reinstalled.stderr.toString()).toBe(0)
-    expect(runScript("uninstall-local").exitCode).toBe(0)
-    expect(runScript("uninstall-local").exitCode).toBe(0)
-    expect(await lstat(installRoot).catch(() => undefined)).toBeUndefined()
-  }, 30_000)
+  test(
+    "installs, runs by PATH name, reinstalls, and uninstalls idempotently",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem
+          const path = yield* Path.Path
+          const installed = yield* runScript("install-local")
+          expect(installed.exitCode, installed.stderr).toBe(0)
+          expect(yield* fileSystem.readLink(path.join(context.binDir, "rika"))).toBe(
+            path.join(context.installRoot, "bin", "rika"),
+          )
+          expect((yield* fileSystem.stat(path.join(context.installRoot, "bin", "node_modules"))).type).toBe("Directory")
+          for (const args of [["--version"], ["--help"], ["tools", "list"]]) {
+            const result = yield* runRika(args)
+            expect(result.exitCode, `${args.join(" ")}\n${result.stderr}`).toBe(0)
+          }
+          const executed = yield* runRika(["run", "--ephemeral", "say hi"])
+          expect(executed.exitCode, executed.stderr).toBe(0)
+          expect(executed.stdout).toContain("deterministic response")
+          expect(executed.stderr).not.toContain("TypeError: members.map is not a function")
+          expect(executed.stderr).not.toContain("requires Crypto")
+          expect((yield* runScript("install-local")).exitCode).toBe(0)
+          expect((yield* runScript("uninstall-local")).exitCode).toBe(0)
+          expect((yield* runScript("uninstall-local")).exitCode).toBe(0)
+          expect(yield* fileSystem.exists(context.installRoot)).toBe(false)
+        }),
+      ),
+    30_000,
+  )
 
-  test("does not overwrite a foreign command", async () => {
-    await mkdir(binDir, { recursive: true })
-    const foreign = join(temporary, "foreign-rika")
-    await writeFile(foreign, "foreign")
-    await symlink(foreign, join(binDir, "rika"))
-    const result = runScript("install-local")
-    expect(result.exitCode).not.toBe(0)
-    expect(await readlink(join(binDir, "rika"))).toBe(foreign)
-    await rm(join(binDir, "rika"))
-  })
+  test("does not overwrite a foreign command", () =>
+    runTest(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
+        yield* fileSystem.makeDirectory(context.binDir, { recursive: true })
+        const foreign = path.join(context.temporary, "foreign-rika")
+        const command = path.join(context.binDir, "rika")
+        yield* fileSystem.writeFileString(foreign, "foreign")
+        yield* fileSystem.symlink(foreign, command)
+        expect((yield* runScript("install-local")).exitCode).not.toBe(0)
+        expect(yield* fileSystem.readLink(command)).toBe(foreign)
+        yield* fileSystem.remove(command)
+      }),
+    ))
 
-  test("replaces the previous packaged Rika launcher", async () => {
-    await mkdir(binDir, { recursive: true })
-    await writeFile(
-      join(binDir, "rika"),
-      '#!/usr/bin/env sh\nSCRIPT_DIR=$(dirname "$0")\nSHARE_DIR="$SCRIPT_DIR/../share/rika"\nexec "$SCRIPT_DIR/rika-darwin-arm64.bin" "$@"\n',
-      { mode: 0o755 },
-    )
-    const result = runScript("install-local")
-    expect(result.exitCode, result.stderr.toString()).toBe(0)
-    expect((await lstat(join(binDir, "rika"))).isSymbolicLink()).toBe(true)
-    expect(runScript("uninstall-local").exitCode).toBe(0)
-  })
+  test("replaces the previous packaged Rika launcher", () =>
+    runTest(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
+        const command = path.join(context.binDir, "rika")
+        yield* fileSystem.makeDirectory(context.binDir, { recursive: true })
+        yield* fileSystem.writeFileString(
+          command,
+          '#!/usr/bin/env sh\nSCRIPT_DIR=$(dirname "$0")\nSHARE_DIR="$SCRIPT_DIR/../share/rika"\nexec "$SCRIPT_DIR/rika-darwin-arm64.bin" "$@"\n',
+        )
+        yield* fileSystem.chmod(command, 0o755)
+        const result = yield* runScript("install-local")
+        expect(result.exitCode, result.stderr).toBe(0)
+        expect(yield* fileSystem.readLink(command)).toBe(path.join(context.installRoot, "bin", "rika"))
+        expect((yield* runScript("uninstall-local")).exitCode).toBe(0)
+      }),
+    ))
 })
