@@ -7,14 +7,20 @@ import { Function } from "effect"
 
 type TranscriptEvent = Extract<
   Operation.InteractiveEvent,
-  | { readonly _tag: "TranscriptPageReceived" }
+  | { readonly _tag: "SelectionLoaded" }
   | { readonly _tag: "TranscriptPagePrepended" }
   | { readonly _tag: "TranscriptPatched" }
   | { readonly _tag: "TranscriptResyncRequired" }
 >
 
+type QueueEvent = Extract<
+  Operation.InteractiveEvent,
+  { readonly _tag: "QueueUpdated" } | { readonly _tag: "QueueFull" }
+>
+
 export interface State {
   readonly model: ViewState.Model
+  readonly selectionEpoch: number
   readonly replayTurns: ReadonlyMap<string, Turn.Turn>
   readonly entries: ReadonlyArray<TranscriptRepository.Entry>
   readonly revisions: ReadonlyMap<string, number>
@@ -26,6 +32,64 @@ export interface Update {
   readonly state: State
   readonly preserveAnchor: boolean
 }
+
+export interface QueueUpdate {
+  readonly model: ViewState.Model
+  readonly resync: boolean
+}
+
+const updateQueueImpl = (model: ViewState.Model, event: QueueEvent): QueueUpdate => {
+  if (event._tag === "QueueUpdated") {
+    if (event.change._tag === "Reset")
+      return {
+        model: ViewState.resetQueue(model, event.threadId, event.revision, event.change.items),
+        resync: false,
+      }
+    return ViewState.applyQueueDelta(model, event.threadId, event.revision, event.change, event.queuedCount)
+  }
+  const submittedPrompt = model.history.at(-1)
+  const failed = ViewState.update(model, {
+    _tag: "ExecutionFailed",
+    message: `Queue full: ${event.count} pending prompts`,
+  })
+  return {
+    model:
+      submittedPrompt === undefined
+        ? failed
+        : ViewState.update(failed, { _tag: "ComposerReplaced", text: submittedPrompt }),
+    resync: false,
+  }
+}
+
+export const updateQueue: {
+  (event: QueueEvent): (model: ViewState.Model) => QueueUpdate
+  (model: ViewState.Model, event: QueueEvent): QueueUpdate
+} = Function.dual(2, updateQueueImpl)
+
+const removePromotedTurnImpl = (model: ViewState.Model, threadId: string, turnId: string): ViewState.Model => {
+  if (!model.queue.some((item) => item.id === turnId)) return model
+  const revision = (model.queueRevision ?? 0) + 1
+  const applied = ViewState.applyQueueDelta(
+    model,
+    threadId,
+    revision,
+    { _tag: "Removed", turnId },
+    model.queue.length - 1,
+  )
+  return applied.model.queue.some((item) => item.id === turnId)
+    ? ViewState.resetQueue(
+        model,
+        threadId,
+        revision,
+        model.queue.filter((item) => item.id !== turnId),
+      )
+    : applied.model
+}
+
+export const removePromotedTurn: {
+  (threadId: string, turnId: string): (model: ViewState.Model) => ViewState.Model
+  (model: ViewState.Model, threadId: string, turnId: string): ViewState.Model
+} = Function.dual(3, removePromotedTurnImpl)
 
 const cleared = (model: ViewState.Model): ViewState.Model => ({
   ...model,
@@ -68,6 +132,17 @@ const projections = (
     }),
   )
 }
+
+const executionKey = (value: string): string => value.replace(/^execution:/, "")
+
+const childParent = (
+  model: ViewState.Model,
+  turnId: string,
+): Extract<ViewState.TranscriptBlock, { readonly _tag: "ToolCall" }> | undefined =>
+  (model.blocks as ReadonlyArray<ViewState.TranscriptBlock>).find(
+    (block): block is Extract<ViewState.TranscriptBlock, { readonly _tag: "ToolCall" }> =>
+      block._tag === "ToolCall" && block.childId !== undefined && executionKey(block.childId) === executionKey(turnId),
+  )
 
 const prependProjection = (
   model: ViewState.Model,
@@ -137,15 +212,21 @@ const prependProjection = (
 }
 
 const updateState = (state: State, event: TranscriptEvent): Update => {
-  if (event._tag === "TranscriptPageReceived") {
+  if (event._tag === "SelectionLoaded") {
+    if (event.selectionEpoch < state.selectionEpoch) return { state, preserveAnchor: false }
     if (
+      event.selectionEpoch === state.selectionEpoch &&
       state.model.currentThreadId === event.thread.id &&
       event.entries.some((entry) => entry.projectionRevision < (state.revisions.get(entry.turn.id) ?? -1))
     )
       return { state, preserveAnchor: false }
-    const activeTurn = event.entries
-      .map((entry) => entry.turn)
-      .find((turn) => turn.status === "accepted" || turn.status === "running" || turn.status === "waiting")
+    const activeTurn = event.activeTurn
+    const keepNewerQueue =
+      event.selectionEpoch === state.selectionEpoch &&
+      state.model.queueThreadId === event.thread.id &&
+      (state.model.queueRevision ?? -1) > event.queueRevision
+    const queue = keepNewerQueue ? state.model.queue : event.queue
+    const queueRevision = keepNewerQueue ? state.model.queueRevision : event.queueRevision
     const model = cleared({
       ...state.model,
       activeTurnId: activeTurn?.id,
@@ -153,6 +234,14 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       busyStatus: activeTurn === undefined ? undefined : "Working",
       currentThreadId: String(event.thread.id),
       currentThreadTitle: event.thread.title,
+      editingTurnId: undefined,
+      editReturn: undefined,
+      queue: [...queue],
+      queueSelection: queue.some((item) => item.id === state.model.queueSelection)
+        ? state.model.queueSelection
+        : queue.at(-1)?.id,
+      queueThreadId: String(event.thread.id),
+      queueRevision,
       threadSidebar: {
         ...state.model.threadSidebar,
         selected: Math.max(
@@ -166,8 +255,12 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     })
     return {
       state: {
+        selectionEpoch: event.selectionEpoch,
         model: project(model, event.entries, event.threadCostUsd),
-        replayTurns: new Map(event.entries.map((entry) => [entry.turn.id, entry.turn])),
+        replayTurns: new Map([
+          ...event.entries.map((entry) => [entry.turn.id, entry.turn] as const),
+          ...(event.activeTurn === undefined ? [] : [[event.activeTurn.id, event.activeTurn] as const]),
+        ]),
         entries: event.entries,
         revisions: new Map(event.entries.map((entry) => [entry.turn.id, entry.projectionRevision])),
         projections: projections(event.entries),
@@ -177,6 +270,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     }
   }
   if (event._tag === "TranscriptPagePrepended") {
+    if (event.selectionEpoch !== state.selectionEpoch) return { state, preserveAnchor: false }
     if (state.model.currentThreadId !== event.threadId) return { state, preserveAnchor: false }
     const known = new Set(state.entries.map((entry) => entry.unit.key))
     const prepended = event.entries.filter((entry) => !known.has(entry.unit.key))
@@ -186,6 +280,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       revisions.set(entry.turn.id, Math.max(entry.projectionRevision, revisions.get(entry.turn.id) ?? -1))
     return {
       state: {
+        ...state,
         model: prependProjection(state.model, prepended, event.threadCostUsd),
         replayTurns: new Map([...prepended.map((entry) => [entry.turn.id, entry.turn] as const), ...state.replayTurns]),
         entries,
@@ -197,13 +292,26 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     }
   }
   if (event._tag === "TranscriptPatched") {
+    if (event.selectionEpoch !== state.selectionEpoch) return { state, preserveAnchor: false }
     if (state.model.currentThreadId !== undefined && state.model.currentThreadId !== event.threadId)
       return { state, preserveAnchor: false }
     if (event.revision <= (state.revisions.get(event.turnId) ?? -1)) return { state, preserveAnchor: false }
     const turn = state.replayTurns.get(event.turnId)
-    if (turn === undefined) return { state, preserveAnchor: false }
-    const previous = state.projections.get(event.turnId) ?? Transcript.empty(turn.id, turn.prompt)
+    const parent = turn === undefined ? childParent(state.model, event.turnId) : undefined
+    if (turn === undefined && parent === undefined) return { state, preserveAnchor: false }
+    const previous = state.projections.get(event.turnId) ?? Transcript.empty(event.turnId, turn?.prompt ?? "")
     const next = Transcript.applyEvent(previous, event.event)
+    if (parent !== undefined) {
+      return {
+        state: {
+          ...state,
+          model: ExecutionEvents.projectChildUnits(state.model, parent.id, next.units),
+          revisions: new Map([...state.revisions, [event.turnId, event.revision]]),
+          projections: new Map([...state.projections, [event.turnId, next]]),
+        },
+        preserveAnchor: false,
+      }
+    }
     const previousCost = previous.costUsd ?? 0
     const nextCost = next.costUsd ?? 0
     const threadCostUsd = state.threadCostUsd + nextCost - previousCost
@@ -212,6 +320,14 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       event.event.type === "execution.completed" ||
       event.event.type === "execution.failed" ||
       event.event.type === "execution.cancelled"
+    const terminalStatus =
+      event.event.type === "execution.completed"
+        ? "completed"
+        : event.event.type === "execution.failed"
+          ? "failed"
+          : event.event.type === "execution.cancelled"
+            ? "cancelled"
+            : undefined
     const model = terminal
       ? { ...projectedModel, activeTurnId: undefined, busy: false, busyStatus: undefined }
       : projectedModel
@@ -235,6 +351,10 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       state: {
         ...state,
         model: { ...model, costUsd: threadCostUsd },
+        replayTurns:
+          terminalStatus === undefined
+            ? state.replayTurns
+            : new Map([...state.replayTurns, [event.turnId, { ...turn, status: terminalStatus }]]),
         entries,
         revisions: new Map([...state.revisions, [event.turnId, event.revision]]),
         projections: new Map([...state.projections, [event.turnId, next]]),
@@ -243,17 +363,39 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       preserveAnchor: false,
     }
   }
-  if (state.model.currentThreadId !== event.threadId) return { state, preserveAnchor: false }
-  return {
-    state: {
-      ...state,
-      model: ViewState.update(state.model, { _tag: "ExecutionFailed", message: event.reason }),
-    },
-    preserveAnchor: false,
-  }
+  if (event.selectionEpoch !== state.selectionEpoch || state.model.currentThreadId !== event.threadId)
+    return { state, preserveAnchor: false }
+  return { state, preserveAnchor: false }
 }
 
 export const update: {
   (event: TranscriptEvent): (state: State) => Update
   (state: State, event: TranscriptEvent): Update
 } = Function.dual(2, updateState)
+
+export const makeFeedFrameBatcher = <Event>(options: {
+  readonly schedule: (flush: () => void) => void
+  readonly apply: (events: ReadonlyArray<Event>) => void
+  readonly render: () => void
+}) => {
+  const pending: Array<Event> = []
+  let scheduled = false
+  const schedule = (flush: () => void) => {
+    scheduled = true
+    options.schedule(flush)
+  }
+  const flush = () => {
+    scheduled = false
+    if (pending.length === 0) return
+    const events = pending.splice(0, 256)
+    options.apply(events)
+    options.render()
+    if (pending.length > 0) schedule(flush)
+  }
+  const offer = (event: Event) => {
+    pending.push(event)
+    if (scheduled) return
+    schedule(flush)
+  }
+  return { offer, flush }
+}

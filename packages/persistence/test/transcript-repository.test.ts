@@ -9,6 +9,7 @@ const turn = (index: number): Turn.Turn => ({
   id: Turn.TurnId.make(`turn-${index}`),
   threadId: Thread.ThreadId.make("thread-a"),
   prompt: `prompt ${index}`,
+  executionRoute: Turn.testExecutionRoute(),
   status: "completed",
   createdAt: index,
   updatedAt: index,
@@ -102,6 +103,36 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
         Turn.TurnId.make("turn-0"),
         Turn.TurnId.make("turn-0"),
       ])
+    }),
+  )
+
+  test.effect("reloads interleaved units in the same order the projection built them", () =>
+    Effect.gen(function* () {
+      const repository = yield* TranscriptRepository.Service
+      const target = { ...turn(31), threadId: Thread.ThreadId.make("thread-order") }
+      const projection = Transcript.project(target.id, target.prompt, [
+        { cursor: "prepared", sequence: 0, type: "model.input.prepared", createdAt: 0 },
+        { cursor: "reason", sequence: 1, type: "model.reasoning.delta", createdAt: 1, text: "thinking" },
+        { cursor: "answer", sequence: 2, type: "model.output.completed", createdAt: 2, text: "answer" },
+        {
+          cursor: "call",
+          sequence: 3,
+          type: "tool.call.requested",
+          createdAt: 3,
+          data: { call_id: "call-a", name: "read_file", input: { path: "x.ts" } },
+        },
+        {
+          cursor: "result",
+          sequence: 4,
+          type: "tool.result.received",
+          createdAt: 4,
+          data: { tool_call_id: "call-a", output: "contents" },
+        },
+      ])
+      yield* repository.replace(target, projection)
+      const page = yield* repository.page(Thread.ThreadId.make("thread-order"), { limit: 200 })
+      expect(page.entries.map((entry) => entry.unit.key)).toEqual(projection.units.map((unit) => unit.key))
+      expect(page.entries.map((entry) => entry.unit.content._tag)).toEqual(["Entry", "Block", "Entry", "Block"])
     }),
   )
 

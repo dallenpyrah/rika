@@ -2,7 +2,11 @@ import * as Transcript from "@rika/transcript"
 import { Context, Effect, Layer, Ref, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { ThreadId } from "./thread-schema"
-import { Status, Turn, TurnId } from "./turn-schema"
+import { ExecutionExtensionPin, ExecutionRoutePin, PromptPart, Status, Turn, TurnId } from "./turn-schema"
+import { EntrySchema, PageCursor, type Entry } from "./transcript-page"
+
+export { EntrySchema, PageCursor }
+export type { Entry }
 
 export interface Projection {
   readonly turn: Turn
@@ -13,38 +17,6 @@ export interface Projection {
   readonly checkpointCursor: string | undefined
   readonly costUsd: number | undefined
 }
-
-export interface Entry {
-  readonly turn: Turn
-  readonly unit: Transcript.Unit
-  readonly projectionRevision: number
-  readonly projectionModelPhase: number
-  readonly projectionCostUsd?: number
-}
-
-export const EntrySchema = Schema.Struct({
-  turn: Turn,
-  unit: Transcript.Unit,
-  projectionRevision: Schema.Finite,
-  projectionModelPhase: Schema.Finite,
-  projectionCostUsd: Schema.optionalKey(Schema.Finite),
-})
-
-export interface PageCursor {
-  readonly createdAt: number
-  readonly turnId: TurnId
-  readonly sequence: number
-  readonly part: number
-  readonly key: string
-}
-
-export const PageCursor = Schema.Struct({
-  createdAt: Schema.Finite,
-  turnId: TurnId,
-  sequence: Schema.Finite,
-  part: Schema.Finite,
-  key: Schema.String,
-})
 
 export interface PageOptions {
   readonly before?: PageCursor | undefined
@@ -79,6 +51,11 @@ const CheckpointRow = Schema.Struct({
   turn_id: Schema.String,
   thread_id: Schema.String,
   prompt: Schema.String,
+  prompt_parts_json: Schema.NullOr(Schema.String),
+  execution_route_json: Schema.String,
+  last_cursor: Schema.NullOr(Schema.String),
+  extension_pin_json: Schema.NullOr(Schema.String),
+  review_fan_out_id: Schema.NullOr(Schema.String),
   status: Schema.String,
   model_phase: Schema.Finite,
   revision: Schema.Finite,
@@ -95,12 +72,20 @@ const UnitRow = Schema.Struct({
   model_phase: Schema.Finite,
   cost_usd: Schema.NullOr(Schema.Finite),
   prompt: Schema.String,
+  prompt_parts_json: Schema.NullOr(Schema.String),
+  execution_route_json: Schema.String,
+  last_cursor: Schema.NullOr(Schema.String),
+  extension_pin_json: Schema.NullOr(Schema.String),
+  review_fan_out_id: Schema.NullOr(Schema.String),
   status: Schema.String,
   created_at: Schema.Finite,
   updated_at: Schema.Finite,
 })
 
 const UnitJson = Schema.fromJsonString(Transcript.Unit)
+const PromptPartsJson = Schema.fromJsonString(Schema.Array(PromptPart))
+const ExecutionRouteJson = Schema.fromJsonString(ExecutionRoutePin)
+const ExtensionPinJson = Schema.fromJsonString(ExecutionExtensionPin)
 const error = (cause: unknown) => RepositoryError.make({ message: String(cause) })
 const clone = <A>(value: A): A => structuredClone(value)
 const pageSize = (limit: number | undefined) => Math.min(200, Math.max(1, Math.floor(limit ?? 50)))
@@ -220,18 +205,33 @@ export const layer = Layer.effect(
     const sql = yield* SqlClient
     const decodeTurn = Effect.fn("TranscriptRepository.decodeTurn")(function* (row: typeof CheckpointRow.Type) {
       const status = yield* Schema.decodeUnknownEffect(Status)(row.status)
+      const promptParts =
+        row.prompt_parts_json === null
+          ? undefined
+          : yield* Schema.decodeUnknownEffect(PromptPartsJson)(row.prompt_parts_json)
+      const executionRoute = yield* Schema.decodeUnknownEffect(ExecutionRouteJson)(row.execution_route_json)
+      const extensionPin =
+        row.extension_pin_json === null
+          ? undefined
+          : yield* Schema.decodeUnknownEffect(ExtensionPinJson)(row.extension_pin_json)
       return {
         id: TurnId.make(row.turn_id),
         threadId: ThreadId.make(row.thread_id),
         prompt: row.prompt,
+        ...(promptParts === undefined ? {} : { promptParts }),
         status,
+        ...(row.last_cursor === null ? {} : { lastCursor: row.last_cursor }),
+        ...(extensionPin === undefined ? {} : { extensionPin }),
+        executionRoute,
+        ...(row.review_fan_out_id === null ? {} : { reviewFanOutId: row.review_fan_out_id }),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       } satisfies Turn
     })
     const get = Effect.fn("TranscriptRepository.get")(function* (turnId: TurnId) {
       const checkpointRows = yield* sql`
-        SELECT c.*, t.prompt, t.status, t.created_at, t.updated_at
+        SELECT c.*, t.prompt, t.prompt_parts_json, t.execution_route_json, t.last_cursor,
+          t.extension_pin_json, t.review_fan_out_id, t.status, t.created_at
         FROM rika_transcript_checkpoints c
         JOIN rika_turns t ON t.id = c.turn_id
         WHERE c.turn_id = ${turnId}
@@ -327,19 +327,21 @@ export const layer = Layer.effect(
         const rows =
           options.before === undefined
             ? yield* sql`SELECT u.unit_json, c.revision AS projection_revision, c.model_phase, c.cost_usd,
-                  t.prompt, t.status, t.created_at, t.updated_at
+                  t.prompt, t.prompt_parts_json, t.execution_route_json, t.last_cursor,
+                  t.extension_pin_json, t.review_fan_out_id, t.status, t.created_at, t.updated_at
                 FROM rika_transcript_units u
                 JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id
                 JOIN rika_turns t ON t.id = u.turn_id
-                WHERE u.thread_id = ${threadId}
+                WHERE u.thread_id = ${threadId} AND t.status <> 'queued'
                 ORDER BY u.created_at DESC, u.turn_id DESC, u.unit_sequence DESC, u.unit_part DESC, u.unit_key DESC
                 LIMIT ${limit + 1}`.pipe(Effect.mapError(error))
             : yield* sql`SELECT u.unit_json, c.revision AS projection_revision, c.model_phase, c.cost_usd,
-                  t.prompt, t.status, t.created_at, t.updated_at
+                  t.prompt, t.prompt_parts_json, t.execution_route_json, t.last_cursor,
+                  t.extension_pin_json, t.review_fan_out_id, t.status, t.created_at, t.updated_at
                 FROM rika_transcript_units u
                 JOIN rika_transcript_checkpoints c ON c.turn_id = u.turn_id
                 JOIN rika_turns t ON t.id = u.turn_id
-                WHERE u.thread_id = ${threadId} AND
+                WHERE u.thread_id = ${threadId} AND t.status <> 'queued' AND
                   (u.created_at, u.turn_id, u.unit_sequence, u.unit_part, u.unit_key) <
                   (${options.before.createdAt}, ${options.before.turnId}, ${options.before.sequence}, ${options.before.part}, ${options.before.key})
                 ORDER BY u.created_at DESC, u.turn_id DESC, u.unit_sequence DESC, u.unit_part DESC, u.unit_key DESC
@@ -351,12 +353,28 @@ export const layer = Layer.effect(
                 Effect.gen(function* () {
                   const unit = yield* Schema.decodeUnknownEffect(UnitJson)(row.unit_json)
                   const status = yield* Schema.decodeUnknownEffect(Status)(row.status)
+                  const promptParts =
+                    row.prompt_parts_json === null
+                      ? undefined
+                      : yield* Schema.decodeUnknownEffect(PromptPartsJson)(row.prompt_parts_json)
+                  const executionRoute = yield* Schema.decodeUnknownEffect(ExecutionRouteJson)(
+                    row.execution_route_json,
+                  )
+                  const extensionPin =
+                    row.extension_pin_json === null
+                      ? undefined
+                      : yield* Schema.decodeUnknownEffect(ExtensionPinJson)(row.extension_pin_json)
                   return {
                     turn: {
                       id: TurnId.make(unit.turnId),
                       threadId,
                       prompt: row.prompt,
+                      ...(promptParts === undefined ? {} : { promptParts }),
                       status,
+                      ...(row.last_cursor === null ? {} : { lastCursor: row.last_cursor }),
+                      ...(extensionPin === undefined ? {} : { extensionPin }),
+                      executionRoute,
+                      ...(row.review_fan_out_id === null ? {} : { reviewFanOutId: row.review_fan_out_id }),
                       createdAt: row.created_at,
                       updatedAt: row.updated_at,
                     },

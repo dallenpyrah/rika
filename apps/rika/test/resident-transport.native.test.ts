@@ -1,6 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import * as BunSocket from "@effect/platform-bun/BunSocket"
-import { ResidentService } from "@rika/app"
+import * as ResidentService from "@rika/app/resident-service"
 import { afterEach, describe, expect, test } from "bun:test"
 import { Cause, Config, Data, Effect, Fiber, FileSystem, Layer, Queue, Ref, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -18,6 +18,7 @@ type Event = {
   error?: string | undefined
   callbacks?: number | undefined
   tags?: ReadonlyArray<string> | undefined
+  outcome?: string | undefined
 }
 
 class FixtureFailure extends Data.TaggedError("FixtureFailure")<{
@@ -47,6 +48,7 @@ const EventSchema = Schema.Struct({
   error: Schema.optional(Schema.String),
   callbacks: Schema.optional(Schema.Finite),
   tags: Schema.optional(Schema.Array(Schema.String)),
+  outcome: Schema.optional(Schema.String),
 })
 
 const decodeEvent = Schema.decodeUnknownEffect(Schema.fromJsonString(EventSchema))
@@ -118,6 +120,9 @@ const start = Effect.fn("ResidentTransportTest.start")(function* (
   finalizerDelay: number = 0,
   delayedWork: boolean = false,
   outboundCapacity: number = 1_024,
+  startupHold: number = 0,
+  uninterruptibleOwner: boolean = false,
+  ownerDrainMilliseconds?: number,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const input = yield* Queue.bounded<string, Cause.Done>(32)
@@ -136,6 +141,11 @@ const start = Effect.fn("ResidentTransportTest.start")(function* (
           RIKA_TEST_RESIDENT_FINALIZER_DELAY: String(finalizerDelay),
           RIKA_TEST_RESIDENT_DELAYED_WORK: delayedWork ? "1" : "0",
           RIKA_TEST_RESIDENT_OUTBOUND_CAPACITY: String(outboundCapacity),
+          RIKA_TEST_RESIDENT_STARTUP_HOLD: String(startupHold),
+          RIKA_TEST_RESIDENT_UNINTERRUPTIBLE_OWNER: uninterruptibleOwner ? "1" : "0",
+          ...(ownerDrainMilliseconds === undefined
+            ? {}
+            : { RIKA_INTERNAL_RESIDENT_OWNER_DRAIN: String(ownerDrainMilliseconds) }),
         },
         extendEnv: true,
       }),
@@ -219,47 +229,6 @@ const nextTypeEffect = (client: ResidentClient, type: string): Effect.Effect<Eve
   })
 
 describe("resident WebSocket process transport", () => {
-  test(
-    "rejects clients that omit a current transport capability",
-    () =>
-      Effect.runPromise(
-        provide(
-          Effect.gen(function* () {
-            const root = yield* makeRoot
-            try {
-              const client = yield* start(root, 2_000)
-              yield* attachedEffect(client)
-              const endpoint = yield* resolve("default", root)
-              const token = (yield* readText(endpoint.tokenPath)).trim()
-              const socket = yield* Socket.makeWebSocket(endpoint.url)
-              const writer = yield* socket.writer
-              const reader = yield* Effect.forkChild(socket.runString(() => Effect.void))
-              yield* writer(
-                yield* Schema.encodeEffect(Schema.UnknownFromJsonString)({
-                  family: "rika-resident",
-                  version: ResidentService.protocolVersion,
-                  identity: endpoint.identity,
-                  token,
-                  clientNonce: "missing-ack",
-                  clientKind: "interactive",
-                  clientVersion: "test",
-                  capabilities: ["ping"],
-                }),
-              )
-              const exit = yield* Fiber.await(reader)
-              expect(exit._tag).toBe("Failure")
-              if (exit._tag === "Failure") expect(Cause.pretty(exit.cause)).toContain("4403")
-              yield* client.closeEffect
-            } finally {
-              yield* cleanRoot(root)
-            }
-          }),
-          Layer.merge(BunServices.layer, BunSocket.layerWebSocketConstructor),
-        ),
-      ),
-    15_000,
-  )
-
   test(
     "keeps a healthy connection through a one-second client stall",
     () =>
@@ -364,6 +333,71 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
+    "serializes one hundred admissions without making execution block later admissions",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const client = yield* start(root)
+            yield* attachedEffect(client)
+
+            yield* client.send("serialized-interactive")
+            const event = yield* client.nextEffect
+            expect(event.type).toBe("serialized-interactive-completed")
+            const result = yield* Schema.decodeUnknownEffect(
+              Schema.fromJsonString(
+                Schema.Struct({
+                  admissionMaximum: Schema.optionalKey(Schema.Finite),
+                  admissions: Schema.optionalKey(Schema.Array(Schema.Finite)),
+                  executionMaximum: Schema.optionalKey(Schema.Finite),
+                  completions: Schema.optionalKey(Schema.Array(Schema.Finite)),
+                }),
+              ),
+            )(event.text ?? "{}")
+            expect(result.admissionMaximum).toBe(1)
+            expect(result.admissions).toEqual(Array.from({ length: 100 }, (_, index) => index))
+            expect(result.executionMaximum).toBeGreaterThan(1)
+            expect(result.completions?.toSorted((left, right) => left - right)).toEqual(
+              Array.from({ length: 100 }, (_, index) => index),
+            )
+            yield* client.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
+    "chunks oversized operation output and keeps the connection healthy",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const client = yield* start(root)
+            yield* attachedEffect(client)
+
+            yield* client.send("oversized-output")
+            const output = yield* client.nextEffect
+            expect(output).toMatchObject({
+              type: "oversized-output-completed",
+              text: "1100001",
+              outcome: "exact",
+            })
+            expect(output.callbacks).toBeGreaterThan(1)
+            yield* client.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
     "delivers a long bounded burst of interactive execution events without overflowing",
     () =>
       run(
@@ -385,7 +419,31 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "emits transcript resync and terminal failure events when interactive delivery overflows",
+    "delivers an oversized interactive event without reconnecting",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const client = yield* start(root)
+            yield* attachedEffect(client)
+
+            yield* client.send("oversized-interactive-event")
+            expect(yield* client.nextEffect).toEqual({
+              type: "oversized-interactive-event-completed",
+              text: "1100000",
+            })
+            yield* client.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    30_000,
+  )
+
+  test(
+    "resyncs transcript delivery without failing the current physical feed",
     () =>
       run(
         Effect.gen(function* () {
@@ -398,11 +456,11 @@ describe("resident WebSocket process transport", () => {
             const event = yield* client.nextEffect
             expect(event).toMatchObject({
               type: "overflow-completed",
-              tag: "ExecutionFailed",
+              tag: "TranscriptResyncRequired",
             })
             expect(event.callbacks).toBeLessThan(12)
             expect(event.tags).toContain("TranscriptResyncRequired")
-            expect(event.tags?.at(-2)).toBe("TranscriptResyncRequired")
+            expect((event.tags ?? []).includes("ExecutionFailed")).toBe(false)
             yield* client.closeEffect
           } finally {
             yield* cleanRoot(root)
@@ -413,7 +471,7 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "interrupts a long-lived interactive action on its first delivery overflow",
+    "keeps an interactive subscription alive after transcript delivery resyncs",
     () =>
       run(
         Effect.gen(function* () {
@@ -424,9 +482,11 @@ describe("resident WebSocket process transport", () => {
 
             yield* client.send("overflow-watch")
             const event = yield* client.nextEffect
+            expect((event.tags ?? []).includes("ExecutionFailed")).toBe(false)
             expect(event).toMatchObject({
               type: "overflow-watch-finished",
-              tags: expect.arrayContaining(["TranscriptResyncRequired", "ExecutionFailed"]),
+              outcome: "Success",
+              tags: expect.arrayContaining(["TranscriptResyncRequired", "ThreadsListed"]),
             })
             yield* client.closeEffect
           } finally {
@@ -438,7 +498,36 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "cancels a resident interactive action before starting the next action",
+    "resyncs queue delivery without failing the current physical feed",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const client = yield* start(root, 350, 0, false, 4)
+            yield* attachedEffect(client)
+
+            yield* client.send("queue-overflow-interactive")
+            const event = yield* client.nextEffect
+            expect(event).toMatchObject({
+              type: "queue-overflow-completed",
+              tag: "QueueResyncRequired",
+            })
+            expect(event.callbacks).toBeLessThan(12)
+            expect(event.tags).toContain("QueueResyncRequired")
+            expect((event.tags ?? []).includes("TranscriptResyncRequired")).toBe(false)
+            expect((event.tags ?? []).includes("ExecutionFailed")).toBe(false)
+            yield* client.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
+    "detaches and replaces the one resident event consumer",
     () =>
       run(
         Effect.gen(function* () {
@@ -447,12 +536,12 @@ describe("resident WebSocket process transport", () => {
             const client = yield* start(root)
             yield* attachedEffect(client)
 
-            yield* client.send("cancel-action")
+            yield* client.send("feed-takeover")
             expect(yield* client.nextEffect).toEqual({
-              type: "second-action-event",
+              type: "replacement-feed-event",
               tag: "ThreadsListed",
             })
-            expect((yield* client.nextEffect).type).toBe("actions-completed")
+            expect((yield* client.nextEffect).type).toBe("feed-takeover-completed")
             yield* client.closeEffect
           } finally {
             yield* cleanRoot(root)
@@ -498,6 +587,34 @@ describe("resident WebSocket process transport", () => {
         }),
       ),
     15_000,
+  )
+
+  test(
+    "keeps the cold startup host alive for clients arriving after normal grace",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const firstClient = yield* start(root, 100, 0, false, 1_024, 2_000)
+            const first = yield* attachedEffect(firstClient)
+            yield* firstClient.closeEffect
+            yield* Effect.sleep("500 millis")
+
+            const lateClient = yield* start(root, 100, 0, false, 1_024, 2_000)
+            const late = yield* attachedEffect(lateClient)
+            expect(late.hostPid).toBe(first.hostPid)
+            expect(yield* readText(`${root}/owner-acquisitions.log`)).toBe(`${first.hostPid}\n`)
+            yield* lateClient.closeEffect
+
+            yield* waitUntil(fileExists(`${root}/owner-finalizations.log`), 3_000)
+            expect(yield* readText(`${root}/owner-finalizations.log`)).toBe(`${first.hostPid}\n`)
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    10_000,
   )
 
   test(
@@ -587,6 +704,64 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
+    "exits promptly when signalled with ten attached clients",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const clients = yield* Effect.forEach(Array.from({ length: 10 }), () => start(root, 1_000), {
+              concurrency: 10,
+            })
+            const attachments = yield* Effect.forEach(clients, attachedEffect, { concurrency: 10 })
+            const hostPid = attachments[0]!.hostPid!
+            expect(new Set(attachments.map((attachment) => attachment.hostPid))).toEqual(new Set([hostPid]))
+
+            process.kill(hostPid, "SIGTERM")
+            yield* waitUntil(
+              Effect.sync(() => !alive(hostPid)),
+              3_000,
+            )
+            expect(yield* fileExists(`${root}/resident-${(yield* resolve("default", root)).identity}.startup`)).toBe(
+              false,
+            )
+            yield* Effect.forEach(clients, (client) => client.kill, { concurrency: 10, discard: true })
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
+    "hard-exits within the owner-drain bound when an owner finalizer hangs uninterruptibly",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const client = yield* start(root, 1_000, 0, false, 1_024, 0, true, 700)
+            const attached = yield* attachedEffect(client)
+            const hostPid = attached.hostPid!
+            yield* waitUntil(fileExists(`${root}/owner-acquisitions.log`))
+            process.kill(hostPid, "SIGTERM")
+            yield* waitUntil(
+              Effect.sync(() => !alive(hostPid)),
+              4_000,
+            )
+            expect(yield* fileExists(`${root}/owner-finalizer-starts.log`)).toBe(true)
+            expect(yield* fileExists(`${root}/owner-finalizations.log`)).toBe(false)
+            yield* client.kill
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
     "interrupts host work before owner finalization and rejects work from an attached client while draining",
     () =>
       run(
@@ -600,6 +775,7 @@ describe("resident WebSocket process transport", () => {
             yield* client.send("delayed")
             yield* waitUntil(fileExists(`${root}/delayed-work-starts.log`))
             process.kill(first.hostPid!, "SIGTERM")
+            yield* waitUntil(fileExists(`${root}/delayed-work-finalizations.log`))
             yield* existing.send("rejected")
             expect(yield* existing.nextEffect).toMatchObject({
               type: "rejected-work",
@@ -679,5 +855,30 @@ describe("resident WebSocket process transport", () => {
         }),
       ),
     15_000,
+  )
+
+  test(
+    "bounds repeated physical reconnects and terminates the logical interactive session",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const client = yield* start(root, 1_000)
+            yield* attachedEffect(client)
+            yield* client.send("flap-interactive")
+            expect(yield* client.nextEffect).toMatchObject({
+              type: "interactive-callback",
+              callbacks: 1,
+            })
+            const failed = yield* nextTypeEffect(client, "flap-failed")
+            expect(failed.error).toContain("closed 8 times before becoming stable")
+            expect(failed.callbacks).toBe(8)
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    30_000,
   )
 })

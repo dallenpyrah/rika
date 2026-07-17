@@ -20,7 +20,7 @@ export type PromptPart =
   | { readonly type: "image"; readonly mediaType: string; readonly data: string; readonly filename?: string }
 
 export interface ExecutionModelRoute {
-  readonly role: "main" | "oracle" | "compaction" | "librarian" | "painter" | "review" | "readThread" | "task"
+  readonly role: "main" | "oracle" | "title" | "compaction" | "librarian" | "painter" | "review" | "readThread" | "task"
   readonly alias: string
   readonly provider: string
   readonly model: string
@@ -40,9 +40,9 @@ export interface ExecutionModelRoute {
 }
 
 export interface ExecutionRoutePin {
-  readonly version: 1
   readonly mode: "low" | "medium" | "high" | "ultra" | "test"
   readonly tokenBudget?: number
+  readonly title?: ExecutionModelRoute
   readonly compactionSummary?: ExecutionModelRoute
   readonly main: ExecutionModelRoute
   readonly oracle: ExecutionModelRoute
@@ -62,7 +62,7 @@ export interface StartInput {
   readonly promptParts?: ReadonlyArray<PromptPart>
   readonly startedAt: number
   readonly extensionPin?: ExecutionExtensionPin
-  readonly executionRoute?: ExecutionRoutePin
+  readonly executionRoute: ExecutionRoutePin
   readonly reasoningEffort?: string
   readonly fastMode?: boolean
   readonly onEvent?: (event: Event) => void
@@ -84,7 +84,7 @@ export interface FanOutInput {
   readonly parentTurnId: string
   readonly fanOutId: string
   readonly workspace?: string
-  readonly executionRoute?: ExecutionRoutePin
+  readonly executionRoute: ExecutionRoutePin
   readonly children: ReadonlyArray<{
     readonly childId: string
     readonly profile?: AgentProfile
@@ -181,7 +181,14 @@ export class BackendError extends Schema.TaggedErrorClass<BackendError>()("Execu
   message: Schema.String,
 }) {}
 
-export type TurnPromoter = (threadId: string) => Effect.Effect<number>
+export interface ThreadQueueWake {
+  readonly threadId: string
+  readonly generation: number
+  readonly queueRevision: number
+  readonly now: number
+}
+
+export type TurnPromoter = (threadId: string, generation: number) => Effect.Effect<number>
 
 export interface Interface {
   readonly registerModels?: (
@@ -208,12 +215,7 @@ export interface Interface {
   ) => Effect.Effect<WorkflowInspection, BackendError>
   readonly inspectWorkflow: (runId: string) => Effect.Effect<WorkflowInspection | undefined, BackendError>
   readonly cancelWorkflow: (runId: string) => Effect.Effect<WorkflowInspection | undefined, BackendError>
-  readonly ensureThreadHost?: (threadId: string, createdAt: number) => Effect.Effect<void, BackendError>
-  readonly notifyThreadHost?: (
-    threadId: string,
-    turnId: string | undefined,
-    now: number,
-  ) => Effect.Effect<void, BackendError>
+  readonly wakeThreadHost?: (wake: ThreadQueueWake) => Effect.Effect<void, BackendError>
   readonly registerTurnPromoter?: (promoter: TurnPromoter) => Effect.Effect<void>
   readonly start: (input: StartInput) => Effect.Effect<Result, BackendError>
   readonly follow?: (

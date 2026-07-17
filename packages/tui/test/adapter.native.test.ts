@@ -1,9 +1,19 @@
 import { CliRenderEvents, Renderable, RendererControlState } from "@opentui/core"
-import { createTestRenderer } from "@opentui/core/testing"
+import { createTestRenderer, ManualClock } from "@opentui/core/testing"
 import { expect, test } from "bun:test"
 import { Data, Effect } from "effect"
+import stringWidth from "string-width"
 import { Surface, maxMountedTranscriptEntries } from "../src/adapter"
-import { initial, ready, replaceQueue, update, type Model, type ThreadItem } from "../src/view-state"
+import {
+  applyQueueDelta,
+  initial,
+  ready,
+  replaceQueue,
+  resetQueue,
+  update,
+  type Model,
+  type ThreadItem,
+} from "../src/view-state"
 
 class OpenTuiError extends Data.TaggedError("OpenTuiError")<{ readonly cause: unknown }> {}
 
@@ -61,6 +71,109 @@ test("renders input and resize updates while the renderer remains event-driven",
         expect(setup.captureCharFrame()).toContain("next")
         expect(setup.renderer.controlState).toBe(RendererControlState.IDLE)
         expect(setup.renderer.isRunning).toBe(false)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("coalesces a resize storm into one transcript reflow at the final width", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const clock = new ManualClock()
+      const setup = yield* openTui(() => createTestRenderer({ width: 200, height: 66, clock }))
+      const resizeCalls: Array<readonly [number, number]> = []
+      let model: Model = {
+        ...initial("/work", "high"),
+        width: 200,
+        height: 66,
+        entries: [{ role: "assistant", text: "alpha ".repeat(25).trimEnd(), turnId: "turn-1" }],
+      }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        resize: (width, height) => {
+          resizeCalls.push([width, height])
+          model = update(model, { _tag: "Resized", width, height })
+          surface.update(model)
+        },
+      })
+      try {
+        surface.update(model)
+        const transcript = surface as unknown as {
+          readonly transcriptChildren: ReadonlyArray<{
+            readonly content: { readonly chunks: ReadonlyArray<{ text: string }> }
+          }>
+        }
+        const mounted = transcript.transcriptChildren[0]!
+        const content = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(mounted), "content")!
+        let contentWrites = 0
+        Object.defineProperty(mounted, "content", {
+          configurable: true,
+          get: () => content.get!.call(mounted),
+          set: (value: unknown) => {
+            contentWrites += 1
+            content.set!.call(mounted, value)
+          },
+        })
+        const renderer = setup.renderer as unknown as { handleResize: (width: number, height: number) => void }
+        for (const [width, height] of [
+          [180, 60],
+          [160, 50],
+          [140, 42],
+          [120, 36],
+          [100, 30],
+        ] as const)
+          renderer.handleResize(width, height)
+        expect(resizeCalls.length).toBe(0)
+        expect(contentWrites).toBe(0)
+        clock.advance(100)
+        expect(resizeCalls).toEqual([[100, 30]])
+        expect(contentWrites).toBe(1)
+        expect(setup.renderer.terminalWidth).toBe(100)
+        expect(setup.renderer.terminalHeight).toBe(30)
+        const narrowed = transcript.transcriptChildren
+          .map((child) => child.content.chunks.map((chunk) => chunk.text).join(""))
+          .join("\n")
+        expect(narrowed.split("\n").every((line) => stringWidth(line) <= 100)).toBe(true)
+        expect(narrowed.match(/alpha/g)?.length).toBe(25)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("converges the model to the physical terminal size when a resize event reports a stale size", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      let model: Model = { ...initial("/work", "high"), width: 80, height: 24 }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        resize: (width, height) => {
+          model = update(model, { _tag: "Resized", width, height })
+          surface.update(model)
+        },
+      })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const renderer = setup.renderer as unknown as {
+          _usesProcessStdout: boolean
+          stdout: { columns: number; rows: number }
+          resize: (width: number, height: number) => void
+          emit: (event: string, ...args: ReadonlyArray<unknown>) => boolean
+        }
+        renderer._usesProcessStdout = true
+        renderer.stdout = { columns: 132, rows: 43 }
+        let corrected: readonly [number, number] | undefined
+        renderer.resize = (width, height) => {
+          corrected = [width, height]
+        }
+        renderer.emit(CliRenderEvents.RESIZE, 80, 24)
+        expect(corrected).toEqual([132, 43])
+        expect([model.width, model.height]).toEqual([132, 43])
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -373,6 +486,88 @@ test("preserves a pending prepend anchor through an intervening composer update"
     }),
   ))
 
+test("keeps the nearest transcript content in view when markdown reflows", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 200, height: 30 }))
+      const entries = Array.from({ length: 80 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index} ${"word ".repeat(40)}`,
+        turnId: `turn-${index}`,
+      }))
+      const items = entries.map((_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      }))
+      let model: Model = {
+        ...initial("/work", "high"),
+        width: 200,
+        height: 30,
+        entries,
+        items,
+        scrollFollow: false,
+      }
+      const geometry = new Array<number>()
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        resize: () => undefined,
+        scrollGeometry: (offset) => geometry.push(offset),
+      })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScroll.scrollTo(80)
+        setup.renderer.requestRender()
+        yield* openTui(() => setup.flush())
+        model = { ...model, scrollOffset: surface.transcriptScroll.scrollTop }
+        const before = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
+
+        surface.update(update(model, { _tag: "Resized", width: 100, height: 30 }))
+        yield* openTui(() => setup.flush())
+
+        expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(before)
+        expect(geometry.at(-1)).toBe(surface.transcriptScroll.scrollTop)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("keeps a followed transcript pinned to the bottom after markdown reflows", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 200, height: 30 }))
+      const entries = Array.from({ length: 80 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index} ${"word ".repeat(40)}`,
+        turnId: `turn-${index}`,
+      }))
+      const model: Model = {
+        ...initial("/work", "high"),
+        width: 200,
+        height: 30,
+        entries,
+      }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.update(update(model, { _tag: "Resized", width: 100, height: 30 }))
+        yield* openTui(() => setup.flush())
+
+        expect(surface.transcriptScroll.scrollTop).toBeGreaterThanOrEqual(
+          surface.transcriptScroll.scrollHeight - surface.transcriptScroll.viewport.height - 1,
+        )
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
 test("suppresses programmatic scrollbar feedback and queued work after teardown", () =>
   Effect.runPromise(
     Effect.gen(function* () {
@@ -536,6 +731,10 @@ for (const panel of ["changed", "workspace"] as const) {
             readonly transcriptChildren: ReadonlyArray<Renderable>
           }
           const sidebarRows = state.changedRows
+          expect(surface.changedFilesBox.scrollHeight).toBe(sidebarRows.length)
+          expect(surface.changedFilesBox.content.height).toBeLessThanOrEqual(
+            surface.changedFilesBox.viewport.height + 1,
+          )
           const transcriptChildren = [...state.transcriptChildren]
           for (let index = 0; index < 20; index += 1)
             surface.update({ ...base, input: `next ${index}`, cursor: `next ${index}`.length })
@@ -549,6 +748,84 @@ for (const panel of ["changed", "workspace"] as const) {
       }),
     ))
 }
+
+test("rebuilds the large changed-files sidebar per set change, not per streaming frame", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 120, height: 40 }))
+      const paths = Array.from(
+        { length: 10_000 },
+        (_, index) => `src/feature-${Math.floor(index / 20)}/file-${index}.ts`,
+      )
+      const files = (revision: number) =>
+        ready(paths.map((path) => ({ path, status: "M", added: revision, removed: 0 })))
+      const base: Model = {
+        ...initial("/work", "high"),
+        width: 120,
+        height: 40,
+        changedFilesOpen: true,
+        changedFiles: files(1),
+      }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(base)
+        yield* openTui(() => setup.flush())
+        const state = surface as unknown as { readonly changedRows: ReadonlyArray<unknown> }
+        const boundedWindow = () =>
+          expect(surface.changedFilesBox.content.height).toBeLessThanOrEqual(
+            surface.changedFilesBox.viewport.height + 1,
+          )
+        boundedWindow()
+        let rebuilds = 0
+        let previousRows = state.changedRows
+        let model = base
+        for (let tick = 0; tick < 4; tick += 1) {
+          for (let frame = 0; frame < 5; frame += 1) {
+            model = Object.assign({}, model, {
+              entries: [{ role: "assistant", text: `streaming ${tick}:${frame}` }],
+            })
+            surface.update(model)
+            if (state.changedRows !== previousRows) {
+              rebuilds += 1
+              previousRows = state.changedRows
+            }
+          }
+          model = { ...model, changedFiles: files(tick + 2) }
+          surface.update(model)
+          if (state.changedRows !== previousRows) {
+            rebuilds += 1
+            previousRows = state.changedRows
+          }
+          boundedWindow()
+        }
+        expect(rebuilds).toBe(4)
+        expect(surface.changedFilesBox.scrollHeight).toBe(state.changedRows.length)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("expands the queue box to fit a wrapped single-line queued prompt joined to the composer", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 40, height: 24 }))
+      let model: Model = { ...initial("/work", "high"), width: 40, height: 24 }
+      model = replaceQueue(model, [{ id: "q1", prompt: "x".repeat(120) }])
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        expect(surface.queueBox.visible).toBe(true)
+        expect(surface.queueBox.height).toBeGreaterThanOrEqual(6)
+        expect(surface.queueRightJoint.top).toBe(model.height - surface.inputBox.height)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
 
 test("renders autonomous welcome animation frames while otherwise event-driven", () =>
   Effect.runPromise(
@@ -566,6 +843,335 @@ test("renders autonomous welcome animation frames while otherwise event-driven",
         expect(second).toContain("Welcome to Rika")
         expect(second).not.toBe(first)
         expect(setup.renderer.isRunning).toBe(false)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("ticks Amp status and running-tool spinners every 200ms without rebuilding transcript bodies", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const clock = new ManualClock()
+      const setup = yield* openTui(() => createTestRenderer({ width: 100, height: 30, clock }))
+      const running = {
+        _tag: "ToolCall" as const,
+        id: "long-running",
+        name: "shell",
+        input: JSON.stringify({ command: "sleep 5" }),
+        status: "running" as const,
+        presentation: {
+          family: "shell" as const,
+          action: "command",
+          activeLabel: "Running",
+          completeLabel: "Ran",
+        },
+        detail: "sleep 5",
+        output: "still running",
+        files: [],
+      }
+      const model: Model = {
+        ...initial("/work", "high"),
+        width: 100,
+        height: 30,
+        busy: true,
+        activity: { _tag: "Thinking", bytes: 20 },
+        blocks: [running],
+        items: [{ _tag: "Block", index: 0, id: "tool:long-running", turnId: "turn" }],
+        expandedRowKeys: ["tool:long-running"],
+      }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined }, { clock })
+      const records = () =>
+        (surface as unknown as {
+          readonly transcriptRecords: ReadonlyMap<
+            string,
+            { readonly renderable: { readonly content: { readonly chunks: ReadonlyArray<{ text: string }> } } }
+          >
+        }).transcriptRecords
+      const text = (value: { readonly chunks: ReadonlyArray<{ readonly text: string }> } | string) =>
+        typeof value === "string" ? value : value.chunks.map((chunk) => chunk.text).join("")
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const body = records().get("tool:long-running:body")!.renderable
+        const firstBodyContent = body.content
+        expect(text(surface.statusLabel.content)).toContain("∼ Thinking 5 tok")
+        expect(text(records().get("tool:long-running:header")!.renderable.content)).toContain("⠭")
+
+        clock.advance(199)
+        expect(text(surface.statusLabel.content)).toContain("∼ Thinking 5 tok")
+        expect(text(records().get("tool:long-running:header")!.renderable.content)).toContain("⠭")
+        clock.advance(1)
+        expect(text(surface.statusLabel.content)).toContain("≈ Thinking 5 tok")
+        expect(text(records().get("tool:long-running:header")!.renderable.content)).toContain("⣟")
+        expect(body.content).toBe(firstBodyContent)
+
+        clock.advance(200)
+        expect(text(surface.statusLabel.content)).toContain("≋ Thinking 5 tok")
+        clock.advance(200)
+        expect(text(surface.statusLabel.content)).toContain("≈ Thinking 5 tok")
+        clock.advance(200)
+        expect(text(surface.statusLabel.content)).toContain("∼ Thinking 5 tok")
+        clock.advance(200)
+        expect(text(surface.statusLabel.content)).toContain("∼ Thinking 5 tok")
+        expect(body.content).toBe(firstBodyContent)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("toggles expandable transcript headers without selecting them and keeps bodies selectable", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      let model: Model = {
+        ...initial("/work", "high"),
+        blocks: [
+          {
+            _tag: "ToolCall",
+            id: "shell-selection",
+            name: "shell",
+            input: JSON.stringify({ command: "printf transcript-output" }),
+            status: "complete",
+            presentation: {
+              family: "shell",
+              action: "shell",
+              activeLabel: "Running",
+              completeLabel: "Ran",
+            },
+            detail: "printf transcript-output",
+            output: "transcript-output",
+            files: [],
+          },
+        ],
+        items: [{ _tag: "Block", index: 0, id: "shell-selection", turnId: "turn-selection" }],
+      }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        clickToggle: (unit) => {
+          model = update(model, { _tag: "DetailToggled", id: unit })
+          surface.update(model)
+        },
+        resize: () => undefined,
+      })
+      const records = () =>
+        (surface as unknown as {
+          readonly transcriptRecords: ReadonlyMap<
+            string,
+            { readonly renderable: { readonly screenX: number; readonly screenY: number; readonly selectable: boolean } }
+          >
+        }).transcriptRecords
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const header = records().get("tool:shell-selection:header")!.renderable
+        yield* openTui(() => setup.mockMouse.click(header.screenX + 2, header.screenY))
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).toContain("tool:shell-selection")
+        expect(setup.renderer.getSelection()).toBeNull()
+
+        const body = records().get("tool:shell-selection:body")!.renderable
+        yield* openTui(() => setup.mockMouse.drag(body.screenX, body.screenY, body.screenX + 20, body.screenY))
+        expect(setup.renderer.getSelection()?.getSelectedText()).toContain("transcript-output")
+        setup.renderer.clearSelection()
+
+        const expandedHeader = records().get("tool:shell-selection:header")!.renderable
+        yield* openTui(() => setup.mockMouse.click(expandedHeader.screenX + 2, expandedHeader.screenY))
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).not.toContain("tool:shell-selection")
+        expect(setup.renderer.getSelection()).toBeNull()
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("updates an existing streaming transcript header when it becomes expandable", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const shell = (id: string, output?: string) => ({
+        _tag: "ToolCall" as const,
+        id,
+        name: "shell",
+        input: JSON.stringify({ command: `printf ${id}` }),
+        status: "running" as const,
+        presentation: {
+          family: "shell" as const,
+          action: "shell",
+          activeLabel: "Running",
+          completeLabel: "Ran",
+        },
+        detail: `printf ${id}`,
+        ...(output === undefined ? {} : { output }),
+        files: [],
+      })
+      let model: Model = {
+        ...initial("/work", "high"),
+        blocks: [shell("first", "first-output"), shell("streaming")],
+        items: [
+          { _tag: "Block", index: 0, id: "first", turnId: "turn-streaming" },
+          { _tag: "Block", index: 1, id: "streaming", turnId: "turn-streaming" },
+        ],
+        expandedRowKeys: ["tool:first+streaming"],
+      }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        clickToggle: (unit) => {
+          model = update(model, { _tag: "DetailToggled", id: unit })
+          surface.update(model)
+        },
+        resize: () => undefined,
+      })
+      const records = () =>
+        (surface as unknown as {
+          readonly transcriptRecords: ReadonlyMap<
+            string,
+            { readonly renderable: { readonly screenX: number; readonly screenY: number; readonly selectable: boolean } }
+          >
+        }).transcriptRecords
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const before = records().get("tool-child:streaming:header")!.renderable
+        expect(before.selectable).toBe(true)
+
+        model = { ...model, blocks: [model.blocks[0]!, shell("streaming", "late-output")] }
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const after = records().get("tool-child:streaming:header")!.renderable
+        expect(after).toBe(before)
+        expect(after.selectable).toBe(false)
+        yield* openTui(() => setup.mockMouse.click(after.screenX + 4, after.screenY))
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).toContain("tool-child:streaming")
+        expect(setup.renderer.getSelection()).toBeNull()
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("renders a subagent tool tree and expands each child independently", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 28 }))
+      const presentation = {
+        agent: {
+          family: "agent" as const,
+          action: "oracle",
+          activeLabel: "Oracle exploring",
+          completeLabel: "Oracle has spoken",
+        },
+        explore: {
+          family: "explore" as const,
+          action: "read",
+          activeLabel: "Exploring",
+          completeLabel: "Explored",
+          counter: "file" as const,
+        },
+        shell: {
+          family: "shell" as const,
+          action: "command",
+          activeLabel: "Running",
+          completeLabel: "Ran",
+        },
+      }
+      let model: Model = {
+        ...initial("/work", "high"),
+        width: 80,
+        height: 28,
+        blocks: [
+          {
+            _tag: "ToolCall",
+            id: "oracle-parent",
+            name: "oracle",
+            input: JSON.stringify({ prompt: "Review the code" }),
+            status: "complete",
+            presentation: presentation.agent,
+            detail: "Review the code",
+            childId: "child:oracle",
+            files: [],
+          },
+          {
+            _tag: "ToolCall",
+            id: "child-read",
+            name: "read_file",
+            input: JSON.stringify({ path: "src/a.ts", offset: 2, limit: 3 }),
+            output: "read child output",
+            status: "complete",
+            presentation: presentation.explore,
+            detail: "src/a.ts L2-4",
+            files: [],
+          },
+          {
+            _tag: "ToolCall",
+            id: "child-shell",
+            name: "shell",
+            input: JSON.stringify({ command: "bun test" }),
+            output: "shell child output",
+            status: "complete",
+            presentation: presentation.shell,
+            detail: "bun test",
+            files: [],
+          },
+        ],
+        items: [
+          { _tag: "Block", index: 0, id: "tool:oracle-parent", turnId: "turn" },
+          { _tag: "Block", index: 1, id: "tool:child-read", turnId: "child:oracle", parentId: "oracle-parent" },
+          { _tag: "Block", index: 2, id: "tool:child-shell", turnId: "child:oracle", parentId: "oracle-parent" },
+        ],
+        expandedRowKeys: ["tool:oracle-parent"],
+      }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        clickToggle: (unit) => {
+          model = update(model, { _tag: "DetailToggled", id: unit })
+          surface.update(model)
+        },
+        resize: () => undefined,
+      })
+      const records = () =>
+        (surface as unknown as {
+          readonly transcriptRecords: ReadonlyMap<
+            string,
+            { readonly renderable: { readonly screenX: number; readonly screenY: number } }
+          >
+        }).transcriptRecords
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const collapsed = setup.captureCharFrame()
+        expect(collapsed).toContain("Oracle has spoken ▾")
+        expect(collapsed).toContain("├ ✓ Read src/a.ts L2-4 ▸")
+        expect(collapsed).toContain("└ ✓ $ bun test ▸")
+        expect(collapsed).not.toContain("read child output")
+        expect(collapsed).not.toContain("shell child output")
+
+        const read = records().get("tool:child-read:header")!.renderable
+        yield* openTui(() => setup.mockMouse.click(read.screenX + 4, read.screenY))
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).toContain("tool:child-read")
+        expect(setup.captureCharFrame()).toContain("read child output")
+        expect(setup.captureCharFrame()).not.toContain("shell child output")
+
+        const shell = records().get("tool:child-shell:header")!.renderable
+        yield* openTui(() => setup.mockMouse.click(shell.screenX + 4, shell.screenY))
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).toContain("tool:child-shell")
+        expect(setup.captureCharFrame()).toContain("shell child output")
+
+        const expandedRead = records().get("tool:child-read:header")!.renderable
+        yield* openTui(() => setup.mockMouse.click(expandedRead.screenX + 4, expandedRead.screenY))
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).not.toContain("tool:child-read")
+        expect(setup.captureCharFrame()).not.toContain("read child output")
+        expect(setup.captureCharFrame()).toContain("shell child output")
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -754,6 +1360,50 @@ test("copies trimmed selected transcript text through OSC52", () =>
     }),
   ))
 
+test("loads the workspace file tree with Opt+T and keeps it separate from changed files", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 100, height: 24 }))
+      let model = update(initial("/work", "high"), {
+        _tag: "FilesReplaced",
+        files: ["apps/rika/src/main.ts", "packages/tui/src/adapter.ts", "README.md"],
+      })
+      model = update(model, {
+        _tag: "ChangedFilesReplaced",
+        files: [{ path: "packages/tui/src/adapter.ts", status: "M", added: 4, removed: 1 }],
+      })
+      const surface = new Surface(setup.renderer, {
+        key: (key) => {
+          model = update(model, { _tag: "KeyPressed", key })
+          surface.update(model)
+        },
+        resize: () => undefined,
+      })
+      try {
+        surface.update(model)
+        setup.mockInput.pressKey("t", { meta: true })
+        yield* openTui(() => setup.flush())
+        expect((model as Model & { readonly workspaceFilesOpen: boolean }).workspaceFilesOpen).toBe(true)
+        expect(model.changedFilesOpen).toBe(false)
+        const workspaceFrame = setup.captureCharFrame()
+        expect(workspaceFrame).toContain("Files (3)")
+        expect(workspaceFrame).toContain("apps/")
+        expect(workspaceFrame).toContain("README.md")
+
+        setup.mockInput.pressKey("s", { meta: true })
+        yield* openTui(() => setup.flush())
+        expect((model as Model & { readonly workspaceFilesOpen: boolean }).workspaceFilesOpen).toBe(false)
+        expect(model.changedFilesOpen).toBe(true)
+        const changedFrame = setup.captureCharFrame()
+        expect(changedFrame).toContain("Changed files (1)")
+        expect(changedFrame).toContain("adapter.ts +4 -1")
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
 test("renders and scrolls nested changed files within the bordered sidebar", () =>
   Effect.runPromise(
     Effect.gen(function* () {
@@ -799,6 +1449,50 @@ test("renders and scrolls nested changed files within the bordered sidebar", () 
         expect(scrolledFrame.split("\n")[23]?.slice(0, 66)).toStartWith("╰")
         yield* openTui(() => setup.mockMouse.click(72, 22))
         expect(opened).toEqual(["apps/rika/src/features/feature-00.ts", "apps/rika/src/features/feature-29.ts"])
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("refreshes the changed-files virtual window after resize layout completes", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 120, height: 35 }))
+      let model: Model = {
+        ...initial("/work", "high"),
+        width: 120,
+        height: 35,
+        entries: [{ role: "assistant", text: "answer" }],
+        changedFilesOpen: true,
+        changedFiles: ready(
+          Array.from({ length: 50 }, (_, index) => ({
+            path: `file-${String(index).padStart(3, "0")}.ts`,
+            status: "M",
+            added: 1,
+            removed: 0,
+          })),
+        ),
+      }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        resize: (width, height) => {
+          model = { ...model, width, height }
+          surface.update(model)
+        },
+      })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        expect(setup.captureCharFrame()).not.toContain("file-041.ts")
+
+        setup.renderer.resize(140, 45)
+        yield* openTui(() => setup.flush())
+
+        const frame = setup.captureCharFrame()
+        expect(frame).toContain("file-041.ts")
+        expect(frame.split("\n").slice(0, -1)).toHaveLength(45)
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -1230,7 +1924,7 @@ test("keeps every overlay above the composer at 50x12", () =>
     }),
   ))
 
-test("joins the durable queue to the composer and exposes steering controls", () =>
+test("joins the durable queue to the composer like Amp", () =>
   Effect.runPromise(
     Effect.gen(function* () {
       const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
@@ -1243,18 +1937,153 @@ test("joins the durable queue to the composer and exposes steering controls", ()
       try {
         surface.update({ ...model, queueSelection: undefined })
         yield* openTui(() => setup.renderOnce())
-        expect(setup.captureCharFrame()).toContain("Enter to steer · Backspace to dequeue")
+        expect(setup.captureCharFrame()).not.toContain("Enter to steer")
         surface.update(model)
         yield* openTui(() => setup.renderOnce())
         const frame = setup.captureCharFrame()
         const rows = frame.split("\n")
         expect(frame).toContain("First queued prompt")
         expect(frame).toContain("Selected queued prompt")
-        expect(frame).toContain("Enter to steer · Backspace to dequeue")
-        expect(surface.inputBox.y).toBe(surface.queueBox.y + surface.queueBox.height)
-        expect(rows[surface.queueBox.y]).toStartWith("╭")
-        expect(rows[surface.inputBox.y]).toStartWith("╭")
+        expect(frame).not.toContain("queued 1/2")
+        expect(frame).not.toContain("queued 2/2")
+        expect(frame).toContain("Enter to steer")
+        expect(frame).toContain("Backspace to dequeue")
+        expect(rows.findIndex((row) => row.includes("Enter to steer"))).toBe(
+          rows.findIndex((row) => row.includes("Selected queued prompt")) + 1,
+        )
+        expect(surface.inputBox.y).toBe(surface.queueBox.y + surface.queueBox.height - 1)
+        expect(rows[surface.queueBox.y]).toStartWith(" ╭")
+        expect(rows[surface.inputBox.y]).toStartWith("╭┴")
         expect(rows[surface.inputBox.y]).toEndWith("╮")
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("renders message-only queued rows with a hint that follows the selection", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 60, height: 14 }))
+      const items = Array.from({ length: 8 }, (_, index) => ({ id: `q${index}`, prompt: `prompt number ${index}` }))
+      const base = replaceQueue({ ...initial("/work", "medium"), busy: true, width: 60, height: 14 }, items)
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update({ ...base, queueSelection: "q0" })
+        yield* openTui(() => setup.renderOnce())
+        const top = setup.captureCharFrame()
+        const topRows = top.split("\n")
+        expect(top).not.toContain("queued 1/8")
+        expect(topRows.findIndex((row) => row.includes("Enter to steer"))).toBe(
+          topRows.findIndex((row) => row.includes("prompt number 0")) + 1,
+        )
+        surface.update({ ...base, queueSelection: "q7" })
+        yield* openTui(() => setup.renderOnce())
+        const bottom = setup.captureCharFrame()
+        const bottomRows = bottom.split("\n")
+        expect(bottom).not.toContain("queued 8/8")
+        expect(bottomRows.findIndex((row) => row.includes("Enter to steer"))).toBe(
+          bottomRows.findIndex((row) => row.includes("prompt number 7")) + 1,
+        )
+        expect(bottom).not.toContain("prompt number 0")
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("shows the editing hint while a queued turn is being edited in the composer", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const model = {
+        ...replaceQueue({ ...initial("/work", "medium"), busy: true, width: 80, height: 24 }, [
+          { id: "a", prompt: "alpha" },
+          { id: "b", prompt: "beta" },
+        ]),
+        queueSelection: "b",
+        editingTurnId: "b",
+        input: "beta edited",
+        cursor: "beta edited".length,
+      }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.renderOnce())
+        const frame = setup.captureCharFrame()
+        const rows = frame.split("\n")
+        expect(frame).toContain("Editing queued")
+        expect(frame).not.toContain("2/2")
+        expect(frame).toContain("Enter save")
+        expect(frame).toContain("Esc cancel")
+        expect(rows.findIndex((row) => row.includes("Editing queued"))).toBe(
+          rows.findIndex((row) => row.includes("beta")) + 1,
+        )
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("removes a promoted prompt from the queue when it starts", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const base = resetQueue(
+        { ...initial("/work", "medium"), busy: true, width: 80, height: 24, currentThreadId: "t" },
+        "t",
+        1,
+        [
+          { id: "a", prompt: "alpha" },
+          { id: "b", prompt: "beta" },
+        ],
+      )
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(base)
+        yield* openTui(() => setup.renderOnce())
+        expect(setup.captureCharFrame()).toContain("beta")
+        const started = update(applyQueueDelta(base, "t", 2, { _tag: "Removed", turnId: "a" }).model, {
+          _tag: "TurnStarted",
+          turnId: "a",
+          prompt: "alpha",
+        })
+        surface.update(started)
+        yield* openTui(() => setup.renderOnce())
+        const frame = setup.captureCharFrame()
+        expect(frame).toContain("beta")
+        expect(frame).not.toContain("queued 1/1")
+        expect(frame).not.toContain("queued 2/2")
+        expect(frame).toContain("alpha")
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("clamps an oversized focused queued prompt to the queue box with an indicator", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 40, height: 12 }))
+      const model = {
+        ...replaceQueue({ ...initial("/work", "medium"), busy: true, width: 40, height: 12 }, [
+          { id: "big", prompt: "x".repeat(400) },
+        ]),
+        queueSelection: "big",
+      }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.renderOnce())
+        const text = (surface.queueText.content as unknown as { chunks: ReadonlyArray<{ text: string }> }).chunks
+          .map((chunk) => chunk.text)
+          .join("")
+        expect(text).toContain("…")
+        expect(text.length).toBeLessThan(200)
       } finally {
         surface.destroy()
         setup.renderer.destroy()

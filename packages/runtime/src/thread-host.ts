@@ -18,16 +18,18 @@ const PromoteTurnFailure = Schema.Struct({
   message: Schema.String,
 })
 
-const PendingTurnMessageJson = Schema.fromJsonString(
+const QueueReadyMessageJson = Schema.fromJsonString(
   Schema.Struct({
-    kind: Schema.Literal("pending-turn"),
+    kind: Schema.Literal("queue-ready"),
     thread_id: Schema.String,
+    wake_generation: Schema.Int,
+    queue_revision: Schema.Int,
   }),
 )
 
 export const promoteTurnTool = Tool.make("promote_turn", {
   description: "Claim and start every currently claimable queued Rika turn for a thread",
-  parameters: Schema.Struct({ threadId: Schema.String }),
+  parameters: Schema.Struct({ threadId: Schema.String, generation: Schema.Int }),
   success: Schema.Struct({ promoted: Schema.Finite }),
   failure: PromoteTurnFailure,
   failureMode: "return",
@@ -35,11 +37,11 @@ export const promoteTurnTool = Tool.make("promote_turn", {
 
 export const toolkit = Toolkit.make(promoteTurnTool)
 
-export type Promoter = (threadId: string) => Effect.Effect<number>
+export type Promoter = (threadId: string, generation: number) => Effect.Effect<number>
 
 export interface RegistryInterface {
   readonly register: (promoter: Promoter) => Effect.Effect<void>
-  readonly promote: (threadId: string) => Effect.Effect<number>
+  readonly promote: (threadId: string, generation: number) => Effect.Effect<number>
 }
 
 export class Registry extends Context.Service<Registry, RegistryInterface>()("@rika/runtime/thread-host/Registry") {}
@@ -48,12 +50,12 @@ export const makeRegistry: Effect.Effect<RegistryInterface> = Effect.gen(functio
   const slot = yield* Ref.make(Option.none<Promoter>())
   return Registry.of({
     register: (promoter) => Ref.set(slot, Option.some(promoter)),
-    promote: (threadId) =>
+    promote: (threadId, generation) =>
       Ref.get(slot).pipe(
         Effect.flatMap(
           Option.match({
             onNone: () => Effect.succeed(0),
-            onSome: (promoter) => promoter(threadId),
+            onSome: (promoter) => promoter(threadId, generation),
           }),
         ),
       ),
@@ -62,23 +64,35 @@ export const makeRegistry: Effect.Effect<RegistryInterface> = Effect.gen(functio
 
 export const handlerLayer = (registry: RegistryInterface) =>
   toolkit.toLayer({
-    promote_turn: ({ threadId }) => registry.promote(threadId).pipe(Effect.map((promoted) => ({ promoted }))),
+    promote_turn: ({ threadId, generation }) =>
+      registry.promote(threadId, generation).pipe(Effect.map((promoted) => ({ promoted }))),
   })
 
 export const waitToolName = "wait_for_messages"
 
-export const pendingThreadIds = (prompt: Prompt.Prompt): ReadonlyArray<string> => {
+export interface PendingQueueWake {
+  readonly threadId: string
+  readonly generation: number
+  readonly queueRevision: number
+}
+
+export const pendingQueueWakes = (prompt: Prompt.Prompt): ReadonlyArray<PendingQueueWake> => {
   const last = prompt.content.at(-1)
   if (last === undefined || last.role !== "tool") return []
   const batch = last.content.findLast((part) => part.type === "tool-result" && part.name === waitToolName)
   if (batch === undefined || batch.type !== "tool-result") return []
   const text = JSON.stringify(batch.result ?? null)
-  const ids = new Set<string>()
-  for (const match of text.matchAll(/\{\\?"kind\\?"\s*:\s*\\?"pending-turn\\?"[^{}]*\}/g)) {
-    const payload = Schema.decodeUnknownOption(PendingTurnMessageJson)(match[0].replaceAll('\\"', '"'))
-    if (Option.isSome(payload) && payload.value.thread_id.length > 0) ids.add(payload.value.thread_id)
+  const wakes = new Map<string, PendingQueueWake>()
+  for (const match of text.matchAll(/\{\\?"kind\\?"\s*:\s*\\?"queue-ready\\?"[^{}]*\}/g)) {
+    const payload = Schema.decodeUnknownOption(QueueReadyMessageJson)(match[0].replaceAll('\\"', '"'))
+    if (Option.isSome(payload) && payload.value.thread_id.length > 0)
+      wakes.set(payload.value.thread_id, {
+        threadId: payload.value.thread_id,
+        generation: payload.value.wake_generation,
+        queueRevision: payload.value.queue_revision,
+      })
   }
-  return [...ids]
+  return [...wakes.values()]
 }
 
 const usage = (): Response.Usage =>
@@ -101,8 +115,8 @@ const respond = (
 ): Effect.Effect<Array<Response.PartEncoded>> =>
   Effect.gen(function* () {
     const request = yield* Ref.getAndUpdate(counter, (value) => value + 1)
-    const threadIds = pendingThreadIds(options.prompt)
-    if (threadIds.length === 0) {
+    const wakes = pendingQueueWakes(options.prompt)
+    if (wakes.length === 0) {
       return [
         {
           type: "tool-call",
@@ -115,12 +129,12 @@ const respond = (
       ]
     }
     return [
-      ...threadIds.map(
-        (threadId, index): Response.PartEncoded => ({
+      ...wakes.map(
+        (wake, index): Response.PartEncoded => ({
           type: "tool-call",
           id: `${namespace}-promote-${request}-${index}`,
           name: "promote_turn",
-          params: { threadId },
+          params: { threadId: wake.threadId, generation: wake.generation },
           providerExecuted: false,
         }),
       ),

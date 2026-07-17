@@ -1,12 +1,11 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { Database } from "bun:sqlite"
-import { Data, Effect, FileSystem, Layer, Path, Schema } from "effect"
+import { Data, Effect, FileSystem, Layer, Path } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 class PackageSmokeError extends Data.TaggedError("PackageSmokeError")<{ readonly message: string }> {}
 
-const MigrationCount = Schema.Struct({ count: Schema.Finite })
 const failure = (message: string) => new PackageSmokeError({ message })
 
 const program = Effect.gen(function* () {
@@ -27,6 +26,12 @@ const program = Effect.gen(function* () {
   const extracted = yield* run("tar", ["-xzf", archive, "-C", temporary])
   if (Number(extracted) !== 0) return yield* failure(`Failed to extract artifact: tar exited with code ${extracted}`)
   const binary = path.join(temporary, `rika-${platform}`, "bin", "rika")
+  const privateRuntime = path.join(temporary, `rika-${platform}`, "bin", ".rika-runtime")
+  for (const executable of [binary, privateRuntime]) {
+    const info = yield* fileSystem.stat(executable)
+    if (info.type !== "File" || (info.mode & 0o111) === 0)
+      return yield* failure(`Packaged executable is missing or not executable: ${executable}`)
+  }
   const env = {
     HOME: home,
     RIKA_DATABASE: path.join(state, "rika.db"),
@@ -38,15 +43,38 @@ const program = Effect.gen(function* () {
       return yield* failure(`Artifact command failed: ${args.join(" ")}\nexited with code ${exitCode}`)
   }
   const files = yield* fileSystem.readDirectory(state)
-  if (!files.includes("rika.db")) return yield* failure("Product migration database was not created")
-  const row = yield* Effect.acquireRelease(
+  if (!files.includes("rika.db")) return yield* failure("Product database was not created")
+  const objects = yield* Effect.acquireRelease(
     Effect.sync(() => new Database(path.join(state, "rika.db"), { readonly: true })),
     (database) => Effect.sync(() => database.close()),
-  ).pipe(Effect.map((database) => database.query("select count(*) as count from rika_migrations").get()))
-  const migrations = yield* Schema.decodeUnknownEffect(MigrationCount)(row).pipe(
-    Effect.mapError((error) => failure(`Invalid migration query result: ${error.message}`)),
+  ).pipe(
+    Effect.map((database) =>
+      database
+        .query<{ type: string; name: string }, []>(
+          "select type, name from sqlite_schema where type in ('table', 'index', 'trigger', 'view') and name not like 'sqlite_%' order by type, name",
+        )
+        .all()
+        .map((row) => `${row.type}:${row.name}`),
+    ),
   )
-  if (migrations.count < 1) return yield* failure("Product migrations were not applied and retained across reopen")
+  const expectedObjects = [
+    "index:rika_thread_turn_activity_summary",
+    "index:rika_threads_listing",
+    "index:rika_transcript_units_page",
+    "index:rika_transcript_units_turn",
+    "index:rika_turns_queue",
+    "index:rika_turns_thread",
+    "table:rika_thread_queue_state",
+    "table:rika_thread_read_state",
+    "table:rika_thread_turn_activity",
+    "table:rika_threads",
+    "table:rika_transcript_checkpoints",
+    "table:rika_transcript_units",
+    "table:rika_turns",
+    "table:rika_workspaces",
+  ]
+  if (objects.length !== expectedObjects.length || objects.some((object, index) => object !== expectedObjects[index]))
+    return yield* failure(`Product database schema does not match the current object set: ${objects.join(", ")}`)
   const tree = yield* spawner.string(
     ChildProcess.make("find", [path.join(temporary, `rika-${platform}`), "-type", "l", "-print"]),
   )

@@ -4,37 +4,54 @@ import * as BunServices from "@effect/platform-bun/BunServices"
 import { Operation } from "@rika/app"
 import * as Thread from "@rika/persistence/thread"
 import * as Turn from "@rika/persistence/turn"
-import { Config, Console, Effect, FileSystem, Layer, Logger, Path, Schema, Semaphore } from "effect"
-import { serve } from "../../src/resident-transport"
+import { Config, Console, Effect, Exit, FileSystem, Layer, Logger, Path, Ref, Schema, Scope } from "effect"
+import { serve } from "../../src/resident-host-transport"
+import * as ResidentProcessStartup from "../../src/resident-process-startup"
 
 let activeWork = 0
 
 const program = Effect.gen(function* () {
   const dataRoot = yield* Config.string("RIKA_TEST_RESIDENT_DATA_ROOT")
   const grace = yield* Config.string("RIKA_TEST_RESIDENT_GRACE").pipe(Config.withDefault("500"))
+  const startupHold = yield* Config.string("RIKA_TEST_RESIDENT_STARTUP_HOLD").pipe(Config.withDefault("0"))
   const finalizerDelay = Number(
     yield* Config.string("RIKA_TEST_RESIDENT_FINALIZER_DELAY").pipe(Config.withDefault("0")),
   )
   const delayedWork = (yield* Config.string("RIKA_TEST_RESIDENT_DELAYED_WORK").pipe(Config.withDefault("0"))) === "1"
+  const uninterruptibleOwner =
+    (yield* Config.string("RIKA_TEST_RESIDENT_UNINTERRUPTIBLE_OWNER").pipe(Config.withDefault("0"))) === "1"
   const outboundCapacity = yield* Config.int("RIKA_TEST_RESIDENT_OUTBOUND_CAPACITY").pipe(Config.withDefault(1_024))
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
+  const interactiveAdmissionActive = yield* Ref.make(0)
+  const interactiveAdmissionMaximum = yield* Ref.make(0)
+  const interactiveAdmissions = yield* Ref.make<ReadonlyArray<number>>([])
+  const interactiveActive = yield* Ref.make(0)
+  const interactiveMaximum = yield* Ref.make(0)
+  const interactiveCompletions = yield* Ref.make<ReadonlyArray<number>>([])
+  const interactiveExecutionScope = yield* Scope.make()
   const append = (name: string, value: string) =>
     fs.writeFileString(path.join(dataRoot, name), value, { flag: "a" }).pipe(Effect.orDie)
   return yield* serve({
     profile: "default",
     dataRoot,
     graceMilliseconds: Number(grace),
+    startupHoldMilliseconds: Number(startupHold),
     outboundCapacity,
+    onReady: ResidentProcessStartup.signalReady,
     owner: (interactive) =>
       Effect.gen(function* () {
         yield* append("owner-acquisitions.log", `${process.pid}\n`)
-        const followOwnership = yield* Semaphore.make(1)
-        let followCount = 0
         yield* Effect.addFinalizer(() =>
           append("owner-finalizer-starts.log", `${process.pid}:${activeWork}\n`).pipe(
-            Effect.andThen(Effect.sleep(finalizerDelay)),
-            Effect.andThen(append("owner-finalizations.log", `${process.pid}\n`)),
+            Effect.andThen(
+              uninterruptibleOwner
+                ? Effect.never.pipe(Effect.uninterruptible)
+                : Effect.sleep(finalizerDelay).pipe(
+                    Effect.andThen(append("owner-finalizations.log", `${process.pid}\n`)),
+                    Effect.andThen(Scope.close(interactiveExecutionScope, Exit.void)),
+                  ),
+            ),
           ),
         )
         return Operation.Service.of({
@@ -48,15 +65,24 @@ const program = Effect.gen(function* () {
                     }),
                   )
                 : interactive(input, {
-                    initialize: (dispatch) =>
+                    events: (dispatch) =>
                       Effect.sync(() => {
                         const kind = input.prompt[0]
-                        const count = kind === "burst-events" ? 1_000 : kind === "overflow-events" ? 10 : 1
+                        if (kind === "feed-takeover") {
+                          dispatch({ _tag: "ThreadsListed", threads: [] })
+                          return true
+                        }
+                        const count =
+                          kind === "burst-events"
+                            ? 1_000
+                            : kind === "overflow-events" || kind === "queue-overflow-events"
+                              ? 10
+                              : 1
                         for (let index = 0; index < count; index += 1) {
-                          if (kind !== "overflow-events") dispatch({ _tag: "ThreadsListed", threads: [] })
-                          else
+                          if (kind === "overflow-events")
                             dispatch({
                               _tag: "TranscriptPatched",
+                              selectionEpoch: 0,
                               threadId: Thread.ThreadId.make("overflow-thread"),
                               turnId: Turn.TurnId.make("overflow-turn"),
                               event: {
@@ -68,62 +94,125 @@ const program = Effect.gen(function* () {
                               },
                               revision: index,
                             })
-                        }
-                      }),
-                    watchThreads: (dispatch) =>
-                      input.prompt[0] === "overflow-watch"
-                        ? Effect.sync(() => {
-                            for (let index = 0; index < 10; index += 1)
-                              dispatch({
-                                _tag: "TranscriptPatched",
-                                threadId: Thread.ThreadId.make("overflow-thread"),
-                                turnId: Turn.TurnId.make("overflow-turn"),
-                                event: {
-                                  cursor: `watch-overflow-${index}`,
-                                  sequence: index,
-                                  type: "model.output.delta",
-                                  createdAt: index,
-                                  text: String(index),
+                          else if (kind === "queue-overflow-events")
+                            dispatch({
+                              _tag: "QueueUpdated",
+                              selectionEpoch: 0,
+                              threadId: Thread.ThreadId.make("queue-overflow-thread"),
+                              revision: index + 1,
+                              queuedCount: index + 1,
+                              change: {
+                                _tag: "Added",
+                                item: {
+                                  id: Turn.TurnId.make(`queue-overflow-turn-${index}`),
+                                  prompt: `queued ${index}`,
                                 },
-                                revision: index,
-                              })
-                          }).pipe(Effect.andThen(Effect.never))
-                        : Effect.never,
+                              },
+                            })
+                          else if (kind === "oversized-event")
+                            dispatch({
+                              _tag: "ExecutionFailed",
+                              selectionEpoch: 0,
+                              message: "x".repeat(1_100_000),
+                            })
+                          else dispatch({ _tag: "ThreadsListed", threads: [] })
+                        }
+                        return true
+                      }).pipe(
+                        Effect.flatMap((started) =>
+                          !started
+                            ? Effect.never
+                            : input.prompt[0] === "feed-takeover"
+                              ? Effect.sleep("100 millis").pipe(
+                                  Effect.andThen(Effect.sync(() => dispatch({ _tag: "ThreadsListed", threads: [] }))),
+                                  Effect.andThen(Effect.never),
+                                )
+                              : input.prompt[0] === "overflow-watch"
+                                ? Effect.sync(() => {
+                                    for (let index = 0; index < 10; index += 1)
+                                      dispatch({
+                                        _tag: "TranscriptPatched",
+                                        selectionEpoch: 0,
+                                        threadId: Thread.ThreadId.make("overflow-thread"),
+                                        turnId: Turn.TurnId.make("overflow-turn"),
+                                        event: {
+                                          cursor: `watch-overflow-${index}`,
+                                          sequence: index,
+                                          type: "model.output.delta",
+                                          createdAt: index,
+                                          text: String(index),
+                                        },
+                                        revision: index,
+                                      })
+                                  }).pipe(
+                                    Effect.andThen(Effect.sleep("50 millis")),
+                                    Effect.andThen(Effect.sync(() => dispatch({ _tag: "ThreadsListed", threads: [] }))),
+                                    Effect.andThen(Effect.never),
+                                  )
+                                : Effect.never,
+                        ),
+                      ),
                     submit: (prompt) =>
                       prompt === "ambiguous"
                         ? append("mutation-attempts.log", `${process.pid}\n`).pipe(
                             Effect.andThen(Effect.sync(() => process.kill(process.pid, "SIGKILL"))),
                             Effect.asVoid,
                           )
-                        : Effect.void,
+                        : prompt.startsWith("serialized-")
+                          ? Effect.gen(function* () {
+                              const index = Number(prompt.slice("serialized-".length))
+                              const admissionActive = yield* Ref.updateAndGet(
+                                interactiveAdmissionActive,
+                                (value) => value + 1,
+                              )
+                              yield* Ref.update(interactiveAdmissionMaximum, (value) =>
+                                Math.max(value, admissionActive),
+                              )
+                              yield* Ref.update(interactiveAdmissions, (values) => [...values, index])
+                              const execution = Effect.gen(function* () {
+                                const active = yield* Ref.updateAndGet(interactiveActive, (value) => value + 1)
+                                yield* Ref.update(interactiveMaximum, (value) => Math.max(value, active))
+                                yield* Effect.sleep(`${1 + ((99 - index) % 10)} millis`)
+                                const completions = yield* Ref.updateAndGet(interactiveCompletions, (values) => [
+                                  ...values,
+                                  index,
+                                ])
+                                if (completions.length === 100) {
+                                  const admissionMaximum = yield* Ref.get(interactiveAdmissionMaximum)
+                                  const admissions = yield* Ref.get(interactiveAdmissions)
+                                  const executionMaximum = yield* Ref.get(interactiveMaximum)
+                                  const encoded = yield* Schema.encodeUnknownEffect(Schema.UnknownFromJsonString)({
+                                    admissionMaximum,
+                                    admissions,
+                                    executionMaximum,
+                                    completions,
+                                  })
+                                  yield* fs
+                                    .writeFileString(path.join(dataRoot, "interactive-serialization.json"), encoded)
+                                    .pipe(Effect.orDie)
+                                }
+                              }).pipe(Effect.ensuring(Ref.update(interactiveActive, (value) => value - 1)))
+                              yield* Effect.forkIn(execution, interactiveExecutionScope)
+                            }).pipe(Effect.ensuring(Ref.update(interactiveAdmissionActive, (value) => value - 1)))
+                          : Effect.void,
                     shell: () => Effect.void,
                     editQueued: () => Effect.void,
                     dequeue: () => Effect.void,
                     steerQueued: () => Effect.void,
                     steer: () => Effect.void,
                     interruptAndSend: () => Effect.void,
-                    cancel: () => Effect.void,
+                    cancel: Effect.void,
                     resolvePermission: () => Effect.void,
                     selectThread: () => Effect.void,
-                    loadOlder: () => Effect.void,
+                    readQueue: () => Effect.void,
+                    loadOlder: Effect.void,
                     previewThread: () => Effect.void,
                     reopenThread: () => Effect.void,
-                    followSelected: (dispatch) =>
-                      followOwnership.withPermits(1)(
-                        Effect.sync(() => {
-                          followCount += 1
-                          return followCount
-                        }).pipe(
-                          Effect.flatMap((count) =>
-                            count === 1
-                              ? Effect.never
-                              : Effect.sync(() => dispatch({ _tag: "ThreadsListed", threads: [] })),
-                          ),
-                        ),
-                      ),
                     replay: () => Effect.void,
                   })
               : Effect.suspend(() => {
+                  if (input._tag === "Run" && input.prompt[0] === "oversized-output")
+                    return Console.log("x".repeat(1_100_000))
                   if (!delayedWork || input._tag !== "Run")
                     return Schema.encodeUnknownEffect(Schema.UnknownFromJsonString)({ hostPid: process.pid }).pipe(
                       Effect.flatMap(Console.log),
@@ -147,9 +236,10 @@ const program = Effect.gen(function* () {
 })
 
 BunRuntime.runMain(
-  Layer.launch(
-    Layer.effectDiscard(Effect.scoped(program)).pipe(
-      Layer.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, Logger.layer([]))),
-    ),
+  Effect.scoped(
+    Effect.gen(function* () {
+      const context = yield* Layer.build(Layer.mergeAll(BunServices.layer, BunCrypto.layer, Logger.layer([])))
+      yield* Effect.provide(program, context)
+    }),
   ),
 )

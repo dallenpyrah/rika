@@ -18,7 +18,17 @@ export const ExecutionExtensionPin = Schema.Struct({
 export type ExecutionExtensionPin = typeof ExecutionExtensionPin.Type
 
 export const ExecutionModelRoute = Schema.Struct({
-  role: Schema.Literals(["main", "oracle", "compaction", "librarian", "painter", "review", "readThread", "task"]),
+  role: Schema.Literals([
+    "main",
+    "oracle",
+    "title",
+    "compaction",
+    "librarian",
+    "painter",
+    "review",
+    "readThread",
+    "task",
+  ]),
   alias: Schema.String,
   provider: Schema.String,
   model: Schema.String,
@@ -39,9 +49,9 @@ export const ExecutionModelRoute = Schema.Struct({
 export type ExecutionModelRoute = typeof ExecutionModelRoute.Type
 
 export const ExecutionRoutePin = Schema.Struct({
-  version: Schema.Literal(1),
   mode: Schema.Literals(["low", "medium", "high", "ultra", "test"]),
   tokenBudget: Schema.optionalKey(Schema.Finite),
+  title: Schema.optionalKey(ExecutionModelRoute),
   compactionSummary: Schema.optionalKey(ExecutionModelRoute),
   main: ExecutionModelRoute,
   oracle: ExecutionModelRoute,
@@ -72,8 +82,8 @@ export const testExecutionRoute = (mode: "low" | "medium" | "high" | "ultra" | "
     compaction: { contextWindow: 372_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
   }
   return {
-    version: 1,
     mode,
+    title: { ...route, role: "title", effort: "low" },
     compactionSummary: { ...route, role: "compaction" },
     main: { ...route, role: "main" },
     oracle: { ...route, role: "oracle" },
@@ -106,7 +116,7 @@ export const Turn = Schema.Struct({
   status: Status,
   lastCursor: Schema.optionalKey(Schema.String),
   extensionPin: Schema.optionalKey(ExecutionExtensionPin),
-  executionRoute: Schema.optionalKey(ExecutionRoutePin),
+  executionRoute: ExecutionRoutePin,
   reviewFanOutId: Schema.optionalKey(Schema.String),
   createdAt: Schema.Finite,
   updatedAt: Schema.Finite,

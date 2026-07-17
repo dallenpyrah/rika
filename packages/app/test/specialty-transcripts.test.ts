@@ -5,6 +5,7 @@ import { Catalog } from "@rika/tools"
 import { Effect, Layer, Schema } from "effect"
 import { ProductAgent } from "../src"
 import { provideLayer } from "./layer"
+import { executionRoute } from "./current-state"
 
 const model = { provider: "test", model: "deterministic" }
 const specialtyNames = ["oracle", "librarian", "painter", "task"] as const
@@ -122,6 +123,7 @@ describe("specialty durable transcripts", () => {
         const inspection = yield* agents.runParallel({
           parentTurnId: "parent-1",
           fanOutId: "specialties-1",
+          executionRoute: executionRoute(),
           tasks: cases.map((entry) => ({ id: entry.tool, prompt: entry.tool, profile: entry.profile })),
           maxConcurrency: 2,
           join: "all",
@@ -141,6 +143,7 @@ describe("specialty durable transcripts", () => {
         const review = yield* agents.runReviewLanes({
           parentTurnId: "parent-1",
           fanOutId: "review-1",
+          executionRoute: executionRoute(),
           checks: [{ id: "correctness", prompt: "Check correctness" }],
           maxConcurrency: 1,
           join: "best-effort",
@@ -166,6 +169,7 @@ describe("specialty durable transcripts", () => {
       const fanOut = yield* agents.runParallel({
         parentTurnId: "parent-2",
         fanOutId: "failed-specialty-1",
+        executionRoute: executionRoute(),
         tasks: [{ id: "oracle", prompt: "investigate", profile: "Oracle" }],
         maxConcurrency: 1,
         join: "best-effort",

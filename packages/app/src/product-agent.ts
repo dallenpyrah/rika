@@ -28,7 +28,7 @@ export interface ParallelInput {
   readonly parentTurnId: string
   readonly fanOutId: string
   readonly workspace?: string
-  readonly executionRoute?: ExecutionBackend.ExecutionRoutePin
+  readonly executionRoute: ExecutionBackend.ExecutionRoutePin
   readonly tasks: ReadonlyArray<TaskInput>
   readonly maxConcurrency: number
   readonly join?: ExecutionBackend.JoinPolicy
@@ -93,7 +93,7 @@ export const layer = Layer.effect(
             parentTurnId: input.parentTurnId,
             fanOutId: input.fanOutId,
             ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
-            ...(input.executionRoute === undefined ? {} : { executionRoute: input.executionRoute }),
+            executionRoute: input.executionRoute,
             children: input.tasks.map((task) => ({
               childId: task.id,
               profile: task.profile ?? selectProfile(task.prompt),
@@ -112,7 +112,7 @@ export const layer = Layer.effect(
             parentTurnId: input.parentTurnId,
             fanOutId: input.fanOutId,
             ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
-            ...(input.executionRoute === undefined ? {} : { executionRoute: input.executionRoute }),
+            executionRoute: input.executionRoute,
             children: input.checks.map((check) => ({ childId: check.id, profile: "Review", prompt: check.prompt })),
             maxConcurrency: input.maxConcurrency,
             join: input.join ?? "best-effort",

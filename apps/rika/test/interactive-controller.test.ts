@@ -1,4 +1,5 @@
 import * as InteractiveController from "../src/interactive-controller"
+import type * as Operation from "@rika/app/operation"
 import * as Thread from "@rika/persistence/thread"
 import * as Turn from "@rika/persistence/turn"
 import * as Transcript from "@rika/transcript"
@@ -32,6 +33,7 @@ const entries = (
     id: Turn.TurnId.make(id),
     threadId: thread.id,
     prompt: id,
+    executionRoute: Turn.testExecutionRoute(),
     status: "completed" as const,
     createdAt,
     updatedAt: createdAt,
@@ -57,12 +59,17 @@ const initialState = (): InteractiveController.State => ({
   revisions: new Map(),
   projections: new Map(),
   threadCostUsd: 0,
+  selectionEpoch: 0,
 })
 
 it("projects prepended pages without rebuilding the loaded transcript", () => {
   const initial = initialState()
   const page = InteractiveController.update(initial, {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: [
       ...entries("new", 2, [
@@ -81,6 +88,7 @@ it("projects prepended pages without rebuilding the loaded transcript", () => {
   const loadedAnswer = page.state.model.entries.at(-1)
   const prepended = InteractiveController.update(page.state, {
     _tag: "TranscriptPagePrepended",
+    selectionEpoch: 1,
     threadId: thread.id,
     entries: [
       ...entries("old", 1, [
@@ -101,10 +109,62 @@ it("projects prepended pages without rebuilding the loaded transcript", () => {
   expect(prepended.state.model.entries.some((value) => value === loadedAnswer)).toBe(true)
 })
 
+it("clears queue edit mode when a selection loads a thread", () => {
+  const initial: InteractiveController.State = {
+    ...initialState(),
+    model: {
+      ...ViewState.initial("/work", "medium"),
+      editingTurnId: "old-turn",
+      editReturn: { input: "draft", attachments: [] },
+      input: "half edited",
+      cursor: 11,
+    },
+  }
+  const loaded = InteractiveController.update(initial, {
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
+    thread,
+    entries: [],
+    hasOlder: false,
+    threadCostUsd: 0,
+  })
+  expect(loaded.state.model.editingTurnId).toBeUndefined()
+  expect(loaded.state.model.editReturn).toBeUndefined()
+})
+
+it("defaults the queue selection to the newest item when the prior selection is gone", () => {
+  const initial: InteractiveController.State = {
+    ...initialState(),
+    model: { ...ViewState.initial("/work", "medium"), queueSelection: "vanished" },
+  }
+  const loaded = InteractiveController.update(initial, {
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [
+      { id: Turn.TurnId.make("q1"), prompt: "one" },
+      { id: Turn.TurnId.make("q2"), prompt: "two" },
+    ],
+    thread,
+    entries: [],
+    hasOlder: false,
+    threadCostUsd: 0,
+  })
+  expect(loaded.state.model.queueSelection).toBe("q2")
+})
+
 it("preserves repository order across Turns with overlapping event sequences", () => {
   const initial = initialState()
   const page = InteractiveController.update(initial, {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: [
       ...entries("old", 1, [
@@ -124,7 +184,11 @@ it("preserves repository order across Turns with overlapping event sequences", (
 it("rejects duplicate patches and stale units with the same semantic identity", () => {
   const initial = initialState()
   const page = InteractiveController.update(initial, {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: entries("new", 2, [
       { cursor: "page-1", sequence: 1, type: "model.output.completed", createdAt: 1, text: "page answer" },
@@ -141,6 +205,7 @@ it("rejects duplicate patches and stale units with the same semantic identity", 
   }
   const patched = InteractiveController.update(page.state, {
     _tag: "TranscriptPatched",
+    selectionEpoch: 1,
     threadId: thread.id,
     turnId: Turn.TurnId.make("new"),
     event: liveEvent,
@@ -148,13 +213,18 @@ it("rejects duplicate patches and stale units with the same semantic identity", 
   })
   const duplicate = InteractiveController.update(patched.state, {
     _tag: "TranscriptPatched",
+    selectionEpoch: 1,
     threadId: thread.id,
     turnId: Turn.TurnId.make("new"),
     event: liveEvent,
     revision: 2,
   })
   const stale = InteractiveController.update(duplicate.state, {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: entries("new", 2, [
       { cursor: "page-1", sequence: 1, type: "model.output.completed", createdAt: 1, text: "page answer" },
@@ -169,6 +239,7 @@ it("rejects duplicate patches and stale units with the same semantic identity", 
   if (staleOlderEntry === undefined) return
   const prepended = InteractiveController.update(duplicate.state, {
     _tag: "TranscriptPagePrepended",
+    selectionEpoch: 1,
     threadId: thread.id,
     entries: [staleOlderEntry],
     hasOlder: false,
@@ -205,7 +276,11 @@ it("reconciles a stale prepended tool call with its newer retained result", () =
   expect(staleCall).toBeDefined()
   if (staleCall === undefined) return
   const page = InteractiveController.update(initial, {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: resultPage,
     hasOlder: true,
@@ -213,6 +288,7 @@ it("reconciles a stale prepended tool call with its newer retained result", () =
   })
   const prepended = InteractiveController.update(page.state, {
     _tag: "TranscriptPagePrepended",
+    selectionEpoch: 1,
     threadId: thread.id,
     entries: [staleCall],
     hasOlder: false,
@@ -228,7 +304,11 @@ it("reconciles a stale prepended tool call with its newer retained result", () =
 it("owns transcript page, prepend, and patch reduction", () => {
   const initial = initialState()
   const page = InteractiveController.update(initial, {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: entries("new", 2),
     hasOlder: true,
@@ -236,6 +316,7 @@ it("owns transcript page, prepend, and patch reduction", () => {
   })
   const prepended = InteractiveController.update(page.state, {
     _tag: "TranscriptPagePrepended",
+    selectionEpoch: 1,
     threadId: thread.id,
     entries: entries("old", 1),
     hasOlder: false,
@@ -243,6 +324,7 @@ it("owns transcript page, prepend, and patch reduction", () => {
   })
   const patched = InteractiveController.update(prepended.state, {
     _tag: "TranscriptPatched",
+    selectionEpoch: 1,
     threadId: thread.id,
     turnId: Turn.TurnId.make("new"),
     event: {
@@ -265,7 +347,11 @@ it("owns transcript page, prepend, and patch reduction", () => {
 
 it("updates one typed apply-patch row while its diff is streaming", () => {
   const page = InteractiveController.update(initialState(), {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: entries("new", 2),
     hasOlder: false,
@@ -273,6 +359,7 @@ it("updates one typed apply-patch row while its diff is streaming", () => {
   })
   const first = InteractiveController.update(page.state, {
     _tag: "TranscriptPatched",
+    selectionEpoch: 1,
     threadId: thread.id,
     turnId: Turn.TurnId.make("new"),
     event: {
@@ -290,6 +377,7 @@ it("updates one typed apply-patch row while its diff is streaming", () => {
   })
   const second = InteractiveController.update(first.state, {
     _tag: "TranscriptPatched",
+    selectionEpoch: 1,
     threadId: thread.id,
     turnId: Turn.TurnId.make("new"),
     event: {
@@ -313,9 +401,82 @@ it("updates one typed apply-patch row while its diff is streaming", () => {
   expect(second.state.model.items).toHaveLength(2)
 })
 
+it("projects replayed child execution tools beneath the matching subagent", () => {
+  const page = InteractiveController.update(initialState(), {
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
+    thread,
+    entries: entries("parent", 2),
+    hasOlder: false,
+    threadCostUsd: 0,
+  })
+  const requested = InteractiveController.update(page.state, {
+    _tag: "TranscriptPatched",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    turnId: Turn.TurnId.make("parent"),
+    event: {
+      cursor: "agent",
+      sequence: 0,
+      type: "tool.call.requested",
+      createdAt: 3,
+      data: { tool_call_id: "agent", tool_name: "oracle", input: { prompt: "Review the code" } },
+    },
+    revision: 0,
+  })
+  const spawned = InteractiveController.update(requested.state, {
+    _tag: "TranscriptPatched",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    turnId: Turn.TurnId.make("parent"),
+    event: {
+      cursor: "spawned",
+      sequence: 1,
+      type: "child_run.spawned",
+      createdAt: 4,
+      data: {
+        tool_call_id: "agent",
+        child_execution_id: "execution:parent:child:agent",
+      },
+    },
+    revision: 1,
+  })
+  const child = InteractiveController.update(spawned.state, {
+    _tag: "TranscriptPatched",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    turnId: Turn.TurnId.make("parent:child:agent"),
+    event: {
+      cursor: "child-read",
+      sequence: 0,
+      type: "tool.call.requested",
+      createdAt: 5,
+      data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts" } },
+    },
+    revision: 0,
+  })
+
+  expect(child.state.model.blocks).toEqual([
+    expect.objectContaining({ _tag: "ToolCall", id: "parent:agent", childId: "execution:parent:child:agent" }),
+    expect.objectContaining({ _tag: "ToolCall", id: "parent:child:agent:read" }),
+  ])
+  expect(child.state.model.items[2]).toMatchObject({
+    id: "tool:parent:child:agent:read",
+    parentId: "parent:agent",
+  })
+  expect(child.state.revisions.get("parent:child:agent")).toBe(0)
+})
+
 it("keeps the authoritative thread cost stable while older pages are prepended", () => {
   const page = InteractiveController.update(initialState(), {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: entries("new", 2),
     hasOlder: true,
@@ -323,6 +484,7 @@ it("keeps the authoritative thread cost stable while older pages are prepended",
   })
   const prepended = InteractiveController.update(page.state, {
     _tag: "TranscriptPagePrepended",
+    selectionEpoch: 1,
     threadId: thread.id,
     entries: entries("old", 1),
     hasOlder: false,
@@ -335,7 +497,11 @@ it("keeps the authoritative thread cost stable while older pages are prepended",
 
 it("clears working state when the semantic event stream reaches a terminal event", () => {
   const page = InteractiveController.update(initialState(), {
-    _tag: "TranscriptPageReceived",
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
     thread,
     entries: entries("new", 2),
     hasOlder: false,
@@ -348,6 +514,7 @@ it("clears working state when the semantic event stream reaches a terminal event
     },
     {
       _tag: "TranscriptPatched",
+      selectionEpoch: 1,
       threadId: thread.id,
       turnId: Turn.TurnId.make("new"),
       event: { cursor: "terminal", sequence: 0, type: "execution.completed", createdAt: 3 },
@@ -356,4 +523,175 @@ it("clears working state when the semantic event stream reaches a terminal event
   )
 
   expect(completed.state.model).toMatchObject({ busy: false, busyStatus: undefined, activeTurnId: undefined })
+})
+
+it("keeps the newest logical selection when delayed A to B to A work arrives", () => {
+  const threadB = { ...thread, id: Thread.ThreadId.make("thread-b"), title: "Thread B" }
+  const load = (
+    state: InteractiveController.State,
+    selected: Thread.Thread,
+    selectionEpoch: number,
+    values: ReturnType<typeof entries>,
+  ) =>
+    InteractiveController.update(state, {
+      _tag: "SelectionLoaded",
+      selectionEpoch,
+      activitySequence: selectionEpoch,
+      thread: selected,
+      entries: values,
+      hasOlder: false,
+      threadCostUsd: 0,
+      queueRevision: selectionEpoch,
+      queue: [],
+    })
+  const a1 = load(initialState(), thread, 1, entries("a-1", 1))
+  const b2 = load(a1.state, threadB, 2, [])
+  const a3 = load(b2.state, thread, 3, entries("a-3", 3))
+  const delayedA1 = load(a3.state, thread, 1, entries("stale-a", 4))
+  const delayedPatch = InteractiveController.update(delayedA1.state, {
+    _tag: "TranscriptPatched",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    turnId: Turn.TurnId.make("a-1"),
+    event: { cursor: "stale", sequence: 9, type: "model.output.completed", createdAt: 9, text: "stale" },
+    revision: 9,
+  })
+
+  expect(delayedA1.state).toBe(a3.state)
+  expect(delayedPatch.state).toBe(a3.state)
+  expect(delayedPatch.state.selectionEpoch).toBe(3)
+  expect(delayedPatch.state.model).toMatchObject({ currentThreadId: "thread-a", currentThreadTitle: "Thread A" })
+  expect(delayedPatch.state.model.entries.map((entry) => entry.text)).toEqual(["a-3"])
+})
+
+it("requests a queue resync when the durable count disagrees with an otherwise contiguous delta", () => {
+  const model = {
+    ...initialState().model,
+    currentThreadId: "thread-a",
+    queueThreadId: "thread-a",
+    queueRevision: 1,
+  }
+  const updated = InteractiveController.updateQueue(model, {
+    _tag: "QueueUpdated",
+    selectionEpoch: 1,
+    threadId: Thread.ThreadId.make("thread-a"),
+    revision: 2,
+    queuedCount: 2,
+    change: { _tag: "Added", item: { id: Turn.TurnId.make("queued"), prompt: "queued" } },
+  })
+
+  expect(updated.model.queue).toEqual([{ id: "queued", prompt: "queued" }])
+  expect(updated.resync).toBe(true)
+})
+
+it("restores the rejected composer and reports the pending count when the queue is full", () => {
+  const submitted = ViewState.update(
+    ViewState.update(initialState().model, { _tag: "ComposerReplaced", text: "retry this prompt" }),
+    { _tag: "Submitted" },
+  )
+  const updated = InteractiveController.updateQueue(submitted, {
+    _tag: "QueueFull",
+    selectionEpoch: 0,
+    threadId: Thread.ThreadId.make("thread-a"),
+    capacity: 2,
+    count: 2,
+  })
+
+  expect(updated.model.input).toBe("retry this prompt")
+  expect(updated.model.blocks.at(-1)).toMatchObject({
+    _tag: "Error",
+    detail: "Queue full: 2 pending prompts",
+  })
+})
+
+it("removes a promoted turn and exits queue edit mode synchronously", () => {
+  const queued = ViewState.resetQueue(
+    {
+      ...initialState().model,
+      currentThreadId: "thread-a",
+      editingTurnId: "promoted",
+      editReturn: { input: "keep this draft", attachments: [] },
+      input: "edited queued prompt",
+      cursor: 20,
+    },
+    "thread-a",
+    4,
+    [{ id: "promoted", prompt: "edited queued prompt" }],
+  )
+
+  const promoted = InteractiveController.removePromotedTurn(queued, "thread-a", "promoted")
+
+  expect(promoted.queue).toEqual([])
+  expect(promoted.queueRevision).toBe(5)
+  expect(promoted.editingTurnId).toBeUndefined()
+  expect(promoted.input).toBe("keep this draft")
+})
+
+it("eagerly consumes a 2000-event feed while bounding reducer work per render frame", () => {
+  type TranscriptPatched = Extract<Operation.InteractiveEvent, { readonly _tag: "TranscriptPatched" }>
+  const scheduled: Array<() => void> = []
+  let received = 0
+  let applied = 0
+  let renders = 0
+  let state = InteractiveController.update(initialState(), {
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
+    thread,
+    entries: entries("stream", 2),
+    hasOlder: false,
+    threadCostUsd: 0,
+  }).state
+  const events: ReadonlyArray<TranscriptPatched> = Array.from({ length: 2_000 }, (_, index) => ({
+    _tag: "TranscriptPatched" as const,
+    selectionEpoch: 1,
+    threadId: thread.id,
+    turnId: Turn.TurnId.make("stream"),
+    event: {
+      cursor: `chunk-${index}`,
+      sequence: index,
+      type: "model.output.delta",
+      createdAt: index,
+      text: index === 1_999 ? "FINAL-CHUNK" : "x",
+    },
+    revision: index,
+  }))
+  const batcher = InteractiveController.makeFeedFrameBatcher<TranscriptPatched>({
+    schedule: (flush) => scheduled.push(flush),
+    apply: (batch) => {
+      for (const event of batch) {
+        state = InteractiveController.update(state, event).state
+        applied += 1
+      }
+    },
+    render: () => {
+      const until = performance.now() + 2
+      while (performance.now() < until) {}
+      renders += 1
+    },
+  })
+  const consume = (dispatch: (event: TranscriptPatched) => void) => {
+    for (const event of events) {
+      received += 1
+      dispatch(event)
+    }
+  }
+
+  consume(batcher.offer)
+
+  expect(received).toBe(2_000)
+  expect(applied).toBe(0)
+  expect(scheduled).toHaveLength(1)
+  scheduled.shift()?.()
+  expect(applied).toBe(256)
+  expect(scheduled).toHaveLength(1)
+  while (scheduled.length > 0) scheduled.shift()?.()
+  expect(applied).toBe(2_000)
+  expect(renders).toBeLessThan(20)
+  expect(state.model.entries.some((entry) => entry.text.includes("FINAL-CHUNK"))).toBe(true)
+
+  batcher.offer(events[0]!)
+  expect(scheduled).toHaveLength(1)
 })

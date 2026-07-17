@@ -9,6 +9,7 @@ import { Context, Deferred, Effect, Fiber, Layer, Ref } from "effect"
 import { TestClock, TestConsole } from "effect/testing"
 import { Operation, ProductAgent } from "../src/index"
 import { provideLayer } from "./layer"
+import { createTurn } from "./current-state"
 
 const backend = ExecutionBackend.Service.of({
   invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
@@ -295,7 +296,7 @@ describe("Operation review dispatcher", () => {
       const reviewTurns = TurnRepository.Service.of({
         ...turns,
         createForSubmission: (submission) =>
-          turns.createForSubmission(submission).pipe(
+          createTurn(turns, submission).pipe(
             Effect.tap(() => Deferred.succeed(persisted, undefined)),
             Effect.tap(() => Deferred.await(continueAdmission)),
           ),

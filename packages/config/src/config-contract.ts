@@ -249,6 +249,9 @@ export const resolveModelRoute: {
     resolveRoute(settings, settings.modes[mode][role], `Mode ${mode} ${role}`),
 )
 
+export const resolveThreadTitleRoute = (settings: Settings): ResolvedModelRoute =>
+  resolveRoute(settings, { ...settings.modes.low.main, effort: "low", fast: false }, "Thread title model")
+
 export const resolveAgentRoute: {
   (agent: AgentId): (settings: Settings) => ResolvedModelRoute
   (settings: Settings, agent: AgentId): ResolvedModelRoute
@@ -460,7 +463,7 @@ export const defaults: Settings = {
   agents: {
     librarian: { alias: "sol", effort: "high" },
     painter: { alias: "sol", effort: "high" },
-    review: { alias: "review", effort: "high" },
+    review: { alias: "sol", effort: "high" },
     readThread: { alias: "terra", effort: "medium" },
     task: { alias: "terra", effort: "medium" },
   },

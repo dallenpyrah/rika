@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { ConfigContract, Models } from "../src/index"
 
 describe("ConfigContract", () => {
-  it("defines GPT-only main, Oracle, and specialized agent routes", () => {
+  it("defines GPT 5.6-only default routes across modes, efforts, and service tiers", () => {
     expect(ConfigContract.defaults.modes).toEqual({
       low: { main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
       medium: { main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
@@ -12,10 +12,69 @@ describe("ConfigContract", () => {
     expect(ConfigContract.defaults.agents).toEqual({
       librarian: { alias: "sol", effort: "high" },
       painter: { alias: "sol", effort: "high" },
-      review: { alias: "review", effort: "high" },
+      review: { alias: "sol", effort: "high" },
       readThread: { alias: "terra", effort: "medium" },
       task: { alias: "terra", effort: "medium" },
     })
+    const modes = ["low", "medium", "high", "ultra"] as const
+    const roles = ["main", "oracle"] as const
+    const efforts = ["low", "medium", "high", "xhigh", "max"] as const
+    expect(
+      modes.flatMap((mode) =>
+        roles.map((role) => {
+          const route = ConfigContract.resolveModelRoute(ConfigContract.defaults, mode, role)
+          return [mode, role, route.gateway.protocol, route.model, route.effort]
+        }),
+      ),
+    ).toEqual([
+      ["low", "main", "openai", "gpt-5.6-luna", "low"],
+      ["low", "oracle", "openai", "gpt-5.6-sol", "high"],
+      ["medium", "main", "openai", "gpt-5.6-terra", "medium"],
+      ["medium", "oracle", "openai", "gpt-5.6-sol", "high"],
+      ["high", "main", "openai", "gpt-5.6-sol", "xhigh"],
+      ["high", "oracle", "openai", "gpt-5.6-sol", "max"],
+      ["ultra", "main", "openai", "gpt-5.6-sol", "max"],
+      ["ultra", "oracle", "openai", "gpt-5.6-sol", "max"],
+    ])
+    for (const mode of modes) {
+      for (const role of roles) {
+        for (const effort of efforts) {
+          for (const fast of [false, true]) {
+            const configured = ConfigContract.defaults.modes[mode][role]
+            const settings: ConfigContract.Settings = {
+              ...ConfigContract.defaults,
+              modes: {
+                ...ConfigContract.defaults.modes,
+                [mode]: {
+                  ...ConfigContract.defaults.modes[mode],
+                  [role]: { ...configured, effort, fast },
+                },
+              },
+            }
+            const route = ConfigContract.resolveModelRoute(settings, mode, role)
+            expect(route.model).toMatch(/^gpt-5\.6-/)
+            expect(route.gateway.protocol).toBe("openai")
+            expect(route.options).toMatchObject({ reasoning: { effort } })
+            expect(route.options.service_tier).toBe(fast ? "priority" : undefined)
+          }
+        }
+      }
+    }
+    expect(ConfigContract.resolveThreadTitleRoute(ConfigContract.defaults)).toMatchObject({
+      alias: "luna",
+      model: "gpt-5.6-luna",
+      effort: "low",
+      fast: false,
+      gateway: { protocol: "openai" },
+      options: { reasoning: { effort: "low" } },
+    })
+    const supportingRoutes = [
+      ConfigContract.resolveCompactionSummaryRoute(ConfigContract.defaults),
+      ...(["librarian", "painter", "review", "readThread", "task"] as const).map((agent) =>
+        ConfigContract.resolveAgentRoute(ConfigContract.defaults, agent),
+      ),
+    ]
+    expect(supportingRoutes.every((route) => route.model.startsWith("gpt-5.6-"))).toBe(true)
     expect(ConfigContract.defaults.models.fable?.candidates).toEqual(["claude-fable-5", "claude-opus-4-8"])
     expect(ConfigContract.defaults.models.review?.candidates).toEqual(["gpt-5.5"])
     expect(ConfigContract.defaults.models.luna?.limits).toEqual({
@@ -220,8 +279,8 @@ describe("ConfigContract", () => {
       compaction: { contextWindow: 1_050_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
     })
     expect(ConfigContract.resolveAgentRoute(ConfigContract.defaults, "review")).toMatchObject({
-      alias: "review",
-      model: "gpt-5.5",
+      alias: "sol",
+      model: "gpt-5.6-sol",
       effort: "high",
     })
   })

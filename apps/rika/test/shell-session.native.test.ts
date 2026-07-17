@@ -12,7 +12,7 @@ import { MediaView, ParallelSearch, ReadWebPage, Runtime as ToolRuntime } from "
 import { ViewState } from "@rika/tui"
 import { Surface } from "@rika/tui/adapter"
 import { expect, test } from "bun:test"
-import { Clock, Config, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Redacted } from "effect"
+import { Clock, Config, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Redacted } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import {
   credentialForRoute,
@@ -28,7 +28,7 @@ test("maps TUI signals to numeric process exit codes", () => {
   expect(tuiSignalExitCode("SIGTERM")).toBe(143)
 })
 
-test("selects only the credential named by each high and ultra main and Oracle gateway", () => {
+test("selects only the OpenAI credential for each high and ultra main and Oracle gateway", () => {
   const openai = Redacted.make("openai-sentinel")
   const anthropic = Redacted.make("anthropic-sentinel")
   const credentials = { OPENAI_API_KEY: openai, ANTHROPIC_API_KEY: anthropic }
@@ -36,10 +36,15 @@ test("selects only the credential named by each high and ultra main and Oracle g
   const highOracle = ConfigContract.resolveModelRoute(ConfigContract.defaults, "high", "oracle")
   const ultraMain = ConfigContract.resolveModelRoute(ConfigContract.defaults, "ultra", "main")
   const ultraOracle = ConfigContract.resolveModelRoute(ConfigContract.defaults, "ultra", "oracle")
-  expect(credentialForRoute(highMain, credentials)).toEqual(openai)
-  expect(credentialForRoute(highOracle, credentials)).toEqual(anthropic)
-  expect(credentialForRoute(ultraMain, credentials)).toEqual(anthropic)
-  expect(credentialForRoute(ultraOracle, credentials)).toEqual(openai)
+  expect(credentialForRoute(highMain, credentials)).toBe(openai)
+  expect(credentialForRoute(highOracle, credentials)).toBe(openai)
+  expect(credentialForRoute(ultraMain, credentials)).toBe(openai)
+  expect(credentialForRoute(ultraOracle, credentials)).toBe(openai)
+  expect(
+    [highMain, highOracle, ultraMain, ultraOracle].some(
+      (route) => credentialForRoute(route, credentials) === anthropic,
+    ),
+  ).toBe(false)
 })
 
 test("awaits tracked fiber cleanup before releasing its enclosing lease", () => {
@@ -167,7 +172,8 @@ test("drives bypassed recorded and incognito shell commands through Operation an
       const database = Database.layer(filename)
       const repositoryLayer = ThreadRepository.layer.pipe(Layer.provide(database), Layer.provide(BunServices.layer))
       const turnRepositoryLayer = TurnRepository.layer.pipe(Layer.provide(database), Layer.provide(BunServices.layer))
-      const sessions: Array<Operation.InteractiveSession> = []
+      const sessionReady = yield* Deferred.make<Operation.InteractiveSession>()
+      const releaseSession = yield* Deferred.make<void>()
       let nextTurn = 0
       const backend = ExecutionBackend.Service.of({
         invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
@@ -207,24 +213,27 @@ test("drives bypassed recorded and incognito shell commands through Operation an
         shellPermission: "allow",
         makeThreadId: Effect.succeed(Thread.ThreadId.make("shell-thread")),
         makeTurnId: Effect.sync(() => Turn.TurnId.make(`shell-turn-${nextTurn++}`)),
-        interactive: (_, session) => Effect.sync(() => sessions.push(session)),
+        interactive: (_, session) =>
+          Deferred.succeed(sessionReady, session).pipe(Effect.andThen(Deferred.await(releaseSession))),
       })
       const operation = Context.get(yield* Layer.buildWithScope(operationLayer, yield* Effect.scope), Operation.Service)
       const repositories = yield* Layer.buildWithScope(
         Layer.merge(repositoryLayer, turnRepositoryLayer),
         yield* Effect.scope,
       )
-      yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
-      const session = sessions[0]
-      if (session === undefined) return yield* Effect.die("Missing interactive session")
+      const operationFiber = yield* Effect.forkChild(
+        operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }),
+      )
+      const session = yield* Deferred.await(sessionReady)
 
       const setup = yield* Effect.acquireRelease(
         Effect.tryPromise(() => createTestRenderer({ width: 100, height: 30 })),
         (value) => Effect.sync(() => value.renderer.destroy()),
       )
-      let model = ViewState.initial(workspace)
+      let model = ViewState.resetQueue(ViewState.initial(workspace), "shell-thread", 0, [])
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       yield* Effect.addFinalizer(() => Effect.sync(() => surface.destroy()))
+      const completedShells = yield* Queue.unbounded<string>()
       const dispatch = (event: Operation.InteractiveEvent) => {
         if (event._tag === "ShellPermissionRequested")
           model = ViewState.update(model, {
@@ -238,23 +247,20 @@ test("drives bypassed recorded and incognito shell commands through Operation an
               status: "pending",
             },
           })
-        else if (event._tag === "ShellCompleted")
+        else if (event._tag === "ShellCompleted") {
           model = ViewState.update(model, { _tag: "AssistantCompleted", text: event.text })
-        else if (event._tag === "QueueChanged")
-          model = ViewState.replaceQueue(
-            model,
-            event.turns
-              .filter((turn) => turn.status === "queued")
-              .map((turn) => ({ id: turn.id, prompt: turn.prompt })),
-          )
-        else if (event._tag === "QueuedTurnEdited")
-          model = ViewState.replaceTurnPrompt(model, event.turnId, event.prompt)
-        else if (
-          event._tag !== "ThreadSelected" &&
-          event._tag !== "TranscriptPageReceived" &&
+          Queue.offerUnsafe(completedShells, event.command)
+        } else if (event._tag === "QueueUpdated") {
+          if (event.change._tag === "Reset")
+            model = ViewState.resetQueue(model, event.threadId, event.revision, event.change.items)
+          else model = ViewState.applyQueueDelta(model, event.threadId, event.revision, event.change).model
+        } else if (
+          event._tag !== "SelectionLoaded" &&
           event._tag !== "TranscriptPagePrepended" &&
           event._tag !== "TranscriptPatched" &&
           event._tag !== "TranscriptResyncRequired" &&
+          event._tag !== "QueueResyncRequired" &&
+          event._tag !== "QueueFull" &&
           event._tag !== "ExecutionControlled" &&
           event._tag !== "ThreadsListed" &&
           event._tag !== "ThreadTitled" &&
@@ -265,10 +271,13 @@ test("drives bypassed recorded and incognito shell commands through Operation an
           model = ViewState.update(model, event)
         surface.update(model)
       }
+      yield* Effect.forkChild(session.events(dispatch))
+      yield* Effect.yieldNow
       const run = Effect.fn("ShellSessionNativeTest.run")(function* (prompt: string) {
         const classified = ViewState.classifyPrompt(prompt)
         if (classified._tag !== "Shell") return yield* Effect.die("Expected shell prompt")
-        yield* session.shell(classified.command, classified.incognito, dispatch)
+        yield* session.shell(classified.command, classified.incognito)
+        expect(yield* Queue.take(completedShells)).toBe(classified.command)
         surface.update(model)
         yield* Effect.tryPromise(() => setup.renderOnce())
         return setup.captureCharFrame()
@@ -300,17 +309,21 @@ test("drives bypassed recorded and incognito shell commands through Operation an
           id: Turn.TurnId.make("active"),
           threadId: Thread.ThreadId.make("shell-thread"),
           prompt: "active",
+          executionRoute: Turn.testExecutionRoute(),
+          queueCapacity: 128,
           now,
         })
       }).pipe(Effect.provide(repositories))
       yield* run("$ printf queued-output")
       const queued = yield* Effect.gen(function* () {
         const turns = yield* TurnRepository.Service
-        return yield* turns.listQueued(Thread.ThreadId.make("shell-thread"))
+        return (yield* turns.readQueue(Thread.ThreadId.make("shell-thread"))).turns
       }).pipe(Effect.provide(repositories))
       expect(queued).toHaveLength(1)
       expect(queued[0]?.prompt).toContain("queued-output")
       expect(setup.captureCharFrame()).toContain("queued-output")
+      yield* Deferred.succeed(releaseSession, undefined)
+      yield* Fiber.join(operationFiber)
     }),
   )
   return Effect.runPromise(

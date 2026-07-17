@@ -14,39 +14,32 @@ import {
   Semaphore,
 } from "effect"
 import { ChildProcessSpawner } from "effect/unstable/process"
-import { Input, InteractiveEventSchema, OperationUnavailable } from "./operation"
-import type { InteractiveSession, Interface as OperationInterface } from "./operation"
+import { Input, InteractiveCommand, InteractiveEventSchema, OperationUnavailable } from "./operation-contract"
+import type { InteractiveSession, Interface as OperationInterface } from "./operation-contract"
 
 export type InteractiveInput = Extract<Input, { readonly _tag: "Interactive" }>
 
-export const protocolVersion = { major: 1, minor: 0 } as const
-
-export const ProtocolVersion = Schema.Struct({ major: Schema.Int, minor: Schema.Int })
-export const isCurrentProtocolVersion = (version: typeof ProtocolVersion.Type): boolean =>
-  version.major === protocolVersion.major && version.minor === protocolVersion.minor
+export const protocolVersion = 1
 export const ClientKind = Schema.Literals(["interactive", "run", "review", "workflow", "thread-continue", "product"])
 export const Handshake = Schema.Struct({
   family: Schema.tag("rika-resident"),
-  version: ProtocolVersion,
   identity: Schema.String,
   token: Schema.String,
   clientNonce: Schema.String,
   clientKind: ClientKind,
-  clientVersion: Schema.String,
-  capabilities: Schema.Array(Schema.String),
+  protocolVersion: Schema.optionalKey(Schema.Int),
 })
 export type Handshake = typeof Handshake.Type
 
 export const HandshakeAccepted = Schema.Struct({
   _tag: Schema.tag("accepted"),
   family: Schema.tag("rika-resident"),
-  version: ProtocolVersion,
   identity: Schema.String,
   clientNonce: Schema.String,
   serviceNonce: Schema.String,
   connectionId: Schema.String,
-  state: Schema.Literals(["starting", "ready", "grace"]),
-  capabilities: Schema.Array(Schema.String),
+  protocolVersion: Schema.optionalKey(Schema.Int),
+  residentPid: Schema.optionalKey(Schema.Int),
 })
 export type HandshakeAccepted = typeof HandshakeAccepted.Type
 
@@ -56,12 +49,6 @@ export const HandshakeRejected = Schema.Struct({
 })
 export type HandshakeRejected = typeof HandshakeRejected.Type
 
-export const StartupReady = Schema.Struct({ _tag: Schema.tag("startup-ready") })
-export const StartupFailed = Schema.Struct({
-  _tag: Schema.tag("startup-failed"),
-  error: Schema.String,
-})
-
 export const Ping = Schema.Struct({ _tag: Schema.tag("ping"), id: Schema.String })
 export const Pong = Schema.Struct({ _tag: Schema.tag("pong"), id: Schema.String })
 export const OperationRequest = Schema.Struct({
@@ -69,40 +56,57 @@ export const OperationRequest = Schema.Struct({
   requestId: Schema.String,
   input: Input,
 })
-export const InteractiveAction = Schema.Struct({
-  _tag: Schema.tag("interactive-action"),
+const PositiveSequence = Schema.Int.check(Schema.isGreaterThan(0))
+const NonNegativeSequence = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+export const InteractiveCommandRequest = Schema.Struct({
+  _tag: Schema.tag("interactive-command"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
-  actionId: Schema.String,
-  method: Schema.String,
-  arguments: Schema.Array(Schema.Unknown),
+  feedGeneration: Schema.String,
+  commandSequence: PositiveSequence,
+  command: InteractiveCommand,
 })
-export const CancelInteractiveAction = Schema.Struct({
-  _tag: Schema.tag("cancel-interactive-action"),
+export const CancelInteractiveCommand = Schema.Struct({
+  _tag: Schema.tag("cancel-interactive-command"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
-  actionId: Schema.String,
+  feedGeneration: Schema.String,
+  commandSequence: PositiveSequence,
 })
-export const InteractiveAck = Schema.Struct({
-  _tag: Schema.tag("interactive-ack"),
+export const InteractiveFeedAck = Schema.Struct({
+  _tag: Schema.tag("interactive-feed-ack"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
-  actionId: Schema.String,
-  deliveryId: Schema.String,
+  feedGeneration: Schema.String,
+  throughSequence: PositiveSequence,
+})
+export const InteractiveFeedReplay = Schema.Struct({
+  _tag: Schema.tag("interactive-feed-replay"),
+  connectionId: Schema.String,
+  requestId: Schema.String,
+  sessionId: Schema.String,
+  feedGeneration: Schema.String,
+  afterSequence: NonNegativeSequence,
 })
 export const InteractiveEnd = Schema.Struct({
   _tag: Schema.tag("interactive-end"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
+  feedGeneration: Schema.String,
 })
 export const CancelRequest = Schema.Struct({ _tag: Schema.tag("cancel"), requestId: Schema.String })
 export const ClientMessage = Schema.Union([
   Handshake,
   Ping,
   OperationRequest,
-  InteractiveAction,
-  InteractiveAck,
-  CancelInteractiveAction,
+  InteractiveCommandRequest,
+  CancelInteractiveCommand,
+  InteractiveFeedAck,
+  InteractiveFeedReplay,
   InteractiveEnd,
   CancelRequest,
 ])
@@ -114,29 +118,45 @@ export const Output = Schema.Struct({
 })
 export const InteractiveStarted = Schema.Struct({
   _tag: Schema.tag("interactive-started"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
+  feedGeneration: Schema.String,
+  feedCapacity: PositiveSequence,
 })
-export const InteractiveEvent = Schema.Struct({
-  _tag: Schema.tag("interactive-event"),
-  version: ProtocolVersion,
+export const InteractiveFeedEvent = Schema.Struct({
+  _tag: Schema.tag("interactive-feed-event"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
-  actionId: Schema.String,
-  deliveryId: Schema.optionalKey(Schema.String),
+  feedGeneration: Schema.String,
+  sequence: PositiveSequence,
   event: InteractiveEventSchema,
 })
-export const ActionCompleted = Schema.Struct({
-  _tag: Schema.tag("action-completed"),
+export const InteractiveFeedResync = Schema.Struct({
+  _tag: Schema.tag("interactive-feed-resync"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
-  actionId: Schema.String,
+  feedGeneration: Schema.String,
+  sequence: PositiveSequence,
+  events: Schema.Array(InteractiveEventSchema),
 })
-export const ActionFailed = Schema.Struct({
-  _tag: Schema.tag("action-failed"),
+export const InteractiveCommandCompleted = Schema.Struct({
+  _tag: Schema.tag("interactive-command-completed"),
+  connectionId: Schema.String,
   requestId: Schema.String,
   sessionId: Schema.String,
-  actionId: Schema.String,
+  feedGeneration: Schema.String,
+  commandSequence: PositiveSequence,
+})
+export const InteractiveCommandFailed = Schema.Struct({
+  _tag: Schema.tag("interactive-command-failed"),
+  connectionId: Schema.String,
+  requestId: Schema.String,
+  sessionId: Schema.String,
+  feedGeneration: Schema.String,
+  commandSequence: PositiveSequence,
   error: OperationUnavailable,
 })
 export const OperationCompleted = Schema.Struct({ _tag: Schema.tag("operation-completed"), requestId: Schema.String })
@@ -148,14 +168,13 @@ export const OperationFailed = Schema.Struct({
 export const ServerMessage = Schema.Union([
   HandshakeAccepted,
   HandshakeRejected,
-  StartupReady,
-  StartupFailed,
   Pong,
   Output,
   InteractiveStarted,
-  InteractiveEvent,
-  ActionCompleted,
-  ActionFailed,
+  InteractiveFeedEvent,
+  InteractiveFeedResync,
+  InteractiveCommandCompleted,
+  InteractiveCommandFailed,
   OperationCompleted,
   OperationFailed,
 ])
@@ -166,11 +185,11 @@ export class ResidentServiceError extends Schema.TaggedErrorClass<ResidentServic
   reason: Schema.Literals([
     "authentication-failed",
     "identity-mismatch",
-    "upgrade-required",
-    "capability-mismatch",
+    "incompatible-resident",
     "foreign-listener",
     "resident-absent",
     "resident-draining",
+    "startup-failed",
     "transport-failed",
     "unsafe-token",
   ]),
@@ -197,21 +216,28 @@ export interface Connection {
   readonly close: Effect.Effect<void>
 }
 
+export interface StartedHost {
+  readonly pid: number
+  readonly startup: Effect.Effect<void, ResidentServiceError>
+  readonly detach: Effect.Effect<void, ResidentServiceError>
+  readonly abort: Effect.Effect<void>
+}
+
+export type Owner = (
+  interactive: (input: InteractiveInput, session: InteractiveSession) => Effect.Effect<void, OperationUnavailable>,
+) => Effect.Effect<OperationInterface, ResidentServiceError, Scope.Scope>
+
 export interface Interface {
   readonly getOrCreate: (options: {
     readonly profile: string
     readonly dataRoot: string
     readonly clientKind: Handshake["clientKind"]
-    readonly clientVersion: string
     readonly graceMilliseconds?: number
     readonly startHost?: () => Effect.Effect<
-      void,
+      StartedHost,
       ResidentServiceError,
       ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
     >
-    readonly owner?: (
-      interactive: (input: InteractiveInput, session: InteractiveSession) => Effect.Effect<void, OperationUnavailable>,
-    ) => Effect.Effect<OperationInterface, ResidentServiceError, Scope.Scope>
   }) => Effect.Effect<
     Connection,
     ResidentServiceError,
@@ -243,30 +269,17 @@ export type HandshakeResult =
   | { readonly _tag: "Accepted" }
   | { readonly _tag: "AuthenticationFailed" }
   | { readonly _tag: "IdentityMismatch" }
-  | { readonly _tag: "UpgradeRequired" }
-  | { readonly _tag: "CapabilityMismatch" }
+  | { readonly _tag: "ProtocolMismatch" }
 
 export const validateHandshake: {
-  (expected: {
-    readonly identity: string
-    readonly token: string
-    readonly capabilities?: ReadonlyArray<string>
-  }): (handshake: Handshake) => HandshakeResult
-  (
-    handshake: Handshake,
-    expected: { readonly identity: string; readonly token: string; readonly capabilities?: ReadonlyArray<string> },
-  ): HandshakeResult
+  (expected: { readonly identity: string; readonly token: string }): (handshake: Handshake) => HandshakeResult
+  (handshake: Handshake, expected: { readonly identity: string; readonly token: string }): HandshakeResult
 } = Function.dual(
   2,
-  (
-    handshake: Handshake,
-    expected: { readonly identity: string; readonly token: string; readonly capabilities?: ReadonlyArray<string> },
-  ): HandshakeResult => {
+  (handshake: Handshake, expected: { readonly identity: string; readonly token: string }): HandshakeResult => {
     if (handshake.token !== expected.token) return { _tag: "AuthenticationFailed" }
     if (handshake.identity !== expected.identity) return { _tag: "IdentityMismatch" }
-    if (!isCurrentProtocolVersion(handshake.version)) return { _tag: "UpgradeRequired" }
-    if ((expected.capabilities ?? []).some((capability) => !handshake.capabilities.includes(capability)))
-      return { _tag: "CapabilityMismatch" }
+    if (handshake.protocolVersion !== protocolVersion) return { _tag: "ProtocolMismatch" }
     return { _tag: "Accepted" }
   },
 )

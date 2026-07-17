@@ -6,7 +6,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./operation": "./src/operation.ts"
+    "./interactive-feed-overflow": "./src/interactive-feed-overflow.ts",
+    "./operation": "./src/operation.ts",
+    "./operation-contract": "./src/operation-contract.ts",
+    "./resident-service": "./src/resident-service.ts"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir dist --target bun --format esm",

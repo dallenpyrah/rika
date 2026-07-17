@@ -1,20 +1,20 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { afterEach, expect, test } from "bun:test"
-import { Config, Data, Effect, FileSystem, Layer, Path } from "effect"
+import { Config, Data, Effect, FileSystem, Layer, Path, Stream } from "effect"
 import * as ChildProcess from "effect/unstable/process/ChildProcess"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ViewState } from "@rika/tui"
 import {
-  countAddedLines,
-  countAddedLinesFromFile,
   defaultOpenArguments,
   initialSubmitAction,
+  imagePasteBlockedNotice,
   materializePromptParts,
   parseChangedFiles,
   pasteClipboardPng,
   pastedImagePath,
   persistPastedImage,
   readChangedFiles,
+  refreshChangedFilesOn,
   resolveWorkspaceFile,
 } from "../src/main"
 
@@ -38,6 +38,16 @@ const command = (name: string, ...args: ReadonlyArray<string>) =>
     const spawner = yield* ChildProcessSpawner
     return yield* spawner.exitCode(ChildProcess.make(name, args))
   })
+
+test("reports why image paste is blocked while editing a queued turn", () => {
+  expect(
+    imagePasteBlockedNotice({
+      ...ViewState.initial("/work"),
+      editingTurnId: "queued-turn",
+    }),
+  ).toBe("Images cannot be pasted while editing a queued prompt")
+  expect(imagePasteBlockedNotice(ViewState.initial("/work"))).toBeUndefined()
+})
 
 afterEach(() =>
   run(
@@ -150,17 +160,6 @@ test("parses nested changed paths, rename destinations, and diff counts", () =>
     }),
   ))
 
-test("counts text additions for untracked files and treats empty or binary files as zero", () =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      expect(countAddedLines(new TextEncoder().encode("one\ntwo\n"))).toBe(2)
-      expect(countAddedLines(new TextEncoder().encode("one\ntwo"))).toBe(2)
-      expect(countAddedLines(new Uint8Array())).toBe(0)
-      expect(countAddedLines(Uint8Array.from([1, 0, 2]))).toBe(0)
-      yield* Effect.void
-    }),
-  ))
-
 test("opens files with the platform default application when no editor is configured", () =>
   Effect.runPromise(
     Effect.gen(function* () {
@@ -177,7 +176,7 @@ test("opens files with the platform default application when no editor is config
     }),
   ))
 
-test("rejects workspace symlinks that resolve outside the workspace before opening or counting", () =>
+test("rejects workspace symlinks that resolve outside the workspace before opening", () =>
   run(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
@@ -188,13 +187,11 @@ test("rejects workspace symlinks that resolve outside the workspace before openi
       yield* fileSystem.writeFileString(outside, "private\ncontent\n")
       yield* fileSystem.symlink(outside, path.join(root, "link.ts"))
       const resolved = yield* Effect.exit(resolveWorkspaceFile(root, { path: "link.ts" }))
-      const counted = yield* Effect.exit(countAddedLinesFromFile(root, "link.ts"))
       expect(resolved).toMatchObject({ _tag: "Failure" })
-      expect(counted).toMatchObject({ _tag: "Failure" })
     }),
   ))
 
-test("loads counts from a repository without HEAD and streams untracked text counts", () =>
+test("loads tracked counts from a repository without HEAD and omits untracked counts", () =>
   run(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
@@ -206,8 +203,62 @@ test("loads counts from a repository without HEAD and streams untracked text cou
       yield* command("git", "-C", root, "add", "staged.ts")
       expect(yield* readChangedFiles(root)).toEqual([
         { path: "staged.ts", status: "A", added: 3, removed: 0 },
-        { path: "untracked.ts", status: "??", added: 2, removed: 0 },
+        { path: "untracked.ts", status: "??" },
       ])
+    }),
+  ))
+
+test("does not read untracked file contents while listing changed files", () =>
+  run(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const root = yield* workspace("rika-untracked-files-")
+      yield* command("git", "init", "-q", root)
+      const paths = Array.from({ length: 256 }, (_, index) => `untracked-${index}.ts`)
+      yield* Effect.forEach(
+        paths,
+        (relative) => fileSystem.writeFileString(path.join(root, relative), "one\ntwo\nthree\n"),
+        { concurrency: 16, discard: true },
+      )
+      let readFileCalls = 0
+      const countingFileSystem: FileSystem.FileSystem = {
+        ...fileSystem,
+        readFile: (filename) => {
+          readFileCalls += 1
+          return fileSystem.readFile(filename)
+        },
+      }
+
+      const changed = yield* readChangedFiles(root).pipe(
+        Effect.provideService(FileSystem.FileSystem, countingFileSystem),
+      )
+      expect(changed).toHaveLength(paths.length)
+      expect(readFileCalls).toBe(0)
+      expect(changed.every((file) => file.added === undefined && file.removed === undefined)).toBe(true)
+    }),
+  ))
+
+test("refreshes changed files once per watcher burst and never while idle or closed", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      let refreshes = 0
+      const refresh = Effect.sync(() => {
+        refreshes += 1
+      })
+
+      yield* refreshChangedFilesOn(Stream.empty, () => true, refresh)
+      expect(refreshes).toBe(0)
+
+      yield* refreshChangedFilesOn(
+        Stream.fromIterable(Array.from({ length: 500 }, (_, index) => index)),
+        () => true,
+        refresh,
+      )
+      expect(refreshes).toBe(1)
+
+      yield* refreshChangedFilesOn(Stream.make(1), () => false, refresh)
+      expect(refreshes).toBe(1)
     }),
   ))
 

@@ -11649,12 +11649,33 @@
           "width": 68
         },
         {
-          "text": "│ ",
+          "text": "│",
           "fg": {
             "buffer": {
               "0": 2176,
               "1": 384,
               "2": 128,
+              "3": 255
+            }
+          },
+          "bg": {
+            "buffer": {
+              "0": 0,
+              "1": 512,
+              "2": 0,
+              "3": 255
+            }
+          },
+          "attributes": 0,
+          "width": 1
+        },
+        {
+          "text": "  ",
+          "fg": {
+            "buffer": {
+              "0": 1984,
+              "1": 448,
+              "2": 192,
               "3": 255
             }
           },
@@ -11754,7 +11775,7 @@
           "width": 1
         },
         {
-          "text": "   ",
+          "text": "  ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -11772,7 +11793,7 @@
             }
           },
           "attributes": 0,
-          "width": 3
+          "width": 2
         },
         {
           "text": "│",
@@ -11905,7 +11926,7 @@
           "width": 68
         },
         {
-          "text": "│ ",
+          "text": "│",
           "fg": {
             "buffer": {
               "0": 2176,
@@ -11923,10 +11944,10 @@
             }
           },
           "attributes": 0,
-          "width": 2
+          "width": 1
         },
         {
-          "text": "                                                               ",
+          "text": "                                                                 ",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -11944,7 +11965,7 @@
             }
           },
           "attributes": 0,
-          "width": 63
+          "width": 65
         },
         {
           "text": "│",
@@ -11968,7 +11989,7 @@
           "width": 1
         },
         {
-          "text": "   ",
+          "text": "  ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -11986,7 +12007,7 @@
             }
           },
           "attributes": 0,
-          "width": 3
+          "width": 2
         },
         {
           "text": "│",
@@ -12119,7 +12140,7 @@
           "width": 68
         },
         {
-          "text": "│ ",
+          "text": "│",
           "fg": {
             "buffer": {
               "0": 2176,
@@ -12137,10 +12158,10 @@
             }
           },
           "attributes": 0,
-          "width": 2
+          "width": 1
         },
         {
-          "text": "Merged all work into main and verified the affected paths.     ",
+          "text": "  Merged all work into main and verified the affected paths.     ",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -12158,7 +12179,7 @@
             }
           },
           "attributes": 0,
-          "width": 63
+          "width": 65
         },
         {
           "text": "│",
@@ -12182,7 +12203,7 @@
           "width": 1
         },
         {
-          "text": "   ",
+          "text": "  ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -12200,7 +12221,7 @@
             }
           },
           "attributes": 0,
-          "width": 3
+          "width": 2
         },
         {
           "text": "│",

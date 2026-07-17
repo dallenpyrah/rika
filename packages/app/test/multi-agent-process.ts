@@ -2,6 +2,7 @@ import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { ChildFanOutRuntime, Client, Ids, SQLite } from "@relayfx/sdk/sqlite"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
+import * as ExecutionBackend from "@rika/runtime/contract"
 import { Config, Context, Effect, FileSystem, Layer, Logger, Schedule, Schema, Semaphore, Stdio, Stream } from "effect"
 import { ProductAgent } from "../src/index"
 
@@ -14,7 +15,6 @@ const ParallelInput = Schema.Struct({
   parentTurnId: Schema.String,
   fanOutId: Schema.String,
   workspace: Schema.optional(Schema.String),
-  executionRoute: Schema.optional(Schema.Unknown),
   tasks: Schema.Array(Task),
   maxConcurrency: Schema.Finite,
   join: Schema.optional(Schema.Literals(["all", "first-success", "quorum", "best-effort"])),
@@ -37,6 +37,38 @@ const ChildResult = Schema.Struct({
   error: Schema.optional(Schema.String),
   completedAt: Schema.optional(Schema.Finite),
 })
+
+const executionRoute: ExecutionBackend.ExecutionRoutePin = {
+  mode: "test",
+  main: {
+    role: "main",
+    alias: "test",
+    provider: "test",
+    model: "deterministic",
+    registrationKey: "test",
+    gatewayProtocol: "test",
+    gatewayBaseUrl: "test://model",
+    gatewayAuth: "none",
+    effort: "medium",
+    fast: false,
+    requestVariant: "test",
+    compaction: { contextWindow: 372_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
+  },
+  oracle: {
+    role: "oracle",
+    alias: "test",
+    provider: "test",
+    model: "deterministic",
+    registrationKey: "test",
+    gatewayProtocol: "test",
+    gatewayBaseUrl: "test://model",
+    gatewayAuth: "none",
+    effort: "medium",
+    fast: false,
+    requestVariant: "test",
+    compaction: { contextWindow: 372_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
+  },
+}
 const decodeMessage = Schema.decodeEffect(Schema.fromJsonString(Message))
 const decodeChildResult = Schema.decodeEffect(Schema.UnknownFromJsonString)
 const encodeLine = Schema.encodeEffect(Schema.UnknownFromJsonString)
@@ -208,6 +240,7 @@ const main = Effect.gen(function* () {
         return yield* agent.runParallel({
           parentTurnId: message.value.parentTurnId,
           fanOutId: message.value.fanOutId,
+          executionRoute,
           ...(message.value.workspace === undefined ? {} : { workspace: message.value.workspace }),
           tasks: message.value.tasks.map((task) => ({
             id: task.id,

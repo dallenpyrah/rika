@@ -9,6 +9,12 @@ export interface Status {
   readonly bytes: bigint
 }
 
+const activeSettlers = new Set<() => void>()
+
+export const settleActiveLogs = () => {
+  for (const settle of activeSettlers) settle()
+}
+
 const effectLogLevel = (level: LogLevel) => {
   switch (level) {
     case "debug":
@@ -116,7 +122,26 @@ export const layer = (options: {
     const now = DateTime.formatIso(timestamp).replace(/[:.]/g, "-")
     const closed = path.join(diagnostics, `${options.role}-${now}-${options.pid ?? process.pid}.jsonl`)
     const open = closed.replace(/\.jsonl$/, ".open.jsonl")
-    yield* Effect.addFinalizer(() => fs.rename(open, closed).pipe(Effect.ignore))
+    const settle = () => {
+      try {
+        process.getBuiltinModule("fs").renameSync(open, closed)
+      } catch {}
+    }
+    activeSettlers.add(settle)
+    process.once("exit", settle)
+    process.once("beforeExit", settle)
+    yield* Effect.addFinalizer(() =>
+      fs.rename(open, closed).pipe(
+        Effect.ignore,
+        Effect.andThen(
+          Effect.sync(() => {
+            process.removeListener("exit", settle)
+            process.removeListener("beforeExit", settle)
+            activeSettlers.delete(settle)
+          }),
+        ),
+      ),
+    )
     return yield* Logger.formatJson.pipe(
       Logger.toFile(open, { flag: "ax", mode: 0o600, batchWindow: Duration.seconds(1) }),
     )

@@ -3,7 +3,7 @@ import { Cause, Crypto, Deferred, Effect, Exit, Fiber, FiberSet, Layer, Ref, Sch
 import { provideLayer } from "./layer"
 import {
   canonicalServiceIdentity,
-  isCurrentProtocolVersion,
+  ClientMessage,
   makeLifecycle,
   protocolVersion,
   ServerMessage,
@@ -26,16 +26,14 @@ describe("resident service protocol", () => {
     })
   })
 
-  it("fails closed for token, identity, exact version, and capability mismatches", () => {
+  it("fails closed for token and identity mismatches", () => {
     const base = {
       family: "rika-resident" as const,
-      version: protocolVersion,
       identity: "identity",
       token: "token",
       clientNonce: "nonce",
       clientKind: "run" as const,
-      clientVersion: "1",
-      capabilities: ["ping", "startup-state", "transcript-pages", "interactive-ack"] as const,
+      protocolVersion,
     }
     expect(validateHandshake(base, { identity: "identity", token: "token" })._tag).toBe("Accepted")
     expect(validateHandshake({ ...base, token: "wrong" }, { identity: "identity", token: "token" })._tag).toBe(
@@ -44,29 +42,23 @@ describe("resident service protocol", () => {
     expect(validateHandshake({ ...base, identity: "wrong" }, { identity: "identity", token: "token" })._tag).toBe(
       "IdentityMismatch",
     )
-    expect(
-      validateHandshake({ ...base, version: { major: 2, minor: 0 } }, { identity: "identity", token: "token" })._tag,
-    ).toBe("UpgradeRequired")
-    expect(
-      validateHandshake(
-        { ...base, capabilities: ["ping", "startup-state", "interactive-ack"] },
-        { identity: "identity", token: "token", capabilities: base.capabilities },
-      )._tag,
-    ).toBe("CapabilityMismatch")
-    expect(isCurrentProtocolVersion(protocolVersion)).toBe(true)
-    expect(isCurrentProtocolVersion({ major: 1, minor: 1 })).toBe(false)
+    expect(validateHandshake({ ...base, protocolVersion: 0 }, { identity: "identity", token: "token" })._tag).toBe(
+      "ProtocolMismatch",
+    )
   })
 
   it("round-trips empty and semantic transcript pages without undefined wire fields", () => {
     const message = Schema.decodeUnknownSync(ServerMessage)({
-      _tag: "interactive-event",
-      version: protocolVersion,
+      _tag: "interactive-feed-event",
+      connectionId: "connection",
       requestId: "request",
       sessionId: "session",
-      actionId: "action",
-      deliveryId: "delivery",
+      feedGeneration: "feed",
+      sequence: 1,
       event: {
-        _tag: "TranscriptPageReceived",
+        _tag: "SelectionLoaded",
+        selectionEpoch: 1,
+        activitySequence: 0,
         thread: {
           id: "thread",
           workspace: "/work",
@@ -80,6 +72,8 @@ describe("resident service protocol", () => {
         entries: [],
         hasOlder: false,
         threadCostUsd: 0,
+        queueRevision: 0,
+        queue: [],
       },
     })
     const encoded = Schema.encodeSync(ServerMessage)(message)
@@ -88,6 +82,88 @@ describe("resident service protocol", () => {
     expect(Schema.decodeUnknownSync(ServerMessage)(Schema.decodeSync(Schema.UnknownFromJsonString)(wire))).toEqual(
       message,
     )
+  })
+
+  it("accepts every current interactive command and rejects unknown command tags", () => {
+    const commands = [
+      { _tag: "Submit", prompt: "prompt", mode: "high", promptParts: [{ type: "text", text: "part" }] },
+      { _tag: "Shell", command: "pwd", incognito: true },
+      { _tag: "EditQueued", turnId: "turn", prompt: "edit" },
+      { _tag: "Dequeue", turnId: "turn" },
+      { _tag: "SteerQueued", turnId: "turn", text: "steer" },
+      { _tag: "Steer", text: "steer" },
+      { _tag: "InterruptAndSend", prompt: "replace" },
+      { _tag: "Cancel" },
+      { _tag: "ResolvePermission", waitId: "wait", kind: "permission", decision: "always" },
+      { _tag: "SelectThread", threadId: "thread", selectionEpoch: 3 },
+      { _tag: "ReadQueue", threadId: "thread" },
+      { _tag: "LoadOlder" },
+      { _tag: "PreviewThread", threadId: "thread" },
+      { _tag: "ReopenThread", selectionEpoch: 4 },
+      { _tag: "Replay", turnId: "turn", afterCursor: "cursor" },
+    ]
+    for (const [index, command] of commands.entries()) {
+      const input = {
+        _tag: "interactive-command",
+        connectionId: "connection",
+        requestId: "request",
+        sessionId: "session",
+        feedGeneration: "feed",
+        commandSequence: index + 1,
+        command,
+      }
+      const decoded = Schema.decodeUnknownSync(ClientMessage)(input)
+      expect(Schema.decodeUnknownSync(ClientMessage)(Schema.encodeSync(ClientMessage)(decoded))).toEqual(decoded)
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(ClientMessage)({
+        _tag: "interactive-command",
+        connectionId: "connection",
+        requestId: "request",
+        sessionId: "session",
+        feedGeneration: "feed",
+        commandSequence: 1,
+        command: { _tag: "OldCommand" },
+      }),
+    ).toThrow()
+  })
+
+  it("rejects sequence values outside the current resident contract", () => {
+    const client = {
+      connectionId: "connection",
+      requestId: "request",
+      sessionId: "session",
+      feedGeneration: "feed",
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(ClientMessage)({
+        _tag: "interactive-command",
+        ...client,
+        commandSequence: 0,
+        command: { _tag: "Cancel" },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(ClientMessage)({
+        _tag: "interactive-feed-ack",
+        ...client,
+        throughSequence: 0,
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(ClientMessage)({
+        _tag: "interactive-feed-replay",
+        ...client,
+        afterSequence: -1,
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(ServerMessage)({
+        _tag: "interactive-started",
+        ...client,
+        feedCapacity: 0,
+      }),
+    ).toThrow()
   })
 })
 

@@ -1,7 +1,15 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import { Effect, FileSystem, Path, Schema } from "effect"
 import { Surface } from "../src/adapter"
-import { initial, ready, update, type Model, type ThreadItem, type TranscriptBlock } from "../src/view-state"
+import {
+  initial,
+  ready,
+  replaceQueue,
+  update,
+  type Model,
+  type ThreadItem,
+  type TranscriptBlock,
+} from "../src/view-state"
 
 export const visualMetadata = {
   schema: 2,
@@ -127,7 +135,7 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
         entries: [
           {
             role: "assistant",
-            text: "# Styled Markdown\n\n**bold** and *emphasis* with `inline code`.\n\n- first\n- second\n\n> muted quote\n\n```ts\nconst answer = 42\n```",
+            text: "# Styled Markdown\n\n**bold** and *emphasis* with `inline code`.\n\n| Layer | Owner |\n|---|---|\n| Durable execution | Relay |\n| Agent loop | Baton |\n\n> muted quote\n\n```ts\nconst answer = 42\n```",
           },
         ],
       },
@@ -229,7 +237,17 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
       80,
       24,
     ],
-    ["queued-turn", block({ _tag: "Queued", id: "queued-turn", prompt: "Run verification next" }), 80, 24],
+    [
+      "queued-turn",
+      {
+        ...replaceQueue({ ...base(), busy: true, busyStatus: "Running Tools" }, [
+          { id: "queued-turn", prompt: "Run verification next" },
+        ]),
+        queueSelection: "queued-turn",
+      },
+      80,
+      24,
+    ],
     [
       "child-workflow",
       {

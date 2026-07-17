@@ -6,10 +6,11 @@ import { TestModel } from "@batonfx/test"
 import { Client, Content, Execution, Ids } from "@relayfx/sdk"
 import type { ChildFanOutRuntime, WorkflowDefinitionRuntime } from "@relayfx/sdk/sqlite"
 import { ThreadTools } from "@rika/tools"
-import { Effect, Layer, Logger, Redacted, Ref, Schedule, Schema, Stream } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Logger, Redacted, Ref, Schedule, Schema, Stream, Tracer } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
+import { createFanOut, currentExecutionRoute, start } from "./current-execution-route"
 
 const MockEffect = vi.hoisted(() => (require("effect") as typeof import("effect")).Effect)
 
@@ -437,7 +438,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const fixture = yield* makeClient({ startStatus: "queued", streamEvents })
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 100 })
+        return yield* start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 100 })
       }).pipe(provideBackendWithThreadTools(fixture.implementation))
       const registrations = yield* Ref.get(fixture.registrations)
       const starts = yield* Ref.get(fixture.starts)
@@ -498,6 +499,108 @@ describe("ExecutionBackend Relay client adapter", () => {
     }),
   )
 
+  it.effect("keeps large execution results out of completed tracing spans", () =>
+    Effect.gen(function* () {
+      const streamEvents = [
+        ...Array.from({ length: 4_000 }, (_, index) =>
+          relayEvent("model.output.delta", index + 1, [Content.text(`chunk-${index}`)]),
+        ),
+        relayEvent("execution.completed", 4_001),
+      ]
+      const fixture = yield* makeClient({ streamEvents })
+      const spans: Array<Tracer.NativeSpan> = []
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options)
+          spans.push(span)
+          return span
+        },
+      })
+      const results = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        const started = yield* start(backend, {
+          threadId: "thread-a",
+          turnId: "turn-a",
+          prompt: "prompt",
+          startedAt: 1,
+        })
+        const followed = yield* backend.follow!("turn-a", undefined)
+        return { started, followed }
+      }).pipe(provideBackend(fixture.implementation), Effect.withTracer(tracer))
+      expect(results.started.events).toHaveLength(4_001)
+      expect(results.followed.events).toHaveLength(4_001)
+      for (const name of ["ExecutionBackend.start", "ExecutionBackend.follow"]) {
+        const span = spans.find((candidate) => candidate.name === name)
+        expect(span?.status._tag).toBe("Ended")
+        if (span?.status._tag !== "Ended") continue
+        expect(Exit.isSuccess(span.status.exit)).toBe(true)
+        if (!Exit.isSuccess(span.status.exit)) continue
+        expect(typeof span.status.exit.value).toBe("undefined")
+      }
+    }),
+  )
+
+  it.effect("follows execution events while the durable start call is still running", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeClient()
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const running = relayEvent("tool.call.requested", 1, [], { tool_name: "shell", input: "sleep 20" })
+      const completed = relayEvent("execution.completed", 2)
+      const implementation: Client.Interface = {
+        ...fixture.implementation,
+        startExecutionByAgentDefinition: (input) =>
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as({ execution_id: input.execution_id!, status: "completed" as const }),
+          ),
+        getExecution: () =>
+          Deferred.isDone(started).pipe(
+            Effect.map((visible) =>
+              visible
+                ? {
+                    id: Ids.ExecutionId.make("execution:turn-a"),
+                    root_address_id: Ids.AddressId.make("address:rika"),
+                    status: "running" as const,
+                    created_at: 1,
+                    updated_at: 1,
+                  }
+                : undefined,
+            ),
+          ),
+        followExecution: () =>
+          Stream.concat(
+            Stream.fromEffect(Deferred.await(started).pipe(Effect.as({ _tag: "event" as const, event: running }))),
+            Stream.fromEffect(Deferred.await(release).pipe(Effect.as({ _tag: "event" as const, event: completed }))),
+          ),
+      }
+      const seen: Array<string> = []
+      const result = yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        return yield* Effect.forkChild(
+          start(backend, {
+            threadId: "thread-a",
+            turnId: "turn-a",
+            prompt: "prompt",
+            startedAt: 1,
+            onEvent: (event) => seen.push(event.type),
+          }),
+        )
+      }).pipe(provideBackend(implementation))
+      yield* Effect.whileLoop({
+        while: () => seen.length === 0,
+        body: () => Effect.yieldNow,
+        step: () => undefined,
+      })
+      expect(seen).toEqual(["tool.call.requested"])
+      yield* Deferred.succeed(release, undefined)
+      expect((yield* Fiber.join(result)).events.map((event) => event.type)).toEqual([
+        "tool.call.requested",
+        "execution.completed",
+      ])
+    }),
+  )
+
   it.effect("emits safe correlated execution breadcrumbs without payloads", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({
@@ -511,7 +614,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const logger = Logger.make((options) => lines.push(Logger.formatJson.log(options)))
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.start({
+        yield* start(backend, {
           threadId: "thread-observed",
           turnId: "turn-observed",
           prompt: "SECRET_PROMPT",
@@ -548,7 +651,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.start({
+        yield* start(backend, {
           threadId: "thread-image",
           turnId: "turn-image",
           prompt: "before [Image 1] after",
@@ -575,7 +678,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         const fixture = yield* makeClient({ streamEvents: [relayEvent(type, 1), relayEvent("model.output.delta", 2)] })
         const result = yield* Effect.gen(function* () {
           const backend = yield* ExecutionBackend.Service
-          return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+          return yield* start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
         }).pipe(provideBackend(fixture.implementation))
         expect(result.events.map((value) => value.type)).toEqual([type])
       }),
@@ -593,7 +696,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       })
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+        return yield* start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
       }).pipe(provideBackend(fixture.implementation))
 
       expect(result.events[0]).toMatchObject({
@@ -613,7 +716,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       })
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+        return yield* start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
       }).pipe(provideBackend(fixture.implementation))
 
       expect(result.events[0]?.text).toBe("content failure")
@@ -627,7 +730,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         const fixture = yield* makeClient({ startStatus: status, streamEvents: [relayEvent("execution.completed", 1)] })
         const result = yield* Effect.gen(function* () {
           const backend = yield* ExecutionBackend.Service
-          return yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+          return yield* start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
         }).pipe(provideBackend(fixture.implementation))
         expect(result.status).toBe("completed")
       }),
@@ -649,7 +752,7 @@ describe("ExecutionBackend Relay client adapter", () => {
           const seen: Array<string> = []
           const result = yield* Effect.gen(function* () {
             const backend = yield* ExecutionBackend.Service
-            return yield* backend.start({
+            return yield* start(backend, {
               threadId: "thread-a",
               turnId: "turn-a",
               prompt: "prompt",
@@ -678,7 +781,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         const seen: Array<string> = []
         const result = yield* Effect.gen(function* () {
           const backend = yield* ExecutionBackend.Service
-          return yield* backend.start({
+          return yield* start(backend, {
             threadId: "thread-a",
             turnId: "turn-a",
             prompt: "prompt",
@@ -692,16 +795,25 @@ describe("ExecutionBackend Relay client adapter", () => {
       }),
   )
 
-  it.effect("selects the effort and fast variant registration per start", () =>
+  it.effect("uses the pinned current route instead of reselecting at start", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.start({
+        yield* start(backend, {
           threadId: "thread-variant",
           turnId: "turn-variant",
           prompt: "prompt",
           startedAt: 1,
+          executionRoute: {
+            ...currentExecutionRoute(),
+            main: {
+              ...currentExecutionRoute().main,
+              effort: "xhigh",
+              fast: true,
+              registrationKey: "effort:xhigh:fast",
+            },
+          },
           reasoningEffort: "xhigh",
           fastMode: true,
         })
@@ -719,7 +831,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.start({
+        yield* start(backend, {
           threadId: "thread-fixed",
           turnId: "turn-fixed",
           prompt: "prompt",
@@ -747,7 +859,20 @@ describe("ExecutionBackend Relay client adapter", () => {
       const permissionPolicy = [{ tool: "shell", action: "deny" }] as never
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
+        const route = currentExecutionRoute()
+        yield* start(backend, {
+          threadId: "thread-a",
+          turnId: "turn-a",
+          prompt: "prompt",
+          startedAt: 1,
+          executionRoute: {
+            ...route,
+            main: {
+              ...route.main,
+              compaction: { contextWindow: 10_000, reserveTokens: 500, keepRecentTokens: 2_000 },
+            },
+          },
+        })
       }).pipe(
         provideConfiguredBackend(fixture.implementation, {
           selection,
@@ -764,19 +889,6 @@ describe("ExecutionBackend Relay client adapter", () => {
           keep_recent_tokens: 2_000,
         },
       })
-    }),
-  )
-
-  it.effect("omits incomplete compaction policies", () =>
-    Effect.gen(function* () {
-      const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
-      yield* Effect.gen(function* () {
-        const backend = yield* ExecutionBackend.Service
-        yield* backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
-      }).pipe(provideConfiguredBackend(fixture.implementation, { selection, compaction: {} }))
-
-      expect((yield* Ref.get(fixture.registrations))[0]).toMatchObject({ metadata: { steering_enabled: true } })
-      expect((yield* Ref.get(fixture.registrations))[0]).not.toHaveProperty("compaction_policy")
     }),
   )
 
@@ -864,7 +976,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         const backend = yield* ExecutionBackend.Service
         if (operation === "start")
           return yield* Effect.flip(
-            backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "p", startedAt: 1 }),
+            start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "p", startedAt: 1 }),
           )
         if (operation === "replay") return yield* Effect.flip(backend.replay("turn-a"))
         return yield* Effect.flip(backend.cancel("turn-a", 2))
@@ -890,7 +1002,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const seen: Array<string> = []
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        return yield* backend.start({
+        return yield* start(backend, {
           threadId: "thread-a",
           turnId: "turn-a",
           prompt: "prompt",
@@ -926,7 +1038,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const seen: Array<string> = []
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        return yield* backend.start({
+        return yield* start(backend, {
           threadId: "thread-a",
           turnId: "turn-a",
           prompt: "prompt",
@@ -953,7 +1065,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const failure = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         return yield* Effect.flip(
-          backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 }),
+          start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 }),
         )
       }).pipe(provideBackend(implementation))
 
@@ -969,7 +1081,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const failure = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         return yield* Effect.flip(
-          backend.start({ threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 }),
+          start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 }),
         )
       }).pipe(provideBackend(fixture.implementation))
 
@@ -1045,7 +1157,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         return {
-          fan: yield* backend.createFanOut({
+          fan: yield* createFanOut(backend, {
             fanOutId: "fan-1",
             parentTurnId: "parent-1",
             children: [
@@ -1178,7 +1290,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       const result = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         for (const join of ["all", "first-success", "best-effort"] as const) {
-          yield* backend.createFanOut({
+          yield* createFanOut(backend, {
             fanOutId: `fan-${join}`,
             parentTurnId: "p",
             children: [],
@@ -1187,7 +1299,7 @@ describe("ExecutionBackend Relay client adapter", () => {
             createdAt: 1,
           })
         }
-        yield* backend.createFanOut({
+        yield* createFanOut(backend, {
           fanOutId: "fan-quorum-default",
           parentTurnId: "p",
           children: [],
@@ -1235,7 +1347,6 @@ describe("ExecutionBackend Relay client adapter", () => {
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         const route = {
-          version: 1 as const,
           mode: "test" as const,
           compactionSummary: routeFor("compaction", summarySelection, mainCompaction),
           main: routeFor("main", selection, mainCompaction),
@@ -1248,14 +1359,14 @@ describe("ExecutionBackend Relay client adapter", () => {
             task: routeFor("task", taskSelection, mainCompaction),
           },
         }
-        yield* backend.start({
+        yield* start(backend, {
           threadId: "thread",
           turnId: "other-turn",
           prompt: "prompt",
           startedAt: 1,
           executionRoute: route,
         })
-        yield* backend.createFanOut({
+        yield* createFanOut(backend, {
           fanOutId: "fan",
           parentTurnId: "turn",
           workspace: "/client/workspace",
@@ -1326,7 +1437,6 @@ describe("ExecutionBackend Relay client adapter", () => {
         rika_workspace: "/client/workspace",
       })
       expect(fanOutInputs[0].children[0].metadata.rika_execution_route).toEqual({
-        version: 1,
         mode: "test",
         compactionSummary: routeFor("compaction", summarySelection, mainCompaction),
         main: routeFor("main", selection, mainCompaction),
@@ -1395,10 +1505,8 @@ describe("ExecutionBackend Relay client adapter", () => {
       })
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.ensureThreadHost!("thread-a", 100)
-        yield* backend.ensureThreadHost!("thread-a", 101)
-        yield* backend.notifyThreadHost!("thread-a", "turn-9", 102)
-        yield* backend.notifyThreadHost!("thread-a", undefined, 103)
+        yield* backend.wakeThreadHost!({ threadId: "thread-a", generation: 9, queueRevision: 12, now: 102 })
+        yield* backend.wakeThreadHost!({ threadId: "thread-a", generation: 9, queueRevision: 12, now: 103 })
         yield* backend.registerTurnPromoter!(() => Effect.succeed(1))
       }).pipe(provideBackend(fixture.implementation))
       const registrations = yield* Ref.get(fixture.registrations)
@@ -1422,18 +1530,19 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect(sent[0]).toMatchObject({
         from: "address:rika",
         to: "address:entity:thread-a",
-        idempotency_key: "rika:turn:turn-9",
+        idempotency_key: "rika:queue-wake:thread-a:9",
       })
       expect(
         yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
           (sent[0]!.content as Array<{ text: string }>)[0]!.text,
         ),
       ).toEqual({
-        kind: "pending-turn",
+        kind: "queue-ready",
         thread_id: "thread-a",
-        turn_id: "turn-9",
+        wake_generation: 9,
+        queue_revision: 12,
       })
-      expect(sent[1]).toMatchObject({ idempotency_key: "rika:nudge:thread-a:103" })
+      expect(sent[1]).toMatchObject({ idempotency_key: "rika:queue-wake:thread-a:9" })
     }),
   )
 
@@ -1454,27 +1563,29 @@ describe("ExecutionBackend Relay client adapter", () => {
       Object.assign(fixture.implementation, {
         registerEntityKind: (input: unknown) => Effect.succeed(input),
         getEntity: () => Effect.sync(() => (calls.push("get"), failed)),
-        inspectExecution: () =>
+        inspectExecution: (executionId: string) =>
           Effect.sync(() => {
             calls.push("inspect")
             return {
-              execution_id: failed.execution_id,
-              status: "failed",
-              waiting_on: [],
+              execution_id: executionId,
+              status: executionId === failed.execution_id ? "failed" : "waiting",
+              waiting_on:
+                executionId === failed.execution_id ? [] : [{ wait_id: "wait:host", mode: "event", created_at: 1 }],
               pending_tool_calls: [],
               child_runs: [],
             }
           }),
         destroyEntity: () => Effect.sync(() => (calls.push("destroy"), { ...failed, status: "destroyed" })),
         getOrCreateEntity: () => Effect.sync(() => (calls.push("create"), recreated)),
+        send: () => Effect.succeed({ envelope_id: "envelope:wake", execution_id: recreated.execution_id }),
       })
 
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        yield* backend.ensureThreadHost!("thread-stale", 100)
+        yield* backend.wakeThreadHost!({ threadId: "thread-stale", generation: 1, queueRevision: 1, now: 100 })
       }).pipe(provideBackend(fixture.implementation))
 
-      expect(calls).toEqual(["get", "inspect", "destroy", "create"])
+      expect(calls).toEqual(["get", "inspect", "destroy", "create", "inspect"])
     }),
   )
 

@@ -1,9 +1,24 @@
 import { StyledText, bold, dim, fg, italic, link, strikethrough, underline, type TextChunk } from "@opentui/core"
+import { Function } from "effect"
 import { Lexer, type Token, type Tokens } from "marked"
+import stringWidth from "string-width"
 import { highlightLines } from "./syntax-highlight"
 import { colors } from "./theme"
 
 type Lines = Array<Array<TextChunk>>
+
+type StyledCell = {
+  readonly chunk: TextChunk
+  readonly text: string
+  readonly width: number
+}
+
+type WordPart = {
+  readonly cells: Array<StyledCell>
+  readonly whitespace: boolean
+}
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 
 const splitChunks = (chunks: ReadonlyArray<TextChunk>): Lines => {
   const lines: Lines = [[]]
@@ -14,6 +29,110 @@ const splitChunks = (chunks: ReadonlyArray<TextChunk>): Lines => {
     })
   }
   return lines
+}
+
+const sameStyle = (left: TextChunk, right: TextChunk): boolean =>
+  left.fg === right.fg &&
+  left.bg === right.bg &&
+  left.attributes === right.attributes &&
+  left.link?.url === right.link?.url
+
+const styledCells = (chunks: ReadonlyArray<TextChunk>): Array<StyledCell> => {
+  const cells: Array<StyledCell> = []
+  for (const chunk of chunks) {
+    if (/^[\x20-\x7e]*$/u.test(chunk.text)) {
+      for (const text of chunk.text) cells.push({ chunk, text, width: 1 })
+      continue
+    }
+    for (const { segment } of graphemeSegmenter.segment(chunk.text)) {
+      cells.push({ chunk, text: segment, width: stringWidth(segment) })
+    }
+  }
+  return cells
+}
+
+const cellsToChunks = (cells: ReadonlyArray<StyledCell>): Array<TextChunk> => {
+  const chunks: Array<TextChunk> = []
+  for (const cell of cells) {
+    const previous = chunks[chunks.length - 1]
+    if (previous !== undefined && sameStyle(previous, cell.chunk)) previous.text += cell.text
+    else chunks.push({ ...cell.chunk, text: cell.text })
+  }
+  return chunks
+}
+
+const wordParts = (cells: ReadonlyArray<StyledCell>): Array<WordPart> => {
+  const parts: Array<WordPart> = []
+  for (const cell of cells) {
+    const whitespace = /^\s+$/u.test(cell.text)
+    const previous = parts[parts.length - 1]
+    if (previous !== undefined && previous.whitespace === whitespace) {
+      previous.cells.push(cell)
+    } else parts.push({ cells: [cell], whitespace })
+  }
+  return parts
+}
+
+const cellsWidth = (cells: ReadonlyArray<StyledCell>): number => cells.reduce((total, cell) => total + cell.width, 0)
+
+const wrapChunkLine = (chunks: ReadonlyArray<TextChunk>, width: number): Lines => {
+  const lines: Array<Array<StyledCell>> = []
+  let current: Array<StyledCell> = []
+  let currentWidth = 0
+  let pendingWhitespace: ReadonlyArray<StyledCell> = []
+
+  const pushCurrent = (): void => {
+    lines.push(current)
+    current = []
+    currentWidth = 0
+  }
+
+  const appendWord = (cells: ReadonlyArray<StyledCell>): void => {
+    for (const cell of cells) {
+      if (current.length > 0 && currentWidth + cell.width > width) pushCurrent()
+      current.push(cell)
+      currentWidth += cell.width
+    }
+  }
+
+  for (const part of wordParts(styledCells(chunks))) {
+    if (part.whitespace) {
+      pendingWhitespace = part.cells
+      continue
+    }
+    const partWidth = cellsWidth(part.cells)
+    const whitespaceWidth = cellsWidth(pendingWhitespace)
+    if (current.length > 0 && currentWidth + whitespaceWidth + partWidth <= width) {
+      current.push(...pendingWhitespace, ...part.cells)
+      currentWidth += whitespaceWidth + partWidth
+    } else {
+      if (current.length > 0) pushCurrent()
+      appendWord(part.cells)
+    }
+    pendingWhitespace = []
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current)
+  return lines.map(cellsToChunks)
+}
+
+const wrapChunks = (chunks: ReadonlyArray<TextChunk>, width: number): Lines =>
+  splitChunks(chunks).flatMap((line) => wrapChunkLine(line, width))
+
+const hardWrapChunkLine = (chunks: ReadonlyArray<TextChunk>, width: number): Lines => {
+  const lines: Array<Array<StyledCell>> = []
+  let current: Array<StyledCell> = []
+  let currentWidth = 0
+  for (const cell of styledCells(chunks)) {
+    if (current.length > 0 && currentWidth + cell.width > width) {
+      lines.push(current)
+      current = []
+      currentWidth = 0
+    }
+    current.push(cell)
+    currentWidth += cell.width
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current)
+  return lines.map(cellsToChunks)
 }
 
 const trailingBlankLines = (raw: string): number => {
@@ -65,7 +184,132 @@ const inlineChunks = (tokens: ReadonlyArray<Token>, plain: boolean): Array<TextC
   return chunks
 }
 
-const listLines = (list: Tokens.List, depth: number, plain: boolean): Lines => {
+const headingChunks = (heading: Tokens.Heading, plain: boolean): Array<TextChunk> =>
+  inlineChunks(heading.tokens, plain).map((chunk) => {
+    const colored = chunk.fg === colors.text ? fg(colors.teal)(chunk) : chunk
+    switch (heading.depth) {
+      case 1:
+        return underline(bold(colored))
+      case 2:
+        return bold(colored)
+      case 3:
+        return underline(colored)
+      case 4:
+        return italic(colored)
+      case 5:
+        return colored
+      case 6:
+        return dim(colored)
+    }
+    return colored
+  })
+
+const distribute = (amount: number, weights: ReadonlyArray<number>): Array<number> => {
+  if (amount <= 0) return weights.map(() => 0)
+  const total = weights.reduce((sum, weight) => sum + weight, 0)
+  const exact = weights.map((weight) => (amount * weight) / total)
+  const result = exact.map(Math.floor)
+  let remaining = amount - result.reduce((sum, value) => sum + value, 0)
+  for (const target of exact
+    .map((value, position) => ({ position, fraction: value - Math.floor(value) }))
+    .toSorted((left, right) => right.fraction - left.fraction || left.position - right.position)
+    .map(({ position }) => position)) {
+    if (remaining === 0) break
+    result[target] = result[target]! + 1
+    remaining -= 1
+  }
+  return result
+}
+
+const tableMeasurements = (
+  table: Tokens.Table,
+  plain: boolean,
+): { readonly minimum: ReadonlyArray<number>; readonly natural: ReadonlyArray<number> } => {
+  const rows: ReadonlyArray<ReadonlyArray<Tokens.TableCell>> = [table.header, ...table.rows]
+  const cells = table.header.map((_, index) =>
+    rows.map((row) => styledCells(inlineChunks(row[index]?.tokens ?? [], plain))),
+  )
+  return {
+    minimum: cells.map((column) => Math.max(1, ...column.flatMap((cell) => cell.map((part) => part.width)))),
+    natural: cells.map((column) => Math.max(1, ...column.map(cellsWidth))),
+  }
+}
+
+const tableWidths = (natural: ReadonlyArray<number>, minimum: ReadonlyArray<number>, width: number): Array<number> => {
+  const columns = natural.length
+  const budget = width - columns * 3 - 1
+  const naturalTotal = natural.reduce((sum, value) => sum + value, 0)
+  if (naturalTotal <= budget) {
+    const extra = distribute(
+      budget - naturalTotal,
+      natural.map((value) => value + 2),
+    )
+    return natural.map((value, index) => value + extra[index]!)
+  }
+  const minimumTotal = minimum.reduce((sum, value) => sum + value, 0)
+  const extra = distribute(
+    budget - minimumTotal,
+    natural.map((value) => value + 2),
+  )
+  return minimum.map((value, index) => value + extra[index]!)
+}
+
+const cellLine = (
+  content: ReadonlyArray<TextChunk>,
+  width: number,
+  align: Tokens.TableCell["align"],
+): Array<TextChunk> => {
+  const contentWidth = content.reduce((sum, chunk) => sum + stringWidth(chunk.text), 0)
+  const remaining = Math.max(0, width - contentWidth)
+  const left = align === "right" ? remaining : align === "center" ? Math.floor(remaining / 2) : 0
+  const right = remaining - left
+  return [fg(colors.text)(` ${" ".repeat(left)}`), ...content, fg(colors.text)(`${" ".repeat(right)} `)]
+}
+
+const tableRule = (left: string, join: string, right: string, widths: ReadonlyArray<number>): Array<TextChunk> => [
+  dim(fg(colors.text)(`${left}${widths.map((width) => "─".repeat(width + 2)).join(join)}${right}`)),
+]
+
+const stackedTableLines = (table: Tokens.Table, plain: boolean, width: number): Lines => {
+  const rows: ReadonlyArray<ReadonlyArray<Tokens.TableCell>> = [table.header, ...table.rows]
+  const lines: Lines = []
+  rows.forEach((cells, rowIndex) => {
+    for (const cell of cells) lines.push(...wrapChunks(inlineChunks(cell.tokens, plain), width))
+    if (rowIndex < rows.length - 1) lines.push([dim(fg(colors.text)("─".repeat(width)))])
+  })
+  return lines
+}
+
+const tableLines = (table: Tokens.Table, plain: boolean, width: number): Lines => {
+  const measurements = tableMeasurements(table, plain)
+  const minimumWidth = measurements.minimum.reduce((sum, value) => sum + value, 0) + table.header.length * 3 + 1
+  if (width < minimumWidth) return stackedTableLines(table, plain, width)
+  const widths = tableWidths(measurements.natural, measurements.minimum, width)
+  const row = (cells: ReadonlyArray<Tokens.TableCell>): Lines => {
+    const wrapped = cells.map((cell, index) => wrapChunks(inlineChunks(cell.tokens, plain), widths[index]!))
+    const height = Math.max(1, ...wrapped.map((cell) => cell.length))
+    return Array.from({ length: height }, (_, lineIndex) => {
+      const chunks: Array<TextChunk> = [dim(fg(colors.text)("│"))]
+      cells.forEach((cell, index) => {
+        chunks.push(
+          ...cellLine(wrapped[index]?.[lineIndex] ?? [], widths[index]!, cell.align),
+          dim(fg(colors.text)("│")),
+        )
+      })
+      return chunks
+    })
+  }
+  const lines: Lines = [tableRule("╭", "┬", "╮", widths), ...row(table.header)]
+  if (table.rows.length > 0) lines.push(tableRule("├", "┼", "┤", widths))
+  table.rows.forEach((cells, index) => {
+    lines.push(...row(cells))
+    if (index < table.rows.length - 1) lines.push(tableRule("├", "┼", "┤", widths))
+  })
+  lines.push(tableRule("╰", "┴", "╯", widths))
+  return lines
+}
+
+const listLines = (list: Tokens.List, depth: number, plain: boolean, width: number): Lines => {
   const lines: Lines = []
   const indent = "  ".repeat(depth)
   list.items.forEach((item, index) => {
@@ -77,7 +321,7 @@ const listLines = (list: Tokens.List, depth: number, plain: boolean): Lines => {
     const passthrough: Array<boolean> = []
     for (const token of item.tokens) {
       const isList = token.type === "list"
-      for (const line of blockLines([token], depth + 1, plain)) {
+      for (const line of blockLines([token], depth + 1, plain, width)) {
         itemLines.push(line)
         passthrough.push(isList)
       }
@@ -101,7 +345,7 @@ const listLines = (list: Tokens.List, depth: number, plain: boolean): Lines => {
   return lines
 }
 
-const blockLines = (tokens: ReadonlyArray<Token>, depth: number, plain: boolean): Lines => {
+const blockLines = (tokens: ReadonlyArray<Token>, depth: number, plain: boolean, width: number): Lines => {
   const lines: Lines = []
   tokens.forEach((token) => {
     switch (token.type) {
@@ -112,14 +356,11 @@ const blockLines = (tokens: ReadonlyArray<Token>, depth: number, plain: boolean)
       }
       case "heading": {
         const heading = token as Tokens.Heading
-        const text = inlineChunks(heading.tokens, plain)
-          .map((chunk) => chunk.text)
-          .join("")
-        lines.push([bold(fg(colors.teal)(text))])
+        lines.push(...wrapChunks(headingChunks(heading, plain), width))
         break
       }
       case "paragraph":
-        lines.push(...splitChunks(inlineChunks((token as Tokens.Paragraph).tokens, plain)))
+        lines.push(...wrapChunks(inlineChunks((token as Tokens.Paragraph).tokens, plain), width))
         break
       case "text": {
         const text = token as Tokens.Text
@@ -130,24 +371,32 @@ const blockLines = (tokens: ReadonlyArray<Token>, depth: number, plain: boolean)
       }
       case "code": {
         const code = token as Tokens.Code
+        const indent = " ".repeat(Math.min(4, Math.max(0, width - 1)))
+        const contentWidth = Math.max(1, width - stringWidth(indent))
         for (const line of highlightLines(code.text, code.lang?.split(/\s/)[0])) {
-          lines.push(line.length === 0 ? [] : [fg(colors.text)("    "), ...line])
+          if (line.length === 0) lines.push([])
+          else
+            for (const wrapped of hardWrapChunkLine(line, contentWidth)) {
+              lines.push([fg(colors.text)(indent), ...wrapped])
+            }
         }
         break
       }
       case "blockquote": {
         const quote = token as Tokens.Blockquote
-        for (const line of blockLines(quote.tokens, depth, plain)) {
+        for (const line of blockLines(quote.tokens, depth, plain, width)) {
           lines.push([dim(fg(colors.text)("│ ")), ...line])
         }
         break
       }
       case "list":
-        lines.push(...listLines(token as Tokens.List, depth, plain))
+        lines.push(...listLines(token as Tokens.List, depth, plain, width))
+        break
+      case "table":
+        lines.push(...tableLines(token as Tokens.Table, plain, width))
         break
       case "hr":
       case "html":
-      case "table":
       default:
         lines.push(...splitChunks([fg(colors.text)(token.raw.replace(/\n+$/, ""))]))
         break
@@ -158,24 +407,45 @@ const blockLines = (tokens: ReadonlyArray<Token>, depth: number, plain: boolean)
   return lines
 }
 
-const renderLines = (source: string, plain: boolean): Lines => {
+const isPlainLine = (source: string): boolean => {
+  if (source.includes("\n") || /[\\`*{}[\]<>()#+\-.!|>~:/@]/u.test(source)) return false
+  for (let index = source.indexOf("_"); index >= 0; index = source.indexOf("_", index + 1)) {
+    if (!/[\p{L}\p{N}]/u.test(source[index - 1] ?? "") || !/[\p{L}\p{N}]/u.test(source[index + 1] ?? "")) return false
+  }
+  return true
+}
+
+const renderLines = (source: string, plain: boolean, width: number): Lines => {
+  if (isPlainLine(source)) return wrapChunks([fg(colors.text)(source)], width)
   const tokens = Lexer.lex(source, { gfm: true })
-  const lines = blockLines(tokens, 0, plain)
+  const lines = blockLines(tokens, 0, plain, Math.max(1, Math.floor(width)))
   while (lines.length > 0 && lines[lines.length - 1]!.length === 0) lines.pop()
   return lines
 }
 
-export const renderMarkdown = (source: string): string =>
-  renderLines(source, true)
-    .map((line) => line.map((chunk) => chunk.text).join(""))
-    .join("\n")
+export const renderMarkdown: {
+  (source: string, width?: number): string
+  (width?: number): (source: string) => string
+} = Function.dual(
+  (args) => typeof args[0] === "string",
+  (source: string, width = 80): string =>
+    renderLines(source, true, width)
+      .map((line) => line.map((chunk) => chunk.text).join(""))
+      .join("\n"),
+)
 
-export const renderMarkdownStyled = (source: string): StyledText => {
-  const chunks: Array<TextChunk> = []
-  renderLines(source, false).forEach((line, index) => {
-    if (index > 0) chunks.push(fg(colors.text)("\n"))
-    chunks.push(...line)
-  })
-  if (chunks.length === 0) chunks.push(fg(colors.text)(""))
-  return new StyledText(chunks)
-}
+export const renderMarkdownStyled: {
+  (source: string, width?: number): StyledText
+  (width?: number): (source: string) => StyledText
+} = Function.dual(
+  (args) => typeof args[0] === "string",
+  (source: string, width = 80): StyledText => {
+    const chunks: Array<TextChunk> = []
+    renderLines(source, false, width).forEach((line, index) => {
+      if (index > 0) chunks.push(fg(colors.text)("\n"))
+      chunks.push(...line)
+    })
+    if (chunks.length === 0) chunks.push(fg(colors.text)(""))
+    return new StyledText(chunks)
+  },
+)

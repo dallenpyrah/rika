@@ -6,10 +6,11 @@ import * as ThreadHost from "../src/thread-host"
 
 const promptWith = (messages: ReadonlyArray<Prompt.MessageEncoded>) => Prompt.make(messages)
 
-const pendingPayload = (threadId: string, turnId: string) => ({
-  kind: "pending-turn",
+const pendingPayload = (threadId: string, generation: number, queueRevision: number) => ({
+  kind: "queue-ready",
   thread_id: threadId,
-  turn_id: turnId,
+  wake_generation: generation,
+  queue_revision: queueRevision,
 })
 
 const waitBatch = (payloads: ReadonlyArray<Record<string, unknown>>) => ({
@@ -41,31 +42,34 @@ const waitTool = Tool.make(ThreadHost.waitToolName, {
 })
 
 describe("ThreadHost", () => {
-  it.effect("parses pending thread ids from the latest wait result", () =>
+  it.effect("parses the latest queue wake for each thread from the latest wait result", () =>
     Effect.sync(() => {
       const prompt = promptWith([
         { role: "user", content: [{ type: "text", text: "create" }] },
         waitResultMessage(
           waitBatch([
-            pendingPayload("thread-a", "turn-1"),
-            pendingPayload("thread-a", "turn-2"),
-            pendingPayload("thread-b", "turn-3"),
+            pendingPayload("thread-a", 1, 4),
+            pendingPayload("thread-a", 2, 5),
+            pendingPayload("thread-b", 1, 3),
           ]),
         ),
       ])
-      expect(ThreadHost.pendingThreadIds(prompt)).toEqual(["thread-a", "thread-b"])
+      expect(ThreadHost.pendingQueueWakes(prompt)).toEqual([
+        { threadId: "thread-a", generation: 2, queueRevision: 5 },
+        { threadId: "thread-b", generation: 1, queueRevision: 3 },
+      ])
     }),
   )
 
   it.effect("returns no thread ids without a trailing wait result", () =>
     Effect.gen(function* () {
-      const encoded = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(pendingPayload("t", "x"))
-      expect(ThreadHost.pendingThreadIds(promptWith([]))).toEqual([])
+      const encoded = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(pendingPayload("t", 1, 1))
+      expect(ThreadHost.pendingQueueWakes(promptWith([]))).toEqual([])
       expect(
-        ThreadHost.pendingThreadIds(promptWith([{ role: "user", content: [{ type: "text", text: encoded }] }])),
+        ThreadHost.pendingQueueWakes(promptWith([{ role: "user", content: [{ type: "text", text: encoded }] }])),
       ).toEqual([])
       expect(
-        ThreadHost.pendingThreadIds(promptWith([waitResultMessage({ status: "timed_out", messages: [] })])),
+        ThreadHost.pendingQueueWakes(promptWith([waitResultMessage({ status: "timed_out", messages: [] })])),
       ).toEqual([])
     }),
   )
@@ -74,17 +78,18 @@ describe("ThreadHost", () => {
     Effect.gen(function* () {
       const crypto = yield* Layer.build(BunCrypto.layer)
       const registry = yield* ThreadHost.makeRegistry
-      const promoted: Array<string> = []
-      yield* registry.register((threadId) =>
+      const promoted: Array<readonly [string, number]> = []
+      yield* registry.register((threadId, generation) =>
         Effect.sync(() => {
-          promoted.push(threadId)
+          promoted.push([threadId, generation])
           return 2
         }),
       )
-      const batch = waitBatch([pendingPayload("thread-a", "turn-1")])
+      const batch = waitBatch([pendingPayload("thread-a", 7, 12)])
       const toolkit = Toolkit.make(ThreadHost.promoteTurnTool, waitTool)
       const handlers = toolkit.toLayer({
-        promote_turn: ({ threadId }) => registry.promote(threadId).pipe(Effect.map((count) => ({ promoted: count }))),
+        promote_turn: ({ threadId, generation }) =>
+          registry.promote(threadId, generation).pipe(Effect.map((count) => ({ promoted: count }))),
         [ThreadHost.waitToolName]: () => Effect.succeed(batch),
       })
       const registration = yield* ThreadHost.hostRegistration.pipe(Effect.provide(crypto))
@@ -101,9 +106,9 @@ describe("ThreadHost", () => {
         toolkit,
       }).pipe(provideModel)
       expect(woken.toolCalls.map((call) => call.name)).toEqual(["promote_turn"])
-      expect(woken.toolCalls[0]?.params).toEqual({ threadId: "thread-a" })
+      expect(woken.toolCalls[0]?.params).toEqual({ threadId: "thread-a", generation: 7 })
       expect(woken.toolResults[0]?.result).toEqual({ promoted: 2 })
-      expect(promoted).toEqual(["thread-a"])
+      expect(promoted).toEqual([["thread-a", 7]])
     }),
   )
 
@@ -132,17 +137,20 @@ describe("ThreadHost", () => {
   it.effect("registry promotes through the registered promoter and defaults to zero", () =>
     Effect.gen(function* () {
       const registry = yield* ThreadHost.makeRegistry
-      expect(yield* registry.promote("thread-a")).toBe(0)
-      const promoted: Array<string> = []
-      yield* registry.register((threadId) =>
+      expect(yield* registry.promote("thread-a", 1)).toBe(0)
+      const promoted: Array<readonly [string, number]> = []
+      yield* registry.register((threadId, generation) =>
         Effect.sync(() => {
-          promoted.push(threadId)
+          promoted.push([threadId, generation])
           return promoted.length
         }),
       )
-      expect(yield* registry.promote("thread-a")).toBe(1)
-      expect(yield* registry.promote("thread-b")).toBe(2)
-      expect(promoted).toEqual(["thread-a", "thread-b"])
+      expect(yield* registry.promote("thread-a", 3)).toBe(1)
+      expect(yield* registry.promote("thread-b", 4)).toBe(2)
+      expect(promoted).toEqual([
+        ["thread-a", 3],
+        ["thread-b", 4],
+      ])
     }),
   )
 })

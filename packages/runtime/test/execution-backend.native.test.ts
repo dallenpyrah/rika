@@ -7,6 +7,7 @@ import { Database } from "bun:sqlite"
 import { Duration, Effect, Fiber, FileSystem, Layer, Schedule, Schema } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
+import { createFanOut, start } from "./current-execution-route"
 
 const executionModelRoute = (
   role: "main" | "oracle",
@@ -59,6 +60,7 @@ const withBackend = <A, E>(
           workspace: directory,
           registration: fixture.registration,
           selection: fixture.selection,
+          modelVariantPolicy: "fixed-selection",
           ...options,
         }),
       )
@@ -81,9 +83,9 @@ test(
               startedAt: 1,
               onEvent: (event: ExecutionBackend.Event) => streamed.push(event),
             }
-            const first = yield* backend.start(input)
+            const first = yield* start(backend, input)
             const { onEvent: _onEvent, ...duplicateInput } = input
-            const duplicate = yield* backend.start(duplicateInput)
+            const duplicate = yield* start(backend, duplicateInput)
             const replay = yield* backend.replay(input.turnId)
             const cursor = replay.events.at(1)?.cursor
             const after = yield* backend.replay(input.turnId, cursor)
@@ -122,7 +124,7 @@ test(
               const fileSystem = yield* FileSystem.FileSystem
               yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "tool fixture")
               const backend = yield* ExecutionBackend.Service
-              const result = yield* backend.start({
+              const result = yield* start(backend, {
                 threadId: "thread-tools",
                 turnId: "turn-tools",
                 prompt: "read fixture.txt",
@@ -168,6 +170,7 @@ test(
               workspace: directory,
               registration: fixture.registration,
               selection: fixture.selection,
+              modelVariantPolicy: "fixed-selection",
               toolRuntimeLayerForWorkspace: RikaToolRuntime.layer,
               resolveWorkspace: (executionId) => {
                 const workspace = workspaceByExecution.get(executionId)
@@ -181,8 +184,8 @@ test(
             yield* provide(
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
-                yield* backend.start({ threadId: "first-thread", turnId: "first-turn", prompt: "first", startedAt: 1 })
-                yield* backend.start({
+                yield* start(backend, { threadId: "first-thread", turnId: "first-turn", prompt: "first", startedAt: 1 })
+                yield* start(backend, {
                   threadId: "second-thread",
                   turnId: "second-turn",
                   prompt: "second",
@@ -218,7 +221,7 @@ test(
           () =>
             Effect.gen(function* () {
               const backend = yield* ExecutionBackend.Service
-              const completed = yield* backend.start({
+              const completed = yield* start(backend, {
                 threadId: "thread-stream",
                 turnId: "turn-stream",
                 prompt: "go",
@@ -250,7 +253,7 @@ test.skipIf(!("reasoning" in TestModel))(
           () =>
             Effect.gen(function* () {
               const backend = yield* ExecutionBackend.Service
-              const completed = yield* backend.start({
+              const completed = yield* start(backend, {
                 threadId: "thread-reasoning",
                 turnId: "turn-reasoning",
                 prompt: "reason",
@@ -286,7 +289,7 @@ test(
               (fixture) =>
                 Effect.gen(function* () {
                   const backend = yield* ExecutionBackend.Service
-                  const result = yield* backend.start({ threadId: turnId, turnId, prompt: "call tool", startedAt: 1 })
+                  const result = yield* start(backend, { threadId: turnId, turnId, prompt: "call tool", startedAt: 1 })
                   return { result, requests: yield* fixture.requests }
                 }),
             )
@@ -324,7 +327,7 @@ test(
               const fileSystem = yield* FileSystem.FileSystem
               yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "fixture")
               const backend = yield* ExecutionBackend.Service
-              return yield* backend.start({
+              return yield* start(backend, {
                 threadId: "thread-late-failure",
                 turnId: "turn-late-failure",
                 prompt: "stream before failing",
@@ -359,13 +362,13 @@ test(
           (_, directory) =>
             Effect.gen(function* () {
               const backend = yield* ExecutionBackend.Service
-              yield* backend.start({
+              yield* start(backend, {
                 threadId: "thread-long-child",
                 turnId: "turn-long-child-parent",
                 prompt: "prepare fan-out",
                 startedAt: 1,
               })
-              yield* backend.createFanOut({
+              yield* createFanOut(backend, {
                 parentTurnId: "turn-long-child-parent",
                 fanOutId: "fan-out:long-child",
                 children: [{ childId: "long-child", prompt: "produce the child result" }],
@@ -443,7 +446,6 @@ test(
               },
             )
             const executionRoute: ExecutionBackend.ExecutionRoutePin = {
-              version: 1,
               mode: "test",
               tokenBudget: 1_000,
               main: executionModelRoute("main", main.selection),
@@ -452,15 +454,17 @@ test(
             return yield* provide(
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
-                yield* backend.start({
+                yield* start(backend, {
                   threadId: "thread-routes",
                   turnId: "turn-routes-parent",
                   prompt: "prepare fan-out",
                   startedAt: 1,
+                  executionRoute,
                 })
-                yield* backend.createFanOut({
+                yield* createFanOut(backend, {
                   parentTurnId: "turn-routes-parent",
                   fanOutId: "fan-out:routes",
+                  executionRoute,
                   children: [
                     { childId: "oracle-route", profile: "Oracle", prompt: "ask Oracle" },
                     { childId: "main-route", profile: "Task", prompt: "ask main" },
@@ -488,7 +492,6 @@ test(
                 additionalRegistrations: [oracle.registration],
                 selection: main.selection,
                 oracleSelection: oracle.selection,
-                resolveExecutionRoute: () => Effect.succeed(executionRoute),
               }),
             )
           }),
@@ -522,7 +525,7 @@ test(
           (fixture) =>
             Effect.gen(function* () {
               const backend = yield* ExecutionBackend.Service
-              const result = yield* backend.start({
+              const result = yield* start(backend, {
                 threadId: "thread-retry",
                 turnId: "turn-retry",
                 prompt: "retry",
@@ -565,7 +568,7 @@ test(
                 yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "fixture")
                 const backend = yield* ExecutionBackend.Service
                 const fiber = yield* Effect.forkScoped(
-                  backend.start({ threadId: "thread-steer", turnId: "turn-steer", prompt: "start", startedAt: 1 }),
+                  start(backend, { threadId: "thread-steer", turnId: "turn-steer", prompt: "start", startedAt: 1 }),
                 )
                 yield* fixture.awaitRequests(1)
                 yield* backend.steer("turn-steer", "focus on the fixture", 2)
@@ -613,6 +616,7 @@ test(
               workspace: directory,
               registration: fixture.registration,
               selection: fixture.selection,
+              modelVariantPolicy: "fixed-selection" as const,
               compaction: { contextWindow: 100, reserveTokens: 1, keepRecentTokens: 10 },
             }
             const input = {
@@ -626,7 +630,7 @@ test(
             const completed = yield* run(
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
-                return yield* backend.start(input)
+                return yield* start(backend, input)
               }),
             )
             const database = new Database(filename, { readonly: true })
@@ -641,7 +645,7 @@ test(
             const reopened = yield* run(
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
-                const duplicate = yield* backend.start(input)
+                const duplicate = yield* start(backend, input)
                 return { duplicate, replay: yield* backend.replay(input.turnId) }
               }),
             )
@@ -685,7 +689,7 @@ test(
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
                 const fiber = yield* Effect.forkScoped(
-                  backend.start({ threadId: "thread-a", turnId: "turn-cancel", prompt: "wait", startedAt: 1 }),
+                  start(backend, { threadId: "thread-a", turnId: "turn-cancel", prompt: "wait", startedAt: 1 }),
                 )
                 yield* fixture.awaitRequests(1)
                 const accepted = yield* backend.cancel("turn-cancel", 2)
@@ -724,6 +728,7 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
                 workspace: directory,
                 registration: fixture.registration,
                 selection: fixture.selection,
+                modelVariantPolicy: "fixed-selection" as const,
                 permissionPolicy: { rules: [{ pattern: "read_file", level: "ask" as const }] },
               }
               const useBackend = <A, E>(effect: Effect.Effect<A, E, ExecutionBackend.Service>) =>
@@ -737,7 +742,7 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
               const waiting = yield* useBackend(
                 Effect.gen(function* () {
                   const backend = yield* ExecutionBackend.Service
-                  const started = yield* backend.start(input)
+                  const started = yield* start(backend, input)
                   const inspection = yield* backend.inspect(input.turnId)
                   return { started, waits: inspection?.waits ?? [] }
                 }),
@@ -749,8 +754,8 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
                 Effect.gen(function* () {
                   const backend = yield* ExecutionBackend.Service
                   yield* backend.resolvePermission(waitId, answer, 2, "test decision")
-                  const resumed = yield* backend.start(input)
-                  const duplicate = yield* backend.start(input)
+                  const resumed = yield* start(backend, input)
+                  const duplicate = yield* start(backend, input)
                   const replay = yield* backend.replay(input.turnId)
                   return { resumed, duplicate, replay, approvals: yield* backend.listApprovals(input.turnId) }
                 }),
@@ -782,17 +787,25 @@ test(
         const program = withBackend([], (_fixture) =>
           Effect.gen(function* () {
             const backend = yield* ExecutionBackend.Service
-            const promoted: Array<string> = []
-            yield* backend.registerTurnPromoter!((threadId) =>
+            const promoted: Array<readonly [string, number]> = []
+            yield* backend.registerTurnPromoter!((threadId, generation) =>
               Effect.sync(() => {
-                promoted.push(threadId)
+                promoted.push([threadId, generation])
                 return 1
               }),
             )
-            yield* backend.ensureThreadHost!("thread-host-native", 1)
-            yield* backend.ensureThreadHost!("thread-host-native", 2)
-            yield* backend.notifyThreadHost!("thread-host-native", "turn-native-1", 3)
-            yield* backend.notifyThreadHost!("thread-host-native", "turn-native-1", 4)
+            yield* backend.wakeThreadHost!({
+              threadId: "thread-host-native",
+              generation: 1,
+              queueRevision: 1,
+              now: 3,
+            })
+            yield* backend.wakeThreadHost!({
+              threadId: "thread-host-native",
+              generation: 1,
+              queueRevision: 1,
+              now: 4,
+            })
             yield* Effect.suspend(() =>
               promoted.length > 0
                 ? Effect.void
@@ -802,7 +815,7 @@ test(
           }),
         )
         const promoted = yield* program
-        expect(promoted).toEqual(["thread-host-native"])
+        expect(promoted).toEqual([["thread-host-native", 1]])
       }),
     ),
   60_000,

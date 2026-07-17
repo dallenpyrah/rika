@@ -27,6 +27,7 @@ const turn = (id: string, threadId: string, prompt: string): Turn.Turn => ({
   id: Turn.TurnId.make(id),
   threadId: Thread.ThreadId.make(threadId),
   prompt,
+  executionRoute: Turn.testExecutionRoute(),
   status: "completed",
   createdAt: 1,
   updatedAt: 2,

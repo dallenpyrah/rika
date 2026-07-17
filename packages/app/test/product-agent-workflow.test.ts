@@ -3,6 +3,7 @@ import * as ExecutionBackend from "@rika/runtime/contract"
 import { Effect, Layer } from "effect"
 import { ProductAgent, Workflow } from "../src"
 import { provideLayer } from "./layer"
+import { executionRoute } from "./current-state"
 
 const failure = ExecutionBackend.BackendError.make({ message: "backend failed" })
 const fanOut = (id: string, state: ExecutionBackend.FanOutInspection["state"]): ExecutionBackend.FanOutInspection => ({
@@ -68,6 +69,7 @@ describe("ProductAgent and Workflow", () => {
       const input = {
         fanOutId: "fan",
         parentTurnId: "turn",
+        executionRoute: executionRoute(),
         children: [],
         maxConcurrency: 2,
         join: "all" as const,
@@ -115,6 +117,7 @@ describe("ProductAgent and Workflow", () => {
           agents.fanOut({
             fanOutId: "f",
             parentTurnId: "p",
+            executionRoute: executionRoute(),
             children: [],
             maxConcurrency: 1,
             join: "all",

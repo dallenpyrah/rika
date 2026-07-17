@@ -223,22 +223,32 @@ const program = Effect.scoped(
             () => fileSystem.remove(resolutionPackage, { recursive: true, force: true }).pipe(Effect.ignore),
           )
         }
-        yield* run(
-          "bun",
-          [
-            "build",
-            "--compile",
-            `--target=${target.bun}`,
-            ...platformPackages
-              .filter((packageName) => packageName !== target.opentui)
-              .flatMap((packageName) => ["--external", packageName]),
-            "--outfile",
-            path.join(stage, "bin", "rika"),
-            path.join(root, "apps/rika/src/main.ts"),
-          ],
-          `build ${name}`,
+        const compile = (entry: string, output: string) =>
+          run(
+            "bun",
+            [
+              "build",
+              "--compile",
+              `--target=${target.bun}`,
+              ...platformPackages
+                .filter((packageName) => packageName !== target.opentui)
+                .flatMap((packageName) => ["--external", packageName]),
+              "--outfile",
+              path.join(stage, "bin", output),
+              path.join(root, "apps/rika/src", entry),
+            ],
+            `build ${name} ${output}`,
+          )
+        yield* compile("client-main.ts", "rika")
+        yield* compile("main.ts", ".rika-runtime")
+        yield* Effect.forEach(
+          ["rika", ".rika-runtime"],
+          (executable) =>
+            fileSystem
+              .chmod(path.join(stage, "bin", executable), 0o755)
+              .pipe(mapFailure(`make ${executable} executable`)),
+          { discard: true },
         )
-        yield* fileSystem.chmod(path.join(stage, "bin", "rika"), 0o755).pipe(mapFailure("make binary executable"))
         const packages = [
           { name: target.opentui, source: packageSource },
           { name: target.fff, source: fffSource },

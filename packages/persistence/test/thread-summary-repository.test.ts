@@ -19,6 +19,11 @@ const turnId = Turn.TurnId.make("turn-a")
 const repositories = Layer.merge(ThreadRepository.memoryLayer(), TurnRepository.memoryLayer())
 const layer = Layer.merge(repositories, ThreadSummaryRepository.memoryLayer.pipe(Layer.provide(repositories)))
 
+const create = (
+  repository: TurnRepository.Interface,
+  input: Omit<TurnRepository.CreateInput, "executionRoute" | "queueCapacity">,
+) => repository.createForSubmission({ ...input, executionRoute: Turn.testExecutionRoute(), queueCapacity: 128 })
+
 describe("memory thread summaries", () => {
   it.effect("orders recent activity and derives status, unread state, and edit totals", () =>
     Effect.gen(function* () {
@@ -26,7 +31,7 @@ describe("memory thread summaries", () => {
       const turns = yield* TurnRepository.Service
       const summaries = yield* ThreadSummaryRepository.Service
       yield* threads.create({ id: threadId, workspace: "/work", title: "First", now: 1 })
-      const turn = yield* turns.createForSubmission({ id: turnId, threadId, prompt: "edit", now: 2 })
+      const turn = yield* create(turns, { id: turnId, threadId, prompt: "edit", now: 2 })
       yield* summaries.ensureTurn(turn.id, turn.threadId, 2)
       expect(yield* summaries.list()).toMatchObject([
         { id: threadId, status: "running", unread: true, editTotals: { added: 0, modified: 0, removed: 0 } },
@@ -62,7 +67,7 @@ describe("memory thread summaries", () => {
       const turns = yield* TurnRepository.Service
       const summaries = yield* ThreadSummaryRepository.Service
       yield* threads.create({ id: threadId, workspace: "/work", title: "First", now: 1 })
-      const turn = yield* turns.createForSubmission({ id: turnId, threadId, prompt: "edit", now: 2 })
+      const turn = yield* create(turns, { id: turnId, threadId, prompt: "edit", now: 2 })
       expect((yield* summaries.list())[0]?.editTotals).toBeUndefined()
       expect(yield* summaries.listRepairCandidates()).toMatchObject([{ turnId, threadId }])
       yield* summaries.ensureTurn(turn.id, turn.threadId, 2)

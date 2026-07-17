@@ -1,6 +1,6 @@
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient"
 import * as SqliteMigrator from "@effect/sql-sqlite-bun/SqliteMigrator"
-import { Effect, FileSystem, Layer, Path } from "effect"
+import { Cause, Effect, Exit, FileSystem, Layer, Path, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 
 const baseline = Effect.gen(function* () {
@@ -94,11 +94,50 @@ const reviewFanOutOwners = Effect.gen(function* () {
 
 const transcriptProjection = Effect.gen(function* () {
   const sql = yield* SqlClient
+  yield* sql`CREATE TABLE rika_transcript_entries (
+    turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    events_json TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL DEFAULT 1,
+    projection_version INTEGER NOT NULL DEFAULT 1,
+    oldest_cursor TEXT,
+    checkpoint_cursor TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`
+  yield* sql`CREATE INDEX rika_transcript_page ON rika_transcript_entries (thread_id, created_at DESC, turn_id DESC)`
+})
+
+const threadSummaries = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`CREATE TABLE rika_thread_turn_activity (
+    turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
+    projected_cursor TEXT,
+    complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)),
+    added INTEGER NOT NULL DEFAULT 0 CHECK (added >= 0),
+    modified INTEGER NOT NULL DEFAULT 0 CHECK (modified >= 0),
+    removed INTEGER NOT NULL DEFAULT 0 CHECK (removed >= 0),
+    last_event_at INTEGER,
+    updated_at INTEGER NOT NULL
+  )`
+  yield* sql`CREATE INDEX rika_thread_turn_activity_summary ON rika_thread_turn_activity (thread_id, last_event_at DESC)`
+  yield* sql`CREATE TABLE rika_thread_read_state (
+    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
+    last_read_at INTEGER NOT NULL
+  )`
+})
+
+const semanticTranscriptProjection = Effect.gen(function* () {
+  const sql = yield* SqlClient
   yield* sql`CREATE TABLE rika_transcript_checkpoints (
     turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
     thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    model_phase INTEGER NOT NULL DEFAULT -1,
+    drafts_json TEXT NOT NULL DEFAULT '[]',
     revision INTEGER NOT NULL DEFAULT -1,
+    projection_version INTEGER NOT NULL DEFAULT 2,
     oldest_cursor TEXT,
     checkpoint_cursor TEXT,
     cost_usd REAL,
@@ -123,25 +162,73 @@ const transcriptProjection = Effect.gen(function* () {
   )`
 })
 
-const threadSummaries = Effect.gen(function* () {
-  const sql = yield* SqlClient
-  yield* sql`CREATE TABLE rika_thread_turn_activity (
-    turn_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_turns(id) ON DELETE CASCADE,
-    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    projected_cursor TEXT,
-    complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)),
-    added INTEGER NOT NULL DEFAULT 0 CHECK (added >= 0),
-    modified INTEGER NOT NULL DEFAULT 0 CHECK (modified >= 0),
-    removed INTEGER NOT NULL DEFAULT 0 CHECK (removed >= 0),
-    last_event_at INTEGER,
-    updated_at INTEGER NOT NULL
-  )`
-  yield* sql`CREATE INDEX rika_thread_turn_activity_summary ON rika_thread_turn_activity (thread_id, last_event_at DESC)`
-  yield* sql`CREATE TABLE rika_thread_read_state (
-    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
-    last_read_at INTEGER NOT NULL
-  )`
+const legacyExecutionRoute = JSON.stringify({
+  version: 1,
+  mode: "test",
+  main: {
+    role: "main",
+    alias: "legacy-unavailable",
+    provider: "legacy-unavailable",
+    model: "legacy-unavailable",
+    registrationKey: "legacy-unavailable",
+    gatewayProtocol: "test",
+    gatewayBaseUrl: "test://legacy-unavailable",
+    gatewayAuth: "none",
+    effort: "medium",
+    fast: false,
+    requestVariant: "legacy-unavailable",
+    compaction: { contextWindow: 1, reserveTokens: 0, keepRecentTokens: 0 },
+  },
+  oracle: {
+    role: "oracle",
+    alias: "legacy-unavailable",
+    provider: "legacy-unavailable",
+    model: "legacy-unavailable",
+    registrationKey: "legacy-unavailable",
+    gatewayProtocol: "test",
+    gatewayBaseUrl: "test://legacy-unavailable",
+    gatewayAuth: "none",
+    effort: "medium",
+    fast: false,
+    requestVariant: "legacy-unavailable",
+    compaction: { contextWindow: 1, reserveTokens: 0, keepRecentTokens: 0 },
+  },
 })
+
+const queueStateAndCurrentTranscripts = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`UPDATE rika_turns SET execution_route_json = ${legacyExecutionRoute} WHERE execution_route_json IS NULL`
+  yield* sql`ALTER TABLE rika_transcript_checkpoints ADD COLUMN model_phase INTEGER NOT NULL DEFAULT -1`
+  yield* sql`CREATE INDEX rika_turns_queue ON rika_turns (thread_id, status, created_at ASC, id ASC)`
+  yield* sql`CREATE TABLE rika_thread_queue_state (
+    thread_id TEXT NOT NULL REFERENCES rika_threads(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    queued_count INTEGER NOT NULL DEFAULT 0 CHECK (queued_count >= 0),
+    wake_generation INTEGER NOT NULL DEFAULT 0 CHECK (wake_generation >= 0),
+    wake_pending INTEGER NOT NULL DEFAULT 0 CHECK (wake_pending IN (0, 1)),
+    PRIMARY KEY (thread_id)
+  )`
+  yield* sql`INSERT INTO rika_thread_queue_state (thread_id, revision, queued_count)
+    SELECT thread_id, COUNT(*), COUNT(*)
+    FROM rika_turns
+    WHERE status = 'queued'
+    GROUP BY thread_id`
+})
+
+const migrationNames = [
+  "product_baseline",
+  "turns",
+  "queued_turn_status",
+  "execution_extension_pins",
+  "turn_prompt_parts",
+  "drop_thread_session_id",
+  "execution_route_pins",
+  "review_fan_out_owners",
+  "transcript_projection",
+  "thread_summaries",
+  "semantic_transcript_projection",
+  "queue_state_and_current_transcripts",
+] as const
 
 const migrations = SqliteMigrator.fromRecord({
   "1_product_baseline": baseline,
@@ -154,8 +241,145 @@ const migrations = SqliteMigrator.fromRecord({
   "8_review_fan_out_owners": reviewFanOutOwners,
   "9_transcript_projection": transcriptProjection,
   "10_thread_summaries": threadSummaries,
+  "11_semantic_transcript_projection": semanticTranscriptProjection,
+  "12_queue_state_and_current_transcripts": queueStateAndCurrentTranscripts,
 })
-const migrate = SqliteMigrator.layer({ loader: migrations, table: "rika_migrations" })
+
+const migrationTableObjects = ["table:rika_migrations"]
+const baselineObjects = [
+  ...migrationTableObjects,
+  "table:rika_workspaces",
+  "table:rika_threads",
+  "index:rika_threads_listing",
+]
+const turnObjects = [...baselineObjects, "table:rika_turns", "index:rika_turns_thread"]
+const transcriptObjects = [...turnObjects, "table:rika_transcript_entries", "index:rika_transcript_page"]
+const summaryObjects = [
+  ...transcriptObjects,
+  "table:rika_thread_turn_activity",
+  "index:rika_thread_turn_activity_summary",
+  "table:rika_thread_read_state",
+]
+const semanticTranscriptObjects = [
+  ...summaryObjects,
+  "table:rika_transcript_checkpoints",
+  "table:rika_transcript_units",
+  "index:rika_transcript_units_page",
+  "index:rika_transcript_units_turn",
+]
+const currentObjects = [...semanticTranscriptObjects, "index:rika_turns_queue", "table:rika_thread_queue_state"]
+const schemaObjectsByMigration: ReadonlyArray<ReadonlyArray<string>> = [
+  migrationTableObjects,
+  baselineObjects,
+  turnObjects,
+  turnObjects,
+  turnObjects,
+  turnObjects,
+  turnObjects,
+  turnObjects,
+  turnObjects,
+  transcriptObjects,
+  summaryObjects,
+  semanticTranscriptObjects,
+  currentObjects,
+]
+
+const SchemaObject = Schema.Struct({ type: Schema.String, name: Schema.String })
+const MigrationRow = Schema.Struct({ migration_id: Schema.Finite, name: Schema.String })
+
+export class ProductDatabaseError extends Schema.TaggedErrorClass<ProductDatabaseError>()("ProductDatabaseError", {
+  message: Schema.String,
+}) {}
+
+const incompatible = "Rika product database does not match the current schema. Use a fresh Rika data root."
+const fail = (message: string) => ProductDatabaseError.make({ message })
+const inspectDatabase = Effect.fn("ProductDatabase.inspect")(function* () {
+  const sql = yield* SqlClient
+  const objects = yield* sql`SELECT type, name
+    FROM sqlite_schema
+    WHERE type IN ('table', 'index', 'trigger', 'view') AND name NOT LIKE 'sqlite_%'
+    ORDER BY type ASC, name ASC`.pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(SchemaObject))),
+    Effect.mapError((error) => fail(`Could not inspect the Rika product database: ${String(error)}`)),
+  )
+  const hasMigrationTable = objects.some((object) => object.type === "table" && object.name === "rika_migrations")
+  const migrationRows = hasMigrationTable
+    ? yield* sql`SELECT migration_id, name FROM rika_migrations ORDER BY migration_id ASC`.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(MigrationRow))),
+        Effect.mapError((error) => fail(`Could not inspect Rika product database migrations: ${String(error)}`)),
+      )
+    : []
+  return { objects, migrationRows }
+})
+
+const validateKnown = (state: Effect.Success<ReturnType<typeof inspectDatabase>>) =>
+  Effect.gen(function* () {
+    if (state.objects.length === 0) return "fresh" as const
+    for (const [index, row] of state.migrationRows.entries())
+      if (row.migration_id !== index + 1 || row.name !== migrationNames[index]) return yield* fail(incompatible)
+    const expected = schemaObjectsByMigration[state.migrationRows.length]
+    if (expected === undefined) return yield* fail(incompatible)
+    const actual = new Set(state.objects.map((object) => `${object.type}:${object.name}`))
+    if (actual.size !== expected.length || expected.some((key) => !actual.has(key))) return yield* fail(incompatible)
+    return "tracked" as const
+  })
+
+const inspectExisting = (filename: string) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem
+    const walExists = yield* fileSystem
+      .exists(`${filename}-wal`)
+      .pipe(Effect.mapError((error) => fail(`Could not inspect product database journal state: ${String(error)}`)))
+    const outcome = yield* Effect.exit(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const context = yield* Layer.build(
+            SqliteClient.layer({
+              filename: walExists ? filename : `file:${encodeURIComponent(filename)}?immutable=1`,
+              readonly: true,
+              readwrite: false,
+              create: false,
+              disableWAL: true,
+            }),
+          )
+          return yield* inspectDatabase().pipe(Effect.provide(context))
+        }),
+      ),
+    )
+    if (Exit.isFailure(outcome))
+      return yield* fail(
+        `Could not open the Rika product database without changing it: ${Cause.pretty(outcome.cause)}. Use a fresh Rika data root.`,
+      )
+    return outcome.value
+  })
+
+const preflight = Effect.fn("ProductDatabase.preflight")(function* (filename: string) {
+  const fileSystem = yield* FileSystem.FileSystem
+  const exists = yield* fileSystem
+    .exists(filename)
+    .pipe(Effect.mapError((error) => fail(`Could not inspect the Rika product database path: ${String(error)}`)))
+  if (!exists) return "fresh" as const
+  return yield* validateKnown(yield* inspectExisting(filename))
+})
+
+const enableForeignKeys = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`PRAGMA foreign_keys = ON`.pipe(
+    Effect.mapError((error) => fail(`Could not enable Rika product database constraints: ${String(error)}`)),
+  )
+})
+
+const validateCurrent = Effect.gen(function* () {
+  const state = yield* inspectDatabase()
+  yield* validateKnown(state)
+  if (state.migrationRows.length !== migrationNames.length) return yield* fail(incompatible)
+})
+
+const prepare = SqliteMigrator.run({ loader: migrations, table: "rika_migrations" }).pipe(
+  Effect.mapError((error) => fail(`Could not migrate the Rika product database: ${String(error)}`)),
+  Effect.andThen(enableForeignKeys),
+  Effect.andThen(validateCurrent),
+)
 
 const directoryLayer = (filename: string) =>
   Layer.effectDiscard(
@@ -166,6 +390,10 @@ const directoryLayer = (filename: string) =>
     }),
   )
 
-export const clientLayer = (filename: string) =>
-  SqliteClient.layer({ filename }).pipe(Layer.provideMerge(directoryLayer(filename)))
-export const layer = (filename: string) => migrate.pipe(Layer.provideMerge(clientLayer(filename)))
+const currentLayer = (filename: string) =>
+  Layer.effectDiscard(prepare).pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
+
+export const layer = (filename: string) =>
+  Layer.unwrap(preflight(filename).pipe(Effect.as(currentLayer(filename)))).pipe(
+    Layer.provideMerge(directoryLayer(filename)),
+  )

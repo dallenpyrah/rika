@@ -19,6 +19,7 @@ import {
   Context,
   Duration,
   Effect,
+  Fiber,
   Function,
   Layer,
   LayerMap,
@@ -125,7 +126,6 @@ export interface LayerOptions<AdditionalTools extends Record<string, Tool.Any> =
   ) => Layer.Layer<RikaToolRuntime.Service, BackendError, RuntimeRequirements>
   readonly resolveWorkspace?: (executionId: string) => Effect.Effect<string, BackendError>
   readonly toolNeedsApproval?: (name: string) => boolean
-  readonly resolveExecutionRoute?: (turnId: string) => Effect.Effect<ExecutionRoutePin | undefined, BackendError>
 }
 
 export const routedToolRuntimeLayer: {
@@ -306,7 +306,11 @@ const childIdFromExecutionId = (parentTurnId: string, value: unknown) => {
   return id.startsWith(prefix) ? id.slice(prefix.length) : id.replace(/^child:/, "")
 }
 export const turnIdFromExecutionId = (value: string): string | undefined => {
-  if (value.startsWith("execution:")) return value.slice("execution:".length)
+  if (value.startsWith("execution:")) {
+    const id = value.slice("execution:".length)
+    const separator = id.indexOf(":child:")
+    return separator < 0 ? id : id.slice(0, separator)
+  }
   if (!value.startsWith("child:")) return undefined
   const separator = value.indexOf(":", "child:".length)
   if (separator < 0) return undefined
@@ -406,6 +410,21 @@ const statusFromEvents = (events: ReadonlyArray<Event>): Status => {
 
 const isActionableWait = (item: Event) =>
   item.type === "permission.ask.requested" || item.type === "tool.approval.requested"
+
+const traceWithoutResult = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.suspend(() => {
+    let result!: A
+    return effect.pipe(
+      Effect.tap((value) =>
+        Effect.sync(() => {
+          result = value
+        }),
+      ),
+      Effect.asVoid,
+      Effect.withSpan(name),
+      Effect.andThen(Effect.sync(() => result)),
+    )
+  })
 
 const followExecution = (
   client: Client.Interface,
@@ -519,7 +538,6 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
     | "permissionPolicy"
     | "defaultReasoningEffort"
     | "modelVariantPolicy"
-    | "resolveExecutionRoute"
   > & {
     readonly registerModels?: (registrations: ReadonlyArray<ModelRegistry.Registration>) => Effect.Effect<void>
   },
@@ -531,7 +549,6 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
       const registry =
         Option.getOrUndefined(yield* Effect.serviceOption(ThreadHost.Registry)) ?? (yield* ThreadHost.makeRegistry)
       const hostInstances = new Map<string, Entity.Instance>()
-      const executionRoutes = new Map<string, ExecutionRoutePin>()
       const hostReady = yield* Effect.cached(
         Effect.gen(function* () {
           yield* client.registerAgent({
@@ -650,37 +667,23 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
       })
       return Service.of({
         ...(options.registerModels === undefined ? {} : { registerModels: options.registerModels }),
-        ensureThreadHost: Effect.fn("ExecutionBackend.ensureThreadHost")(function* (threadId, createdAt) {
-          yield* hostGate
-            .withPermits(1)(hostInstance(threadId, createdAt))
-            .pipe(
-              Effect.tapCause((cause) =>
-                Effect.logError("thread_host.ensure.failed").pipe(
-                  Effect.annotateLogs({
-                    "rika.thread.id": threadId,
-                    "rika.failure.kind": failureKind(cause),
-                  }),
-                ),
-              ),
-              Effect.mapError(error),
-            )
-        }),
-        notifyThreadHost: Effect.fn("ExecutionBackend.notifyThreadHost")(function* (threadId, turnId, now) {
+        wakeThreadHost: Effect.fn("ExecutionBackend.wakeThreadHost")(function* (wake) {
           yield* hostGate
             .withPermits(1)(
               Effect.gen(function* () {
-                const created = yield* hostInstance(threadId, now)
-                const instance = yield* awaitParkedHost(threadId, created, now)
+                const created = yield* hostInstance(wake.threadId, wake.now)
+                const instance = yield* awaitParkedHost(wake.threadId, created, wake.now)
                 const notification = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)({
-                  kind: "pending-turn",
-                  thread_id: threadId,
-                  ...(turnId === undefined ? {} : { turn_id: turnId }),
+                  kind: "queue-ready",
+                  thread_id: wake.threadId,
+                  wake_generation: wake.generation,
+                  queue_revision: wake.queueRevision,
                 })
                 yield* client.send({
                   from: addressId,
                   to: instance.address_id,
                   content: [Content.text(notification)],
-                  idempotency_key: turnId === undefined ? `rika:nudge:${threadId}:${now}` : `rika:turn:${turnId}`,
+                  idempotency_key: `rika:queue-wake:${wake.threadId}:${wake.generation}`,
                 })
               }),
             )
@@ -688,8 +691,9 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               Effect.tapCause((cause) =>
                 Effect.logError("thread_host.notification.failed").pipe(
                   Effect.annotateLogs({
-                    "rika.thread.id": threadId,
-                    ...(turnId === undefined ? {} : { "rika.turn.id": turnId }),
+                    "rika.thread.id": wake.threadId,
+                    "rika.queue.wake_generation": wake.generation,
+                    "rika.queue.revision": wake.queueRevision,
                     "rika.failure.kind": failureKind(cause),
                   }),
                 ),
@@ -698,32 +702,22 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             )
         }),
         registerTurnPromoter: (promoter) => registry.register(promoter),
-        createFanOut: Effect.fn("ExecutionBackend.createFanOut")(function* (input) {
-          const cachedRoute = executionRoutes.get(input.parentTurnId)
-          const routePin =
-            options.modelVariantPolicy === "fixed-selection"
-              ? undefined
-              : (input.executionRoute ??
-                cachedRoute ??
-                (options.resolveExecutionRoute === undefined
-                  ? undefined
-                  : yield* options.resolveExecutionRoute(input.parentTurnId)))
-          const durableRoute =
-            routePin === undefined
-              ? undefined
-              : yield* Schema.decodeUnknownEffect(Schema.Json)(routePin).pipe(Effect.mapError(error))
-          const summaryModel = routePin?.compactionSummary
-          const routeForProfile = (profile: AgentProfile) => {
-            if (profile === "Oracle") return routePin?.oracle
-            if (routePin?.agents === undefined) return routePin?.main
-            if (profile === "Librarian") return routePin.agents.librarian
-            if (profile === "Painter") return routePin.agents.painter
-            if (profile === "Review") return routePin.agents.review
-            if (profile === "ReadThread") return routePin.agents.readThread
-            return routePin.agents.task
-          }
-          const state = yield* client
-            .createChildFanOut({
+        createFanOut: Effect.fn("ExecutionBackend.createFanOut")((input) =>
+          Effect.gen(function* () {
+            const routePin = input.executionRoute
+            const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(routePin)
+            const summaryModel = routePin?.compactionSummary
+            const routeForProfile = (profile: AgentProfile) => {
+              if (options.modelVariantPolicy === "fixed-selection") return undefined
+              if (profile === "Oracle") return routePin.oracle
+              if (routePin.agents === undefined) return routePin.main
+              if (profile === "Librarian") return routePin.agents.librarian
+              if (profile === "Painter") return routePin.agents.painter
+              if (profile === "Review") return routePin.agents.review
+              if (profile === "ReadThread") return routePin.agents.readThread
+              return routePin.agents.task
+            }
+            const state = yield* client.createChildFanOut({
               fan_out_id: Ids.ChildFanOutId.make(input.fanOutId),
               parent_execution_id: executionId(input.parentTurnId),
               children: input.children.map((child) => {
@@ -753,11 +747,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                     product_profile: profile,
                     steering_enabled: true,
                     ...(input.workspace === undefined ? {} : { rika_workspace: input.workspace }),
-                    ...(durableRoute === undefined
-                      ? {}
-                      : {
-                          rika_execution_route: durableRoute,
-                        }),
+                    rika_execution_route: durableRoute,
                   },
                 }
               }),
@@ -768,9 +758,9 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                   : { _tag: input.join },
               created_at: input.createdAt,
             })
-            .pipe(Effect.mapError(error))
-          return mapFanOut(state)
-        }),
+            return mapFanOut(state)
+          }).pipe(Effect.mapError(error)),
+        ),
         inspectFanOut: Effect.fn("ExecutionBackend.inspectFanOut")(function* (fanOutId) {
           const result = yield* client
             .inspectChildFanOut({ fan_out_id: Ids.ChildFanOutId.make(fanOutId) })
@@ -841,131 +831,161 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             type: "accepted" as const,
           }
         }),
-        start: Effect.fn("ExecutionBackend.start")(function* (input) {
-          return yield* Effect.gen(function* () {
-            const startedAt = yield* Clock.currentTimeMillis
-            const metadata = { steering_enabled: true, multi_agent_enabled: true }
-            const rootCompaction =
-              input.executionRoute === undefined
-                ? compactionPolicy(options.compaction, options.compactionSummarySelection)
-                : pinnedCompactionPolicy(input.executionRoute.main, input.executionRoute.compactionSummary)
-            const selection =
-              input.executionRoute === undefined || options.modelVariantPolicy === "fixed-selection"
-                ? variantSelection(
-                    options.selection,
-                    input.reasoningEffort ?? options.defaultReasoningEffort,
-                    input.fastMode === true,
-                    options.modelVariantPolicy ?? "registration-key",
-                  )
-                : pinnedSelection(input.executionRoute.main)
-            const oracleSelection =
-              input.executionRoute === undefined || options.modelVariantPolicy === "fixed-selection"
-                ? options.oracleSelection
-                : pinnedSelection(input.executionRoute.oracle)
-            const oracleCompaction =
-              input.executionRoute === undefined
-                ? compactionPolicy(options.oracleCompaction ?? options.compaction, options.compactionSummarySelection)
-                : pinnedCompactionPolicy(input.executionRoute.oracle, input.executionRoute.compactionSummary)
-            const agentRoutes = input.executionRoute?.agents
-            const agentModels =
-              agentRoutes === undefined
-                ? {}
-                : {
-                    Librarian: pinnedSelection(agentRoutes.librarian),
-                    Painter: pinnedSelection(agentRoutes.painter),
-                    Review: pinnedSelection(agentRoutes.review),
-                    ReadThread: pinnedSelection(agentRoutes.readThread),
-                    Task: pinnedSelection(agentRoutes.task),
-                  }
-            yield* Effect.logInfo("execution.starting").pipe(
-              Effect.annotateLogs({
-                "rika.model.name": selection.model,
-                "rika.model.provider": selection.provider,
-              }),
-            )
-            const registered = yield* client.registerAgent({
-              id: agentId,
-              address: addressId,
-              agent: Agent.make("rika", { model: selection, toolkit: toolkitFor(options) }),
-              permissions: [...parentPermissions, childRunSpawnPermission],
-              ...(options.permissionPolicy === undefined ? {} : { permission_rules: options.permissionPolicy }),
-              metadata,
-              ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
-              handoff_targets: subagentHandoffTargets,
-              child_run_presets: Object.fromEntries(
-                Object.entries(presets(selection, oracleSelection, agentModels)).map(([name, preset]) => {
-                  const agentRoute =
-                    name === "Librarian"
-                      ? agentRoutes?.librarian
-                      : name === "Painter"
-                        ? agentRoutes?.painter
-                        : name === "Review"
-                          ? agentRoutes?.review
-                          : name === "ReadThread"
-                            ? agentRoutes?.readThread
-                            : name === "Task"
-                              ? agentRoutes?.task
-                              : undefined
-                  const policy =
-                    name === "Oracle"
-                      ? oracleCompaction
-                      : agentRoute === undefined
-                        ? rootCompaction
-                        : pinnedCompactionPolicy(agentRoute, input.executionRoute?.compactionSummary)
-                  return [name, { ...preset, ...(policy === undefined ? {} : { compaction_policy: policy }) }]
+        start: Effect.fn(
+          function* (input) {
+            return yield* Effect.gen(function* () {
+              const startedAt = yield* Clock.currentTimeMillis
+              const metadata = { steering_enabled: true, multi_agent_enabled: true }
+              const rootCompaction =
+                options.modelVariantPolicy === "fixed-selection"
+                  ? compactionPolicy(options.compaction, options.compactionSummarySelection)
+                  : pinnedCompactionPolicy(input.executionRoute.main, input.executionRoute.compactionSummary)
+              const selection =
+                options.modelVariantPolicy === "fixed-selection"
+                  ? variantSelection(
+                      options.selection,
+                      input.reasoningEffort ?? options.defaultReasoningEffort,
+                      input.fastMode === true,
+                      options.modelVariantPolicy ?? "registration-key",
+                    )
+                  : pinnedSelection(input.executionRoute.main)
+              const oracleSelection =
+                options.modelVariantPolicy === "fixed-selection"
+                  ? options.oracleSelection
+                  : pinnedSelection(input.executionRoute.oracle)
+              const oracleCompaction =
+                options.modelVariantPolicy === "fixed-selection"
+                  ? compactionPolicy(options.oracleCompaction ?? options.compaction, options.compactionSummarySelection)
+                  : pinnedCompactionPolicy(input.executionRoute.oracle, input.executionRoute.compactionSummary)
+              const agentRoutes =
+                options.modelVariantPolicy === "fixed-selection" ? undefined : input.executionRoute.agents
+              const agentModels =
+                agentRoutes === undefined
+                  ? {}
+                  : {
+                      Librarian: pinnedSelection(agentRoutes.librarian),
+                      Painter: pinnedSelection(agentRoutes.painter),
+                      Review: pinnedSelection(agentRoutes.review),
+                      ReadThread: pinnedSelection(agentRoutes.readThread),
+                      Task: pinnedSelection(agentRoutes.task),
+                    }
+              yield* Effect.logInfo("execution.starting").pipe(
+                Effect.annotateLogs({
+                  "rika.model.name": selection.model,
+                  "rika.model.provider": selection.provider,
                 }),
-              ),
-            })
-            if (input.executionRoute !== undefined) executionRoutes.set(input.turnId, input.executionRoute)
-            const id = executionId(input.turnId)
-            yield* client
-              .startExecutionByAgentDefinition({
-                root_address_id: addressId,
-                session_id: sessionId(input.threadId),
-                agent_id: agentId,
-                agent_revision: registered.record.current_revision,
-                input: executionInput(input),
-                idempotency_key: input.turnId,
-                execution_id: id,
-                started_at: input.startedAt,
-                completed_at: input.startedAt,
+              )
+              const registered = yield* client.registerAgent({
+                id: agentId,
+                address: addressId,
+                agent: Agent.make("rika", { model: selection, toolkit: toolkitFor(options) }),
+                permissions: [...parentPermissions, childRunSpawnPermission],
+                ...(options.permissionPolicy === undefined ? {} : { permission_rules: options.permissionPolicy }),
+                metadata,
+                ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
+                handoff_targets: subagentHandoffTargets,
+                child_run_presets: Object.fromEntries(
+                  Object.entries(presets(selection, oracleSelection, agentModels)).map(([name, preset]) => {
+                    const agentRoute =
+                      name === "Librarian"
+                        ? agentRoutes?.librarian
+                        : name === "Painter"
+                          ? agentRoutes?.painter
+                          : name === "Review"
+                            ? agentRoutes?.review
+                            : name === "ReadThread"
+                              ? agentRoutes?.readThread
+                              : name === "Task"
+                                ? agentRoutes?.task
+                                : undefined
+                    const policy =
+                      name === "Oracle"
+                        ? oracleCompaction
+                        : agentRoute === undefined
+                          ? rootCompaction
+                          : pinnedCompactionPolicy(agentRoute, input.executionRoute.compactionSummary)
+                    return [name, { ...preset, ...(policy === undefined ? {} : { compaction_policy: policy }) }]
+                  }),
+                ),
               })
-              .pipe(
-                Effect.asVoid,
-                Effect.catchTag("ClientError", (startError) =>
-                  client.getExecution(id).pipe(
-                    Effect.matchEffect({
-                      onFailure: () => Effect.fail(startError),
-                      onSuccess: (existing) => (existing === undefined ? Effect.fail(startError) : Effect.void),
-                    }),
+              const id = executionId(input.turnId)
+              const start = client
+                .startExecutionByAgentDefinition({
+                  root_address_id: addressId,
+                  session_id: sessionId(input.threadId),
+                  agent_id: agentId,
+                  agent_revision: registered.record.current_revision,
+                  input: executionInput(input),
+                  idempotency_key: input.turnId,
+                  execution_id: id,
+                  started_at: input.startedAt,
+                  completed_at: input.startedAt,
+                })
+                .pipe(
+                  Effect.asVoid,
+                  Effect.catchTag("ClientError", (startError) =>
+                    client.getExecution(id).pipe(
+                      Effect.matchEffect({
+                        onFailure: () => Effect.fail(startError),
+                        onSuccess: (existing) => (existing === undefined ? Effect.fail(startError) : Effect.void),
+                      }),
+                    ),
+                  ),
+                )
+              const starter = yield* Effect.forkChild(start)
+              yield* Effect.yieldNow
+              const awaitAccepted: Effect.Effect<void, Client.ClientError> = Effect.suspend(() =>
+                client
+                  .getExecution(id)
+                  .pipe(
+                    Effect.flatMap((existing) =>
+                      existing === undefined
+                        ? Effect.sleep("25 millis").pipe(Effect.andThen(awaitAccepted))
+                        : Effect.void,
+                    ),
+                  ),
+              )
+              const started = starter.pollUnsafe()
+              if (started !== undefined) yield* Fiber.join(starter)
+              else
+                yield* Effect.raceFirst(awaitAccepted, Fiber.join(starter)).pipe(
+                  Effect.timeoutOrElse({
+                    duration: "15 seconds",
+                    orElse: () => Effect.fail(Client.ClientError.make({ message: "Execution acceptance timed out" })),
+                  }),
+                )
+              yield* Clock.currentTimeMillis.pipe(
+                Effect.flatMap((acceptedAt) =>
+                  Effect.logInfo("execution.accepted").pipe(
+                    Effect.annotateLogs("rika.duration.ms", acceptedAt - startedAt),
                   ),
                 ),
               )
-            yield* Clock.currentTimeMillis.pipe(
-              Effect.flatMap((acceptedAt) =>
-                Effect.logInfo("execution.accepted").pipe(
-                  Effect.annotateLogs("rika.duration.ms", acceptedAt - startedAt),
+              return yield* followExecution(client, input.turnId, undefined, input.onEvent).pipe(
+                Effect.ensuring(Fiber.interrupt(starter)),
+              )
+            }).pipe(
+              Effect.tapCause((cause) =>
+                Effect.logError("execution.start.failed").pipe(
+                  Effect.annotateLogs("rika.failure.kind", failureKind(cause)),
                 ),
               ),
+              Effect.annotateLogs({
+                "rika.execution.id": String(executionId(input.turnId)),
+                "rika.thread.id": String(input.threadId),
+                "rika.turn.id": String(input.turnId),
+              }),
+              Effect.mapError(error),
             )
-            return yield* followExecution(client, input.turnId, undefined, input.onEvent)
-          }).pipe(
-            Effect.tapCause((cause) =>
-              Effect.logError("execution.start.failed").pipe(
-                Effect.annotateLogs("rika.failure.kind", failureKind(cause)),
-              ),
-            ),
-            Effect.annotateLogs({
-              "rika.execution.id": String(executionId(input.turnId)),
-              "rika.thread.id": String(input.threadId),
-              "rika.turn.id": String(input.turnId),
-            }),
-            Effect.mapError(error),
-          )
-        }),
-        follow: Effect.fn("ExecutionBackend.follow")(function* (turnId, afterCursor, onEvent) {
-          return yield* followExecution(client, turnId, afterCursor, onEvent).pipe(Effect.mapError(error))
-        }),
+          },
+          (effect) => traceWithoutResult("ExecutionBackend.start", effect),
+        ),
+        follow: Effect.fn(
+          function* (turnId, afterCursor, onEvent) {
+            return yield* followExecution(client, turnId, afterCursor, onEvent).pipe(Effect.mapError(error))
+          },
+          (effect) => traceWithoutResult("ExecutionBackend.follow", effect),
+        ),
         replay: Effect.fn("ExecutionBackend.replay")(function* (turnId, afterCursor) {
           return yield* client
             .replayExecution({

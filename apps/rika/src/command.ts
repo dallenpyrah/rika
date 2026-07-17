@@ -1,4 +1,4 @@
-import * as Operation from "@rika/app/operation"
+import * as Operation from "@rika/app/operation-contract"
 import { Console, Effect, Option, Schema, Stdio, Stream } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import { command as ConfigCommand } from "./commands/config"

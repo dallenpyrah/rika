@@ -5,14 +5,17 @@ export type ToolGroupKind = "explore" | "edit" | "shell" | "other"
 
 export type ToolKind = "read" | "search" | "edit" | "shell" | "other"
 
+export type ToolTranscriptUnit = {
+  readonly kind: "tool"
+  readonly group: ToolGroupKind
+  readonly blocks: ReadonlyArray<number>
+  readonly diffs: ReadonlyArray<number>
+  readonly children?: ReadonlyArray<ToolTranscriptUnit>
+}
+
 export type TranscriptUnit =
   | { readonly kind: "entry"; readonly entry: number }
-  | {
-      readonly kind: "tool"
-      readonly group: ToolGroupKind
-      readonly blocks: ReadonlyArray<number>
-      readonly diffs: ReadonlyArray<number>
-    }
+  | ToolTranscriptUnit
   | { readonly kind: "reasoning"; readonly block: number }
   | { readonly kind: "diff"; readonly block: number }
   | { readonly kind: "childAgent"; readonly block: number }
@@ -133,6 +136,26 @@ export const orderedTranscriptItems = (model: Model): ReadonlyArray<TranscriptIt
 
 export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => {
   const units: Array<TranscriptUnit> = []
+  const childItems = new Map<string, Array<Extract<TranscriptItem, { readonly _tag: "Block" }>>>()
+  for (const item of orderedTranscriptItems(model)) {
+    if (item._tag !== "Block" || item.parentId === undefined) continue
+    childItems.set(item.parentId, [...(childItems.get(item.parentId) ?? []), item])
+  }
+  const nestedTools = (parentId: string): ReadonlyArray<ToolTranscriptUnit> =>
+    (childItems.get(parentId) ?? []).flatMap((item) => {
+      const block = model.blocks[item.index] as TranscriptBlock
+      if (block._tag !== "ToolCall") return []
+      const children = nestedTools(block.id)
+      return [
+        {
+          kind: "tool" as const,
+          group: groupOf(toolKind(block.name, block.presentation.family)),
+          blocks: [item.index],
+          diffs: [],
+          ...(children.length === 0 ? {} : { children }),
+        },
+      ]
+    })
   let toolRun: Array<{ readonly index: number; readonly kind: ToolKind }> = []
   let pendingEditDiffs: Array<number> = []
   const flush = () => {
@@ -158,6 +181,7 @@ export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => 
     toolRun = []
   }
   for (const item of orderedTranscriptItems(model)) {
+    if (item._tag === "Block" && item.parentId !== undefined) continue
     if (item._tag === "Entry") {
       flush()
       units.push({ kind: "entry", entry: item.index })
@@ -165,6 +189,18 @@ export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => 
     }
     const block = model.blocks[item.index] as TranscriptBlock
     if (block._tag === "ToolCall") {
+      const children = nestedTools(block.id)
+      if (children.length > 0) {
+        flush()
+        units.push({
+          kind: "tool",
+          group: groupOf(toolKind(block.name, block.presentation.family)),
+          blocks: [item.index],
+          diffs: [],
+          children,
+        })
+        continue
+      }
       toolRun.push({ index: item.index, kind: toolKind(block.name, block.presentation.family) })
       continue
     }
@@ -191,23 +227,28 @@ export const expandableUnits = (model: Model): ReadonlyArray<TranscriptUnit> =>
 
 export const expandableRowIds = (model: Model): ReadonlyArray<TranscriptUnitId> => {
   const ids: Array<TranscriptUnitId> = []
-  for (const unit of expandableUnits(model)) {
+  const appendTool = (unit: ToolTranscriptUnit) => {
     const id = transcriptUnitId(model, unit)
     ids.push(id)
-    if (unit.kind !== "tool" || !model.expandedRowKeys.includes(id)) continue
+    if (!model.expandedRowKeys.includes(id)) return
+    for (const child of unit.children ?? []) appendTool(child)
     if (unit.group === "edit") {
       const files = unit.blocks.flatMap((index) => {
         const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
         return block.files
       })
       if (files.length > 1) for (const file of files) ids.push(`file:${file.key}`)
-      continue
+      return
     }
     if (unit.group === "shell" && unit.blocks.length > 1)
       for (const index of unit.blocks) {
         const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
         if (block.output !== undefined && block.output.length > 0) ids.push(`tool-child:${block.id}`)
       }
+  }
+  for (const unit of expandableUnits(model)) {
+    if (unit.kind === "tool") appendTool(unit)
+    else ids.push(transcriptUnitId(model, unit))
   }
   return ids
 }

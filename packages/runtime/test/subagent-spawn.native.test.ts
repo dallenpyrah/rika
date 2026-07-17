@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite"
 import { Effect, FileSystem, Layer, Schedule } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
+import { start } from "./current-execution-route"
 
 const terminal = (status: string) => status === "completed" || status === "failed" || status === "cancelled"
 
@@ -29,6 +30,7 @@ test("model spawns a durable Oracle child through the handoff tool and resumes w
         workspace: directory,
         registration: fixture.registration,
         selection: fixture.selection,
+        modelVariantPolicy: "fixed-selection",
         toolRuntimeLayer: runtimeLayer,
         toolNeedsApproval: () => false,
         permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
@@ -41,7 +43,7 @@ test("model spawns a durable Oracle child through the handoff tool and resumes w
       const backendContext = yield* Layer.build(backendLayer)
       return yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
-        const started = yield* backend.start({
+        const started = yield* start(backend, {
           threadId: "thread-subagent",
           turnId: "turn-subagent",
           prompt: "Ask the Oracle to investigate the boundary.",
@@ -114,6 +116,90 @@ test("model spawns a durable Oracle child through the handoff tool and resumes w
               .map((event) => event.text)
               .join(""),
           ).toBe("Parent synthesized the child answer.")
+        }),
+      ),
+    ),
+  )
+}, 60_000)
+
+test("handoff children resolve real workspace tools through their parent Rika turn", () => {
+  const program = Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-subagent-workspace-" })
+      const workspace = `${directory}/workspace`
+      yield* fileSystem.makeDirectory(workspace)
+      yield* fileSystem.writeFileString(`${workspace}/AGENTS.md`, "child workspace marker")
+      const fixture = yield* TestModel.make([
+        TestModel.toolCall("transfer_to_review", {}, { id: "call-review" }),
+        TestModel.turn([TestModel.toolCall("read_file", { path: "AGENTS.md" }, { id: "call-child-read" })]),
+        TestModel.object({ summary: "Workspace inspected.", findings: [] }),
+        TestModel.text("Parent received the review."),
+      ])
+      const workspaces = new Map([["turn-review", workspace]])
+      const backendLayer = RelayExecutionBackend.layer({
+        filename: `${directory}/relay.db`,
+        workspace: directory,
+        registration: fixture.registration,
+        selection: fixture.selection,
+        modelVariantPolicy: "fixed-selection",
+        toolRuntimeLayerForWorkspace: Runtime.layer,
+        resolveWorkspace: (executionId) => {
+          const turnId = RelayExecutionBackend.turnIdFromExecutionId(executionId)
+          const resolved = turnId === undefined ? undefined : workspaces.get(turnId)
+          return resolved === undefined
+            ? Effect.fail(
+                ExecutionBackend.BackendError.make({
+                  message: turnId === undefined ? `Unknown execution ${executionId}` : `Turn ${turnId} does not exist`,
+                }),
+              )
+            : Effect.succeed(resolved)
+        },
+        toolNeedsApproval: () => false,
+        permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
+      })
+      const backendContext = yield* Layer.build(backendLayer)
+      return yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        const started = yield* start(backend, {
+          threadId: "thread-review",
+          turnId: "turn-review",
+          prompt: "Ask Review to inspect AGENTS.md.",
+          startedAt: 1,
+        })
+        const settled = yield* backend.replay("turn-review").pipe(
+          Effect.repeat({
+            while: (result) => !terminal(result.status),
+            schedule: Schedule.both(Schedule.spaced("20 millis"), Schedule.recurs(500)),
+          }),
+        )
+        const database = yield* Effect.acquireRelease(
+          Effect.sync(() => new Database(`${directory}/relay.db`, { readonly: true })),
+          (connection) => Effect.sync(() => connection.close()),
+        )
+        const toolResult = database
+          .query<
+            { readonly output_json: string; readonly error: string | null },
+            [string]
+          >("select output_json, error from relay_tool_results where tool_call_id = ?")
+          .get("call-child-read")
+        return { started, settled, toolResult }
+      }).pipe(Effect.provide(backendContext))
+    }),
+  )
+  return Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const bunContext = yield* Layer.build(BunServices.layer)
+        return yield* program.pipe(Effect.provide(bunContext))
+      }),
+    ).pipe(
+      Effect.tap(({ started, settled, toolResult }) =>
+        Effect.sync(() => {
+          expect(started.status).toBe("completed")
+          expect(settled.status).toBe("completed")
+          expect(toolResult?.error).toBeNull()
+          expect(toolResult?.output_json).toContain("child workspace marker")
         }),
       ),
     ),

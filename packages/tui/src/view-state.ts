@@ -1,5 +1,6 @@
 import type * as Transcript from "@rika/transcript"
 import { Function, Schema } from "effect"
+import stringWidth from "string-width"
 import type { Key } from "./keys"
 import { isPrintable } from "./keys"
 import { filter, type PaletteAction } from "./palette"
@@ -9,6 +10,58 @@ export const Mode = Schema.Literals(["low", "medium", "high", "ultra"])
 export const ReasoningEffort = Schema.Literals(["low", "medium", "high", "xhigh"])
 export type ReasoningEffort = typeof ReasoningEffort.Type
 export type Mode = typeof Mode.Type
+
+export const Activity = Schema.Union([
+  Schema.TaggedStruct("Sending", {}),
+  Schema.TaggedStruct("Thinking", { bytes: Schema.Finite, blockId: Schema.optionalKey(Schema.String) }),
+  Schema.TaggedStruct("Streaming", { bytes: Schema.Finite, blockId: Schema.optionalKey(Schema.String) }),
+  Schema.TaggedStruct("Tool", { label: Schema.String }),
+  Schema.TaggedStruct("Approval", {}),
+  Schema.TaggedStruct("Cancelling", {}),
+  Schema.TaggedStruct("Error", {}),
+])
+export type Activity = typeof Activity.Type
+
+export const utf8ByteLength = (value: string): number => {
+  let bytes = 0
+  for (const character of value) {
+    const point = character.codePointAt(0)!
+    bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+  }
+  return bytes
+}
+
+export const formatActivityCounter = (tokens: number): string =>
+  tokens < 1_000
+    ? `${tokens} tok`
+    : tokens < 10_000
+      ? `${(tokens / 1_000).toFixed(2)}k tok`
+      : tokens < 1_000_000
+        ? `${(tokens / 1_000).toFixed(1)}k tok`
+        : `${(tokens / 1_000_000).toFixed(1)}M tok`
+
+export const formatActivity = (activity: Activity | undefined): string | undefined => {
+  if (activity === undefined) return undefined
+  if (activity._tag === "Tool") return activity.label
+  if (activity._tag === "Approval") return "Waiting for Approval"
+  if (activity._tag === "Thinking" || activity._tag === "Streaming") {
+    const tokens = Math.floor(activity.bytes / 4)
+    return `${activity._tag}${tokens === 0 ? "" : ` ${formatActivityCounter(tokens)}`}`
+  }
+  return activity._tag
+}
+
+export const streamActivity = (
+  current: Activity | undefined,
+  tag: "Thinking" | "Streaming",
+  text: string,
+  blockId?: string,
+): Activity => ({
+  _tag: tag,
+  bytes:
+    current?._tag === tag && current.blockId === blockId ? current.bytes + utf8ByteLength(text) : utf8ByteLength(text),
+  ...(blockId === undefined ? {} : { blockId }),
+})
 
 export const Entry = Schema.Struct({
   role: Schema.Literals(["user", "assistant", "notice"]),
@@ -67,7 +120,13 @@ export type UiEvent = {
 }
 export type TranscriptItem =
   | { readonly _tag: "Entry"; readonly index: number; readonly id?: string; readonly turnId?: string }
-  | { readonly _tag: "Block"; readonly index: number; readonly id?: string; readonly turnId?: string }
+  | {
+      readonly _tag: "Block"
+      readonly index: number
+      readonly id?: string
+      readonly turnId?: string
+      readonly parentId?: string
+    }
 
 export interface PaletteState {
   readonly open: boolean
@@ -180,6 +239,18 @@ const ThreadPreviewSchema = Schema.Union([
   }),
 ])
 
+export const QueueItem = Schema.Struct({
+  id: Schema.String,
+  prompt: Schema.String,
+  attachments: Schema.optionalKey(Schema.Array(Schema.String)),
+})
+export type QueueItem = typeof QueueItem.Type
+
+export type QueueChange =
+  | { readonly _tag: "Added"; readonly item: QueueItem }
+  | { readonly _tag: "Updated"; readonly item: QueueItem }
+  | { readonly _tag: "Removed"; readonly turnId: string }
+
 export const Model = Schema.Struct({
   workspace: Schema.String,
   branch: Schema.optional(Schema.String),
@@ -196,7 +267,7 @@ export const Model = Schema.Struct({
   historyIndex: Schema.optional(Schema.Finite),
   historySearch: Schema.String,
   busy: Schema.Boolean,
-  busyStatus: Schema.optional(Schema.String),
+  activity: Schema.optional(Activity),
   costUsd: Schema.optional(Schema.Finite),
   paletteOpen: Schema.Boolean,
   palette: PaletteStateSchema,
@@ -215,7 +286,11 @@ export const Model = Schema.Struct({
   threadSidebar: ThreadSidebarStateSchema,
   permissionSelection: Schema.Finite,
   queueSelection: Schema.optional(Schema.String),
-  queue: Schema.Array(Schema.Unknown),
+  queue: Schema.Array(QueueItem),
+  queueThreadId: Schema.optional(Schema.String),
+  queueRevision: Schema.optional(Schema.Int),
+  editingTurnId: Schema.optional(Schema.String),
+  editReturn: Schema.optional(ComposerDraftSchema),
   detailSelection: Schema.optional(Schema.String),
   expandedRowKeys: Schema.Array(Schema.String),
   seenEventIds: Schema.Array(Schema.String),
@@ -249,12 +324,9 @@ export type Message =
   | { readonly _tag: "ExecutionCompleted"; readonly turnId?: string }
   | { readonly _tag: "ExecutionFailed"; readonly turnId?: string; readonly message: string }
   | { readonly _tag: "ExecutionCancelled"; readonly turnId?: string }
-  | { readonly _tag: "SubmissionQueued"; readonly prompt: string }
   | { readonly _tag: "BlockAdded"; readonly block: TranscriptBlock }
   | { readonly _tag: "ReasoningStreamed"; readonly text: string }
   | { readonly _tag: "ReasoningToggled"; readonly index: number }
-  | { readonly _tag: "QueuedEdited"; readonly index: number; readonly prompt: string }
-  | { readonly _tag: "QueuedDequeued"; readonly index: number }
   | { readonly _tag: "ScrollMoved"; readonly offset: number }
   | { readonly _tag: "ScrollFollowed" }
   | { readonly _tag: "PaletteActionConsumed" }
@@ -273,6 +345,7 @@ export type Message =
   | { readonly _tag: "EventReplayed"; readonly event: UiEvent }
   | { readonly _tag: "DetailMoved"; readonly offset: number }
   | { readonly _tag: "DetailToggled"; readonly id?: string }
+  | { readonly _tag: "AllDetailsToggled" }
   | { readonly _tag: "FastModeToggled" }
   | { readonly _tag: "ReasoningEffortCycled" }
   | { readonly _tag: "SidebarViewToggled" }
@@ -290,12 +363,6 @@ export type Message =
       readonly turns: ReadonlyArray<{ readonly prompt: string; readonly events: ReadonlyArray<unknown> }>
     }
 
-export interface QueueItem {
-  readonly id: string
-  readonly prompt: string
-  readonly attachments?: ReadonlyArray<string>
-}
-
 export const replaceQueue: {
   (model: Model, queue: ReadonlyArray<QueueItem>): Model
   (queue: ReadonlyArray<QueueItem>): (model: Model) => Model
@@ -307,6 +374,98 @@ export const replaceQueue: {
     queueSelection: selected,
   }
 })
+
+const defaultQueueSelection = (current: string | undefined, queue: ReadonlyArray<QueueItem>): string | undefined =>
+  current !== undefined && queue.some((item) => item.id === current) ? current : queue.at(-1)?.id
+
+const exitEditWhenRemoved = (model: Model, queue: ReadonlyArray<QueueItem>): Partial<Model> => {
+  if (model.editingTurnId === undefined || queue.some((item) => item.id === model.editingTurnId)) return {}
+  const restore = model.editReturn ?? { input: "", attachments: [] }
+  return {
+    editingTurnId: undefined,
+    editReturn: undefined,
+    input: restore.input,
+    cursor: restore.input.length,
+    pastedText: [...restore.attachments],
+  }
+}
+
+export const resetQueue: {
+  (model: Model, threadId: string, revision: number, queue: ReadonlyArray<QueueItem>): Model
+  (threadId: string, revision: number, queue: ReadonlyArray<QueueItem>): (model: Model) => Model
+} = Function.dual(
+  4,
+  (model: Model, threadId: string, revision: number, queue: ReadonlyArray<QueueItem>): Model => ({
+    ...model,
+    queue: [...queue],
+    queueThreadId: threadId,
+    queueRevision: revision,
+    queueSelection: defaultQueueSelection(model.queueSelection, queue),
+    ...exitEditWhenRemoved(model, queue),
+  }),
+)
+
+export const applyQueueDelta: {
+  (
+    model: Model,
+    threadId: string,
+    revision: number,
+    change: QueueChange,
+    queuedCount?: number,
+  ): {
+    readonly model: Model
+    readonly resync: boolean
+  }
+  (
+    threadId: string,
+    revision: number,
+    change: QueueChange,
+    queuedCount?: number,
+  ): (model: Model) => {
+    readonly model: Model
+    readonly resync: boolean
+  }
+} = Function.dual(
+  (args) => typeof args[0] !== "string",
+  (
+    model: Model,
+    threadId: string,
+    revision: number,
+    change: QueueChange,
+    queuedCount?: number,
+  ): { readonly model: Model; readonly resync: boolean } => {
+    if (model.currentThreadId !== undefined && model.currentThreadId !== threadId) return { model, resync: false }
+    if (model.queueThreadId !== threadId || model.queueRevision === undefined) return { model, resync: true }
+    if (revision <= model.queueRevision) return { model, resync: false }
+    if (revision !== model.queueRevision + 1) return { model, resync: true }
+    const queue = [...model.queue]
+    let selection = model.queueSelection
+    if (change._tag === "Added") {
+      if (queue.some((item) => item.id === change.item.id)) return { model, resync: true }
+      queue.push(change.item)
+      selection = change.item.id
+    } else if (change._tag === "Updated") {
+      const index = queue.findIndex((item) => item.id === change.item.id)
+      if (index < 0) return { model, resync: true }
+      queue[index] = change.item
+    } else {
+      const index = queue.findIndex((item) => item.id === change.turnId)
+      if (index < 0) return { model, resync: true }
+      queue.splice(index, 1)
+      if (model.queueSelection === change.turnId) selection = queue[Math.min(index, queue.length - 1)]?.id
+    }
+    return {
+      model: {
+        ...model,
+        queue,
+        queueRevision: revision,
+        queueSelection: defaultQueueSelection(selection, queue),
+        ...exitEditWhenRemoved(model, queue),
+      },
+      resync: queuedCount !== undefined && queuedCount !== queue.length,
+    }
+  },
+)
 
 export const replaceTurnPrompt: {
   (model: Model, turnId: string, prompt: string): Model
@@ -374,22 +533,50 @@ export const initial: {
   }),
 )
 
-export const inputRows = (model: Model): number => {
-  const width = Math.max(1, model.width - 4)
-  return Math.min(
-    8,
-    Math.max(
-      1,
-      displayInput(model)
-        .split("\n")
-        .reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / width)), 0),
-    ),
+export const isNarrow = (model: Model): boolean => model.width < 60
+
+export const threadSidebarWidth = 36
+
+export const contentColumnWidth = (model: Model): number => {
+  const fileTreeVisible =
+    !isNarrow(model) &&
+    ((model.changedFilesOpen && isReady(model.changedFiles)) ||
+      (model.workspaceFilesOpen && isReady(model.filePicker.items)))
+  return Math.max(
+    1,
+    model.width - (fileTreeVisible ? model.sidebarWidth : 0) - (model.threadSidebar.open ? threadSidebarWidth : 0),
   )
 }
 
+const wrappedRowsForLine = (text: string, width: number): number => {
+  if (width <= 0) return 1
+  let rows = 1
+  let column = 0
+  for (const character of text) {
+    const cells = stringWidth(character)
+    if (cells === 0) continue
+    if (column + cells > width) {
+      rows += 1
+      column = cells
+    } else column += cells
+  }
+  return rows
+}
+
+export const wrappedRowCount: {
+  (text: string, width: number): number
+  (width: number): (text: string) => number
+} = Function.dual(2, (text: string, width: number): number =>
+  text.split("\n").reduce((rows, line) => rows + wrappedRowsForLine(line, width), 0),
+)
+
+export const queueContentWidth = (model: Model): number => Math.max(1, contentColumnWidth(model) - 6)
+
+export const inputRows = (model: Model): number =>
+  Math.min(8, Math.max(1, wrappedRowCount(displayInput(model), Math.max(1, contentColumnWidth(model) - 4))))
+
 export const composerHeight = (model: Model): number =>
   Math.min(Math.max(5, model.height - 4), Math.max(5, model.composerHeight, inputRows(model) + 2))
-export const isNarrow = (model: Model): boolean => model.width < 60
 
 export type PromptSubmission =
   | { readonly _tag: "Prompt"; readonly prompt: string }
@@ -491,6 +678,7 @@ const insertPaste = (model: Model, value: string): Model => {
 }
 
 const insertImage = (model: Model, path: string): Model => {
+  if (model.editingTurnId !== undefined) return model
   const token = String.fromCharCode(0xe000 + model.pastedText.length)
   const imageCount = model.pastedText.filter((attachment) => attachment.type === "image").length
   const next = insert(model, token)
@@ -600,6 +788,7 @@ const sameChangedFiles = (left: ReadonlyArray<ChangedFile>, right: ReadonlyArray
   })
 
 export const canSubmit = (model: Model): boolean =>
+  model.editingTurnId === undefined &&
   !model.threadSwitcher.open &&
   !model.threadSidebar.focused &&
   !model.paletteOpen &&
@@ -790,14 +979,22 @@ export const update: {
           eventCursor: message.event.cursor,
           ...(model.busy
             ? {
-                busyStatus:
+                activity:
                   incoming._tag === "ToolCall"
-                    ? "Working"
+                    ? {
+                        _tag: "Tool" as const,
+                        label:
+                          incoming.presentation.family === "shell"
+                            ? `$ ${incoming.detail || incoming.input}`
+                            : `${incoming.presentation.activeLabel}${incoming.detail.length === 0 ? "" : ` ${incoming.detail}`}`,
+                      }
                     : incoming._tag === "ToolResult"
-                      ? "Waiting"
+                      ? undefined
                       : incoming._tag === "Reasoning"
-                        ? "Thinking"
-                        : model.busyStatus,
+                        ? streamActivity(model.activity, "Thinking", incoming.text)
+                        : incoming._tag === "Permission" && incoming.status === "pending"
+                          ? { _tag: "Approval" as const }
+                          : model.activity,
               }
             : {}),
         }
@@ -840,11 +1037,11 @@ export const update: {
             historyIndex: undefined,
             historySearch: "",
             busy: true,
-            busyStatus: "Waiting",
+            activity: { _tag: "Sending" },
           }
     case "TurnStarted":
       if (model.entries.some((entry) => entry.role === "user" && entry.turnId === message.turnId))
-        return { ...model, activeTurnId: message.turnId, busy: true, busyStatus: "Waiting" }
+        return { ...model, activeTurnId: message.turnId, busy: true, activity: undefined }
       return {
         ...model,
         entries: [...model.entries, { role: "user", text: message.prompt, turnId: message.turnId }],
@@ -854,10 +1051,8 @@ export const update: {
         ],
         activeTurnId: message.turnId,
         busy: true,
-        busyStatus: "Waiting",
+        activity: undefined,
       }
-    case "SubmissionQueued":
-      return model
     case "BlockAdded":
       return {
         ...model,
@@ -876,10 +1071,14 @@ export const update: {
           ...model,
           blocks,
           items: [...model.items, { _tag: "Block", index: model.blocks.length }],
-          ...(model.busy ? { busyStatus: "Thinking" } : {}),
+          ...(model.busy ? { activity: streamActivity(model.activity, "Thinking", message.text) } : {}),
         }
       }
-      return { ...model, blocks, ...(model.busy ? { busyStatus: "Thinking" } : {}) }
+      return {
+        ...model,
+        blocks,
+        ...(model.busy ? { activity: streamActivity(model.activity, "Thinking", message.text) } : {}),
+      }
     }
     case "ReasoningToggled": {
       const unit = transcriptUnits(model).find(
@@ -892,26 +1091,6 @@ export const update: {
       else expanded.add(id)
       return { ...model, expandedRowKeys: [...expanded] }
     }
-    case "QueuedEdited":
-      return {
-        ...model,
-        blocks: model.blocks.map((block, index) =>
-          index === message.index && (block as TranscriptBlock)._tag === "Queued"
-            ? { ...(block as Extract<TranscriptBlock, { _tag: "Queued" }>), prompt: message.prompt }
-            : block,
-        ),
-      }
-    case "QueuedDequeued":
-      if ((model.blocks[message.index] as TranscriptBlock | undefined)?._tag !== "Queued") return model
-      return replaceQueue(
-        model,
-        model.blocks
-          .filter((block, index) => index !== message.index && (block as TranscriptBlock)._tag === "Queued")
-          .map((block) => {
-            const queued = block as Extract<TranscriptBlock, { _tag: "Queued" }>
-            return { id: queued.id, prompt: queued.prompt }
-          }),
-      )
     case "PaletteActionConsumed":
       return { ...model, pendingAction: undefined }
     case "AssistantStreamed": {
@@ -922,7 +1101,7 @@ export const update: {
       const index =
         lastItem?._tag === "Entry" &&
         entries[lastItem.index]?.role === "assistant" &&
-        (message.turnId !== undefined || model.busyStatus === "Streaming")
+        (message.turnId !== undefined || model.activity?._tag === "Streaming")
           ? lastItem.index
           : -1
       if (index >= 0) entries[index] = { ...entries[index]!, text: entries[index]!.text + message.text }
@@ -948,7 +1127,7 @@ export const update: {
                 } as const,
               ],
         busy: true,
-        busyStatus: "Streaming",
+        activity: streamActivity(model.activity, "Streaming", message.text),
       }
     }
     case "AssistantCompleted": {
@@ -959,7 +1138,7 @@ export const update: {
       const index =
         lastItem?._tag === "Entry" &&
         entries[lastItem.index]?.role === "assistant" &&
-        (message.turnId !== undefined || model.busyStatus === "Streaming")
+        (message.turnId !== undefined || model.activity?._tag === "Streaming")
           ? lastItem.index
           : -1
       if (index >= 0) entries[index] = { ...entries[index]!, text: message.text }
@@ -985,13 +1164,13 @@ export const update: {
                 },
               ],
         busy: model.busy,
-        busyStatus: model.busy ? "Working" : undefined,
+        activity: model.busy ? model.activity : undefined,
       }
     }
     case "ExecutionCompleted":
       return message.turnId !== undefined && model.activeTurnId !== message.turnId
         ? model
-        : { ...model, busy: false, busyStatus: undefined, activeTurnId: undefined }
+        : { ...model, busy: false, activity: undefined, activeTurnId: undefined }
     case "ExecutionFailed":
       if (message.turnId !== undefined && model.activeTurnId !== message.turnId) return model
       return {
@@ -1007,7 +1186,7 @@ export const update: {
         ],
         items: [...model.items, { _tag: "Block", index: model.blocks.length }],
         busy: false,
-        busyStatus: undefined,
+        activity: { _tag: "Error" },
         activeTurnId: undefined,
       }
     case "ExecutionCancelled":
@@ -1018,7 +1197,7 @@ export const update: {
         entries: [...model.entries, { role: "notice", text: "cancelled" }],
         items: [...model.items, { _tag: "Entry", index: model.entries.length }],
         busy: false,
-        busyStatus: undefined,
+        activity: undefined,
         activeTurnId: undefined,
       }
     case "UsageReported":
@@ -1044,6 +1223,13 @@ export const update: {
         detailSelection: id,
         expandedRowKeys: [...expanded],
       }
+    }
+    case "AllDetailsToggled": {
+      const roots = expandableRowIds({ ...model, expandedRowKeys: [] })
+      if (roots.length === 0) return model
+      const all = expandableRowIds({ ...model, expandedRowKeys: roots })
+      const expanded = new Set(model.expandedRowKeys)
+      return { ...model, expandedRowKeys: all.every((id) => expanded.has(id)) ? [] : [...all] }
     }
     case "FastModeToggled":
       return { ...model, fastMode: !model.fastMode }
@@ -1082,6 +1268,34 @@ export const update: {
     case "KeyPressed": {
       const key = message.key
       if (key.eventType === "release") return model
+      if (model.editingTurnId !== undefined) {
+        if (key.name === "escape") {
+          const restore = model.editReturn ?? { input: "", attachments: [] }
+          return {
+            ...model,
+            editingTurnId: undefined,
+            editReturn: undefined,
+            queueSelection: undefined,
+            input: restore.input,
+            cursor: restore.input.length,
+            pastedText: [...restore.attachments],
+          }
+        }
+        if (key.name === "return" && !key.shift && !(model.cursor > 0 && model.input[model.cursor - 1] === "\\"))
+          return {
+            ...model,
+            pendingAction: {
+              _tag: "EditQueued",
+              id: model.editingTurnId,
+              prompt: expandPastedText(model.input, model.pastedText),
+            },
+            editingTurnId: undefined,
+            editReturn: undefined,
+            input: "",
+            cursor: 0,
+            pastedText: [],
+          }
+      }
       if (key.ctrl && (key.name === "\\" || key.sequence === "\u001c")) {
         const currentIndex = Math.max(
           0,
@@ -1281,7 +1495,8 @@ export const update: {
           modePicker: { ...model.modePicker, open: false },
           filePicker: { ...model.filePicker, open: false },
         }
-      if (key.ctrl && key.name === "c" && model.busy) return { ...model, pendingAction: { _tag: "Cancel" } }
+      if (key.ctrl && key.name === "c" && model.busy)
+        return { ...model, activity: { _tag: "Cancelling" }, pendingAction: { _tag: "Cancel" } }
       if (key.ctrl && key.name === "s" && model.busy && model.input.length > 0)
         return { ...model, pendingAction: { _tag: "Steer", prompt: model.input }, input: "", cursor: 0 }
       if (key.ctrl && key.name === "return" && model.busy && model.input.length > 0)
@@ -1432,31 +1647,54 @@ export const update: {
       if ((key.name === "tab" || key.name === "backtab") && !key.ctrl && !key.alt && !key.meta)
         return update(model, { _tag: "DetailMoved", offset: key.name === "backtab" || key.shift ? -1 : 1 })
       const queued = model.queue as ReadonlyArray<QueueItem>
-      if (model.busy && model.input.length === 0 && queued.length > 0) {
-        if (key.name === "up" || key.name === "down") {
-          const current = queued.findIndex((item) => item.id === model.queueSelection)
-          const index =
-            current < 0
-              ? key.name === "up"
-                ? queued.length - 1
-                : 0
-              : (current + (key.name === "up" ? -1 : 1) + queued.length) % queued.length
-          return {
-            ...model,
-            queueSelection: queued[index]!.id,
+      if (model.busy && model.input.length === 0 && queued.length > 0 && model.editingTurnId === undefined) {
+        const current = queued.findIndex((item) => item.id === model.queueSelection)
+        if (current < 0) {
+          if (key.name === "up")
+            return {
+              ...model,
+              queueSelection: queued.at(-1)!.id,
+            }
+        } else {
+          if (key.name === "escape") return { ...model, queueSelection: undefined }
+          if (key.name === "up") {
+            const index = Math.max(0, current - 1)
+            return {
+              ...model,
+              queueSelection: queued[index]!.id,
+            }
           }
+          if (key.name === "down") {
+            if (current === queued.length - 1) return { ...model, queueSelection: undefined }
+            return {
+              ...model,
+              queueSelection: queued[current + 1]!.id,
+            }
+          }
+          const selected = queued[current]!
+          if (key.ctrl && key.name === "e")
+            return insert(
+              {
+                ...model,
+                editingTurnId: selected.id,
+                editReturn: { input: model.input, attachments: model.pastedText },
+                input: "",
+                cursor: 0,
+                pastedText: [],
+              },
+              selected.prompt,
+            )
+          if (key.name === "return")
+            return {
+              ...model,
+              pendingAction: {
+                _tag: "SteerQueued",
+                id: selected.id,
+                prompt: selected.prompt,
+              },
+            }
+          if (key.name === "backspace") return { ...model, pendingAction: { _tag: "Dequeue", id: selected.id } }
         }
-        const selected = queued.find((item) => item.id === model.queueSelection) ?? queued[0]!
-        if (key.name === "return")
-          return {
-            ...model,
-            pendingAction: {
-              _tag: "SteerQueued",
-              id: selected.id,
-              prompt: selected.prompt,
-            },
-          }
-        if (key.name === "backspace") return { ...model, pendingAction: { _tag: "Dequeue", id: selected.id } }
       }
       if ((key.name === "return" && key.shift) || key.name === "linefeed" || (key.ctrl && key.name === "j"))
         return insert(model, "\n")

@@ -25,7 +25,9 @@ export const makeRecordingSql = (): RecordingSql => {
   const statements: Array<RecordedStatement> = []
   const outcomes: Array<Outcome> = []
   const execute = (sql: string, parameters: ReadonlyArray<unknown>) => {
-    statements.push({ sql: sql.replace(/\s+/g, " ").trim(), parameters })
+    const normalized = sql.replace(/\s+/g, " ").trim()
+    if (/^(?:BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/.test(normalized)) return Effect.succeed([])
+    statements.push({ sql: normalized, parameters })
     const outcome = outcomes.shift() ?? { _tag: "Rows", rows: [] }
     return outcome._tag === "Rows" ? Effect.succeed(outcome.rows) : Effect.fail(outcome.error)
   }

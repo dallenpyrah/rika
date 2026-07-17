@@ -1,6 +1,7 @@
 import * as Transcript from "@rika/transcript"
 import { describe, expect, it } from "vitest"
 import { ExecutionEvents, ViewState } from "../src"
+import { transcriptUnitId, transcriptUnits } from "../src/transcript-units"
 
 const event = (
   cursor: string,
@@ -92,5 +93,53 @@ describe("ExecutionEvents.projectUnits", () => {
     model = ExecutionEvents.projectUnits(model, projection.units)
 
     expect(model.blocks).toEqual([expect.objectContaining({ _tag: "ChildAgent", id: "child", status: "complete" })])
+  })
+
+  it("projects child execution tools beneath their subagent with stable nested keys", () => {
+    const parent = Transcript.project("turn", "prompt", [
+      event("agent", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent", tool_name: "oracle", input: { prompt: "Review the code" } },
+      }),
+      event("agent-spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent", child_execution_id: "child:turn:oracle" },
+      }),
+    ])
+    const child = Transcript.project("child:turn:oracle", "", [
+      event("read", 0, "tool.call.requested", {
+        data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts", offset: 3, limit: 4 } },
+      }),
+      event("read-result", 1, "tool.result.received", {
+        data: { tool_call_id: "read", output: "contents" },
+      }),
+      event("shell", 2, "tool.call.requested", {
+        data: { tool_call_id: "shell", tool_name: "shell", input: { command: "bun test" } },
+      }),
+      event("shell-result", 3, "tool.result.received", {
+        data: { tool_call_id: "shell", output: { text: "passed", exitCode: 0 } },
+      }),
+    ])
+    let model = ExecutionEvents.projectUnits(ViewState.initial("/work"), parent.units)
+    model = ExecutionEvents.projectChildUnits(model, "turn:agent", child.units)
+    model = { ...model, expandedRowKeys: ["tool:turn:agent"] }
+
+    const units = transcriptUnits(model)
+    expect(units).toMatchObject([
+      { kind: "entry" },
+      {
+        kind: "tool",
+        blocks: [0],
+        children: [
+          { kind: "tool", blocks: [1] },
+          { kind: "tool", blocks: [2] },
+        ],
+      },
+    ])
+    const parentUnit = units[1]!
+    expect(transcriptUnitId(model, parentUnit)).toBe("tool:turn:agent")
+    if (parentUnit.kind !== "tool") throw new Error("Expected tool unit")
+    expect(parentUnit.children?.map((unit) => transcriptUnitId(model, unit))).toEqual([
+      "tool:child:turn:oracle:read",
+      "tool:child:turn:oracle:shell",
+    ])
   })
 })

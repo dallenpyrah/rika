@@ -19,6 +19,7 @@ const opentui = vi.hoisted(() => {
   const keyHandlers = new Set<(key: object) => void>()
   const pasteHandlers = new Set<(event: object) => void>()
   const resizeHandlers = new Set<(width: number, height: number) => void>()
+  const frameHandlers = new Set<() => void>()
   const selectionHandlers = new Set<(selection: object) => void>()
   const rootChildren: Array<object> = []
   const requestRender = vi.fn()
@@ -140,6 +141,7 @@ const opentui = vi.hoisted(() => {
   }
 
   const renderer = {
+    _usesProcessStdout: true,
     stdout: { write: vi.fn() },
     realStdoutWrite: vi.fn(),
     terminalWidth: 80,
@@ -147,10 +149,11 @@ const opentui = vi.hoisted(() => {
     destroy: vi.fn(),
     suspend: vi.fn(),
     resume: vi.fn(),
+    setBackgroundColor: vi.fn(),
     root: {
-      add(child: object) {
+      add: vi.fn((child: object) => {
         rootChildren.push(child)
-      },
+      }),
     },
     keyInput: {
       on(event: string, handler: (key: object) => void) {
@@ -162,13 +165,20 @@ const opentui = vi.hoisted(() => {
     },
     on(event: string, handler: (width: number, height: number) => void) {
       if (event === "selection") selectionHandlers.add(handler as unknown as (selection: object) => void)
+      else if (event === "frame") frameHandlers.add(handler as unknown as () => void)
       else resizeHandlers.add(handler)
     },
     off(event: string, handler: (width: number, height: number) => void) {
       if (event === "selection") selectionHandlers.delete(handler as unknown as (selection: object) => void)
+      else if (event === "frame") frameHandlers.delete(handler as unknown as () => void)
       else resizeHandlers.delete(handler)
     },
     requestRender,
+    resize: vi.fn((width: number, height: number) => {
+      renderer.terminalWidth = width
+      renderer.terminalHeight = height
+      for (const handler of resizeHandlers) handler(width, height)
+    }),
     getSelection: () => null,
     copyToClipboardOSC52: vi.fn(),
     setMousePointer: vi.fn(),
@@ -183,6 +193,7 @@ const opentui = vi.hoisted(() => {
     TextRenderable,
     boxChildren,
     createCliRenderer: vi.fn(() => Effect.runPromise(Effect.succeed(renderer))),
+    frameHandlers,
     keyHandlers,
     pasteHandlers,
     renderer,
@@ -200,7 +211,7 @@ vi.mock("@opentui/core", () => ({
   RGBA: opentui.RGBA,
   ScrollBarRenderable: opentui.ScrollBarRenderable,
   ScrollBoxRenderable: opentui.ScrollBoxRenderable,
-  CliRenderEvents: { RESIZE: "resize", SELECTION: "selection" },
+  CliRenderEvents: { FRAME: "frame", RESIZE: "resize", SELECTION: "selection" },
   TextRenderable: opentui.TextRenderable,
   createCliRenderer: opentui.createCliRenderer,
   decodePasteBytes: (bytes: Uint8Array) => new TextDecoder().decode(bytes),
@@ -218,18 +229,30 @@ vi.mock("@opentui/core", () => ({
   stripAnsiSequences: (text: string) => text,
 }))
 
+import stringWidth from "string-width"
 import {
   Surface,
   buildTranscript,
   boundedTranscriptModel,
+  clipStyledLine,
   create,
+  previewBoxRows,
   renderBlock,
   renderChangedFiles,
   renderSidebar,
   renderTranscript,
   renderTranscriptStyled,
 } from "../src/adapter"
-import { defaultReasoningEffort, initial, ready, type Mode, type Model, type ThreadItem } from "../src/view-state"
+import {
+  defaultReasoningEffort,
+  initial,
+  loading,
+  ready,
+  update,
+  type Mode,
+  type Model,
+  type ThreadItem,
+} from "../src/view-state"
 
 const handlers = () => ({ key: vi.fn(), resize: vi.fn() })
 
@@ -248,6 +271,98 @@ const thread = (input: Partial<ThreadItem> & Pick<ThreadItem, "id" | "title">): 
 const createScoped = (callbacks: Parameters<typeof create>[0]) =>
   Effect.acquireRelease(create(callbacks), (created) => Effect.sync(created.releaseTerminal))
 
+test("clips a styled line by terminal cell width, not character count", () => {
+  const clipped = clipStyledLine([{ __isChunk: true, text: "你好世界" }], 4)
+  expect(clipped.reduce((total, chunk) => total + stringWidth(chunk.text), 0)).toBeLessThanOrEqual(4)
+  expect(clipped.map((chunk) => chunk.text).join("")).toBe("你好")
+})
+
+test("draws every thread-preview row at the exact box width with a two-cell gutter", () => {
+  const width = 44
+  const height = 14
+  const previewModel = model({
+    threads: [thread({ id: "a", title: "Alpha" })],
+    threadSwitcher: { open: true, query: "", selected: 0, kind: "switch", previewScroll: 0 },
+    threadPreview: ready({
+      threadId: "a",
+      turns: [
+        {
+          prompt: "hello world this prompt is long enough that it must wrap across several preview rows",
+          events: [],
+        },
+      ],
+    }),
+  })
+  const rows = previewBoxRows(previewModel, width, height)
+  expect(rows.size).toBe(height)
+  for (const chunks of rows.values())
+    expect(chunks.reduce((total, chunk) => total + stringWidth(chunk.text), 0)).toBe(width)
+  const contentRow = [...rows.values()].find((chunks) =>
+    chunks
+      .map((chunk) => chunk.text)
+      .join("")
+      .includes("hello"),
+  )
+  expect(contentRow).toBeDefined()
+  expect(contentRow![0]!.text).toBe("│")
+  expect(stringWidth(contentRow![1]!.text)).toBe(2)
+})
+
+test("shows the centered mode orb while a thread preview loads, then the transcript tail", () => {
+  const width = 64
+  const height = 24
+  const pendingModel = model({
+    mode: "high",
+    threads: [thread({ id: "a", title: "Alpha" })],
+    threadSwitcher: { open: true, query: "", selected: 0, kind: "switch", previewScroll: 0 },
+    threadPreview: loading,
+  })
+  const pendingRows = previewBoxRows(pendingModel, width, height)
+  const pending = Array.from({ length: height }, (_, row) =>
+    (pendingRows.get(row) ?? [])
+      .map((chunk) => chunk.text)
+      .join(""),
+  )
+  expect(pending.join("\n")).not.toContain("Loading preview")
+  const glyphs = pending.flatMap((line, row) =>
+    [...line].flatMap((glyph, column) => ("•●·".includes(glyph) ? [{ row, column }] : [])),
+  )
+  expect(glyphs.length).toBeGreaterThan(0)
+  const minRow = Math.min(...glyphs.map(({ row }) => row))
+  const maxRow = Math.max(...glyphs.map(({ row }) => row))
+  const minColumn = Math.min(...glyphs.map(({ column }) => column))
+  const maxColumn = Math.max(...glyphs.map(({ column }) => column))
+  expect(Math.abs((minRow + maxRow) / 2 - (height - 1) / 2)).toBeLessThanOrEqual(1)
+  expect(Math.abs((minColumn + maxColumn) / 2 - (width - 1) / 2)).toBeLessThanOrEqual(1)
+
+  const loadedRows = previewBoxRows(
+    {
+      ...pendingModel,
+      threadPreview: ready({
+        threadId: "a",
+        turns: [
+          {
+            prompt: "inspect the workspace",
+            events: [
+              {
+                cursor: "answer",
+                sequence: 1,
+                type: "model.output.completed",
+                createdAt: 1,
+                text: "transcript tail loaded",
+              },
+            ],
+          },
+        ],
+      }),
+    },
+    width,
+    height,
+  )
+  expect([...loadedRows.values()].flatMap((row) => row.map((chunk) => chunk.text)).join(""))
+    .toContain("transcript tail loaded")
+})
+
 test("renders changed files as an indented path tree", () => {
   const rendered = renderChangedFiles(
     model({
@@ -262,9 +377,7 @@ test("renders changed files as an indented path tree", () => {
     .chunks.map(({ text }) => text)
     .join("")
 
-  expect(rendered).toBe(
-    "apps/\n  rika/\n    src/\n      main.ts +3 -1\n    test/\n      main.test.ts +8 -0\nREADME.md +0 -0",
-  )
+  expect(rendered).toBe("apps/\n  rika/\n    src/\n      main.ts +3 -1\n    test/\n      main.test.ts +8 -0\nREADME.md")
   expect(
     renderChangedFiles(model({ changedFiles: ready([{ path: "src/main.ts", status: "M", added: 3, removed: 1 }]) }), 28)
       .chunks,
@@ -286,6 +399,94 @@ test("renders base transcript text with an explicit terminal palette color", () 
 })
 
 describe("Surface", () => {
+  it.effect("reflows mounted assistant markdown when the terminal width shrinks", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      const markdown = [
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega repeat every paragraph word",
+        "",
+        "| Layer | Owner | Detail |",
+        "|---|---|---|",
+        "| durable execution | Relay | preserves every table word while wrapping narrow cells |",
+        "",
+        "```ts",
+        "const blankRowRhythmMarker = preserveEveryCodeTokenAcrossTheNarrowTerminalWidth",
+        "```",
+      ].join("\n")
+      const wide = model({
+        width: 200,
+        height: 66,
+        entries: [{ role: "assistant", text: markdown, turnId: "turn-1" }],
+      })
+
+      surface.update(wide)
+      const transcript = surface as unknown as {
+        readonly transcriptChildren: ReadonlyArray<{
+          readonly content: { readonly chunks: ReadonlyArray<{ text: string }> }
+        }>
+      }
+      const text = () =>
+        transcript.transcriptChildren
+          .map((child) => child.content.chunks.map((chunk) => chunk.text).join(""))
+          .join("\n")
+      const mounted = [...transcript.transcriptChildren]
+      expect(
+        text()
+          .split("\n")
+          .some((line) => stringWidth(line) > 100),
+      ).toBe(true)
+
+      surface.update(update(wide, { _tag: "Resized", width: 100, height: 30 }))
+      const narrowed = text()
+
+      expect(transcript.transcriptChildren).toEqual(mounted)
+      expect(narrowed.split("\n").every((line) => stringWidth(line) <= 100)).toBe(true)
+      for (const word of [
+        "alpha",
+        "omega",
+        "durable",
+        "execution",
+        "Relay",
+        "preserves",
+        "wrapping",
+        "blankRowRhythmMarker",
+        "preserveEveryCodeTokenAcrossTheNarrowTerminalWidth",
+      ])
+        expect(narrowed).toContain(word)
+    }),
+  )
+
+  it.effect("keeps a 4000-chunk transcript resize reflow bounded", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      const source = Array.from({ length: 4_000 }, (_, index) => `LONG_CHUNK_${String(index).padStart(4, "0")};`).join(
+        "",
+      )
+      const wide = model({
+        width: 200,
+        height: 66,
+        entries: [{ role: "assistant", text: source, turnId: "turn-1" }],
+      })
+      surface.update(wide)
+
+      const startedAt = performance.now()
+      surface.update(update(wide, { _tag: "Resized", width: 100, height: 30 }))
+      const elapsed = performance.now() - startedAt
+      const transcript = surface as unknown as {
+        readonly transcriptChildren: ReadonlyArray<{
+          readonly content: { readonly chunks: ReadonlyArray<{ text: string }> }
+        }>
+      }
+      const text = transcript.transcriptChildren
+        .flatMap((child) => child.content.chunks)
+        .map((chunk) => chunk.text)
+        .join("")
+
+      expect(text).toContain("LONG_CHUNK_3999")
+      expect(elapsed).toBeLessThan(1_000)
+    }),
+  )
+
   it.effect("keeps unchanged keyed transcript renderables across composer updates", () =>
     Effect.gen(function* () {
       const { surface } = yield* createScoped(handlers())
@@ -626,6 +827,39 @@ describe("Surface", () => {
       })
       expect(callbacks.resize).toHaveBeenLastCalledWith(101, 37)
     }),
+  )
+
+  it.effect("registers no SIGWINCH handler and relies on OpenTUI's debounced resize", () =>
+    Effect.gen(function* () {
+      const before = process.listenerCount("SIGWINCH")
+      const callbacks = handlers()
+      const { surface: _surface } = yield* createScoped(callbacks)
+      expect(process.listenerCount("SIGWINCH")).toBe(before)
+      opentui.renderer.resize.mockClear()
+      const stdout = opentui.renderer.stdout as { columns?: number; rows?: number }
+      for (const [columns, rows] of [
+        [100, 40],
+        [90, 30],
+        [140, 45],
+      ] as const) {
+        stdout.columns = columns
+        stdout.rows = rows
+        process.emit("SIGWINCH", "SIGWINCH")
+      }
+      expect(opentui.renderer.resize).not.toHaveBeenCalled()
+      for (const listener of opentui.resizeHandlers) listener(140, 45)
+      expect(callbacks.resize).toHaveBeenLastCalledWith(140, 45)
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          const stdout = opentui.renderer.stdout as { columns?: number; rows?: number }
+          delete stdout.columns
+          delete stdout.rows
+          opentui.renderer.terminalWidth = 80
+          opentui.renderer.terminalHeight = 24
+        }),
+      ),
+    ),
   )
 
   it.effect("uses a steady block cursor and wakes it on key and paste input", () =>
@@ -973,6 +1207,18 @@ it.effect("create configures the CLI renderer", () =>
     })
     expect("renderer" in result).toBe(false)
     expect(result.surface).toBeInstanceOf(Surface)
+  }),
+)
+
+it.effect("makes the renderer background transparent before constructing the surface", () =>
+  Effect.gen(function* () {
+    opentui.renderer.setBackgroundColor.mockClear()
+    opentui.renderer.root.add.mockClear()
+    yield* createScoped(handlers())
+    expect(opentui.renderer.setBackgroundColor).toHaveBeenCalledWith("transparent")
+    const backgroundOrder = opentui.renderer.setBackgroundColor.mock.invocationCallOrder[0]!
+    const rootAddOrder = opentui.renderer.root.add.mock.invocationCallOrder[0]!
+    expect(backgroundOrder).toBeLessThan(rootAddOrder)
   }),
 )
 

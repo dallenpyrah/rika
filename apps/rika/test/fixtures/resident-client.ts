@@ -1,6 +1,6 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { ResidentService } from "@rika/app"
+import * as ResidentService from "@rika/app/resident-service"
 import {
   Clock,
   Config,
@@ -11,13 +11,15 @@ import {
   Layer,
   Logger,
   Path,
+  Queue,
   Ref,
   Schema,
   Stdio,
   Stream,
 } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { make } from "../../src/resident-transport"
+import { make } from "../../src/resident-client-transport"
+import * as ResidentProcessStartup from "../../src/resident-process-startup"
 
 const JsonLine = Schema.UnknownFromJsonString
 const HostStatus = Schema.fromJsonString(Schema.Struct({ hostPid: Schema.Finite }))
@@ -27,6 +29,7 @@ const program = Effect.gen(function* () {
   const grace = yield* Config.string("RIKA_TEST_RESIDENT_GRACE").pipe(Config.withDefault("500"))
   const finalizerDelay = yield* Config.string("RIKA_TEST_RESIDENT_FINALIZER_DELAY").pipe(Config.withDefault("0"))
   const delayedWork = yield* Config.string("RIKA_TEST_RESIDENT_DELAYED_WORK").pipe(Config.withDefault("0"))
+  const startupHold = yield* Config.string("RIKA_TEST_RESIDENT_STARTUP_HOLD").pipe(Config.withDefault("0"))
   const stdio = yield* Stdio.Stdio
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
@@ -51,36 +54,20 @@ const program = Effect.gen(function* () {
       profile: "default",
       dataRoot,
       clientKind: "run",
-      clientVersion: "test",
       graceMilliseconds: Number(grace),
       startHost: () =>
-        Effect.gen(function* () {
-          const handle = yield* spawner.spawn(
-            ChildProcess.make("bun", ["test/fixtures/resident-host.ts"], {
-              cwd: path.dirname(path.dirname(import.meta.dir)),
-              detached: true,
-              stdin: "ignore",
-              stdout: "ignore",
-              stderr: "ignore",
-              extendEnv: true,
-              env: {
-                RIKA_TEST_RESIDENT_DATA_ROOT: dataRoot,
-                RIKA_TEST_RESIDENT_GRACE: grace,
-                RIKA_TEST_RESIDENT_FINALIZER_DELAY: finalizerDelay,
-                RIKA_TEST_RESIDENT_DELAYED_WORK: delayedWork,
-              },
-            }),
-          )
-          const reref = yield* handle.unref
-          void reref
-        }).pipe(
-          Effect.mapError((cause) =>
-            ResidentService.ResidentServiceError.make({
-              reason: "transport-failed",
-              message: String(cause),
-            }),
-          ),
-        ),
+        ResidentProcessStartup.spawn({
+          executable: "bun",
+          arguments: ["test/fixtures/resident-host.ts"],
+          cwd: path.dirname(path.dirname(import.meta.dir)),
+          environment: {
+            RIKA_TEST_RESIDENT_DATA_ROOT: dataRoot,
+            RIKA_TEST_RESIDENT_GRACE: grace,
+            RIKA_TEST_RESIDENT_FINALIZER_DELAY: finalizerDelay,
+            RIKA_TEST_RESIDENT_DELAYED_WORK: delayedWork,
+            RIKA_TEST_RESIDENT_STARTUP_HOLD: startupHold,
+          },
+        }),
     }),
   )
   if (connected._tag === "Failure") {
@@ -130,37 +117,80 @@ const program = Effect.gen(function* () {
                 interactive: (_, session) =>
                   Effect.gen(function* () {
                     yield* emit({ type: "interactive-callback", callbacks: 1 })
-                    const initial = new Array<string>()
-                    yield* session.initialize((event) => initial.push(event._tag))
-                    yield* Effect.forEach(initial, (tag) => emit({ type: "initial-read", tag }), { discard: true })
+                    const events = yield* Queue.unbounded<string>()
+                    const feed = yield* Effect.forkChild(
+                      session.events((event) => Queue.offerUnsafe(events, event._tag)),
+                    )
+                    yield* emit({ type: "initial-read", tag: yield* Queue.take(events) })
                     const pid = yield* Ref.get(hostPid)
                     yield* kill(pid)
-                    yield* Effect.sleep("250 millis")
-                    const replacement = new Array<string>()
-                    yield* session.initialize((event) => replacement.push(event._tag))
-                    yield* Effect.forEach(replacement, (tag) => emit({ type: "replacement-read", tag }), {
-                      discard: true,
-                    })
-                    const mutation = new Array<string>()
-                    yield* session.submit("ambiguous", (event) => {
-                      if (event._tag === "ExecutionFailed") mutation.push(event._tag)
-                    })
-                    yield* Effect.forEach(mutation, (tag) => emit({ type: "mutation-failed", tag }), { discard: true })
-                    const postMutation = new Array<string>()
-                    yield* session.initialize((event) => postMutation.push(event._tag))
-                    yield* Effect.forEach(postMutation, (tag) => emit({ type: "post-mutation-read", tag }), {
-                      discard: true,
-                    })
+                    yield* emit({ type: "replacement-read", tag: yield* Queue.take(events) })
+                    yield* session.submit("ambiguous")
+                    let mutationFailed = false
+                    let replacementRead = false
+                    while (!mutationFailed || !replacementRead) {
+                      const tag = yield* Queue.take(events)
+                      if (tag === "ExecutionFailed" && !mutationFailed) {
+                        mutationFailed = true
+                        yield* emit({ type: "mutation-failed", tag })
+                      } else if (tag === "ThreadsListed" && !replacementRead) {
+                        replacementRead = true
+                        yield* emit({ type: "post-mutation-read", tag })
+                      }
+                    }
                     const attempts = (yield* fs
                       .readFileString(path.join(dataRoot, "mutation-attempts.log"))
                       .pipe(Effect.orDie))
                       .trim()
                       .split("\n")
                     yield* emit({ type: "mutation-attempts", text: String(attempts.length) })
+                    yield* Fiber.interrupt(feed)
                   }),
               },
             )
             .pipe(Effect.catch((error) => emit({ type: "reconnect-failed", error: error.message })))
+        if (command === "flap-interactive")
+          return connection
+            .run(
+              { _tag: "Interactive", prompt: [], ephemeral: false, workspace },
+              {
+                interactive: (_, session) =>
+                  Effect.gen(function* () {
+                    yield* emit({ type: "interactive-callback", callbacks: 1 })
+                    const attachedFeeds = yield* Queue.unbounded<void>()
+                    const feed = yield* Effect.forkChild(
+                      session.events(() => Queue.offerUnsafe(attachedFeeds, undefined)),
+                    )
+                    let killed = 0
+                    while (killed < 20) {
+                      yield* Queue.take(attachedFeeds)
+                      const acquisitions = (yield* fs
+                        .readFileString(path.join(dataRoot, "owner-acquisitions.log"))
+                        .pipe(Effect.orDie))
+                        .trim()
+                        .split("\n")
+                      const pid = Number(acquisitions.at(-1))
+                      killed += 1
+                      yield* kill(pid)
+                    }
+                    yield* Fiber.interrupt(feed)
+                  }),
+              },
+            )
+            .pipe(
+              Effect.catch((error) =>
+                fs.readFileString(path.join(dataRoot, "owner-acquisitions.log")).pipe(
+                  Effect.flatMap((text) =>
+                    emit({
+                      type: "flap-failed",
+                      callbacks: text.trim().split("\n").length,
+                      error: error.message,
+                    }),
+                  ),
+                  Effect.orDie,
+                ),
+              ),
+            )
         if (command === "interactive")
           return connection
             .run(
@@ -169,13 +199,39 @@ const program = Effect.gen(function* () {
                 interactive: (_, session) =>
                   Effect.gen(function* () {
                     yield* emit({ type: "interactive-callback" })
-                    const events = new Array<string>()
-                    yield* session.initialize((event) => events.push(event._tag))
-                    yield* Effect.forEach(events, (tag) => emit({ type: "interactive-event", tag }), { discard: true })
+                    const events = yield* Queue.unbounded<string>()
+                    const feed = yield* Effect.forkChild(
+                      session.events((value) => Queue.offerUnsafe(events, value._tag)),
+                    )
+                    yield* emit({ type: "interactive-event", tag: yield* Queue.take(events) })
+                    yield* Fiber.interrupt(feed)
                   }),
               },
             )
             .pipe(Effect.andThen(emit({ type: "interactive-completed" })))
+        if (command === "serialized-interactive")
+          return connection
+            .run(
+              { _tag: "Interactive", prompt: ["serialized-commands"], ephemeral: false, workspace },
+              {
+                interactive: (_, session) =>
+                  Effect.gen(function* () {
+                    yield* Effect.all(
+                      Array.from({ length: 100 }, (_, index) => session.submit(`serialized-${index}`)),
+                      { concurrency: "unbounded", discard: true },
+                    )
+                    while (
+                      !(yield* fs.exists(path.join(dataRoot, "interactive-serialization.json")).pipe(Effect.orDie))
+                    )
+                      yield* Effect.sleep("1 millis")
+                    const result = yield* fs
+                      .readFileString(path.join(dataRoot, "interactive-serialization.json"))
+                      .pipe(Effect.orDie)
+                    yield* emit({ type: "serialized-interactive-completed", text: result })
+                  }),
+              },
+            )
+            .pipe(Effect.catch((error) => emit({ type: "serialized-interactive-failed", error: error.message })))
         if (command === "rejected-interactive")
           return connection
             .run(
@@ -185,31 +241,75 @@ const program = Effect.gen(function* () {
             .pipe(Effect.catch((error) => emit({ type: "interactive-rejected", error: error.message })))
         if (command === "burst-interactive")
           return Effect.gen(function* () {
-            const count = yield* Ref.make(0)
-            const context = yield* Effect.context()
+            let count = 0
+            const completed = yield* Queue.unbounded<void>()
             const exit = yield* Effect.exit(
               connection.run(
                 { _tag: "Interactive", prompt: ["burst-events"], ephemeral: false, workspace },
                 {
                   interactive: (_, session) =>
-                    session.initialize(() => Effect.runSyncWith(context)(Ref.update(count, (value) => value + 1))),
+                    Effect.gen(function* () {
+                      const feed = yield* Effect.forkChild(
+                        session.events(() => {
+                          count += 1
+                          if (count === 1_000) Queue.offerUnsafe(completed, undefined)
+                        }),
+                      )
+                      yield* Queue.take(completed)
+                      yield* Fiber.interrupt(feed)
+                    }),
                 },
               ),
             )
             yield* emit(
               exit._tag === "Success"
-                ? { type: "burst-completed", text: String(yield* Ref.get(count)) }
+                ? { type: "burst-completed", text: String(count) }
                 : { type: "burst-failed", error: String(exit.cause) },
             )
+          })
+        if (command === "oversized-interactive-event")
+          return Effect.gen(function* () {
+            const events = yield* Queue.unbounded<string>()
+            const exit = yield* Effect.exit(
+              connection.run(
+                { _tag: "Interactive", prompt: ["oversized-event"], ephemeral: false, workspace },
+                {
+                  interactive: (_, session) =>
+                    Effect.gen(function* () {
+                      const feed = yield* Effect.forkChild(
+                        session.events((event) => {
+                          if (event._tag === "ExecutionFailed") Queue.offerUnsafe(events, event.message)
+                        }),
+                      )
+                      const message = yield* Queue.take(events)
+                      yield* Fiber.interrupt(feed)
+                      yield* emit({ type: "oversized-interactive-event-completed", text: String(message.length) })
+                    }),
+                },
+              ),
+            )
+            if (exit._tag === "Failure")
+              yield* emit({ type: "oversized-interactive-event-failed", error: String(exit.cause) })
           })
         if (command === "overflow-interactive")
           return Effect.gen(function* () {
             const tags = new Array<string>()
+            const completed = yield* Queue.unbounded<void>()
             const exit = yield* Effect.exit(
               connection.run(
                 { _tag: "Interactive", prompt: ["overflow-events"], ephemeral: false, workspace },
                 {
-                  interactive: (_, session) => session.initialize((event) => tags.push(event._tag)),
+                  interactive: (_, session) =>
+                    Effect.gen(function* () {
+                      const feed = yield* Effect.forkChild(
+                        session.events((event) => {
+                          tags.push(event._tag)
+                          if (event._tag === "TranscriptResyncRequired") Queue.offerUnsafe(completed, undefined)
+                        }),
+                      )
+                      yield* Queue.take(completed)
+                      yield* Fiber.interrupt(feed)
+                    }),
                 },
               ),
             )
@@ -221,14 +321,56 @@ const program = Effect.gen(function* () {
               ...(exit._tag === "Failure" ? { error: String(exit.cause) } : {}),
             })
           })
+        if (command === "queue-overflow-interactive")
+          return Effect.gen(function* () {
+            const tags = new Array<string>()
+            const completed = yield* Queue.unbounded<void>()
+            const exit = yield* Effect.exit(
+              connection.run(
+                { _tag: "Interactive", prompt: ["queue-overflow-events"], ephemeral: false, workspace },
+                {
+                  interactive: (_, session) =>
+                    Effect.gen(function* () {
+                      const feed = yield* Effect.forkChild(
+                        session.events((event) => {
+                          tags.push(event._tag)
+                          if (event._tag === "QueueResyncRequired") Queue.offerUnsafe(completed, undefined)
+                        }),
+                      )
+                      yield* Queue.take(completed)
+                      yield* Fiber.interrupt(feed)
+                    }),
+                },
+              ),
+            )
+            yield* emit({
+              type: exit._tag === "Failure" ? "queue-overflow-failed" : "queue-overflow-completed",
+              callbacks: tags.length,
+              tag: tags.at(-1),
+              tags,
+              ...(exit._tag === "Failure" ? { error: String(exit.cause) } : {}),
+            })
+          })
         if (command === "overflow-watch")
           return Effect.gen(function* () {
             const tags = new Array<string>()
+            const completed = yield* Queue.unbounded<void>()
             const exit = yield* Effect.exit(
               connection.run(
                 { _tag: "Interactive", prompt: ["overflow-watch"], ephemeral: false, workspace },
                 {
-                  interactive: (_, session) => session.watchThreads((event) => tags.push(event._tag)),
+                  interactive: (_, session) =>
+                    Effect.gen(function* () {
+                      const feed = yield* Effect.forkChild(
+                        session.events((event) => {
+                          tags.push(event._tag)
+                          if (event._tag === "ThreadsListed" && tags.includes("TranscriptResyncRequired"))
+                            Queue.offerUnsafe(completed, undefined)
+                        }),
+                      )
+                      yield* Queue.take(completed)
+                      yield* Fiber.interrupt(feed)
+                    }),
                 },
               ),
             )
@@ -245,29 +387,59 @@ const program = Effect.gen(function* () {
               { interactive: () => emit({ type: "interactive-callback" }).pipe(Effect.andThen(Effect.never)) },
             )
             .pipe(Effect.ensuring(emit({ type: "blocking-completed" })), Effect.forkChild, Effect.asVoid)
-        if (command === "cancel-action")
+        if (command === "feed-takeover")
           return connection
             .run(
-              { _tag: "Interactive", prompt: [], ephemeral: false, workspace },
+              { _tag: "Interactive", prompt: ["feed-takeover"], ephemeral: false, workspace },
               {
                 interactive: (_, session) =>
                   Effect.gen(function* () {
-                    const first = yield* Effect.forkChild(session.followSelected(() => undefined))
+                    const first = yield* Effect.forkChild(session.events(() => undefined))
                     yield* Effect.sleep("50 millis")
                     yield* Fiber.interrupt(first)
-                    const events = new Array<string>()
-                    yield* session.followSelected((event) => events.push(event._tag))
-                    yield* Effect.forEach(events, (tag) => emit({ type: "second-action-event", tag }), {
-                      discard: true,
-                    })
+                    const events = yield* Queue.unbounded<string>()
+                    const second = yield* Effect.forkChild(
+                      session.events((value) => Queue.offerUnsafe(events, value._tag)),
+                    )
+                    yield* emit({ type: "replacement-feed-event", tag: yield* Queue.take(events) })
+                    yield* Fiber.interrupt(second)
                   }),
               },
             )
-            .pipe(Effect.andThen(emit({ type: "actions-completed" })))
+            .pipe(Effect.andThen(emit({ type: "feed-takeover-completed" })))
         if (command === "output")
           return connection
             .run({ _tag: "Doctor" }, { stdout: (text) => emit({ type: "output", text }) })
             .pipe(Effect.andThen(emit({ type: "output-completed" })))
+        if (command === "oversized-output")
+          return Effect.gen(function* () {
+            let text = ""
+            let callbacks = 0
+            yield* connection.run(
+              {
+                _tag: "Run",
+                prompt: ["oversized-output"],
+                ephemeral: false,
+                streamJson: false,
+                streamJsonInput: false,
+                streamJsonThinking: false,
+              },
+              {
+                stdout: (chunk) =>
+                  Effect.sync(() => {
+                    text += chunk
+                    callbacks += 1
+                  }),
+              },
+            )
+            yield* connection.ping
+            yield* emit({
+              type: "oversized-output-completed",
+              text: String(text.length),
+              callbacks,
+              outcome: text === `${"x".repeat(1_100_000)}\n` ? "exact" : "mismatch",
+            })
+          })
         if (command === "delayed")
           return connection
             .run({

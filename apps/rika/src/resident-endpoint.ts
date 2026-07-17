@@ -1,4 +1,4 @@
-import { ResidentService } from "@rika/app"
+import * as ResidentService from "@rika/app/resident-service"
 import { Crypto, Effect, Encoding, FileSystem, Option, Path } from "effect"
 
 const tokenName = "resident.token"
@@ -13,8 +13,9 @@ export const resolve = Effect.fn("ResidentEndpoint.resolve")(function* (profile:
     identity,
     canonicalDataRoot,
     port,
-    url: `ws://127.0.0.1:${port}/resident/v1`,
+    url: `ws://127.0.0.1:${port}/resident`,
     tokenPath: path.join(canonicalDataRoot, tokenName),
+    startupPath: path.join(canonicalDataRoot, `resident-${identity}.startup`),
   }
 })
 

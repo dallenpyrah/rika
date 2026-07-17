@@ -8,9 +8,11 @@ import {
   canonicalDatabaseRoot,
   distinctModelRoutes,
   executionRoutePin,
+  modelRoutesForExecution,
   modelRoutePlan,
   parseTestModelScript,
   productionCompaction,
+  registrationsForRoutes,
   withClientWorkspace,
   gatewayCredentialsForRoutes,
   persistedModelRoutesForStartup,
@@ -107,7 +109,7 @@ test("content-addresses non-secret model execution semantics deterministically",
   expect(JSON.stringify(modelRoutePlan(route))).not.toContain("API_KEY_VALUE")
   expect(modelRoutePlan(route).selection.registrationKey).toBe(key)
   expect(executionRoutePin(ConfigContract.defaults, "high").oracle.providerOptions).toEqual(route.options)
-  expect(executionRoutePin(ConfigContract.defaults, "high").agents?.review.alias).toBe("review")
+  expect(executionRoutePin(ConfigContract.defaults, "high").agents?.review.alias).toBe("sol")
   expect(executionRoutePin(ConfigContract.defaults, "medium").tokenBudget).toBeUndefined()
   const settings = {
     ...ConfigContract.defaults,
@@ -119,6 +121,104 @@ test("content-addresses non-secret model execution semantics deterministically",
     model: "gpt-5.6-terra",
   })
 })
+
+test("pins GPT 5.6 routes for every mode, reasoning effort, fast tier, and thread title", () => {
+  const modes = ["low", "medium", "high", "ultra"] as const
+  const efforts = ["low", "medium", "high", "xhigh", "max"] as const
+  for (const mode of modes) {
+    for (const effort of efforts) {
+      for (const fastMode of [false, true]) {
+        const route = executionRoutePin(ConfigContract.defaults, mode, { reasoningEffort: effort, fastMode })
+        for (const selected of [route.main, route.oracle, route.title!]) {
+          expect(selected.model).toMatch(/^gpt-5\.6-/)
+          expect(selected.gatewayProtocol).toBe("openai")
+        }
+        expect(route.main.providerOptions).toMatchObject({ reasoning: { effort } })
+        expect(route.oracle.providerOptions).toMatchObject({ reasoning: { effort } })
+        expect(route.main.providerOptions?.service_tier).toBe(fastMode ? "priority" : undefined)
+        expect(route.oracle.providerOptions?.service_tier).toBe(fastMode ? "priority" : undefined)
+        expect(route.title).toMatchObject({
+          role: "title",
+          alias: "luna",
+          model: "gpt-5.6-luna",
+          gatewayProtocol: "openai",
+          effort: "low",
+          fast: false,
+          providerOptions: { reasoning: { effort: "low" } },
+        })
+      }
+    }
+  }
+})
+
+test("constructs GPT 5.6 provider registrations for every pinned mode variant", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const modes = ["low", "medium", "high", "ultra"] as const
+        const efforts = ["low", "medium", "high", "xhigh", "max"] as const
+        const variants = modes.flatMap((mode) =>
+          efforts.flatMap((effort) =>
+            [false, true].map((fastMode) => ({ mode, tuning: { reasoningEffort: effort, fastMode } })),
+          ),
+        )
+        const routes = variants.flatMap(({ mode, tuning }) =>
+          modelRoutesForExecution(ConfigContract.defaults, mode, tuning),
+        )
+        const registrations = yield* registrationsForRoutes(routes, {
+          OPENAI_API_KEY: Redacted.make("unused"),
+        })
+        const registered = new Set(
+          registrations.map(({ provider, model, registrationKey }) => `${provider}\0${model}\0${registrationKey}`),
+        )
+        expect(registrations).toHaveLength(30)
+        expect(
+          registrations.every(({ provider, model }) => provider === "openai" && model.startsWith("gpt-5.6-")),
+        ).toBe(true)
+        for (const { mode, tuning } of variants) {
+          const pin = executionRoutePin(ConfigContract.defaults, mode, tuning)
+          for (const route of [pin.main, pin.oracle, pin.title!, pin.compactionSummary!, ...Object.values(pin.agents!)])
+            expect(registered.has(`${route.provider}\0${route.model}\0${route.registrationKey}`)).toBe(true)
+        }
+      }),
+    ),
+  ))
+
+test("constructs the retained Anthropic provider registration", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const settings: ConfigContract.Settings = {
+          ...ConfigContract.defaults,
+          gateways: {
+            ...ConfigContract.defaults.gateways,
+            anthropic: {
+              ...ConfigContract.defaults.gateways.anthropic!,
+              auth: { type: "none" },
+            },
+          },
+          modes: {
+            ...ConfigContract.defaults.modes,
+            low: {
+              ...ConfigContract.defaults.modes.low,
+              main: { alias: "fable", effort: "low" },
+            },
+          },
+        }
+        const route = ConfigContract.resolveModelRoute(settings, "low", "main")
+        const registrations = yield* registrationsForRoutes([route], {})
+        expect(
+          registrations.map(({ provider, model, registrationKey }) => ({ provider, model, registrationKey })),
+        ).toEqual([
+          {
+            provider: "anthropic",
+            model: "claude-fable-5",
+            registrationKey: modelRoutePlan(route).registrationKey,
+          },
+        ])
+      }),
+    ),
+  ))
 
 test("keeps registrations distinct by the exact Baton registry tuple", () => {
   const route = ConfigContract.resolveModelRoute(ConfigContract.defaults, "high", "oracle")
@@ -200,6 +300,7 @@ test("keeps a review route owner's workspace-specific models in the startup regi
   expect(persistedModelRoutesForStartup([owner]).map((candidate) => candidate.registrationKey)).toEqual([
     "workspace-main",
     "workspace-oracle",
+    route.title!.registrationKey,
     route.compactionSummary!.registrationKey,
     route.agents!.librarian.registrationKey,
     route.agents!.painter.registrationKey,

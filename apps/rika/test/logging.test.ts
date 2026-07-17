@@ -95,6 +95,26 @@ describe("Logging", () => {
       }),
     )
 
+    test.effect("settles the active filename before a native process boundary", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-logging-" })
+        yield* TestClock.setTime(1_784_023_200_000)
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Layer.build(Logging.layer({ dataRoot: root, role: "client", version: "1", pid: 42 }))
+            Logging.settleActiveLogs()
+            const names = yield* fs.readDirectory(yield* Logging.directory(root))
+            assert.deepStrictEqual(
+              names.filter((name) => name.endsWith(".open.jsonl")),
+              [],
+            )
+            assert.strictEqual(names.filter((name) => name.endsWith(".jsonl")).length, 1)
+          }),
+        )
+      }),
+    )
+
     test.effect("exports only logging files into a private directory", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem

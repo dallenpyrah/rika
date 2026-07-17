@@ -28,6 +28,7 @@ import { cursorBlink } from "./cursor-blink"
 import { fromOpenTui, type Key } from "./keys"
 import {
   composerHeight,
+  contentColumnWidth,
   defaultReasoningEffort,
   displayInput,
   filteredFiles,
@@ -37,10 +38,14 @@ import {
   isNarrow,
   isReady,
   pastedTextTokenAt,
+  queueContentWidth,
   readyOr,
   selectedThreadMetadata,
+  threadSidebarWidth,
+  wrappedRowCount,
   type Mode,
   type Model,
+  type QueueItem,
   type TranscriptItem,
 } from "./view-state"
 import type { ThreadItem, TranscriptBlock } from "./view-state"
@@ -54,17 +59,24 @@ import { renderTool } from "./tool-renderer"
 import {
   isExpandableUnit,
   orderedTranscriptItems,
+  toolDetail,
   toolKind,
   transcriptUnitId,
   transcriptUnits,
   toolDetails,
   type PathTarget,
   type ToolKind,
+  type ToolTranscriptUnit,
 } from "./transcript-units"
 
 export const spinnerFrames: ReadonlyArray<string> = cliSpinners.dots.frames
 export const spinnerInterval = 160
 export const idleSpinnerFrame = "⠿"
+
+const markdownWidthForColumn = (width: number): number => Math.max(8, width - spacing.transcript * 2 - 2)
+
+const queueItemLabel = (item: QueueItem): string =>
+  `${item.prompt}${item.attachments?.map((path) => `\n  ▧ ${path}`).join("") ?? ""}`
 
 export class AdapterError extends Schema.TaggedErrorClass<AdapterError>()("TuiAdapterError", {
   message: Schema.String,
@@ -106,8 +118,6 @@ export const renderBlock: {
         return `✖ ERROR: ${block.title}${block.turnId === undefined ? "" : ` · Turn ${block.turnId}`}\n  ${block.detail}${block.recovery === undefined ? "" : `\n  Next: ${block.recovery}`}`
       case "Permission":
         return `? ${block.title} [${block.status}]\n  ${block.detail}`
-      case "Queued":
-        return `↳ Queued\n  ${block.prompt}`
       case "ChildAgent": {
         const icon = block.status === "running" ? "⠿" : block.status === "complete" ? "✓" : "✗"
         return `${icon} Subagent ${block.status === "running" ? "working" : "finished"} ▸\n  ${block.name} · ${block.summary}`
@@ -123,8 +133,6 @@ export const renderBlock: {
     }
   },
 )
-
-const threadSidebarWidth = 36
 
 export const renderSidebar: {
   (spinnerFrame?: string): (model: Model) => StyledText
@@ -249,7 +257,8 @@ const fileTreeRows = (
         })
         walk(child, depth + 1)
       } else {
-        if (!showCounts) {
+        const hasCounts = child.file.added !== undefined || child.file.removed !== undefined
+        if (!showCounts || !hasCounts) {
           rows.push({
             chunks: [
               ...indentChunks,
@@ -326,10 +335,9 @@ export const renderTranscript = (model: Model): string => {
         ? `┃ ${entry.text}`
         : entry.role === "notice"
           ? `! ${entry.text}`
-          : renderMarkdown(entry.text),
+          : renderMarkdown(entry.text, markdownWidthForColumn(model.width)),
     )
     .join("\n\n")
-  let queueIndex = 0
   const blocks = (model.blocks as ReadonlyArray<TranscriptBlock>)
     .map((block) => {
       if (block._tag === "Permission" && block.status === "pending") {
@@ -337,11 +345,6 @@ export const renderTranscript = (model: Model): string => {
           .map((option, index) => `${index === model.permissionSelection ? "›" : " "} ${option}`)
           .join("   ")
         return `${renderBlock(block, model.width)}\n  ${options}`
-      }
-      if (block._tag === "Queued") {
-        const rendered = `  ${renderBlock(block, model.width)}`
-        queueIndex += 1
-        return rendered
       }
       return renderBlock(block, model.width)
     })
@@ -355,7 +358,7 @@ export const renderTranscript = (model: Model): string => {
       ? `┃ ${entry.text}`
       : entry.role === "notice"
         ? `! ${entry.text}`
-        : renderMarkdown(entry.text)
+        : renderMarkdown(entry.text, markdownWidthForColumn(model.width))
   })
   return welcome + ordered.join("\n\n")
 }
@@ -502,7 +505,7 @@ export const buildTranscript: {
     const renderEntryBody = (index: number) => {
       const entry = model.entries[index]!
       if (entry.role === "assistant") {
-        appendAll(renderMarkdownStyled(entry.text.trimEnd()))
+        appendAll(renderMarkdownStyled(entry.text.trimEnd(), markdownWidthForColumn(model.width)))
         return
       }
       if (entry.role === "notice") {
@@ -510,7 +513,7 @@ export const buildTranscript: {
         else append(fg(colors.amber)(`! ${entry.text}`))
         return
       }
-      const wrapWidth = Math.max(8, model.width - spacing.transcript * 2 - 2)
+      const wrapWidth = markdownWidthForColumn(model.width)
       const wrapped = entry.text.split("\n").flatMap((current) => {
         if (current.length <= wrapWidth) return [current]
         const parts: Array<string> = []
@@ -732,15 +735,15 @@ export const buildTranscript: {
           nestedRanges.push({ start, end: line, unit: childId, expandable })
         }
     }
-    const renderOtherToolBody = (unit: ToolUnit, selected: boolean, expanded: boolean) => {
+    const renderOtherToolBody = (unit: ToolUnit, selected: boolean, expanded: boolean, hasChildren = false) => {
       const failed = unit.block.status === "failed"
       const running = unit.block.status === "running"
       const label = running ? unit.block.presentation.activeLabel : unit.block.presentation.completeLabel
       const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
       const agent = unit.block.presentation.family === "agent"
-      const expandable = agent
+      const expandable = hasChildren || (agent
         ? unit.block.detail.length > 0
-        : unit.block.output !== undefined && unit.block.output.length > 0
+        : unit.block.output !== undefined && unit.block.output.length > 0)
       if (selected)
         highlight(
           `${iconChar(failed, running, spinnerFrame)} ${label}${agent ? "" : detail}${expandable ? markerText(expanded) : ""}`,
@@ -755,6 +758,48 @@ export const buildTranscript: {
       else if (expanded && unit.block.output !== undefined) {
         append(fg(colors.text)("\n"))
         append(dim(fg(colors.text)(unit.block.output.split("\n").slice(0, 12).join("\n"))))
+      }
+    }
+    const renderNestedTool = (unit: ToolTranscriptUnit, prefix: string, last: boolean) => {
+      const index = unit.blocks[0]!
+      const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
+      const id = transcriptUnitId(model, unit)
+      const expanded = rowExpanded(id)
+      const running = block.status === "running"
+      const failed = block.status === "failed"
+      const detail = toolDetail(index, block)
+      const children = unit.children ?? []
+      append(fg(colors.text)("\n"))
+      append(dim(fg(colors.subtle)(`${prefix}${last ? "└" : "├"} `)))
+      const start = line
+      append(statusIcon(failed, running))
+      append(fg(colors.text)(` ${detail.label}`))
+      append(marker(expanded))
+      const rangeIndex = nestedRanges.length
+      nestedRanges.push({
+        start,
+        end: start,
+        unit: id,
+        expandable: true,
+        ...(detail.target === undefined ? {} : { targets: [detail.target] }),
+      })
+      const bodyPrefix = `${prefix}${last ? "  " : "│ "}`
+      if (expanded && block.presentation.family === "agent" && block.detail.length > 0) {
+        append(fg(colors.text)("\n"))
+        append(dim(fg(colors.subtle)(`${bodyPrefix}  `)))
+        append(dim(fg(colors.text)(block.detail)))
+      } else if (expanded && block.output !== undefined && block.output.length > 0) {
+        const output = block.output.split("\n").slice(0, 12).join(`\n${bodyPrefix}  `)
+        append(fg(colors.text)("\n"))
+        append(dim(fg(colors.subtle)(`${bodyPrefix}  `)))
+        append(dim(fg(colors.text)(output)))
+      }
+      if (expanded)
+        for (const [childIndex, child] of children.entries())
+          renderNestedTool(child, bodyPrefix, childIndex === children.length - 1)
+      nestedRanges[rangeIndex] = {
+        ...nestedRanges[rangeIndex]!,
+        end: children.length === 0 ? line : start,
       }
     }
     const renderChildAgentBody = (block: Extract<TranscriptBlock, { _tag: "ChildAgent" }>, expanded: boolean) => {
@@ -835,7 +880,12 @@ export const buildTranscript: {
         renderChildAgentBody(model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "ChildAgent" }>, expanded)
       else if (unit.kind === "diff") renderDiffBody(unit.block, selected, expanded)
       else if (unit.kind === "block") renderPlainBlock(unit.block)
-      else if (unit.group === "explore") renderExploreBody(toolUnitsFor(model, unit.blocks), selected, expanded)
+      else if (unit.children !== undefined) {
+        renderOtherToolBody(toolUnitsFor(model, unit.blocks)[0]!, selected, expanded, true)
+        if (expanded)
+          for (const [childIndex, child] of unit.children.entries())
+            renderNestedTool(child, "  ", childIndex === unit.children.length - 1)
+      } else if (unit.group === "explore") renderExploreBody(toolUnitsFor(model, unit.blocks), selected, expanded)
       else if (unit.group === "edit") renderEditBody(toolUnitsFor(model, unit.blocks), unit.diffs, selected, expanded)
       else if (unit.group === "shell") renderShellBody(toolUnitsFor(model, unit.blocks), selected, expanded)
       else for (const toolUnit of toolUnitsFor(model, unit.blocks)) renderOtherToolBody(toolUnit, selected, expanded)
@@ -894,6 +944,7 @@ interface TranscriptRenderableDescriptor {
   readonly key: string
   readonly revision: string
   readonly content: StyledText
+  readonly selectable?: boolean
   readonly onMouseDown?: TextRenderable["onMouseDown"]
 }
 
@@ -930,14 +981,48 @@ const cutoutBackground = (renderer: CliRenderer): RGBA => {
 
 class SidebarScrollBoxRenderable extends ScrollBoxRenderable {
   onWindowChanged: (() => void) | undefined
+  private virtualHeight = 0
+
+  override get scrollHeight(): number {
+    return this.virtualHeight
+  }
 
   override get scrollTop(): number {
     return super.scrollTop
   }
 
   override set scrollTop(value: number) {
+    this.applyVirtualGeometry()
     super.scrollTop = value
+    this.content.translateY = 0
     this.onWindowChanged?.()
+  }
+
+  setVirtualHeight(value: number): void {
+    const height = Math.max(0, Math.floor(value))
+    this.virtualHeight = height
+    if (this.applyVirtualGeometry()) this.onWindowChanged?.()
+  }
+
+  syncVirtualScroll(): void {
+    if (this.applyVirtualGeometry()) this.onWindowChanged?.()
+  }
+
+  override render(...args: Parameters<ScrollBoxRenderable["render"]>): void {
+    this.applyVirtualGeometry()
+    super.render(...args)
+  }
+
+  private applyVirtualGeometry(): boolean {
+    const previousTop = super.scrollTop
+    this.verticalScrollBar.viewportSize = this.viewport.height
+    this.verticalScrollBar.scrollSize = Math.max(this.virtualHeight, this.viewport.height)
+    this.verticalScrollBar.scrollPosition = Math.min(
+      previousTop,
+      Math.max(0, this.virtualHeight - this.viewport.height),
+    )
+    this.content.translateY = 0
+    return super.scrollTop !== previousTop
   }
 }
 
@@ -961,6 +1046,8 @@ export class Surface {
   readonly queueBox: BoxRenderable
   readonly queueText: TextRenderable
   readonly queueHint: TextRenderable
+  readonly queueLeftJoint: TextRenderable
+  readonly queueRightJoint: TextRenderable
   readonly modeLabel: TextRenderable
   readonly workspaceLabel: TextRenderable
   readonly paletteBox: BoxRenderable
@@ -990,14 +1077,13 @@ export class Surface {
   private pointerShape = "default"
   private changedRows: ReadonlyArray<ChangedFileRow> = []
   private changedFilesHoveredRow: number | undefined
-  private readonly changedFilesBefore: BoxRenderable
-  private readonly changedFilesAfter: BoxRenderable
   private sidebarRowsSource: unknown
   private sidebarRowsView: "changed" | "workspace" | undefined
   private sidebarRowsWidth = 0
   private sidebarWindowStart = -1
   private sidebarWindowEnd = -1
   private sidebarWindowHoveredRow: number | undefined
+  private sidebarLayoutFrame: (() => void) | undefined
   private scrollProgrammatic = false
   private scrollFramePending = false
   private loaderPhase = 0
@@ -1066,6 +1152,9 @@ export class Surface {
       minHeight: 3,
       paddingLeft: spacing.inputHorizontal,
       paddingRight: spacing.inputHorizontal,
+      marginLeft: 1,
+      marginRight: 1,
+      marginBottom: -1,
       flexShrink: 0,
       visible: false,
     })
@@ -1073,13 +1162,33 @@ export class Surface {
     this.queueHint = new TextRenderable(renderer, {
       content: "",
       position: "absolute",
-      bottom: 0,
+      top: 0,
       right: 1,
       zIndex: 10,
       selectable: false,
     })
     this.queueBox.add(this.queueText)
     this.queueBox.add(this.queueHint)
+    this.queueLeftJoint = new TextRenderable(renderer, {
+      content: "┴",
+      position: "absolute",
+      left: 1,
+      top: 0,
+      zIndex: 40,
+      fg: colors.text,
+      visible: false,
+      selectable: false,
+    })
+    this.queueRightJoint = new TextRenderable(renderer, {
+      content: "┴",
+      position: "absolute",
+      right: 1,
+      top: 0,
+      zIndex: 40,
+      fg: colors.text,
+      visible: false,
+      selectable: false,
+    })
     this.inputBox = new BoxRenderable(renderer, {
       border: true,
       borderStyle: "rounded",
@@ -1210,18 +1319,17 @@ export class Surface {
       onMouseScroll: () => this.defer(() => this.refreshSidebarWindow()),
     })
     this.changedFilesBox.onWindowChanged = () => this.refreshSidebarWindow()
-    this.changedFilesBefore = new BoxRenderable(renderer, { height: 0, flexShrink: 0 })
     this.changedFilesText = new TextRenderable(renderer, {
       content: "",
       fg: colors.text,
       selectable: false,
       wrapMode: "none",
     })
-    this.changedFilesAfter = new BoxRenderable(renderer, { height: 0, flexShrink: 0 })
-    this.changedFilesBox.add(this.changedFilesBefore)
     this.changedFilesBox.add(this.changedFilesText)
-    this.changedFilesBox.add(this.changedFilesAfter)
-    this.changedFilesBox.verticalScrollBar.on?.("change", () => this.refreshSidebarWindow())
+    this.changedFilesBox.verticalScrollBar.on?.("change", () => {
+      this.changedFilesBox.syncVirtualScroll()
+      this.refreshSidebarWindow()
+    })
     this.changedFilesText.onMouseDown = (event) => {
       if (event.button !== 0) return
       const row = this.sidebarWindowStart + Math.floor(event.y - this.changedFilesText.screenY)
@@ -1268,6 +1376,8 @@ export class Surface {
     this.contentColumn.add(this.transcriptRow)
     this.contentColumn.add(this.queueBox)
     this.contentColumn.add(this.inputBox)
+    this.contentColumn.add(this.queueLeftJoint)
+    this.contentColumn.add(this.queueRightJoint)
     this.main.add(this.sidebar)
     this.main.add(this.contentColumn)
     this.main.add(this.changedFilesBox)
@@ -1492,7 +1602,27 @@ export class Surface {
     this.lastPaste = { text, at: now }
     this.handlers.paste?.(text)
   }
-  private readonly onResize = (width: number, height: number) => this.handlers.resize(width, height)
+  private readonly physicalTerminalSize = (width: number, height: number) => {
+    if ((this.renderer as unknown as { readonly _usesProcessStdout?: boolean })._usesProcessStdout !== true)
+      return { width, height }
+    const stream = (this.renderer as unknown as { readonly stdout?: NodeJS.WriteStream }).stdout
+    const physicalWidth = stream?.columns
+    const physicalHeight = stream?.rows
+    const currentWidth =
+      Number.isInteger(physicalWidth) && physicalWidth !== undefined && physicalWidth > 0 ? physicalWidth : width
+    const currentHeight =
+      Number.isInteger(physicalHeight) && physicalHeight !== undefined && physicalHeight > 0 ? physicalHeight : height
+    return { width: currentWidth, height: currentHeight }
+  }
+  private readonly onResize = (width: number, height: number) => {
+    const current = this.physicalTerminalSize(width, height)
+    if (
+      (current.width !== width || current.height !== height) &&
+      (this.renderer.terminalWidth !== current.width || this.renderer.terminalHeight !== current.height)
+    )
+      this.renderer.resize(current.width, current.height)
+    this.handlers.resize(current.width, current.height)
+  }
   private readonly setPointerShape = (shape: "ns-resize" | "ew-resize" | "default") => {
     if (this.pointerShape === shape) return
     this.pointerShape = shape
@@ -1617,13 +1747,14 @@ export class Surface {
           existing.revision = descriptor.revision
           existing.renderable.content = descriptor.content
         }
+        existing.renderable.selectable = descriptor.selectable ?? true
         existing.renderable.onMouseDown = descriptor.onMouseDown
         return existing
       }
       const renderable = new TextRenderable(this.renderer, {
         content: descriptor.content,
         wrapMode: "word",
-        selectable: true,
+        selectable: descriptor.selectable ?? true,
       })
       renderable.onMouseDown = descriptor.onMouseDown
       const record = { key: descriptor.key, revision: descriptor.revision, renderable }
@@ -1669,49 +1800,51 @@ export class Surface {
       this.sidebarRowsSource = source
       this.sidebarRowsWidth = width
       this.changedRows = sidebarFileRows(model, width)
+      this.changedFilesBox.setVirtualHeight(this.changedRows.length)
       this.sidebarWindowStart = -1
       this.sidebarWindowEnd = -1
     }
     this.refreshSidebarWindow()
   }
-  private refreshSidebarWindow(force = false): void {
-    if (!this.changedFilesBox.visible) return
+  private refreshSidebarWindow(force = false): boolean {
+    if (!this.changedFilesBox.visible) return false
     const viewportRows = Math.max(1, this.changedFilesBox.viewport.height || (this.model?.height ?? 1) - 2)
     const scrollTop = Math.min(
       Math.max(0, Math.floor(this.changedFilesBox.scrollTop)),
       Math.max(0, this.changedRows.length - viewportRows),
     )
-    const start = Math.max(0, scrollTop - 4)
-    const end = Math.min(this.changedRows.length, scrollTop + viewportRows + 4)
+    const start = scrollTop
+    const end = Math.min(this.changedRows.length, scrollTop + viewportRows)
     if (
       !force &&
       start === this.sidebarWindowStart &&
       end === this.sidebarWindowEnd &&
       this.changedFilesHoveredRow === this.sidebarWindowHoveredRow
     )
-      return
+      return false
     this.sidebarWindowStart = start
     this.sidebarWindowEnd = end
     this.sidebarWindowHoveredRow = this.changedFilesHoveredRow
-    this.changedFilesBefore.height = start
-    this.changedFilesAfter.height = Math.max(0, this.changedRows.length - end)
     this.changedFilesText.content = renderFileRows(
       this.changedRows.slice(start, end),
       this.changedFilesHoveredRow === undefined ? undefined : this.changedFilesHoveredRow - start,
     )
+    return true
+  }
+  private refreshSidebarAfterLayout(): void {
+    if (this.sidebarLayoutFrame !== undefined) return
+    const refresh = () => {
+      this.renderer.off(CliRenderEvents.FRAME, refresh)
+      this.sidebarLayoutFrame = undefined
+      if (this.destroyed) return
+      this.changedFilesBox.syncVirtualScroll()
+      if (this.refreshSidebarWindow()) this.renderer.requestRender()
+    }
+    this.sidebarLayoutFrame = refresh
+    this.renderer.on(CliRenderEvents.FRAME, refresh)
   }
   private welcomeWidthFor(model: Model): number {
-    const sidebarReady = model.changedFilesOpen
-      ? isReady(model.changedFiles)
-      : model.workspaceFilesOpen
-        ? isReady(model.filePicker.items)
-        : false
-    const visible = (model.changedFilesOpen || model.workspaceFilesOpen) && sidebarReady && !isNarrow(model)
-    const contentWidth = Math.max(
-      1,
-      model.width - (visible ? model.sidebarWidth : 0) - (model.threadSidebar.open ? threadSidebarWidth : 0),
-    )
-    return Math.max(1, contentWidth - spacing.transcript * 2)
+    return Math.max(1, contentColumnWidth(model) - spacing.transcript * 2)
   }
   showToast(message: string, color: ColorInput = colors.green): void {
     this.toast.content = new StyledText([fg(color)("✓ "), fg(colors.text)(message)])
@@ -1735,8 +1868,15 @@ export class Surface {
 
   update(model: Model, preserveTranscriptAnchor = false): void {
     const previousScrollHeight = this.transcriptScroll.scrollHeight
-    const transcriptAnchor = preserveTranscriptAnchor ? this.captureTranscriptAnchor() : undefined
     const previousModel = this.model
+    const transcriptWidthChanged =
+      previousModel !== undefined &&
+      previousModel.currentThreadId === model.currentThreadId &&
+      !model.scrollFollow &&
+      (model.entries.length > 0 || model.blocks.length > 0) &&
+      contentColumnWidth(previousModel) !== contentColumnWidth(model)
+    const preserveTranscriptPosition = preserveTranscriptAnchor || transcriptWidthChanged
+    const transcriptAnchor = preserveTranscriptPosition ? this.captureTranscriptAnchor() : undefined
     const previousItems = previousModel?.items.length ?? 0
     if (this.transcriptWindowThread !== model.currentThreadId) {
       if (this.transcriptAnchorFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.transcriptAnchorFrame)
@@ -1745,7 +1885,7 @@ export class Surface {
       this.transcriptAnchorScrollBy = 0
       this.transcriptWindowThread = model.currentThreadId
       this.transcriptWindowEnd = model.items.length
-    } else if (preserveTranscriptAnchor)
+    } else if (preserveTranscriptPosition)
       this.transcriptWindowEnd = Math.min(
         model.items.length,
         this.transcriptWindowEnd + Math.max(0, model.items.length - previousItems),
@@ -1760,14 +1900,12 @@ export class Surface {
     if (model.shortcutsOpen) this.setComposerResizePointer(false)
     const inputHeight = composerHeight(model)
     const renderedInputHeight = model.shortcutsOpen ? Math.min(model.height - 4, spacing.inputHeight + 12) : inputHeight
-    const sidebarReady = model.changedFilesOpen
-      ? isReady(model.changedFiles)
-      : model.workspaceFilesOpen
-        ? isReady(model.filePicker.items)
-        : false
-    const sidebarVisible = (model.changedFilesOpen || model.workspaceFilesOpen) && sidebarReady && !isNarrow(model)
+    const sidebarVisible =
+      !isNarrow(model) &&
+      ((model.changedFilesOpen && isReady(model.changedFiles)) ||
+        (model.workspaceFilesOpen && isReady(model.filePicker.items)))
     const sidebarWidth = sidebarVisible ? model.sidebarWidth : 0
-    const contentWidth = Math.max(1, model.width - sidebarWidth - (model.threadSidebar.open ? threadSidebarWidth : 0))
+    const contentWidth = contentColumnWidth(model)
     const modeColor = colors[model.mode]
     const isWelcome = model.entries.length === 0 && model.blocks.length === 0
     this.transcriptScroll.content.justifyContent = isWelcome ? "flex-start" : "flex-end"
@@ -1829,6 +1967,7 @@ export class Surface {
             key: `${range.unit}:header`,
             revision: JSON.stringify(headerContent.chunks),
             content: headerContent,
+            selectable: !range.expandable,
             ...(range.expandable
               ? {
                   onMouseDown: (event: MouseEvent) => {
@@ -1872,27 +2011,61 @@ export class Surface {
       this.cancelTimer(this.welcomeTimer)
       this.welcomeTimer = undefined
     }
-    const queue = model.queue as ReadonlyArray<import("./view-state").QueueItem>
+    const queue = model.queue as ReadonlyArray<QueueItem>
     this.queueBox.visible = queue.length > 0
-    this.queueBox.height = Math.min(
-      Math.max(3, model.height - renderedInputHeight - 2),
-      Math.max(3, queue.length + queue.reduce((total, item) => total + (item.attachments?.length ?? 0), 0) + 2),
-    )
-    this.queueText.content = new StyledText(
-      queue.flatMap((item, index) => {
-        const label = `${item.prompt}${item.attachments?.map((path) => `\n  ▧ ${path}`).join("") ?? ""}`
-        const chunk = item.id === model.queueSelection ? bold(fg(colors.text)(label)) : fg(colors.subtle)(label)
-        return index === queue.length - 1 ? [chunk] : [chunk, fg(colors.text)("\n")]
-      }),
-    )
-    this.queueHint.content = new StyledText([
-      fg(colors[model.mode])(" Enter"),
-      dim(fg(colors.text)(" to steer")),
-      dim(fg(colors.text)(" · ")),
-      fg(colors[model.mode])("Backspace"),
-      dim(fg(colors.text)(" to dequeue ")),
-    ])
-    this.queueHint.visible = queue.length > 0
+    const queueTextWidth = queueContentWidth(model)
+    const queueLength = queue.length
+    const heights = queue.map((item) => wrappedRowCount(queueItemLabel(item), queueTextWidth))
+    const selectedIndex = queue.findIndex((item) => item.id === model.queueSelection)
+    const editIndex = queue.findIndex((item) => item.id === model.editingTurnId)
+    const hintIndex = editIndex >= 0 ? editIndex : selectedIndex
+    const hintRows = hintIndex >= 0 ? 1 : 0
+    const queueRows = heights.reduce((sum, rows) => sum + rows, hintRows)
+    const queueBoxHeight = Math.min(Math.max(3, model.height - renderedInputHeight - 2), Math.max(3, queueRows + 2))
+    this.queueBox.height = queueBoxHeight
+    const availableRows = Math.max(1, queueBoxHeight - 2)
+    const clampToRows = (text: string, rows: number): string =>
+      wrappedRowCount(text, queueTextWidth) <= rows
+        ? text
+        : `${truncateToWidth(text.replace(/\n/g, " "), Math.max(1, rows * queueTextWidth - 1))}…`
+    const focusIndex = hintIndex < 0 ? queueLength - 1 : hintIndex
+    const focusRows = Math.max(1, availableRows - hintRows)
+    let start = focusIndex
+    let end = focusIndex + 1
+    let used = Math.min(focusRows, heights[focusIndex] ?? 0) + hintRows
+    while (end < queueLength && used + heights[end]! <= availableRows) used += heights[end++]!
+    while (start > 0 && used + heights[start - 1]! <= availableRows) used += heights[--start]!
+    const queueChunks: Array<TextChunk> = []
+    let hintTop = 0
+    let renderedRows = 0
+    for (const [offset, item] of queue.slice(start, end).entries()) {
+      const index = start + offset
+      const label = clampToRows(queueItemLabel(item), index === focusIndex ? focusRows : availableRows)
+      const labelRows = wrappedRowCount(label, queueTextWidth)
+      queueChunks.push(item.id === model.queueSelection ? bold(fg(colors.text)(label)) : fg(colors.subtle)(label))
+      renderedRows += labelRows
+      if (index === hintIndex) {
+        hintTop = renderedRows
+        queueChunks.push(fg(colors.text)("\n"))
+        renderedRows += 1
+      }
+      if (index < end - 1) queueChunks.push(fg(colors.text)("\n"))
+    }
+    this.queueText.content = new StyledText(queueChunks)
+    this.queueHint.top = hintTop
+    this.queueHint.content =
+      model.editingTurnId !== undefined && editIndex >= 0
+        ? new StyledText([
+            fg(colors[model.mode])(" Editing queued"),
+            dim(fg(colors.text)(" · Enter save · Esc cancel ")),
+          ])
+        : new StyledText([
+            fg(colors[model.mode])(" Enter"),
+            dim(fg(colors.text)(" to steer · Backspace to dequeue · Ctrl+E to edit ")),
+          ])
+    this.queueHint.visible = hintIndex >= 0
+    this.queueLeftJoint.visible = queue.length > 0
+    this.queueRightJoint.visible = queue.length > 0
     this.inputBox.borderColor = colors.text
     const costText = model.costUsd !== undefined ? formatCost(model.costUsd) : model.busy ? "$····" : ""
     this.inputBox.title = ""
@@ -1941,11 +2114,11 @@ export class Surface {
     this.workspaceLabel.right = sidebarWidth + 2
     this.workspaceLabel.content = new StyledText([dim(fg(colors.text)(workspaceTitle))])
     this.inputBox.height = renderedInputHeight
-    this.modeLabel.top = model.height - renderedInputHeight - (queue.length > 0 ? this.queueBox.height : 0)
-    this.transcriptViewportRows = Math.max(
-      1,
-      model.height - renderedInputHeight - (queue.length > 0 ? this.queueBox.height : 0),
-    )
+    const queueHeight = queue.length > 0 ? this.queueBox.height - 1 : 0
+    this.modeLabel.top = model.height - renderedInputHeight
+    this.queueLeftJoint.top = model.height - renderedInputHeight
+    this.queueRightJoint.top = model.height - renderedInputHeight
+    this.transcriptViewportRows = Math.max(1, model.height - renderedInputHeight - queueHeight)
     this.transcriptScroll.content.minHeight = this.transcriptViewportRows
     this.input.visible = model.shortcutsOpen
     this.input.content = model.shortcutsOpen ? shortcutsContent(model, Math.max(1, contentWidth - 4)) : ""
@@ -1962,12 +2135,23 @@ export class Surface {
         : ` Files (${readyOr(model.filePicker.items, []).length}) `
       this.changedFilesBox.titleAlignment = "left"
       this.refreshSidebarRows(model)
+      if (
+        previousModel === undefined ||
+        previousModel.width !== model.width ||
+        previousModel.height !== model.height ||
+        previousModel.sidebarWidth !== model.sidebarWidth ||
+        previousModel.changedFilesOpen !== model.changedFilesOpen ||
+        previousModel.changedFiles !== model.changedFiles ||
+        previousModel.workspaceFilesOpen !== model.workspaceFilesOpen ||
+        previousModel.filePicker.items !== model.filePicker.items
+      )
+        this.refreshSidebarAfterLayout()
     } else {
       this.changedFilesHoveredRow = undefined
     }
     this.transcriptScroll.stickyScroll = model.scrollFollow
     this.anchorTranscriptAfterLayout()
-    if (preserveTranscriptAnchor) {
+    if (preserveTranscriptPosition) {
       const pending = this.pendingTranscriptAnchor
       this.pendingTranscriptAnchor =
         pending !== undefined && pending.threadId === model.currentThreadId
@@ -2166,6 +2350,8 @@ export class Surface {
     this.stopCursorBlink()
     if (this.transcriptAnchorFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.transcriptAnchorFrame)
     this.transcriptAnchorFrame = undefined
+    if (this.sidebarLayoutFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.sidebarLayoutFrame)
+    this.sidebarLayoutFrame = undefined
     this.transcriptAnchorScrollBy = 0
     this.pendingTranscriptAnchor = undefined
     this.cancelTimer(this.loaderTimer)
@@ -2388,17 +2574,22 @@ const splitStyledLines = (styled: StyledText): Array<Array<TextChunk>> => {
   return lines
 }
 
-const clipStyledLine = (line: ReadonlyArray<TextChunk>, width: number): Array<TextChunk> => {
+export const clipStyledLine: {
+  (line: ReadonlyArray<TextChunk>, width: number): Array<TextChunk>
+  (width: number): (line: ReadonlyArray<TextChunk>) => Array<TextChunk>
+} = Function.dual(2, (line: ReadonlyArray<TextChunk>, width: number): Array<TextChunk> => {
   const out: Array<TextChunk> = []
   let used = 0
   for (const chunk of line) {
     if (used >= width) break
-    const text = chunk.text.length > width - used ? chunk.text.slice(0, width - used) : chunk.text
+    const remaining = width - used
+    const text = stringWidth(chunk.text) > remaining ? truncateToWidth(chunk.text, remaining) : chunk.text
+    if (text.length === 0) continue
     out.push({ ...chunk, text })
-    used += text.length
+    used += stringWidth(text)
   }
   return out
-}
+})
 
 const previewTranscriptLines = (
   model: Model,
@@ -2482,7 +2673,10 @@ const threadListRows = (
   return listRows
 }
 
-const previewBoxRows = (model: Model, width: number, height: number): ReadonlyMap<number, ReadonlyArray<TextChunk>> => {
+export const previewBoxRows: {
+  (model: Model, width: number, height: number): ReadonlyMap<number, ReadonlyArray<TextChunk>>
+  (width: number, height: number): (model: Model) => ReadonlyMap<number, ReadonlyArray<TextChunk>>
+} = Function.dual(3, (model: Model, width: number, height: number): ReadonlyMap<number, ReadonlyArray<TextChunk>> => {
   const rows = new Map<number, ReadonlyArray<TextChunk>>()
   if (width < 8 || height < 4) return rows
   const inner = width - 2
@@ -2510,15 +2704,39 @@ const previewBoxRows = (model: Model, width: number, height: number): ReadonlyMa
       const textWidth = line.reduce((total, chunk) => total + stringWidth(chunk.text), 0)
       const contentRow = startRow + index
       rows.set(contentRow, [
-        fg(colors.muted)("│ "),
+        fg(colors.muted)("│"),
+        fg(colors.text)("  "),
         ...line,
         fg(colors.text)(" ".repeat(Math.max(0, contentWidth - textWidth))),
         scrollable ? fg(colors.muted)(contentRow - 2 === thumb ? "█" : "│") : fg(colors.text)(" "),
         fg(colors.muted)("│"),
       ])
     })
+  } else if (isLoading(model.threadPreview)) {
+    const pattern = (welcomeMarkFrames[5] ?? welcomeMarkFrames[0]).slice(3)
+    const availableRows = Math.max(1, height - 3)
+    const visibleRows = Math.min(availableRows, pattern.length)
+    const sourceTop = Math.max(0, Math.floor((pattern.length - visibleRows) / 2))
+    const top = 2 + Math.max(0, Math.floor((availableRows - visibleRows) / 2))
+    const sourceWidth = 40
+    const visibleWidth = Math.min(inner, sourceWidth)
+    const sourceLeft = Math.max(0, Math.floor((sourceWidth - visibleWidth) / 2))
+    const left = Math.max(0, Math.floor((inner - visibleWidth) / 2))
+    pattern.slice(sourceTop, sourceTop + visibleRows).forEach((source, index) => {
+      const chunks: Array<TextChunk> = [fg(colors.muted)("│"), fg(colors.text)(" ".repeat(left))]
+      for (const glyph of source.slice(sourceLeft, sourceLeft + visibleWidth)) {
+        if (glyph === " ") chunks.push(fg(colors.text)(glyph))
+        else {
+          const [red, green, blue] = welcomeMarkColor((sourceTop + index) / 17, model.mode)
+          chunks.push(fg(`#${hex2(red)}${hex2(green)}${hex2(blue)}`)(glyph))
+        }
+      }
+      chunks.push(fg(colors.text)(" ".repeat(Math.max(0, inner - left - visibleWidth))))
+      chunks.push(fg(colors.muted)("│"))
+      rows.set(top + index, chunks)
+    })
   } else {
-    const status = isLoading(model.threadPreview) ? "Loading preview" : "No preview"
+    const status = "No preview"
     const statusLeft = Math.max(0, Math.floor((inner - status.length) / 2))
     rows.set(2, [
       fg(colors.muted)("│"),
@@ -2538,9 +2756,11 @@ const previewBoxRows = (model: Model, width: number, height: number): ReadonlyMa
       details.forEach((line, index) => {
         const visible = truncateToWidth(line, contentWidth)
         rows.set(height - 1 - details.length + index, [
-          fg(colors.muted)("│ "),
+          fg(colors.muted)("│"),
+          fg(colors.text)("  "),
           fg(colors.text)(visible),
-          fg(colors.text)(" ".repeat(Math.max(0, contentWidth - stringWidth(visible) + 1))),
+          fg(colors.text)(" ".repeat(Math.max(0, contentWidth - stringWidth(visible)))),
+          fg(colors.text)(" "),
           fg(colors.muted)("│"),
         ])
       })
@@ -2551,7 +2771,7 @@ const previewBoxRows = (model: Model, width: number, height: number): ReadonlyMa
       rows.set(row, [fg(colors.muted)("│"), fg(colors.text)(" ".repeat(inner)), fg(colors.muted)("│")])
   rows.set(height - 1, [fg(colors.muted)(`╰${"─".repeat(inner)}╯`)])
   return rows
-}
+})
 
 const threadSwitcherContent = (model: Model, innerWidth: number, innerHeight: number): StyledText => {
   const horizontal = model.width >= 120
@@ -2987,6 +3207,7 @@ export const create = (handlers: Handlers) =>
             }
           }
           try {
+            renderer.setBackgroundColor("transparent")
             handlers.resize(renderer.terminalWidth, renderer.terminalHeight)
             surface = new Surface(renderer, handlers)
             return { surface, releaseTerminal, suspendTerminal, resumeTerminal }

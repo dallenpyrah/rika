@@ -87,5 +87,5 @@ test("restarts through the shared event mapper and preserves transcript across q
   expect(live.entries).toEqual(reopened.entries)
   expect(live.blocks).toEqual(reopened.blocks)
   expect(live.blocks.at(-1)).toMatchObject({ _tag: "ToolCall", id: "turn:t" })
-  expect(live.blocks.some((block) => (block as ViewState.TranscriptBlock)._tag === "Queued")).toBe(false)
+  expect(live.queue).toEqual([])
 })

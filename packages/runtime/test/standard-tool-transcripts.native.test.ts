@@ -5,6 +5,7 @@ import { expect, test } from "bun:test"
 import { Effect, FileSystem, Layer, Schema } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
+import { start } from "./current-execution-route"
 
 const cases = [
   ["find_files", { query: "fixture" }, "query"],
@@ -64,6 +65,7 @@ for (const [name, parameters, malformedField] of cases) {
           workspace: directory,
           registration: fixture.registration,
           selection: fixture.selection,
+          modelVariantPolicy: "fixed-selection",
           additionalToolkit: ThreadTools.toolkit,
           additionalHandlerLayer: threadHandlers,
           toolRuntimeLayer: runtimeLayer,
@@ -73,7 +75,7 @@ for (const [name, parameters, malformedField] of cases) {
         const backendContext = yield* Layer.build(backendLayer)
         return yield* Effect.gen(function* () {
           const backend = yield* ExecutionBackend.Service
-          const completed = yield* backend.start({
+          const completed = yield* start(backend, {
             threadId: `thread-${name}`,
             turnId: `turn-${name}`,
             prompt: `invoke ${name}`,
@@ -135,6 +137,7 @@ for (const [name, parameters, malformedField] of cases) {
                     workspace: directory,
                     registration: fixture.registration,
                     selection: fixture.selection,
+                    modelVariantPolicy: "fixed-selection",
                     additionalToolkit: ThreadTools.toolkit,
                     additionalHandlerLayer: threadHandlers,
                     toolRuntimeLayer: Runtime.testLayer(() => Effect.succeed({ text: "unexpected", truncated: false })),
@@ -144,7 +147,7 @@ for (const [name, parameters, malformedField] of cases) {
                 )
                 return yield* Effect.gen(function* () {
                   const backend = yield* ExecutionBackend.Service
-                  const execution = yield* backend.start({
+                  const execution = yield* start(backend, {
                     threadId: `bad-${name}`,
                     turnId: `bad-${name}`,
                     prompt: "bad",

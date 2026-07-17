@@ -3,6 +3,7 @@ import * as ExecutionBackend from "@rika/runtime/contract"
 import { Effect, Exit, Layer } from "effect"
 import { ProductAgent } from "../src/index"
 import { provideLayer } from "./layer"
+import { executionRoute } from "./current-state"
 
 describe("ProductAgent", () => {
   it.effect("delegates every service operation, maps failures, and selects every profile", () =>
@@ -45,6 +46,7 @@ describe("ProductAgent", () => {
           (yield* agents.fanOut({
             parentTurnId: "p",
             fanOutId: "direct",
+            executionRoute: executionRoute(),
             children: [],
             maxConcurrency: 1,
             join: "all",
@@ -58,6 +60,7 @@ describe("ProductAgent", () => {
           (yield* agents.runParallel({
             parentTurnId: "p",
             fanOutId: "parallel",
+            executionRoute: executionRoute(),
             tasks: [{ id: "a", prompt: "x", profile: "Oracle" }],
             maxConcurrency: 1,
             quorum: 1,
@@ -68,6 +71,7 @@ describe("ProductAgent", () => {
           (yield* agents.runReviewLanes({
             parentTurnId: "p",
             fanOutId: "review",
+            executionRoute: executionRoute(),
             checks: [{ id: "a", prompt: "x" }],
             maxConcurrency: 1,
             quorum: 1,
@@ -163,6 +167,7 @@ describe("ProductAgent", () => {
           agents.fanOut({
             parentTurnId: "p",
             fanOutId: "f",
+            executionRoute: executionRoute(),
             children: [],
             maxConcurrency: 1,
             join: "all",
@@ -171,8 +176,22 @@ describe("ProductAgent", () => {
           agents.inspectFanOut("f"),
           agents.cancelFanOut("f", 2),
           agents.cancelChild("c", 2),
-          agents.runParallel({ parentTurnId: "p", fanOutId: "p", tasks: [], maxConcurrency: 1, createdAt: 1 }),
-          agents.runReviewLanes({ parentTurnId: "p", fanOutId: "r", checks: [], maxConcurrency: 1, createdAt: 1 }),
+          agents.runParallel({
+            parentTurnId: "p",
+            fanOutId: "p",
+            executionRoute: executionRoute(),
+            tasks: [],
+            maxConcurrency: 1,
+            createdAt: 1,
+          }),
+          agents.runReviewLanes({
+            parentTurnId: "p",
+            fanOutId: "r",
+            executionRoute: executionRoute(),
+            checks: [],
+            maxConcurrency: 1,
+            createdAt: 1,
+          }),
         ]
         for (const effect of effects) {
           const exit = yield* Effect.exit(effect)
@@ -221,6 +240,7 @@ describe("ProductAgent", () => {
         const inspection = yield* agents.runParallel({
           parentTurnId: "parent",
           fanOutId: "fan",
+          executionRoute: executionRoute(),
           tasks: [
             { id: "a", prompt: "research APIs" },
             { id: "b", prompt: "implement it" },

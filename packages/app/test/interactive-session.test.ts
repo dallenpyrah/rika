@@ -5,10 +5,18 @@ import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import { Runtime as ToolRuntime } from "@rika/tools"
-import { Effect, Fiber, Layer, Queue, Ref } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Queue, Ref } from "effect"
 import { TestClock } from "effect/testing"
 import { Operation } from "../src/index"
-import { provideLayer } from "./layer"
+import { createTurn, executionRoute } from "./current-state"
+
+const collectEvents = (session: Operation.InteractiveSession, events: Array<Operation.InteractiveEvent>) =>
+  Effect.forkChild(session.events((event) => events.push(event))).pipe(Effect.andThen(Effect.yieldNow))
+
+const waitForSessions = (sessions: Ref.Ref<ReadonlyArray<Operation.InteractiveSession>>, count = 1) =>
+  Effect.gen(function* () {
+    while ((yield* Ref.get(sessions)).length < count) yield* Effect.yieldNow
+  })
 
 const thread = (id: string, updatedAt: number): Thread.Thread => ({
   id: Thread.ThreadId.make(id),
@@ -25,6 +33,7 @@ const active = (threadId: Thread.ThreadId, id = "active"): Turn.Turn => ({
   id: Turn.TurnId.make(id),
   threadId,
   prompt: "active prompt",
+  executionRoute: executionRoute(),
   status: "running",
   createdAt: 1,
   updatedAt: 1,
@@ -43,6 +52,7 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
   const turns = yield* TurnRepository.makeMemory([active(older.id), active(latest.id, "latest-active")])
   const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
   const controls = yield* Ref.make<ReadonlyArray<ReadonlyArray<unknown>>>([])
+  const permissionResolved = yield* Deferred.make<void>()
   const hiddenExecutions = yield* Ref.make<ReadonlySet<string>>(new Set())
   const record = (...call: ReadonlyArray<unknown>) => Ref.update(controls, (calls) => [...calls, call])
   const backend = ExecutionBackend.Service.of({
@@ -56,11 +66,13 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
     cancelWorkflow: () => Effect.die("unused"),
     start: (input) =>
       followAfterPermission
-        ? Effect.succeed({
-            turnId: input.turnId,
-            status: "completed" as const,
-            events: [{ cursor: "queued-done", sequence: 1, type: "execution.completed", createdAt: 3 }],
-          })
+        ? record("start", input.turnId).pipe(
+            Effect.as({
+              turnId: input.turnId,
+              status: "completed" as const,
+              events: [{ cursor: "queued-done", sequence: 1, type: "execution.completed", createdAt: 3 }],
+            }),
+          )
         : Effect.die("unused"),
     ...(followAfterPermission
       ? {
@@ -77,9 +89,10 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
               text: "created file",
             }
             const completed = { cursor: "resumed-done", sequence: 3, type: "execution.completed", createdAt: 3 }
-            onEvent?.(output)
-            onEvent?.(completed)
             return record("follow", turnId, afterCursor).pipe(
+              Effect.andThen(turnId === "active" ? Deferred.await(permissionResolved) : Effect.void),
+              Effect.tap(() => Effect.sync(() => onEvent?.(output))),
+              Effect.tap(() => Effect.sync(() => onEvent?.(completed))),
               Effect.as({ turnId, status: "completed" as const, events: [output, completed] }),
             )
           },
@@ -157,7 +170,8 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
         ),
       ),
     resolveToolApproval: (waitId, approved, now) => record("tool-approval", waitId, approved, now),
-    resolvePermission: (waitId, decision, now) => record("permission", waitId, decision, now),
+    resolvePermission: (waitId, decision, now) =>
+      record("permission", waitId, decision, now).pipe(Effect.andThen(Deferred.succeed(permissionResolved, undefined))),
   })
   const layer = Operation.productLayer({
     repositoryLayer: Layer.succeed(ThreadRepository.Service, repositories),
@@ -166,12 +180,14 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
     defaultWorkspace: "/work",
     makeThreadId: Effect.die("unused"),
     makeTurnId: Effect.succeed(Turn.TurnId.make("pending")),
-    interactive: (_, session) => Ref.update(sessions, (values) => [...values, session]),
+    interactive: (_, session) =>
+      Ref.update(sessions, (values) => [...values, session]).pipe(Effect.andThen(Effect.never)),
   })
-  yield* Effect.gen(function* () {
-    const operation = yield* Operation.Service
-    yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
-  }).pipe(provideLayer(layer))
+  const context = yield* Layer.build(layer)
+  const operation = Context.get(context, Operation.Service)
+  yield* Effect.forkChild(operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }))
+  yield* waitForSessions(sessions)
+  yield* Ref.set(controls, [])
   const session = (yield* Ref.get(sessions))[0]
   if (session === undefined) return yield* Effect.die("Missing interactive session")
   return { session, repositories, turns, controls, hiddenExecutions, older, latest }
@@ -182,7 +198,7 @@ describe("InteractiveSession controls", () => {
     Effect.gen(function* () {
       const { session, older } = yield* makeHarness()
       const events = yield* Queue.unbounded<Operation.InteractiveEvent>()
-      const watcher = yield* Effect.forkChild(session.watchThreads((event) => Queue.offerUnsafe(events, event)))
+      const watcher = yield* Effect.forkChild(session.events((event) => Queue.offerUnsafe(events, event)))
       const initial = yield* Queue.take(events)
       expect(initial).toMatchObject({
         _tag: "ThreadsListed",
@@ -192,7 +208,7 @@ describe("InteractiveSession controls", () => {
         ]),
       })
       yield* TestClock.adjust("10 millis")
-      yield* session.selectThread(older.id, () => undefined)
+      yield* session.selectThread(older.id, 3)
       let selected = yield* Queue.take(events)
       while (
         selected._tag !== "ThreadsListed" ||
@@ -248,45 +264,35 @@ describe("InteractiveSession controls", () => {
         makeTurnId: Ref.updateAndGet(turnSequence, (value) => value + 1).pipe(
           Effect.map((value) => Turn.TurnId.make(`turn-${value}`)),
         ),
-        interactive: (input, session) => Effect.sync(() => sessions.set(input.workspace ?? "/default", session)),
+        interactive: (input, session) =>
+          Effect.sync(() => sessions.set(input.workspace ?? "/default", session)).pipe(Effect.andThen(Effect.never)),
       })
-      yield* Effect.gen(function* () {
-        const operation = yield* Operation.Service
-        yield* Effect.all(
+      const context = yield* Layer.build(layer)
+      const operation = Context.get(context, Operation.Service)
+      yield* Effect.forkChild(
+        Effect.all(
           [
             operation.run({ _tag: "Interactive", prompt: [], workspace: "/alpha", ephemeral: false }),
             operation.run({ _tag: "Interactive", prompt: [], workspace: "/beta", ephemeral: false }),
           ],
-          { concurrency: "unbounded" },
-        )
-      }).pipe(provideLayer(layer))
+          { concurrency: "unbounded", discard: true },
+        ),
+      )
+      while (sessions.size < 2) yield* Effect.yieldNow
       const alpha = sessions.get("/alpha")
       const beta = sessions.get("/beta")
       if (alpha === undefined || beta === undefined) return yield* Effect.die("Missing interactive sessions")
       const alphaEvents: Array<Operation.InteractiveEvent> = []
       const betaEvents: Array<Operation.InteractiveEvent> = []
-      yield* Effect.all(
-        [
-          alpha.submit("alpha prompt", (event) => alphaEvents.push(event)),
-          beta.submit("beta prompt", (event) => betaEvents.push(event)),
-        ],
-        { concurrency: "unbounded" },
-      )
-      yield* Effect.all([
-        alpha.shell("pwd", true, (event) => alphaEvents.push(event)),
-        beta.shell("pwd", true, (event) => betaEvents.push(event)),
-      ])
+      yield* collectEvents(alpha, alphaEvents)
+      yield* collectEvents(beta, betaEvents)
+      yield* Effect.all([alpha.submit("alpha prompt"), beta.submit("beta prompt")], { concurrency: "unbounded" })
+      yield* Effect.all([alpha.shell("pwd", true), beta.shell("pwd", true)])
       const alphaThreadId = alphaEvents.find((event) => event._tag === "ThreadActivated")?.threadId
       const betaThreadId = betaEvents.find((event) => event._tag === "ThreadActivated")?.threadId
       expect(alphaThreadId).not.toBe(betaThreadId)
-      yield* Effect.all([
-        alpha.selectThread(alphaThreadId!, (event) => alphaEvents.push(event)),
-        beta.selectThread(betaThreadId!, (event) => betaEvents.push(event)),
-      ])
-      yield* Effect.all([
-        alpha.submit("alpha follow-up", (event) => alphaEvents.push(event)),
-        beta.submit("beta follow-up", (event) => betaEvents.push(event)),
-      ])
+      yield* Effect.all([alpha.selectThread(alphaThreadId!, 1), beta.selectThread(betaThreadId!, 1)])
+      yield* Effect.all([alpha.submit("alpha follow-up"), beta.submit("beta follow-up")])
       expect((yield* repositories.get(Thread.ThreadId.make(alphaThreadId!)))?.workspace).toBe("/alpha")
       expect((yield* repositories.get(Thread.ThreadId.make(betaThreadId!)))?.workspace).toBe("/beta")
       expect((yield* turns.list(Thread.ThreadId.make(alphaThreadId!))).map((turn) => turn.prompt)).toEqual([
@@ -339,25 +345,31 @@ describe("InteractiveSession controls", () => {
         defaultWorkspace: "/work",
         makeThreadId: Effect.succeed(Thread.ThreadId.make("created")),
         makeTurnId: Effect.succeed(Turn.TurnId.make("created-turn")),
-        interactive: (_, session) => Ref.update(sessions, (values) => [...values, session]),
+        interactive: (_, session) =>
+          Ref.update(sessions, (values) => [...values, session]).pipe(Effect.andThen(Effect.never)),
       })
-      yield* Effect.gen(function* () {
-        const operation = yield* Operation.Service
-        yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
-      }).pipe(provideLayer(layer))
+      const context = yield* Layer.build(layer)
+      const operation = Context.get(context, Operation.Service)
+      yield* Effect.forkChild(operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }))
+      yield* waitForSessions(sessions)
       const session = (yield* Ref.get(sessions))[0]
       if (session === undefined) return yield* Effect.die("Missing interactive session")
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.submit("", (event) => events.push(event))
-      expect(events).toEqual([
+      yield* collectEvents(session, events)
+      yield* session.submit("")
+      while ((yield* turns.get(Turn.TurnId.make("created-turn")))?.status !== "completed") yield* Effect.yieldNow
+      while (events.filter((event) => event._tag !== "ThreadsListed").length < 4) yield* Effect.yieldNow
+      expect(events.filter((event) => event._tag !== "ThreadsListed")).toEqual([
         { _tag: "ThreadActivated", threadId: "created", title: "New thread" },
         {
           _tag: "TurnStarted",
+          selectionEpoch: 0,
           threadId: "created",
-          turn: expect.objectContaining({ id: "created-turn", threadId: "created", prompt: "", status: "accepted" }),
+          turn: expect.objectContaining({ id: "created-turn", threadId: "created", prompt: "", status: "running" }),
         },
         {
           _tag: "TranscriptPatched",
+          selectionEpoch: 0,
           threadId: "created",
           turnId: "created-turn",
           revision: 1,
@@ -365,12 +377,12 @@ describe("InteractiveSession controls", () => {
         },
         {
           _tag: "TranscriptPatched",
+          selectionEpoch: 0,
           threadId: "created",
           turnId: "created-turn",
           revision: 2,
           event: { cursor: "done", sequence: 2, type: "execution.completed", createdAt: 2 },
         },
-        { _tag: "QueueChanged", threadId: "created", turns: [] },
       ])
       expect(yield* repositories.get(Thread.ThreadId.make("created"))).toMatchObject({ title: "New thread" })
       expect(yield* turns.get(Turn.TurnId.make("created-turn"))).toMatchObject({
@@ -380,32 +392,154 @@ describe("InteractiveSession controls", () => {
     }),
   )
 
+  it.effect("admits, edits, and dequeues pending turns while the active turn is still executing", () =>
+    Effect.gen(function* () {
+      const repositories = yield* ThreadRepository.makeMemory()
+      const turns = yield* TurnRepository.makeMemory()
+      const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
+      const nextTurn = yield* Ref.make(0)
+      const activeStarted = yield* Deferred.make<void>()
+      const activeSubmitted = yield* Deferred.make<void>()
+      const releaseActive = yield* Deferred.make<void>()
+      const pendingStarted = yield* Deferred.make<void>()
+      const backend = ExecutionBackend.Service.of({
+        invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
+        createFanOut: () => Effect.die("unused"),
+        inspectFanOut: () => Effect.die("unused"),
+        cancelFanOut: () => Effect.die("unused"),
+        registerWorkflows: () => Effect.die("unused"),
+        startWorkflow: () => Effect.die("unused"),
+        inspectWorkflow: () => Effect.die("unused"),
+        cancelWorkflow: () => Effect.die("unused"),
+        inspect: () => Effect.void.pipe(Effect.as(undefined)),
+        start: (input) =>
+          input.turnId === "turn-0"
+            ? Deferred.succeed(activeStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseActive)),
+                Effect.as({ turnId: input.turnId, status: "completed" as const, events: [] }),
+              )
+            : Deferred.succeed(pendingStarted, undefined).pipe(
+                Effect.as({ turnId: input.turnId, status: "completed" as const, events: [] }),
+              ),
+        replay: () => Effect.die("unused"),
+        steer: () => Effect.die("unused"),
+        cancel: () => Effect.die("unused"),
+        listApprovals: () => Effect.succeed([]),
+        resolveToolApproval: () => Effect.void,
+        resolvePermission: () => Effect.die("unused"),
+      })
+      const layer = Operation.productLayer({
+        repositoryLayer: Layer.succeed(ThreadRepository.Service, repositories),
+        turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
+        backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
+        defaultWorkspace: "/work",
+        pendingTurnCapacity: 2,
+        makeThreadId: Effect.succeed(Thread.ThreadId.make("thread")),
+        makeTurnId: Ref.getAndUpdate(nextTurn, (value) => value + 1).pipe(
+          Effect.map((value) => Turn.TurnId.make(`turn-${value}`)),
+        ),
+        interactive: (_, session) =>
+          Ref.update(sessions, (values) => [...values, session]).pipe(Effect.andThen(Effect.never)),
+      })
+      const context = yield* Layer.build(layer)
+      const operation = Context.get(context, Operation.Service)
+      yield* Effect.forkChild(operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }))
+      yield* waitForSessions(sessions)
+      const session = (yield* Ref.get(sessions))[0]
+      if (session === undefined) return yield* Effect.die("Missing interactive session")
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* collectEvents(session, events)
+
+      const active = yield* Effect.forkChild(
+        session.submit("active").pipe(Effect.andThen(Deferred.succeed(activeSubmitted, undefined))),
+      )
+      yield* Deferred.await(activeStarted)
+      expect(yield* Deferred.isDone(activeSubmitted)).toBe(true)
+      const pending = yield* Effect.forkChild(session.submit("pending"))
+      const removed = yield* Effect.forkChild(session.submit("removed"))
+      for (let index = 0; index < 10; index += 1) yield* Effect.yieldNow
+      yield* session.submit("overflow")
+      yield* Effect.yieldNow
+
+      expect(yield* turns.readQueue(Thread.ThreadId.make("thread"))).toMatchObject({
+        queuedCount: 2,
+        turns: [
+          { id: "turn-1", prompt: "pending", status: "queued" },
+          { id: "turn-2", prompt: "removed", status: "queued" },
+        ],
+      })
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          _tag: "QueueUpdated",
+          change: { _tag: "Added", item: { id: "turn-1", prompt: "pending" } },
+        }),
+      )
+      expect(events).toContainEqual({
+        _tag: "QueueFull",
+        selectionEpoch: 0,
+        threadId: "thread",
+        capacity: 2,
+        count: 2,
+      })
+      expect(yield* turns.get(Turn.TurnId.make("turn-3"))).toBeUndefined()
+      yield* session.editQueued("turn-1", "edited")
+      yield* session.dequeue("turn-2")
+      expect(yield* turns.readQueue(Thread.ThreadId.make("thread"))).toMatchObject({
+        queuedCount: 1,
+        turns: [{ id: "turn-1", prompt: "edited", status: "queued" }],
+      })
+      expect(yield* Deferred.isDone(pendingStarted)).toBe(false)
+
+      yield* Deferred.succeed(releaseActive, undefined)
+      yield* Deferred.await(pendingStarted)
+      yield* Effect.yieldNow
+      yield* Fiber.join(active)
+      yield* Fiber.join(pending)
+      yield* Fiber.join(removed)
+      expect(yield* turns.get(Turn.TurnId.make("turn-1"))).toMatchObject({ status: "completed" })
+      expect(events.filter((event) => event._tag === "TurnStarted").map((event) => event.turn.id)).toEqual([
+        "turn-0",
+        "turn-1",
+      ])
+    }),
+  )
+
   it.effect("edits and dequeues queued turns and reports the remaining queue", () =>
     Effect.gen(function* () {
       const { session, turns, older } = yield* makeHarness()
-      yield* turns.createForSubmission({ id: Turn.TurnId.make("queued"), threadId: older.id, prompt: "before", now: 2 })
+      yield* createTurn(turns, { id: Turn.TurnId.make("queued"), threadId: older.id, prompt: "before", now: 2 })
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      yield* session.editQueued("queued", "after", (event) => events.push(event))
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 2)
+      yield* session.editQueued("queued", "after")
+      yield* Effect.yieldNow
       expect((yield* turns.get(Turn.TurnId.make("queued")))?.prompt).toBe("after")
-      expect(events.at(-2)).toEqual({
-        _tag: "QueuedTurnEdited",
+      expect(events.at(-1)).toEqual({
+        _tag: "QueueUpdated",
+        selectionEpoch: 2,
         threadId: "older",
-        turnId: "queued",
-        prompt: "after",
+        revision: 2,
+        queuedCount: 1,
+        change: { _tag: "Updated", item: { id: "queued", prompt: "after" } },
       })
-      expect(events.at(-1)).toMatchObject({ _tag: "QueueChanged", turns: [{ id: "queued", prompt: "after" }] })
       events.length = 0
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      const page = events.find((event) => event._tag === "TranscriptPageReceived")
-      expect(
-        page?._tag === "TranscriptPageReceived"
-          ? page.entries.find((entry) => entry.turn.id === "queued")?.unit.content
-          : undefined,
-      ).toEqual({ _tag: "Entry", role: "user", text: "after" })
-      yield* session.dequeue("queued", (event) => events.push(event))
+      yield* session.selectThread(older.id, 3)
+      yield* Effect.yieldNow
+      const page = events.find((event) => event._tag === "SelectionLoaded")
+      expect(page?._tag === "SelectionLoaded" ? page.entries.some((entry) => entry.turn.id === "queued") : true).toBe(
+        false,
+      )
+      yield* session.dequeue("queued")
+      yield* Effect.yieldNow
       expect(yield* turns.get(Turn.TurnId.make("queued"))).toBeUndefined()
-      expect(events.at(-1)).toEqual({ _tag: "QueueChanged", threadId: "older", turns: [] })
+      expect(events.at(-1)).toEqual({
+        _tag: "QueueUpdated",
+        selectionEpoch: 3,
+        threadId: "older",
+        revision: 3,
+        queuedCount: 0,
+        change: { _tag: "Removed", turnId: "queued" },
+      })
     }),
   )
 
@@ -413,9 +547,11 @@ describe("InteractiveSession controls", () => {
     Effect.gen(function* () {
       const { session, turns, controls, older } = yield* makeHarness()
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      yield* session.steer("change course", (event) => events.push(event))
-      yield* session.cancel((event) => events.push(event))
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* session.steer("change course")
+      yield* session.cancel
+      yield* Effect.yieldNow
       expect(yield* Ref.get(controls)).toEqual([
         ["replay", "active", undefined],
         ["steer", "active", "change course", 0],
@@ -425,10 +561,13 @@ describe("InteractiveSession controls", () => {
         status: "cancelled",
         lastCursor: "cancel-cursor",
       })
-      expect(events.slice(-2)).toEqual([
-        { _tag: "ExecutionControlled", threadId: "older", turnId: "active", action: "cancelled" },
-        { _tag: "QueueChanged", threadId: "older", turns: [] },
-      ])
+      expect(events.at(-1)).toEqual({
+        _tag: "ExecutionControlled",
+        selectionEpoch: 1,
+        threadId: "older",
+        turnId: "active",
+        action: "cancelled",
+      })
     }),
   )
 
@@ -472,24 +611,30 @@ describe("InteractiveSession controls", () => {
         defaultWorkspace: "/work",
         makeThreadId: Effect.die("unused"),
         makeTurnId: Effect.succeed(Turn.TurnId.make("pending")),
-        interactive: (_, value) => Ref.update(sessions, (values) => [...values, value]),
+        interactive: (_, value) =>
+          Ref.update(sessions, (values) => [...values, value]).pipe(Effect.andThen(Effect.never)),
       })
-      yield* Effect.gen(function* () {
-        const operation = yield* Operation.Service
-        yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false })
-      }).pipe(provideLayer(layer))
+      const context = yield* Layer.build(layer)
+      const operation = Context.get(context, Operation.Service)
+      yield* Effect.forkChild(operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }))
+      yield* waitForSessions(sessions)
       const checkingSession = (yield* Ref.get(sessions))[0]
       if (checkingSession === undefined) return yield* Effect.die("Missing interactive session")
       const events: Array<Operation.InteractiveEvent> = []
-      yield* checkingSession.selectThread(older.id, (event) => events.push(event))
-      yield* checkingSession.interruptAndSend("next prompt", (event) => events.push(event))
+      yield* collectEvents(checkingSession, events)
+      yield* checkingSession.selectThread(older.id, 1)
+      yield* checkingSession.interruptAndSend("next prompt")
+      yield* Effect.yieldNow
       expect(yield* Ref.get(persistedAtCancel)).toMatchObject({ prompt: "next prompt", status: "queued" })
       expect((yield* turns.get(Turn.TurnId.make("active")))?.status).toBe("cancelled")
       expect(yield* turns.get(Turn.TurnId.make("pending"))).toMatchObject({
         status: "completed",
         lastCursor: "replacement-done",
       })
-      expect(events.at(-1)?._tag).toBe("QueueChanged")
+      expect(events.filter((event) => event._tag === "QueueUpdated").map((event) => event.change._tag)).toEqual([
+        "Added",
+        "Removed",
+      ])
       expect(yield* Ref.get(controls)).toEqual([])
     }),
   )
@@ -498,21 +643,22 @@ describe("InteractiveSession controls", () => {
     Effect.gen(function* () {
       const { session, controls } = yield* makeHarness()
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread("older", (event) => events.push(event))
+      yield* collectEvents(session, events)
+      yield* session.selectThread("older", 1)
       yield* Ref.set(controls, [])
       events.length = 0
-      yield* session.resolvePermission("allow-wait", "permission", "allow", (event) => events.push(event))
-      yield* session.resolvePermission("deny-wait", "permission", "deny", (event) => events.push(event))
-      yield* session.resolvePermission("always-wait", "permission", "always", (event) => events.push(event))
+      yield* session.resolvePermission("allow-wait", "permission", "allow")
+      yield* session.resolvePermission("deny-wait", "permission", "deny")
+      yield* session.resolvePermission("always-wait", "permission", "always")
+      yield* Effect.yieldNow
       expect(yield* Ref.get(controls)).toEqual([
         ["permission", "allow-wait", "Approved", 0],
         ["permission", "deny-wait", "Denied", 0],
         ["permission", "always-wait", "Always", 0],
       ])
-      expect(events).toHaveLength(3)
-      expect(
-        events.every((event) => event._tag === "ExecutionControlled" && event.action === "permission-resolved"),
-      ).toBe(true)
+      const resolved = events.filter((event) => event._tag === "ExecutionControlled")
+      expect(resolved).toHaveLength(3)
+      expect(resolved.every((event) => event.action === "permission-resolved" && event.selectionEpoch === 1)).toBe(true)
     }),
   )
 
@@ -520,12 +666,12 @@ describe("InteractiveSession controls", () => {
     Effect.gen(function* () {
       const { session, controls } = yield* makeHarness(false, ["allow-tool", "always-tool", "deny-tool"])
       const events: Array<Operation.InteractiveEvent> = []
-      const dispatch = (event: Operation.InteractiveEvent) => events.push(event)
-      yield* session.selectThread("older", dispatch)
+      yield* collectEvents(session, events)
+      yield* session.selectThread("older", 1)
       yield* Ref.set(controls, [])
-      yield* session.resolvePermission("allow-tool", "tool-approval", "allow", dispatch)
-      yield* session.resolvePermission("always-tool", "tool-approval", "always", dispatch)
-      yield* session.resolvePermission("deny-tool", "tool-approval", "deny", dispatch)
+      yield* session.resolvePermission("allow-tool", "tool-approval", "allow")
+      yield* session.resolvePermission("always-tool", "tool-approval", "always")
+      yield* session.resolvePermission("deny-tool", "tool-approval", "deny")
       expect(yield* Ref.get(controls)).toEqual([
         ["tool-approval", "allow-tool", true, 0],
         ["tool-approval", "always-tool", true, 0],
@@ -552,15 +698,17 @@ describe("InteractiveSession controls", () => {
       }
       const { session, turns, controls, older } = yield* makeHarness(true, [], [priorOutput, priorPermission])
       yield* turns.setStatus(Turn.TurnId.make("active"), "waiting", "wait-cursor", 2)
-      yield* turns.createForSubmission({
+      yield* createTurn(turns, {
         id: Turn.TurnId.make("queued-after-wait"),
         threadId: older.id,
         prompt: "queued prompt",
         now: 3,
       })
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      yield* session.resolvePermission("permission-wait", "permission", "allow", (event) => events.push(event))
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* session.resolvePermission("permission-wait", "permission", "allow")
+      yield* Effect.yieldNow
       expect(yield* Ref.get(controls)).toContainEqual(["follow", "active", "wait-cursor"])
       expect(yield* turns.get(Turn.TurnId.make("active"))).toMatchObject({
         status: "completed",
@@ -572,6 +720,7 @@ describe("InteractiveSession controls", () => {
       })
       expect(events).toContainEqual({
         _tag: "TranscriptPatched",
+        selectionEpoch: 1,
         threadId: "older",
         turnId: "active",
         revision: expect.any(Number),
@@ -579,15 +728,17 @@ describe("InteractiveSession controls", () => {
       })
       expect(events).toContainEqual({
         _tag: "TranscriptPatched",
+        selectionEpoch: 1,
         threadId: "older",
         turnId: "active",
         revision: expect.any(Number),
         event: expect.objectContaining({ cursor: "resumed-done", type: "execution.completed" }),
       })
       events.length = 0
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      const page = events.find((event) => event._tag === "TranscriptPageReceived")
-      expect(page?._tag === "TranscriptPageReceived" ? page.entries : []).toEqual(
+      yield* session.selectThread(older.id, 2)
+      yield* Effect.yieldNow
+      const page = events.find((event) => event._tag === "SelectionLoaded")
+      expect(page?._tag === "SelectionLoaded" ? page.entries : []).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             unit: expect.objectContaining({
@@ -604,62 +755,38 @@ describe("InteractiveSession controls", () => {
     }),
   )
 
-  it.effect("keeps following a selected thread when another session starts a later turn", () =>
+  it.effect("starts every queued turn exactly once after a waiting turn completes", () =>
     Effect.gen(function* () {
       const { session, turns, controls, older } = yield* makeHarness(true)
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      const follower = yield* Effect.forkChild(session.followSelected((event) => events.push(event)))
-      yield* Effect.yieldNow
-      expect(yield* Ref.get(controls)).toContainEqual(["follow", "active", "active-cursor"])
-
-      yield* turns.createForSubmission({
-        id: Turn.TurnId.make("later"),
-        threadId: older.id,
-        prompt: "later prompt",
-        now: 4,
-      })
-      yield* turns.setStatus(Turn.TurnId.make("later"), "running", undefined, 5)
-      yield* TestClock.adjust("100 millis")
-      yield* Effect.yieldNow
-
-      expect(yield* Ref.get(controls)).toContainEqual(["follow", "later", undefined])
-      expect(events).toContainEqual({
-        _tag: "TurnStarted",
-        threadId: "older",
-        turn: expect.objectContaining({ id: "later", prompt: "later prompt" }),
-      })
-      yield* Fiber.interrupt(follower)
-    }),
-  )
-
-  it.effect("waits for an accepted turn execution to become visible before following", () =>
-    Effect.gen(function* () {
-      const { session, turns, controls, hiddenExecutions, older } = yield* makeHarness(true)
-      const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      const follower = yield* Effect.forkChild(session.followSelected((event) => events.push(event)))
-      yield* Effect.yieldNow
-
-      yield* Ref.set(hiddenExecutions, new Set(["later-accepted"]))
-      yield* turns.createForSubmission({
-        id: Turn.TurnId.make("later-accepted"),
-        threadId: older.id,
-        prompt: "accepted elsewhere",
-        now: 6,
-      })
-      yield* TestClock.adjust("100 millis")
-      yield* Effect.yieldNow
-
-      expect(yield* Ref.get(controls)).not.toContainEqual(["follow", "later-accepted", undefined])
-      expect(events.some((event) => event._tag === "ExecutionFailed")).toBe(false)
-
-      yield* Ref.set(hiddenExecutions, new Set())
-      yield* TestClock.adjust("100 millis")
-      yield* Effect.yieldNow
-
-      expect(yield* Ref.get(controls)).toContainEqual(["follow", "later-accepted", undefined])
-      yield* Fiber.interrupt(follower)
+      yield* turns.setStatus(Turn.TurnId.make("active"), "waiting", "wait-cursor", 2)
+      for (const [index, id] of ["promoted-one", "promoted-two", "promoted-three"].entries())
+        yield* createTurn(turns, {
+          id: Turn.TurnId.make(id),
+          threadId: older.id,
+          prompt: id,
+          now: 10 + index,
+        })
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* session.resolvePermission("permission-wait", "permission", "allow")
+      while (
+        (yield* turns.get(Turn.TurnId.make("promoted-three")))?.status !== "completed" ||
+        events.filter((event) => event._tag === "TurnStarted").length < 3
+      )
+        yield* Effect.yieldNow
+      const calls = yield* Ref.get(controls)
+      expect(calls.filter((call) => call[0] === "start")).toEqual([
+        ["start", "promoted-one"],
+        ["start", "promoted-two"],
+        ["start", "promoted-three"],
+      ])
+      expect(calls.some((call) => call[0] === "follow" && String(call[1]).startsWith("promoted-"))).toBe(false)
+      expect(
+        events
+          .filter((event) => event._tag === "TurnStarted")
+          .map((event) => (event._tag === "TurnStarted" ? String(event.turn.id) : "")),
+      ).toEqual(["promoted-one", "promoted-two", "promoted-three"])
     }),
   )
 
@@ -709,29 +836,36 @@ describe("InteractiveSession controls", () => {
             Ref.update(permissionWorkspaces, (values) => [...values, workspace]).pipe(Effect.as("ask" as const)),
           makeThreadId: Effect.succeed(Thread.ThreadId.make("shell-thread")),
           makeTurnId: Effect.sync(() => Turn.TurnId.make(`shell-turn-${turnNumber++}`)),
-          interactive: (_, session) => Ref.update(sessions, (values) => [...values, session]),
+          interactive: (_, session) =>
+            Ref.update(sessions, (values) => [...values, session]).pipe(Effect.andThen(Effect.never)),
         })
-        yield* Effect.gen(function* () {
-          const operation = yield* Operation.Service
-          yield* operation.run({ _tag: "Interactive", prompt: [], ephemeral: false, workspace: "/client-shell" })
-        }).pipe(provideLayer(layer))
+        const context = yield* Layer.build(layer)
+        const operation = Context.get(context, Operation.Service)
+        yield* Effect.forkChild(
+          operation.run({ _tag: "Interactive", prompt: [], ephemeral: false, workspace: "/client-shell" }),
+        )
+        yield* waitForSessions(sessions)
         expect(yield* Ref.get(permissionWorkspaces)).toContain("/client-shell")
         const session = (yield* Ref.get(sessions))[0]
         if (session === undefined) return yield* Effect.die("Missing interactive session")
+        const allEvents: Array<Operation.InteractiveEvent> = []
+        yield* collectEvents(session, allEvents)
 
         const runShell = Effect.fn("InteractiveSessionTest.runShell")(function* (
           command: string,
           incognito: boolean,
           decision: "allow" | "deny" | "always",
         ) {
-          const events: Array<Operation.InteractiveEvent> = []
-          const fiber = yield* Effect.forkChild(session.shell(command, incognito, (event) => events.push(event)))
-          yield* Effect.yieldNow
-          const permission = events.find((event) => event._tag === "ShellPermissionRequested")
+          const first = allEvents.length
+          const fiber = yield* Effect.forkChild(session.shell(command, incognito))
+          while (!allEvents.slice(first).some((event) => event._tag === "ShellPermissionRequested"))
+            yield* Effect.yieldNow
+          const permission = allEvents.slice(first).find((event) => event._tag === "ShellPermissionRequested")
           if (permission?._tag !== "ShellPermissionRequested") return yield* Effect.die("Missing shell permission")
-          yield* session.resolvePermission(permission.id, "permission", decision, (event) => events.push(event))
+          yield* session.resolvePermission(permission.id, "permission", decision)
           yield* Fiber.join(fiber)
-          return events
+          yield* Effect.yieldNow
+          return allEvents.slice(first)
         })
 
         const persisted = yield* runShell("printf persisted", false, "allow")
@@ -752,15 +886,15 @@ describe("InteractiveSession controls", () => {
         })
         expect(yield* Ref.get(commands)).toEqual(["-lc printf persisted", "-lc printf secret"])
 
-        yield* turns.createForSubmission({
+        yield* createTurn(turns, {
           id: Turn.TurnId.make("active-shell-blocker"),
           threadId: Thread.ThreadId.make("shell-thread"),
           prompt: "active",
           now: 2,
         })
         const queued = yield* runShell("printf queued", false, "allow")
-        expect(queued.findLast((event) => event._tag === "QueueChanged")).toMatchObject({
-          turns: [{ status: "queued" }],
+        expect(queued.findLast((event) => event._tag === "QueueUpdated")).toMatchObject({
+          change: { _tag: "Added", item: { prompt: expect.stringContaining("printf queued") } },
         })
         expect(
           (yield* turns.list(Thread.ThreadId.make("shell-thread"))).find((turn) =>
@@ -774,18 +908,18 @@ describe("InteractiveSession controls", () => {
     Effect.gen(function* () {
       const { session, controls, older } = yield* makeHarness()
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      yield* session.reopenThread((event) => events.push(event))
-      yield* session.replay("latest-active", "cursor-7", (event) => events.push(event))
-      expect(events[0]).toMatchObject({
-        _tag: "TranscriptPageReceived",
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* session.reopenThread(2)
+      yield* session.replay("latest-active", "cursor-7")
+      yield* Effect.yieldNow
+      expect(events.find((event) => event._tag === "SelectionLoaded" && event.thread.id === "older")).toMatchObject({
+        _tag: "SelectionLoaded",
         thread: { id: "older" },
         entries: [{ turn: { id: "active" } }],
       })
-      expect(
-        events.find((event) => event._tag === "TranscriptPageReceived" && event.thread.id === "latest"),
-      ).toMatchObject({
-        _tag: "TranscriptPageReceived",
+      expect(events.find((event) => event._tag === "SelectionLoaded" && event.thread.id === "latest")).toMatchObject({
+        _tag: "SelectionLoaded",
         thread: { id: "latest" },
         entries: [{ turn: { id: "latest-active" } }],
       })
@@ -812,14 +946,13 @@ describe("InteractiveSession controls", () => {
       )
       const { session, controls, older } = yield* makeHarness(false, [], pagedEvents)
       const events: Array<Operation.InteractiveEvent> = []
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* Effect.yieldNow
 
-      yield* session.selectThread(older.id, (event) => events.push(event))
-
-      const received = events.find((event) => event._tag === "TranscriptPageReceived")
+      const received = events.find((event) => event._tag === "SelectionLoaded")
       const projected =
-        received?._tag === "TranscriptPageReceived"
-          ? received.entries.filter((entry) => entry.turn.id === "active")
-          : []
+        received?._tag === "SelectionLoaded" ? received.entries.filter((entry) => entry.turn.id === "active") : []
       expect(projected).toHaveLength(2)
       expect(projected.at(-1)?.unit).toMatchObject({
         revision: 450,
@@ -847,8 +980,9 @@ describe("InteractiveSession controls", () => {
       )
       const { session, controls, older } = yield* makeHarness(false, [], pagedEvents, true)
       const events: Array<Operation.InteractiveEvent> = []
-
-      yield* session.selectThread(older.id, (event) => events.push(event))
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* Effect.yieldNow
 
       expect(events.find((event) => event._tag === "ExecutionFailed")).toMatchObject({
         message: expect.stringContaining("cursor did not advance"),
@@ -860,16 +994,16 @@ describe("InteractiveSession controls", () => {
     }),
   )
 
-  it.effect("replays only existing executions and still emits the queued turns when selecting a thread", () =>
+  it.effect("keeps queued turns in the queue and out of the transcript when selecting a thread", () =>
     Effect.gen(function* () {
       const { session, turns, controls, older } = yield* makeHarness()
-      const queued = yield* turns.createForSubmission({
+      const queued = yield* createTurn(turns, {
         id: Turn.TurnId.make("queued-selection"),
         threadId: older.id,
         prompt: "queued prompt",
         now: 2,
       })
-      const shell = yield* turns.createForSubmission({
+      const shell = yield* createTurn(turns, {
         id: Turn.TurnId.make("recorded-shell"),
         threadId: older.id,
         prompt: "$ printf recorded\n\noutput:recorded",
@@ -878,17 +1012,14 @@ describe("InteractiveSession controls", () => {
       yield* turns.setStatus(shell.id, "completed", undefined, 4)
       yield* turns.setStatus(Turn.TurnId.make("active"), "completed", "done", 5)
       const events: Array<Operation.InteractiveEvent> = []
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* Effect.yieldNow
 
-      yield* session.selectThread(older.id, (event) => events.push(event))
-
-      expect(events.find((event) => event._tag === "QueueChanged")).toMatchObject({
-        _tag: "QueueChanged",
-        turns: [{ id: queued.id, status: "queued" }],
-      })
-      expect(events.find((event) => event._tag === "TranscriptPageReceived")).toMatchObject({
+      expect(events.find((event) => event._tag === "SelectionLoaded")).toMatchObject({
+        queue: [{ id: queued.id }],
         entries: [
           { turn: { id: "active" }, unit: { content: { _tag: "Entry" } } },
-          { turn: { id: queued.id, status: "queued" }, unit: { content: { _tag: "Entry" } } },
           { turn: { id: shell.id, status: "completed" }, unit: { content: { _tag: "Entry" } } },
         ],
       })
@@ -901,7 +1032,7 @@ describe("InteractiveSession controls", () => {
       const { session, turns, older } = yield* makeHarness()
       yield* turns.setStatus(Turn.TurnId.make("active"), "completed", "done", 2)
       for (let index = 0; index < 60; index += 1) {
-        const created = yield* turns.createForSubmission({
+        const created = yield* createTurn(turns, {
           id: Turn.TurnId.make(`history-${index.toString().padStart(2, "0")}`),
           threadId: older.id,
           prompt: `history ${index}`,
@@ -910,13 +1041,16 @@ describe("InteractiveSession controls", () => {
         yield* turns.setStatus(created.id, "completed", undefined, index + 10)
       }
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread(older.id, (event) => events.push(event))
-      const initial = events.find((event) => event._tag === "TranscriptPageReceived")
-      yield* session.loadOlder((event) => events.push(event))
-      expect(initial?._tag === "TranscriptPageReceived" ? initial.hasOlder : false).toBe(true)
-      expect(initial?._tag === "TranscriptPageReceived" ? initial.entries : []).toHaveLength(50)
+      yield* collectEvents(session, events)
+      yield* session.selectThread(older.id, 1)
+      yield* Effect.yieldNow
+      const initial = events.find((event) => event._tag === "SelectionLoaded")
+      yield* session.loadOlder
+      yield* Effect.yieldNow
+      expect(initial?._tag === "SelectionLoaded" ? initial.hasOlder : false).toBe(true)
+      expect(initial?._tag === "SelectionLoaded" ? initial.entries : []).toHaveLength(50)
       expect(
-        initial?._tag === "TranscriptPageReceived" ? initial.entries.map((entry) => entry.turn.id).at(-1) : undefined,
+        initial?._tag === "SelectionLoaded" ? initial.entries.map((entry) => entry.turn.id).at(-1) : undefined,
       ).toBe(Turn.TurnId.make("history-59"))
       const prepended = events.find((event) => event._tag === "TranscriptPagePrepended")
       expect(prepended?._tag === "TranscriptPagePrepended" ? prepended.hasOlder : true).toBe(false)
@@ -933,14 +1067,16 @@ describe("InteractiveSession controls", () => {
     Effect.gen(function* () {
       const { session } = yield* makeHarness()
       const events: Array<Operation.InteractiveEvent> = []
-      yield* session.selectThread("missing", (event) => events.push(event))
-      yield* session.steer("nowhere", (event) => events.push(event))
-      yield* session.editQueued("missing", "no", (event) => events.push(event))
-      expect(events).toHaveLength(3)
-      expect(events.every((event) => event._tag === "ExecutionFailed")).toBe(true)
-      expect(events[0]).toMatchObject({ message: expect.stringContaining("Thread missing does not exist") })
-      expect(events[1]).toMatchObject({ message: expect.stringContaining("No thread selected") })
-      expect(events[2]).toMatchObject({ message: expect.stringContaining("is not queued") })
+      yield* collectEvents(session, events)
+      yield* session.selectThread("missing", 1)
+      yield* session.steer("nowhere")
+      yield* session.editQueued("missing", "no")
+      yield* Effect.yieldNow
+      const failures = events.filter((event) => event._tag === "ExecutionFailed")
+      expect(failures).toHaveLength(3)
+      expect(failures[0]).toMatchObject({ message: expect.stringContaining("Thread missing does not exist") })
+      expect(failures[1]).toMatchObject({ message: expect.stringContaining("No thread selected") })
+      expect(failures[2]).toMatchObject({ message: expect.stringContaining("is not queued") })
     }),
   )
 })

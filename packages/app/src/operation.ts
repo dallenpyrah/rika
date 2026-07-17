@@ -1,6 +1,5 @@
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
-import * as ThreadSummary from "@rika/persistence/thread-summary"
 import * as ThreadSummaryRepository from "@rika/persistence/thread-summary-repository"
 import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as TranscriptRepository from "@rika/persistence/transcript-repository"
@@ -19,24 +18,34 @@ import {
   Context,
   Deferred,
   Effect,
+  Exit,
   Fiber,
   Layer,
   PubSub,
+  Queue,
   Ref,
-  Runtime,
   Schema,
   Semaphore,
+  Scope,
 } from "effect"
 import * as FileMentions from "./file-mentions"
 import * as ContextMentions from "./context-mentions"
 import * as ConfigOperations from "./config-operations"
 import * as ResolvedContext from "./resolved-context"
 import * as ThreadActivity from "./thread-activity"
+import * as InteractiveFeedOverflow from "./interactive-feed-overflow"
+import {
+  Input,
+  InteractiveEventSchema,
+  InvalidInput,
+  OperationUnavailable,
+  Service,
+  unavailableLayer,
+} from "./operation-contract"
+import type { Interface, InteractiveEvent, InteractiveSession, QueueChange, QueueItem } from "./operation-contract"
 
-const Mode = Schema.Literals(["low", "medium", "high", "ultra"])
-const ClientWorkspace = { clientWorkspace: Schema.optionalKey(Schema.String) }
-
-const startupDispatch = () => undefined
+export { Input, InteractiveEventSchema, InvalidInput, OperationUnavailable, Service, unavailableLayer }
+export type { Interface, InteractiveEvent, InteractiveSession, QueueChange, QueueItem }
 
 const failureKind = (cause: Cause.Cause<unknown>) => {
   const failure = Cause.squash(cause)
@@ -50,252 +59,29 @@ const isTerminalStatus = (
   status: "accepted" | "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled",
 ) => status === "completed" || status === "failed" || status === "cancelled"
 
-const Interactive = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Interactive"),
-  prompt: Schema.Array(Schema.String),
-  mode: Schema.optionalKey(Mode),
-  workspace: Schema.optionalKey(Schema.String),
-  threadId: Schema.optionalKey(Schema.String),
-  last: Schema.optionalKey(Schema.Boolean),
-  ephemeral: Schema.Boolean,
-})
+const interactiveEventThreadId = (event: InteractiveEvent): string | undefined =>
+  event._tag === "SelectionLoaded"
+    ? String(event.thread.id)
+    : "threadId" in event && event.threadId !== undefined
+      ? String(event.threadId)
+      : undefined
 
-const Run = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Run"),
-  prompt: Schema.Array(Schema.String),
-  mode: Schema.optionalKey(Mode),
-  workspace: Schema.optionalKey(Schema.String),
-  threadId: Schema.optionalKey(Schema.String),
-  ephemeral: Schema.Boolean,
-  streamJson: Schema.Boolean,
-  streamJsonInput: Schema.Boolean,
-  streamJsonThinking: Schema.Boolean,
-})
-
-const Review = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Review"),
-  staged: Schema.Boolean,
-  base: Schema.optionalKey(Schema.String),
-  workspace: Schema.optionalKey(Schema.String),
-  ephemeral: Schema.Boolean,
-  json: Schema.Boolean,
-  paths: Schema.Array(Schema.String),
-})
-
-const ThreadNoInput = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.Literals(["new", "last", "top"]),
-})
-const ThreadContinueLast = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("continue"),
-  last: Schema.tag(true),
-})
-const ThreadContinueIds = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("continue"),
-  threadIds: Schema.NonEmptyArray(Schema.String),
-})
-const ThreadList = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("list"),
-  includeArchived: Schema.optionalKey(Schema.Boolean),
-  limit: Schema.optionalKey(Schema.Int),
-})
-const ThreadSearch = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("search"),
-  query: Schema.NonEmptyArray(Schema.String),
-  includeArchived: Schema.optionalKey(Schema.Boolean),
-  limit: Schema.optionalKey(Schema.Int),
-})
-const ThreadRename = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("rename"),
-  threadId: Schema.String,
-  title: Schema.String,
-})
-const ThreadLabel = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("label"),
-  threadId: Schema.String,
-  labels: Schema.NonEmptyArray(Schema.String),
-})
-const ThreadById = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.Literals(["pin", "archive", "unarchive", "delete", "usage"]),
-  threadId: Schema.String,
-})
-const ThreadFork = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("fork"),
-  threadId: Schema.String,
-  atTurn: Schema.optionalKey(Schema.String),
-})
-const ThreadExport = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Thread"),
-  action: Schema.tag("export"),
-  threadId: Schema.String,
-  format: Schema.Literals(["json", "markdown"]),
-})
-
-const ConfigNoInput = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Config"),
-  action: Schema.Literals(["list", "keymap"]),
-})
-const ConfigEdit = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Config"),
-  action: Schema.tag("edit"),
-  workspace: Schema.Boolean,
-})
-
-const McpNoInput = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Mcp"),
-  action: Schema.Literals(["list", "doctor"]),
-})
-const McpAddCommand = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Mcp"),
-  action: Schema.tag("add"),
-  name: Schema.String,
-  command: Schema.NonEmptyArray(Schema.String),
-})
-const McpAddUrl = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Mcp"),
-  action: Schema.tag("add"),
-  name: Schema.String,
-  url: Schema.String,
-})
-const McpNamed = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Mcp"),
-  action: Schema.Literals(["remove", "enable", "disable", "oauth-login", "oauth-logout"]),
-  name: Schema.String,
-})
-const McpApprove = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Mcp"),
-  action: Schema.tag("approve"),
-  name: Schema.String,
-  workspace: Schema.optionalKey(Schema.String),
-})
-const McpOauthStatus = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Mcp"),
-  action: Schema.tag("oauth-status"),
-  name: Schema.optionalKey(Schema.String),
-})
-
-const SkillList = Schema.Struct({ ...ClientWorkspace, _tag: Schema.tag("Skill"), action: Schema.tag("list") })
-const SkillNamed = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Skill"),
-  action: Schema.Literals(["inspect", "remove"]),
-  name: Schema.String,
-})
-const SkillAdd = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Skill"),
-  action: Schema.tag("add"),
-  source: Schema.String,
-})
-
-const ToolList = Schema.Struct({
-  _tag: Schema.tag("ToolCatalog"),
-  action: Schema.tag("list"),
-  mode: Schema.optionalKey(Mode),
-})
-const ToolShow = Schema.Struct({ _tag: Schema.tag("ToolCatalog"), action: Schema.tag("show"), name: Schema.String })
-
-const Extension = Schema.Struct({
-  ...ClientWorkspace,
-  _tag: Schema.tag("Extension"),
-  action: Schema.Literals(["create-skill", "create-plugin", "enable", "disable", "rollback"]),
-  name: Schema.String,
-})
-const ExtensionList = Schema.Struct({ ...ClientWorkspace, _tag: Schema.tag("Extension"), action: Schema.tag("list") })
-
-const Doctor = Schema.Struct({ ...ClientWorkspace, _tag: Schema.tag("Doctor") })
-const Update = Schema.Struct({ _tag: Schema.tag("Update") })
-const WorkflowStart = Schema.Struct({
-  _tag: Schema.tag("Workflow"),
-  action: Schema.tag("start"),
-  name: Schema.Literals(["delivery", "research-synthesis"]),
-  runId: Schema.String,
-  revision: Schema.optionalKey(Schema.Int),
-})
-const WorkflowInspect = Schema.Struct({
-  _tag: Schema.tag("Workflow"),
-  action: Schema.tag("inspect"),
-  runId: Schema.String,
-})
-
-export const Input = Schema.Union([
-  Interactive,
-  Run,
-  Review,
-  ThreadNoInput,
-  ThreadContinueLast,
-  ThreadContinueIds,
-  ThreadList,
-  ThreadSearch,
-  ThreadRename,
-  ThreadLabel,
-  ThreadById,
-  ThreadFork,
-  ThreadExport,
-  ConfigNoInput,
-  ConfigEdit,
-  McpNoInput,
-  McpAddCommand,
-  McpAddUrl,
-  McpNamed,
-  McpApprove,
-  McpOauthStatus,
-  SkillList,
-  SkillNamed,
-  SkillAdd,
-  ToolList,
-  ToolShow,
-  Extension,
-  ExtensionList,
-  Doctor,
-  Update,
-  WorkflowStart,
-  WorkflowInspect,
-])
-export type Input = typeof Input.Type
-
-export class OperationUnavailable extends Schema.TaggedErrorClass<OperationUnavailable>()("OperationUnavailable", {
-  operation: Schema.String,
-  message: Schema.String,
-}) {
-  override readonly [Runtime.errorExitCode] = 2
-  override readonly [Runtime.errorReported] = false
-}
-
-export class InvalidInput extends Schema.TaggedErrorClass<InvalidInput>()("InvalidInput", {
-  message: Schema.String,
-}) {
-  override readonly [Runtime.errorExitCode] = 2
-  override readonly [Runtime.errorReported] = false
+const withSelectionEpoch = (event: InteractiveEvent, selectionEpoch: number): InteractiveEvent => {
+  switch (event._tag) {
+    case "SelectionLoaded":
+    case "TranscriptPagePrepended":
+    case "TranscriptPatched":
+    case "TranscriptResyncRequired":
+    case "QueueUpdated":
+    case "QueueResyncRequired":
+    case "QueueFull":
+    case "TurnStarted":
+    case "ExecutionFailed":
+    case "ExecutionControlled":
+      return { ...event, selectionEpoch }
+    default:
+      return event
+  }
 }
 
 class OperationError extends Schema.TaggedErrorClass<OperationError>()("OperationError", {
@@ -304,24 +90,6 @@ class OperationError extends Schema.TaggedErrorClass<OperationError>()("Operatio
 
 const operationError = (message: string) => OperationError.make({ message })
 const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString)
-
-export interface Interface {
-  readonly run: (input: Input) => Effect.Effect<void, OperationUnavailable>
-}
-
-export class Service extends Context.Service<Service, Interface>()("@rika/app/operation/Service") {}
-
-export const unavailableLayer = Layer.succeed(
-  Service,
-  Service.of({
-    run: Effect.fn("Operation.run")(function* (input) {
-      return yield* OperationUnavailable.make({
-        operation: input._tag,
-        message: `${input._tag} is specified but not implemented yet`,
-      })
-    }),
-  }),
-)
 
 export interface ProductLayerOptions<
   ThreadError,
@@ -348,6 +116,7 @@ export interface ProductLayerOptions<
     readonly mcpFingerprint: Effect.Effect<string>
   }
   readonly defaultWorkspace: string
+  readonly pendingTurnCapacity?: number
   readonly shellPermission?: "ask" | "allow" | ((workspace: string) => Effect.Effect<"ask" | "allow">)
   readonly makeThreadId: Effect.Effect<Thread.ThreadId>
   readonly makeTurnId: Effect.Effect<Turn.TurnId>
@@ -397,6 +166,15 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
     turn: Turn.Turn,
     inspection: ExecutionBackend.FanOutInspection,
   ) => Effect.Effect<void, OperationError>,
+  ownership?: {
+    readonly claim: (turnId: Turn.TurnId) => Effect.Effect<boolean>
+    readonly release: (turnId: Turn.TurnId) => Effect.Effect<boolean>
+    readonly claimQueued: (
+      threadId: Thread.ThreadId,
+      now: number,
+    ) => Effect.Effect<TurnRepository.QueueClaim | undefined, TurnRepository.RepositoryError, TurnRepository.Service>
+  },
+  repairQueues: boolean = true,
 ) {
   const turns = yield* TurnRepository.Service
   const backend = yield* ExecutionBackend.Service
@@ -404,110 +182,111 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
   yield* Effect.forEach(
     active.filter((turn) => turn.status !== "queued"),
     (turn) => {
-      if (turn.reviewFanOutId !== undefined)
-        return backend.inspectFanOut(turn.reviewFanOutId).pipe(
-          Effect.flatMap((inspection) =>
-            Effect.gen(function* () {
-              const status =
-                inspection === undefined
-                  ? "failed"
-                  : inspection.state === "joining"
-                    ? "running"
-                    : inspection.state === "satisfied"
-                      ? "completed"
-                      : inspection.state
-              yield* turns.setStatus(turn.id, status, turn.lastCursor, yield* Clock.currentTimeMillis)
-              if (inspection?.state === "joining" && watchReviewOwner !== undefined)
-                yield* watchReviewOwner(turn, inspection)
-            }),
+      const repair =
+        turn.reviewFanOutId !== undefined
+          ? backend.inspectFanOut(turn.reviewFanOutId).pipe(
+              Effect.flatMap((inspection) =>
+                Effect.gen(function* () {
+                  const status =
+                    inspection === undefined
+                      ? "failed"
+                      : inspection.state === "joining"
+                        ? "running"
+                        : inspection.state === "satisfied"
+                          ? "completed"
+                          : inspection.state
+                  yield* turns.setStatus(turn.id, status, turn.lastCursor, yield* Clock.currentTimeMillis)
+                  if (inspection?.state === "joining" && watchReviewOwner !== undefined)
+                    yield* watchReviewOwner(turn, inspection)
+                }),
+              ),
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* turns.setStatus(turn.id, "failed", turn.lastCursor, yield* Clock.currentTimeMillis)
+                  return yield* error
+                }),
+              ),
+            )
+          : backend.inspect(turn.id).pipe(
+              Effect.flatMap((inspection) =>
+                Effect.gen(function* () {
+                  const now = yield* Clock.currentTimeMillis
+                  if (inspection === undefined) {
+                    if (prepare === undefined && extensions !== undefined && turn.extensionPin === undefined)
+                      return yield* operationError(`Turn ${turn.id} has no durable extension pin`)
+                    if (prepare === undefined && extensions !== undefined && turn.extensionPin !== undefined)
+                      yield* extensions.resume(turn.extensionPin)
+                    const prepared =
+                      prepare === undefined
+                        ? { prompt: turn.prompt, promptParts: turn.promptParts, extensionPin: turn.extensionPin }
+                        : yield* (yield* ThreadRepository.Service)
+                            .get(turn.threadId)
+                            .pipe(
+                              Effect.flatMap((thread) =>
+                                thread === undefined
+                                  ? operationError(`Thread ${turn.threadId} does not exist`)
+                                  : prepare(turn, thread.workspace),
+                              ),
+                            )
+                    const result = yield* backend.start({
+                      threadId: turn.threadId,
+                      turnId: turn.id,
+                      prompt: prepared.prompt,
+                      ...(prepared.promptParts === undefined ? {} : { promptParts: prepared.promptParts }),
+                      startedAt: turn.updatedAt,
+                      executionRoute: turn.executionRoute,
+                      ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
+                    })
+                    yield* turns.setStatus(turn.id, result.status, result.events.at(-1)?.cursor ?? turn.lastCursor, now)
+                    return
+                  }
+                  yield* turns.setStatus(turn.id, inspection.status, inspection.lastCursor ?? turn.lastCursor, now)
+                }),
+              ),
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* turns.setStatus(turn.id, "failed", turn.lastCursor, yield* Clock.currentTimeMillis)
+                  return yield* error
+                }),
+              ),
+            )
+      if (ownership === undefined) return repair
+      return Effect.uninterruptibleMask((restore) =>
+        ownership
+          .claim(turn.id)
+          .pipe(
+            Effect.flatMap((claimed) =>
+              claimed ? restore(repair).pipe(Effect.ensuring(ownership.release(turn.id))) : Effect.void,
+            ),
           ),
-          Effect.catch((error) =>
-            Effect.gen(function* () {
-              yield* turns.setStatus(turn.id, "failed", turn.lastCursor, yield* Clock.currentTimeMillis)
-              return yield* error
-            }),
-          ),
-        )
-      return backend.inspect(turn.id).pipe(
-        Effect.flatMap((inspection) =>
-          Effect.gen(function* () {
-            const now = yield* Clock.currentTimeMillis
-            if (inspection === undefined) {
-              if (turn.executionRoute === undefined) {
-                yield* turns.setStatus(turn.id, "failed", turn.lastCursor, now)
-                return
-              }
-              if (prepare === undefined && extensions !== undefined && turn.extensionPin === undefined)
-                return yield* operationError(`Turn ${turn.id} has no durable extension pin`)
-              if (prepare === undefined && extensions !== undefined && turn.extensionPin !== undefined)
-                yield* extensions.resume(turn.extensionPin)
-              const prepared =
-                prepare === undefined
-                  ? { prompt: turn.prompt, promptParts: turn.promptParts, extensionPin: turn.extensionPin }
-                  : yield* (yield* ThreadRepository.Service)
-                      .get(turn.threadId)
-                      .pipe(
-                        Effect.flatMap((thread) =>
-                          thread === undefined
-                            ? operationError(`Thread ${turn.threadId} does not exist`)
-                            : prepare(turn, thread.workspace),
-                        ),
-                      )
-              const result = yield* backend.start({
-                threadId: turn.threadId,
-                turnId: turn.id,
-                prompt: prepared.prompt,
-                ...(prepared.promptParts === undefined ? {} : { promptParts: prepared.promptParts }),
-                startedAt: turn.updatedAt,
-                executionRoute: turn.executionRoute,
-                ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
-              })
-              yield* turns.setStatus(turn.id, result.status, result.events.at(-1)?.cursor ?? turn.lastCursor, now)
-              return
-            }
-            yield* turns.setStatus(turn.id, inspection.status, inspection.lastCursor ?? turn.lastCursor, now)
-          }),
-        ),
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* turns.setStatus(turn.id, "failed", turn.lastCursor, yield* Clock.currentTimeMillis)
-            return yield* error
-          }),
-        ),
       )
     },
     { discard: true },
   )
   const threadIds = [...new Set(active.map((turn) => turn.threadId))]
-  if (backend.ensureThreadHost !== undefined && backend.notifyThreadHost !== undefined) {
+  if (backend.wakeThreadHost !== undefined) {
     yield* Effect.forEach(
       threadIds,
       (threadId) =>
         Effect.gen(function* () {
+          const wake = yield* turns.requestQueueWake(threadId)
+          if (wake === undefined) return
           const now = yield* Clock.currentTimeMillis
-          yield* backend.ensureThreadHost!(threadId, now)
-          yield* backend.notifyThreadHost!(threadId, undefined, now)
+          yield* backend.wakeThreadHost!({ ...wake, now })
         }),
       { discard: true },
     )
     return
   }
+  if (!repairQueues) return
   yield* Effect.forEach(
     threadIds,
     (threadId) =>
       Effect.gen(function* () {
         const thread = prepare === undefined ? undefined : yield* (yield* ThreadRepository.Service).get(threadId)
         if (prepare !== undefined && thread === undefined) return
-        let promoted = yield* turns.claimNextQueued(threadId, yield* Clock.currentTimeMillis)
-        while (promoted !== undefined) {
-          const promotedTurn = promoted
-          if (promotedTurn.executionRoute === undefined) {
-            yield* turns.setStatus(promotedTurn.id, "failed", promotedTurn.lastCursor, yield* Clock.currentTimeMillis)
-            promoted = yield* turns.claimNextQueued(threadId, yield* Clock.currentTimeMillis)
-            continue
-          }
-          const executionRoute = promotedTurn.executionRoute
-          const result = yield* Effect.gen(function* () {
+        const executePromoted = (promotedTurn: TurnRepository.QueueClaim) =>
+          Effect.gen(function* () {
             const prepared =
               prepare === undefined
                 ? {
@@ -522,7 +301,7 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
               prompt: prepared.prompt,
               ...(prepared.promptParts === undefined ? {} : { promptParts: prepared.promptParts }),
               startedAt: promotedTurn.updatedAt,
-              executionRoute,
+              executionRoute: promotedTurn.executionRoute,
               ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
             })
           }).pipe(
@@ -538,6 +317,29 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
               }),
             ),
           )
+        while (true) {
+          let promotedTurn: TurnRepository.QueueClaim
+          let result: ExecutionBackend.Result
+          if (ownership === undefined) {
+            const promoted = yield* turns.claimNextQueued(threadId, yield* Clock.currentTimeMillis)
+            if (promoted === undefined) return
+            promotedTurn = promoted
+            result = yield* executePromoted(promoted)
+          } else {
+            const repaired = yield* Effect.uninterruptibleMask((restore) =>
+              Effect.gen(function* () {
+                const promoted = yield* ownership.claimQueued(threadId, yield* Clock.currentTimeMillis)
+                if (promoted === undefined) return undefined
+                const executionResult = yield* restore(executePromoted(promoted)).pipe(
+                  Effect.ensuring(ownership.release(promoted.id)),
+                )
+                return { promoted, result: executionResult }
+              }),
+            )
+            if (repaired === undefined) return
+            promotedTurn = repaired.promoted
+            result = repaired.result
+          }
           yield* turns.setStatus(
             promotedTurn.id,
             result.status,
@@ -545,7 +347,6 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
             yield* Clock.currentTimeMillis,
           )
           if (!isTerminalStatus(result.status)) return
-          promoted = yield* turns.claimNextQueued(threadId, yield* Clock.currentTimeMillis)
         }
       }),
     { discard: true },
@@ -584,190 +385,37 @@ export const reconcile = Effect.fn("Operation.reconcilePublic")(function* (
   )
 })
 
-export type InteractiveEvent =
-  | { readonly _tag: "ThreadsListed"; readonly threads: ReadonlyArray<ThreadSummary.ThreadSummary> }
-  | {
-      readonly _tag: "TranscriptPatched"
-      readonly threadId: Thread.ThreadId
-      readonly turnId: Turn.TurnId
-      readonly event: ExecutionBackend.Event
-      readonly revision: number
-    }
-  | { readonly _tag: "TranscriptResyncRequired"; readonly threadId: Thread.ThreadId; readonly reason: string }
-  | { readonly _tag: "AssistantCompleted"; readonly text: string }
-  | {
-      readonly _tag: "ExecutionFailed"
-      readonly threadId?: Thread.ThreadId
-      readonly turnId?: Turn.TurnId
-      readonly message: string
-    }
-  | { readonly _tag: "QueueChanged"; readonly threadId: Thread.ThreadId; readonly turns: ReadonlyArray<Turn.Turn> }
-  | {
-      readonly _tag: "QueuedTurnEdited"
-      readonly threadId: Thread.ThreadId
-      readonly turnId: Turn.TurnId
-      readonly prompt: string
-    }
-  | { readonly _tag: "TurnStarted"; readonly threadId: Thread.ThreadId; readonly turn: Turn.Turn }
-  | { readonly _tag: "ThreadSelected"; readonly thread: Thread.Thread; readonly turns: ReadonlyArray<Turn.Turn> }
-  | {
-      readonly _tag: "TranscriptPageReceived"
-      readonly thread: Thread.Thread
-      readonly entries: ReadonlyArray<TranscriptRepository.Entry>
-      readonly hasOlder: boolean
-      readonly threadCostUsd: number
-      readonly oldestCursor?: TranscriptRepository.PageCursor
-    }
-  | {
-      readonly _tag: "TranscriptPagePrepended"
-      readonly threadId: Thread.ThreadId
-      readonly entries: ReadonlyArray<TranscriptRepository.Entry>
-      readonly hasOlder: boolean
-      readonly threadCostUsd: number
-      readonly oldestCursor?: TranscriptRepository.PageCursor
-    }
-  | { readonly _tag: "ShellPermissionRequested"; readonly id: string; readonly command: string }
-  | { readonly _tag: "ShellCompleted"; readonly command: string; readonly text: string; readonly incognito: boolean }
-  | {
-      readonly _tag: "ExecutionControlled"
-      readonly threadId?: Thread.ThreadId
-      readonly turnId?: Turn.TurnId
-      readonly action: "steered" | "cancelled" | "permission-resolved"
-    }
-  | { readonly _tag: "ThreadTitled"; readonly threadId: string; readonly title: string }
-  | { readonly _tag: "ThreadActivated"; readonly threadId: string; readonly title: string }
-  | {
-      readonly _tag: "ThreadPreviewLoaded"
-      readonly threadId: string
-      readonly turns: ReadonlyArray<{ readonly prompt: string; readonly events: ReadonlyArray<ExecutionBackend.Event> }>
-    }
+const transcriptPatch = (turn: Turn.Turn, event: ExecutionBackend.Event): InteractiveEvent => ({
+  _tag: "TranscriptPatched",
+  selectionEpoch: 0,
+  threadId: turn.threadId,
+  turnId: turn.id,
+  event,
+  revision: event.sequence,
+})
 
-const enqueueTranscriptPatch = (
-  turn: Turn.Turn,
-  event: ExecutionBackend.Event,
-  dispatch: (event: InteractiveEvent) => void,
-) =>
-  dispatch({
-    _tag: "TranscriptPatched",
-    threadId: turn.threadId,
-    turnId: turn.id,
-    event,
-    revision: event.sequence,
-  })
+const queueItem = (turn: Turn.Turn): QueueItem => {
+  const attachments = turn.promptParts
+    ?.filter((part) => part.type === "image")
+    .flatMap((part) => (part.filename === undefined ? [] : [part.filename]))
+  return attachments === undefined || attachments.length === 0
+    ? { id: turn.id, prompt: turn.prompt }
+    : { id: turn.id, prompt: turn.prompt, attachments }
+}
 
-export const InteractiveEventSchema = Schema.Union([
-  Schema.Struct({
-    _tag: Schema.tag("TranscriptPatched"),
-    threadId: Thread.ThreadId,
-    turnId: Turn.TurnId,
-    event: ExecutionBackend.Event,
-    revision: Schema.Finite,
-  }),
-  Schema.Struct({
-    _tag: Schema.tag("TranscriptResyncRequired"),
-    threadId: Thread.ThreadId,
-    reason: Schema.String,
-  }),
-  Schema.Struct({ _tag: Schema.tag("ThreadsListed"), threads: Schema.Array(ThreadSummary.ThreadSummary) }),
-  Schema.Struct({ _tag: Schema.tag("AssistantCompleted"), text: Schema.String }),
-  Schema.Struct({
-    _tag: Schema.tag("ExecutionFailed"),
-    threadId: Schema.optionalKey(Thread.ThreadId),
-    turnId: Schema.optionalKey(Turn.TurnId),
-    message: Schema.String,
-  }),
-  Schema.Struct({ _tag: Schema.tag("QueueChanged"), threadId: Thread.ThreadId, turns: Schema.Array(Turn.Turn) }),
-  Schema.Struct({
-    _tag: Schema.tag("QueuedTurnEdited"),
-    threadId: Thread.ThreadId,
-    turnId: Turn.TurnId,
-    prompt: Schema.String,
-  }),
-  Schema.Struct({ _tag: Schema.tag("TurnStarted"), threadId: Thread.ThreadId, turn: Turn.Turn }),
-  Schema.Struct({ _tag: Schema.tag("ThreadSelected"), thread: Thread.Thread, turns: Schema.Array(Turn.Turn) }),
-  Schema.Struct({
-    _tag: Schema.tag("TranscriptPageReceived"),
-    thread: Thread.Thread,
-    entries: Schema.Array(TranscriptRepository.EntrySchema),
-    hasOlder: Schema.Boolean,
-    threadCostUsd: Schema.Finite,
-    oldestCursor: Schema.optionalKey(TranscriptRepository.PageCursor),
-  }),
-  Schema.Struct({
-    _tag: Schema.tag("TranscriptPagePrepended"),
-    threadId: Thread.ThreadId,
-    entries: Schema.Array(TranscriptRepository.EntrySchema),
-    hasOlder: Schema.Boolean,
-    threadCostUsd: Schema.Finite,
-    oldestCursor: Schema.optionalKey(TranscriptRepository.PageCursor),
-  }),
-  Schema.Struct({ _tag: Schema.tag("ShellPermissionRequested"), id: Schema.String, command: Schema.String }),
-  Schema.Struct({
-    _tag: Schema.tag("ShellCompleted"),
-    command: Schema.String,
-    text: Schema.String,
-    incognito: Schema.Boolean,
-  }),
-  Schema.Struct({
-    _tag: Schema.tag("ExecutionControlled"),
-    threadId: Schema.optionalKey(Thread.ThreadId),
-    turnId: Schema.optionalKey(Turn.TurnId),
-    action: Schema.Literals(["steered", "cancelled", "permission-resolved"]),
-  }),
-  Schema.Struct({ _tag: Schema.tag("ThreadTitled"), threadId: Schema.String, title: Schema.String }),
-  Schema.Struct({ _tag: Schema.tag("ThreadActivated"), threadId: Schema.String, title: Schema.String }),
-  Schema.Struct({
-    _tag: Schema.tag("ThreadPreviewLoaded"),
-    threadId: Schema.String,
-    turns: Schema.Array(Schema.Struct({ prompt: Schema.String, events: Schema.Array(ExecutionBackend.Event) })),
-  }),
-])
-
-export interface InteractiveSession {
-  readonly initialize: (dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly watchThreads: (dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly submit: (
-    prompt: string,
-    dispatch: (event: InteractiveEvent) => void,
-    mode?: "low" | "medium" | "high" | "ultra",
-    promptParts?: ReadonlyArray<Turn.PromptPart>,
-    modelTuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
-  ) => Effect.Effect<void, never>
-  readonly shell: (
-    command: string,
-    incognito: boolean,
-    dispatch: (event: InteractiveEvent) => void,
-  ) => Effect.Effect<void, never>
-  readonly editQueued: (
-    turnId: string,
-    prompt: string,
-    dispatch: (event: InteractiveEvent) => void,
-  ) => Effect.Effect<void, never>
-  readonly dequeue: (turnId: string, dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly steerQueued: (
-    turnId: string,
-    text: string,
-    dispatch: (event: InteractiveEvent) => void,
-  ) => Effect.Effect<void, never>
-  readonly steer: (text: string, dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly interruptAndSend: (prompt: string, dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly cancel: (dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly resolvePermission: (
-    waitId: string,
-    kind: "permission" | "tool-approval",
-    decision: "allow" | "deny" | "always",
-    dispatch: (event: InteractiveEvent) => void,
-  ) => Effect.Effect<void, never>
-  readonly selectThread: (threadId: string, dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly loadOlder: (dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly previewThread: (threadId: string, dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly reopenThread: (dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly followSelected: (dispatch: (event: InteractiveEvent) => void) => Effect.Effect<void, never>
-  readonly replay: (
-    turnId: string,
-    afterCursor: string | undefined,
-    dispatch: (event: InteractiveEvent) => void,
-  ) => Effect.Effect<void, never>
+const queueMutationEvent = (queue: TurnRepository.QueueItemChange): InteractiveEvent => {
+  const change =
+    queue.change._tag === "Removed"
+      ? ({ _tag: "Removed", turnId: queue.change.turnId } as const)
+      : ({ _tag: queue.change._tag, item: queueItem(queue.change.turn) } as const)
+  return {
+    _tag: "QueueUpdated",
+    selectionEpoch: 0,
+    threadId: queue.threadId,
+    revision: queue.revision,
+    queuedCount: queue.queuedCount,
+    change,
+  }
 }
 
 const unavailable = (input: Input, message = `${input._tag} is specified but not implemented yet`) =>
@@ -802,10 +450,39 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
     Service,
     Effect.gen(function* () {
       const ownerScope = yield* Effect.scope
-      const submissionAdmission = yield* Semaphore.make(1)
-      const queueDrain = yield* Semaphore.make(1)
+      const pendingTurnCapacity = Math.max(0, Math.floor(options.pendingTurnCapacity ?? 64))
       const reviewSettlementAdmission = yield* Semaphore.make(1)
-      const threadSummaryChanges = yield* PubSub.sliding<void>(1)
+      const turnChanges = yield* PubSub.sliding<void>(1)
+      let interactiveSessionSequence = 0
+      let activitySequence = 0
+      const interactiveSinks = new Map<number, (origin: number, event: InteractiveEvent) => void>()
+      const turnObserverAdmission = yield* Semaphore.make(1)
+      const observedTurns = new Set<string>()
+      const claimTurnObserver = (turnId: Turn.TurnId) =>
+        turnObserverAdmission.withPermits(1)(
+          Effect.sync(() => {
+            const key = String(turnId)
+            if (observedTurns.has(key)) return false
+            observedTurns.add(key)
+            return true
+          }),
+        )
+      const releaseTurnObserver = (turnId: Turn.TurnId) =>
+        turnObserverAdmission.withPermits(1)(Effect.sync(() => observedTurns.delete(String(turnId))))
+      const claimQueuedTurn = (threadId: Thread.ThreadId, now: number) =>
+        turnObserverAdmission.withPermits(1)(
+          Effect.gen(function* () {
+            const turns = yield* TurnRepository.Service
+            const promoted = yield* turns.claimNextQueued(threadId, now)
+            if (promoted === undefined) return undefined
+            observedTurns.add(String(promoted.id))
+            return promoted
+          }),
+        )
+      const publishInteractiveActivity = (origin: number, event: InteractiveEvent) => {
+        activitySequence += 1
+        for (const [sessionId, sink] of interactiveSinks) if (sessionId !== origin) sink(origin, event)
+      }
       const reviewSettlements = new Map<string, Fiber.Fiber<ExecutionBackend.FanOutInspection, OperationError>>()
       const resolvedContextLayer =
         options.resolvedContextLayer ??
@@ -837,7 +514,12 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
         dependencyContext,
         Context.make(ExecutionBackend.Service, acquiredBackend),
       )
-      const notifyThreadSummaries = PubSub.publish(threadSummaryChanges, undefined).pipe(Effect.asVoid)
+      const notifyThreadSummaries = Effect.gen(function* () {
+        const summaries = yield* ThreadSummaryRepository.Service
+        publishInteractiveActivity(0, { _tag: "ThreadsListed", threads: yield* summaries.list() })
+      })
+      const notifyTurnChanged = (_turn: Pick<Turn.Turn, "id" | "threadId">) =>
+        PubSub.publish(turnChanges, undefined).pipe(Effect.asVoid)
       const dispatchThreadSummaries = Effect.fn("Operation.dispatchThreadSummaries")(function* (
         dispatch: (event: InteractiveEvent) => void,
       ) {
@@ -848,6 +530,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
         const summaries = yield* ThreadSummaryRepository.Service
         yield* summaries.ensureTurn(turn.id, turn.threadId, turn.updatedAt)
         yield* notifyThreadSummaries
+        yield* notifyTurnChanged(turn)
       })
       const projectExecutionResult = Effect.fn("Operation.projectExecutionResult")(function* (
         threadId: Thread.ThreadId,
@@ -866,6 +549,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
         const turns = yield* TurnRepository.Service
         const turn = yield* turns.setStatus(id, status, lastCursor, now)
         yield* notifyThreadSummaries
+        yield* notifyTurnChanged(turn)
         return turn
       })
       const repairThreadSummaries = Effect.fn("Operation.repairThreadSummaries")(function* () {
@@ -1011,7 +695,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
         yield* turns.setExtensionPin(turn.id, activated.pin)
         return { prompt: resolved.prompt, promptParts, extensionPin: activated.pin }
       })
-      const reconcileExecutions = reconcile(
+      const reconcileExecutions = reconcileInternal(
         extensionService,
         (turn, workspace) =>
           prepareExecution(turn, workspace).pipe(Effect.mapError((error) => operationError(String(error)))),
@@ -1020,8 +704,151 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             Effect.asVoid,
             Effect.mapError((error) => operationError(String(error))),
           ),
-      ).pipe(Effect.provide(executionDependencies), Effect.scoped)
-      const makeInteractiveSession = Effect.fn("Operation.makeInteractiveSession")(function* (workspace: string) {
+        { claim: claimTurnObserver, release: releaseTurnObserver, claimQueued: claimQueuedTurn },
+        false,
+      ).pipe(
+        Effect.provide(executionDependencies),
+        Effect.scoped,
+        Effect.mapError((error) => operationError(String(error))),
+      )
+      const makeInteractiveSession = Effect.fn("Operation.makeInteractiveSession")(function* (
+        workspace: string,
+        settings: {
+          readonly initialThreadId?: string
+          readonly registerPromoter?: boolean
+        } = {},
+      ) {
+        const registerPromoter = settings.registerPromoter ?? false
+        const sessionId = (interactiveSessionSequence += 1)
+        let selectedThreadId = settings.initialThreadId
+        let currentSelectionEpoch = 0
+        type SessionEnvelope = {
+          readonly event: InteractiveEvent
+          readonly selectionRequest?: number
+          readonly selectedThreadOnly?: boolean
+        }
+        const sessionEvents = yield* Queue.bounded<SessionEnvelope>(8192)
+        let overflow: InteractiveFeedOverflow.State | undefined
+        type SelectionLoad = {
+          readonly epoch: number
+          readonly threadId: string
+          readonly previousEpoch: number
+          readonly previousThreadId: string | undefined
+          readonly events: Array<InteractiveEvent>
+          committed: boolean
+          overflow?: InteractiveFeedOverflow.State
+        }
+        let selectionLoad: SelectionLoad | undefined =
+          settings.initialThreadId === undefined
+            ? undefined
+            : {
+                epoch: 0,
+                threadId: settings.initialThreadId,
+                previousEpoch: 0,
+                previousThreadId: undefined,
+                events: [],
+                committed: false,
+              }
+        const bufferSelectionEvent = (event: InteractiveEvent) => {
+          if (InteractiveFeedOverflow.isCritical(event)) return false
+          const loading = selectionLoad
+          if (loading === undefined || interactiveEventThreadId(event) !== loading.threadId) return false
+          const selectedEvent = withSelectionEpoch(event, loading.epoch)
+          if (loading.overflow !== undefined) {
+            InteractiveFeedOverflow.remember(loading.overflow, selectedEvent)
+            return true
+          }
+          if (loading.events.length < 8192) {
+            loading.events.push(selectedEvent)
+            return true
+          }
+          loading.overflow = InteractiveFeedOverflow.make()
+          for (const buffered of loading.events) InteractiveFeedOverflow.remember(loading.overflow, buffered)
+          loading.events.length = 0
+          InteractiveFeedOverflow.remember(loading.overflow, selectedEvent)
+          return true
+        }
+        const deliver = (
+          event: InteractiveEvent,
+          deliveryOptions?: { readonly selectionRequest?: number; readonly selectedThreadOnly?: boolean },
+        ) => {
+          const selectedEvent = withSelectionEpoch(event, deliveryOptions?.selectionRequest ?? currentSelectionEpoch)
+          const envelope: SessionEnvelope = {
+            event: selectedEvent,
+            ...(deliveryOptions?.selectionRequest === undefined
+              ? {}
+              : { selectionRequest: deliveryOptions.selectionRequest }),
+            ...(deliveryOptions?.selectedThreadOnly === undefined
+              ? {}
+              : { selectedThreadOnly: deliveryOptions.selectedThreadOnly }),
+          }
+          if (overflow !== undefined) {
+            InteractiveFeedOverflow.remember(overflow, selectedEvent)
+            return false
+          }
+          if (Queue.offerUnsafe(sessionEvents, envelope)) return true
+          overflow = InteractiveFeedOverflow.make()
+          InteractiveFeedOverflow.remember(overflow, selectedEvent)
+          return false
+        }
+        const sessionDispatch = (event: InteractiveEvent) => {
+          if (!bufferSelectionEvent(event)) deliver(event)
+        }
+        const dispatchFailure = (dispatch: (event: InteractiveEvent) => void, error: unknown) =>
+          Schema.is(TurnRepository.QueueFull)(error)
+            ? dispatch({
+                _tag: "QueueFull",
+                selectionEpoch: 0,
+                threadId: error.threadId,
+                capacity: error.capacity,
+                count: error.count,
+              })
+            : dispatch({ _tag: "ExecutionFailed", selectionEpoch: 0, message: String(error) })
+        const selectionDispatch = (request: number) => (event: InteractiveEvent) => {
+          deliver(event, { selectionRequest: request })
+        }
+        const finishSelection = (epoch: number) =>
+          Effect.gen(function* () {
+            const loading = selectionLoad
+            if (loading === undefined || loading.epoch !== epoch) return
+            selectionLoad = undefined
+            if (!loading.committed) {
+              selectedThreadId = loading.previousThreadId
+              currentSelectionEpoch = loading.previousEpoch
+              yield* Ref.set(selectionRequest, loading.previousEpoch)
+              return
+            }
+            if (loading.overflow === undefined) {
+              for (const event of loading.events) deliver(event, { selectionRequest: epoch, selectedThreadOnly: true })
+              return
+            }
+            const threadId = Thread.ThreadId.make(loading.threadId)
+            if (loading.overflow.transcriptThreadIds.size > 0)
+              deliver(
+                {
+                  _tag: "TranscriptResyncRequired",
+                  selectionEpoch: epoch,
+                  threadId,
+                  reason: "Selection activity exceeded its bounded live window",
+                },
+                { selectionRequest: epoch, selectedThreadOnly: true },
+              )
+            if (loading.overflow.queueThreadIds.size > 0)
+              deliver(
+                {
+                  _tag: "QueueResyncRequired",
+                  selectionEpoch: epoch,
+                  threadId,
+                  reason: "Selection queue activity exceeded its bounded live window",
+                },
+                { selectionRequest: epoch, selectedThreadOnly: true },
+              )
+          })
+        const emit = (dispatch: (event: InteractiveEvent) => void, event: InteractiveEvent) => {
+          dispatch(event)
+          publishInteractiveActivity(sessionId, event)
+        }
+        const submissionAdmission = yield* Semaphore.make(1)
         const shellPermission =
           typeof options.shellPermission === "function"
             ? yield* options.shellPermission(workspace)
@@ -1041,8 +868,46 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             }),
           )
         const flushProjection = Effect.void
-        const followOwnership = yield* Semaphore.make(1)
         const shellApprovals = new Map<string, Deferred.Deferred<boolean>>()
+        const lifecycleAdmission = yield* Semaphore.make(1)
+        const closed = yield* Deferred.make<void>()
+        const sessionScope = yield* Scope.make()
+        let lifecycle: "open" | "closed" = "open"
+        let feedAttached = false
+        const sessionClosed = OperationUnavailable.make({
+          operation: "InteractiveSession",
+          message: "Interactive session is closed",
+        })
+        const admit = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | OperationUnavailable, R> =>
+          lifecycleAdmission
+            .withPermits(1)(
+              Effect.suspend(() => (lifecycle === "open" ? Effect.succeed(effect) : Effect.fail(sessionClosed))),
+            )
+            .pipe(Effect.flatten)
+        const runOwned = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          Effect.forkIn(effect, sessionScope).pipe(
+            Effect.flatMap((fiber) => Fiber.join(fiber).pipe(Effect.ensuring(Fiber.interrupt(fiber)))),
+          )
+        const admitLocal = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | OperationUnavailable, R> =>
+          effect.pipe(runOwned, admit)
+        const attachFeed = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | OperationUnavailable, R> =>
+          lifecycleAdmission
+            .withPermits(1)(
+              Effect.suspend(() => {
+                if (lifecycle === "closed") return Effect.fail(sessionClosed)
+                if (feedAttached)
+                  return Effect.fail(
+                    OperationUnavailable.make({
+                      operation: "InteractiveSession.events",
+                      message: "Interactive session already has an event consumer",
+                    }),
+                  )
+                feedAttached = true
+                const attached = effect.pipe(Effect.ensuring(Effect.sync(() => (feedAttached = false))))
+                return Effect.succeed(runOwned(attached))
+              }),
+            )
+            .pipe(Effect.flatten)
         let shellPermissionSequence = 0
         const submit = Effect.fn("Operation.interactive.submit")(function* (
           prompt: string,
@@ -1051,143 +916,201 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           promptParts?: ReadonlyArray<Turn.PromptPart>,
           modelTuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
         ) {
+          let observerTurn: Turn.Turn | undefined
+          let executionLaunched = false
           const program = Effect.gen(function* () {
             const threads = yield* ThreadRepository.Service
             const turns = yield* TurnRepository.Service
             const backend = yield* ExecutionBackend.Service
-            const admitted = yield* submissionAdmission.withPermits(1)(
+            const now = yield* Clock.currentTimeMillis
+            let thread = yield* Ref.get(interactiveThread)
+            const isNewThread = thread === undefined
+            if (thread === undefined) {
+              thread = yield* threads.create({
+                id: yield* options.makeThreadId,
+                workspace,
+                title: prompt.slice(0, 80) || "New thread",
+                now,
+              })
+              yield* Ref.set(interactiveThread, thread)
+              selectedThreadId = String(thread.id)
+            }
+            if (isNewThread) dispatch({ _tag: "ThreadActivated", threadId: String(thread.id), title: thread.title })
+            const turnId = yield* options.makeTurnId
+            const executionRoute = yield* resolveExecutionRoute(mode, modelTuning, thread.workspace)
+            yield* Effect.uninterruptible(
               Effect.gen(function* () {
-                const now = yield* Clock.currentTimeMillis
-                let thread = yield* Ref.get(interactiveThread)
-                const isNewThread = thread === undefined
-                if (thread === undefined) {
-                  thread = yield* threads.create({
-                    id: yield* options.makeThreadId,
-                    workspace,
-                    title: prompt.slice(0, 80) || "New thread",
-                    now,
-                  })
-                  yield* Ref.set(interactiveThread, thread)
-                }
-                if (isNewThread) dispatch({ _tag: "ThreadActivated", threadId: String(thread.id), title: thread.title })
                 const turn = yield* turns.createForSubmission({
-                  id: yield* options.makeTurnId,
+                  id: turnId,
                   threadId: thread.id,
                   prompt,
                   ...(promptParts === undefined ? {} : { promptParts }),
-                  executionRoute: yield* resolveExecutionRoute(mode, modelTuning, thread.workspace),
+                  executionRoute,
+                  queueCapacity: pendingTurnCapacity,
                   now,
                 })
+                if (turn.status !== "queued") {
+                  const claimed = yield* claimTurnObserver(turn.id).pipe(
+                    Effect.tap((acquired) =>
+                      Effect.sync(() => {
+                        if (acquired) observerTurn = turn
+                      }),
+                    ),
+                  )
+                  if (!claimed) return yield* operationError(`Turn ${turn.id} already has an execution observer`)
+                }
                 yield* ensureTurnSummary(turn)
-                return { thread, isNewThread, turn }
+                yield* Effect.logInfo("turn.accepted").pipe(
+                  Effect.annotateLogs({
+                    "rika.thread.id": String(thread.id),
+                    "rika.turn.id": String(turn.id),
+                    "rika.turn.status": turn.status,
+                  }),
+                )
+                if (turn.status === "queued") {
+                  if (turn.queue !== undefined) emit(dispatch, queueMutationEvent(turn.queue))
+                  return
+                }
+                const execution = Effect.gen(function* () {
+                  const startedAt = yield* Clock.currentTimeMillis
+                  const deliveredCursors = new Set<string>()
+                  const outcome = yield* Effect.exit(
+                    Effect.gen(function* () {
+                      yield* Effect.logInfo("turn.started")
+                      const prepared = yield* prepareExecution(turn, thread.workspace)
+                      const runningTurn = yield* setTurnStatus(turn.id, "running", turn.lastCursor, startedAt)
+                      if (runningTurn.status !== "running") return undefined
+                      emit(dispatch, { _tag: "TurnStarted", selectionEpoch: 0, threadId: thread.id, turn: runningTurn })
+                      const result = yield* backend.start({
+                        threadId: thread.id,
+                        turnId: turn.id,
+                        prompt: prepared.prompt,
+                        ...(prepared.promptParts === undefined ? {} : { promptParts: prepared.promptParts }),
+                        startedAt,
+                        executionRoute: turn.executionRoute,
+                        ...(modelTuning?.reasoningEffort === undefined
+                          ? {}
+                          : { reasoningEffort: modelTuning.reasoningEffort }),
+                        ...(modelTuning?.fastMode === undefined ? {} : { fastMode: modelTuning.fastMode }),
+                        onEvent: (event) => {
+                          deliveredCursors.add(event.cursor)
+                          emit(dispatch, transcriptPatch(turn, event))
+                        },
+                        ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
+                      })
+                      return result
+                    }).pipe(
+                      Effect.annotateLogs({
+                        "rika.thread.id": String(thread.id),
+                        "rika.turn.id": String(turn.id),
+                      }),
+                    ),
+                  )
+                  yield* Effect.uninterruptible(
+                    Effect.gen(function* () {
+                      if (outcome._tag === "Failure") {
+                        yield* flushProjection
+                        const failedAt = yield* Clock.currentTimeMillis
+                        yield* Effect.logError("turn.failed").pipe(
+                          Effect.annotateLogs({
+                            "rika.duration.ms": failedAt - startedAt,
+                            "rika.failure.kind": failureKind(outcome.cause),
+                            "rika.thread.id": String(thread.id),
+                            "rika.turn.id": String(turn.id),
+                          }),
+                        )
+                        yield* setTurnStatus(turn.id, "failed", turn.lastCursor, failedAt)
+                        emit(dispatch, {
+                          _tag: "ExecutionFailed",
+                          selectionEpoch: 0,
+                          threadId: thread.id,
+                          turnId: turn.id,
+                          message: String(outcome.cause),
+                        })
+                        yield* settleThread(thread, dispatch)
+                        return
+                      }
+                      const result = outcome.value
+                      if (result === undefined) {
+                        yield* settleThread(thread, dispatch)
+                        return
+                      }
+                      for (const event of result.events)
+                        if (!deliveredCursors.has(event.cursor)) emit(dispatch, transcriptPatch(turn, event))
+                      const completedAt = yield* Clock.currentTimeMillis
+                      yield* Effect.logInfo("turn.finished").pipe(
+                        Effect.annotateLogs({
+                          "rika.duration.ms": completedAt - startedAt,
+                          "rika.thread.id": String(thread.id),
+                          "rika.turn.id": String(turn.id),
+                          "rika.turn.status": result.status,
+                        }),
+                      )
+                      const updatedTurn = yield* setTurnStatus(
+                        turn.id,
+                        result.status,
+                        result.events.at(-1)?.cursor,
+                        completedAt,
+                      )
+                      yield* projectExecutionResult(thread.id, result)
+                      yield* appendProjection(updatedTurn, result.events)
+                      if (result.status === "completed") {
+                        yield* settleThread(thread, dispatch)
+                        if (isNewThread)
+                          yield* Effect.interruptible(titleThread(thread, prompt, turn.executionRoute, dispatch))
+                        return
+                      }
+                      if (result.status === "waiting" || result.status === "running" || result.status === "queued")
+                        return
+                      if (
+                        result.status === "failed" &&
+                        !result.events.some((event) => event.type === "execution.failed")
+                      )
+                        emit(dispatch, {
+                          _tag: "ExecutionFailed",
+                          selectionEpoch: 0,
+                          threadId: thread.id,
+                          turnId: turn.id,
+                          message: `Execution ${result.status}`,
+                        })
+                      yield* settleThread(thread, dispatch)
+                    }),
+                  )
+                }).pipe(
+                  Effect.provide(executionDependencies),
+                  Effect.scoped,
+                  Effect.tapCause((cause) =>
+                    Effect.logError("interactive.submit.failed").pipe(
+                      Effect.annotateLogs("rika.failure.kind", failureKind(cause)),
+                    ),
+                  ),
+                  Effect.catch((error) => Effect.sync(() => dispatchFailure(dispatch, error))),
+                  Effect.ensuring(releaseTurnObserver(turn.id).pipe(Effect.andThen(notifyTurnChanged(turn)))),
+                )
+                yield* Effect.forkIn(Effect.interruptible(execution), sessionScope)
+                executionLaunched = true
               }),
             )
-            const { thread, isNewThread, turn } = admitted
-            yield* Effect.logInfo("turn.accepted").pipe(
-              Effect.annotateLogs({
-                "rika.thread.id": String(thread.id),
-                "rika.turn.id": String(turn.id),
-                "rika.turn.status": turn.status,
-              }),
-            )
-            if (turn.status === "queued") {
-              yield* promoteThread(thread, turn.id, dispatch)
-              return
-            }
-            dispatch({ _tag: "TurnStarted", threadId: thread.id, turn })
-            const startedAt = yield* Clock.currentTimeMillis
-            const deliveredCursors = new Set<string>()
-            const outcome = yield* Effect.exit(
-              Effect.gen(function* () {
-                yield* Effect.logInfo("turn.started")
-                const prepared = yield* prepareExecution(turn, thread.workspace)
-                yield* setTurnStatus(turn.id, "running", turn.lastCursor, startedAt)
-                const result = yield* backend.start({
-                  threadId: thread.id,
-                  turnId: turn.id,
-                  prompt: prepared.prompt,
-                  ...(prepared.promptParts === undefined ? {} : { promptParts: prepared.promptParts }),
-                  startedAt,
-                  executionRoute: turn.executionRoute!,
-                  ...(modelTuning?.reasoningEffort === undefined
-                    ? {}
-                    : { reasoningEffort: modelTuning.reasoningEffort }),
-                  ...(modelTuning?.fastMode === undefined ? {} : { fastMode: modelTuning.fastMode }),
-                  onEvent: (event) => {
-                    deliveredCursors.add(event.cursor)
-                    enqueueTranscriptPatch(turn, event, dispatch)
-                  },
-                  ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
-                })
-                return result
-              }).pipe(
-                Effect.annotateLogs({
-                  "rika.thread.id": String(thread.id),
-                  "rika.turn.id": String(turn.id),
-                }),
-              ),
-            )
-            if (outcome._tag === "Failure") {
-              yield* flushProjection
-              const failedAt = yield* Clock.currentTimeMillis
-              yield* Effect.logError("turn.failed").pipe(
-                Effect.annotateLogs({
-                  "rika.duration.ms": failedAt - startedAt,
-                  "rika.failure.kind": failureKind(outcome.cause),
-                  "rika.thread.id": String(thread.id),
-                  "rika.turn.id": String(turn.id),
-                }),
-              )
-              yield* setTurnStatus(turn.id, "failed", turn.lastCursor, failedAt)
-              dispatch({
-                _tag: "ExecutionFailed",
-                threadId: thread.id,
-                turnId: turn.id,
-                message: String(outcome.cause),
-              })
-              yield* settleThread(thread, dispatch)
-              return
-            }
-            const result = outcome.value
-            for (const event of result.events)
-              if (!deliveredCursors.has(event.cursor)) enqueueTranscriptPatch(turn, event, dispatch)
-            const completedAt = yield* Clock.currentTimeMillis
-            yield* Effect.logInfo("turn.finished").pipe(
-              Effect.annotateLogs({
-                "rika.duration.ms": completedAt - startedAt,
-                "rika.thread.id": String(thread.id),
-                "rika.turn.id": String(turn.id),
-                "rika.turn.status": result.status,
-              }),
-            )
-            const updatedTurn = yield* setTurnStatus(turn.id, result.status, result.events.at(-1)?.cursor, completedAt)
-            yield* projectExecutionResult(thread.id, result)
-            yield* appendProjection(updatedTurn, result.events)
-            if (result.status === "completed") {
-              yield* settleThread(thread, dispatch)
-              if (isNewThread) yield* titleThread(thread, prompt, turn.executionRoute!, dispatch)
-              return
-            }
-            if (result.status === "waiting" || result.status === "running" || result.status === "queued") return
-            if (result.status === "failed" && !result.events.some((event) => event.type === "execution.failed"))
-              dispatch({
-                _tag: "ExecutionFailed",
-                threadId: thread.id,
-                turnId: turn.id,
-                message: `Execution ${result.status}`,
-              })
-            yield* settleThread(thread, dispatch)
           })
-          yield* program.pipe(
-            Effect.provide(executionDependencies),
-            Effect.scoped,
-            Effect.tapCause((cause) =>
-              Effect.logError("interactive.submit.failed").pipe(
-                Effect.annotateLogs("rika.failure.kind", failureKind(cause)),
+          yield* submissionAdmission
+            .withPermits(1)(program)
+            .pipe(
+              Effect.provide(executionDependencies),
+              Effect.scoped,
+              Effect.tapCause((cause) =>
+                Effect.logError("interactive.submit.failed").pipe(
+                  Effect.annotateLogs("rika.failure.kind", failureKind(cause)),
+                ),
               ),
-            ),
-            Effect.catch((error) => Effect.sync(() => dispatch({ _tag: "ExecutionFailed", message: String(error) }))),
-          )
+              Effect.catch((error) => Effect.sync(() => dispatchFailure(dispatch, error))),
+              Effect.ensuring(
+                Effect.suspend(() =>
+                  observerTurn === undefined || executionLaunched
+                    ? Effect.void
+                    : releaseTurnObserver(observerTurn.id).pipe(Effect.andThen(notifyTurnChanged(observerTurn))),
+                ),
+              ),
+            )
         })
         const safe = <E>(
           dispatch: (event: InteractiveEvent) => void,
@@ -1206,43 +1129,53 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           effect.pipe(
             Effect.provide(executionDependencies),
             Effect.scoped,
-            Effect.catch((error) => Effect.sync(() => dispatch({ _tag: "ExecutionFailed", message: String(error) }))),
+            Effect.catch((error) => Effect.sync(() => dispatchFailure(dispatch, error))),
           )
-        const queueChanged = Effect.fn("Operation.interactive.queueChanged")(function* (
+        const readQueue = Effect.fn("Operation.interactive.readQueue")(function* (
           threadId: Thread.ThreadId,
           dispatch: (event: InteractiveEvent) => void,
         ) {
           const turns = yield* TurnRepository.Service
-          dispatch({ _tag: "QueueChanged", threadId, turns: yield* turns.listQueued(threadId) })
+          const queue = yield* turns.readQueue(threadId)
+          dispatch({
+            _tag: "QueueUpdated",
+            selectionEpoch: 0,
+            threadId,
+            revision: queue.revision,
+            queuedCount: queue.queuedCount,
+            change: { _tag: "Reset", items: queue.turns.map(queueItem) },
+          })
         })
-        const queueChangedCurrent = (dispatch: (event: InteractiveEvent) => void) =>
-          Ref.get(interactiveThread).pipe(
-            Effect.flatMap((thread) => (thread === undefined ? Effect.void : queueChanged(thread.id, dispatch))),
-          )
-        const drainQueuedUnlocked = Effect.fn("Operation.interactive.drainQueued")(function* (
+        const drainQueued = Effect.fn("Operation.interactive.drainQueued")(function* (
           thread: Thread.Thread,
           dispatch: (event: InteractiveEvent) => void,
         ) {
           const turns = yield* TurnRepository.Service
           const backend = yield* ExecutionBackend.Service
           let claimed = 0
-          let promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
-          while (promoted !== undefined) {
-            claimed += 1
-            const promotedTurn = promoted
-            if (promotedTurn.executionRoute === undefined) {
-              yield* setTurnStatus(promotedTurn.id, "failed", promotedTurn.lastCursor, yield* Clock.currentTimeMillis)
-              promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
-              continue
-            }
+          const runPromoted = Effect.fn("Operation.interactive.runPromoted")(function* (
+            promotedTurn: TurnRepository.QueueClaim,
+          ) {
             const executionRoute = promotedTurn.executionRoute
-            dispatch({ _tag: "TurnStarted", threadId: thread.id, turn: promotedTurn })
-            yield* queueChanged(thread.id, dispatch)
-            const promotedAt = yield* Clock.currentTimeMillis
+            const deliveredCursors = new Set<string>()
+            emit(dispatch, queueMutationEvent(promotedTurn.queue))
             const outcome = yield* Effect.exit(
               Effect.gen(function* () {
                 const prepared = yield* prepareExecution(promotedTurn, thread.workspace)
-                yield* setTurnStatus(promotedTurn.id, "running", promotedTurn.lastCursor, promotedAt)
+                const promotedAt = yield* Clock.currentTimeMillis
+                const runningTurn = yield* setTurnStatus(
+                  promotedTurn.id,
+                  "running",
+                  promotedTurn.lastCursor,
+                  promotedAt,
+                )
+                if (runningTurn.status !== "running") return undefined
+                emit(dispatch, {
+                  _tag: "TurnStarted",
+                  selectionEpoch: 0,
+                  threadId: thread.id,
+                  turn: runningTurn,
+                })
                 const result = yield* backend.start({
                   threadId: thread.id,
                   turnId: promotedTurn.id,
@@ -1250,7 +1183,10 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   ...(prepared.promptParts === undefined ? {} : { promptParts: prepared.promptParts }),
                   startedAt: promotedAt,
                   executionRoute,
-                  onEvent: (event) => enqueueTranscriptPatch(promotedTurn, event, dispatch),
+                  onEvent: (event) => {
+                    deliveredCursors.add(event.cursor)
+                    emit(dispatch, transcriptPatch(promotedTurn, event))
+                  },
                   ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
                 })
                 return result
@@ -1259,37 +1195,83 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             if (outcome._tag === "Failure") {
               yield* setTurnStatus(promotedTurn.id, "failed", promotedTurn.lastCursor, yield* Clock.currentTimeMillis)
               yield* flushProjection
-              dispatch({
+              emit(dispatch, {
                 _tag: "ExecutionFailed",
+                selectionEpoch: 0,
                 threadId: thread.id,
                 turnId: promotedTurn.id,
                 message: String(outcome.cause),
               })
-            } else {
-              const result = outcome.value
-              for (const event of result.events) enqueueTranscriptPatch(promotedTurn, event, dispatch)
-              const updatedTurn = yield* setTurnStatus(
-                promotedTurn.id,
-                result.status,
-                result.events.at(-1)?.cursor,
-                yield* Clock.currentTimeMillis,
-              )
-              yield* projectExecutionResult(thread.id, result)
-              yield* appendProjection(updatedTurn, result.events)
-              if (!isTerminalStatus(result.status)) break
+              return true
             }
-            promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
+            const result = outcome.value
+            if (result === undefined) return true
+            for (const event of result.events)
+              if (!deliveredCursors.has(event.cursor)) emit(dispatch, transcriptPatch(promotedTurn, event))
+            const updatedTurn = yield* setTurnStatus(
+              promotedTurn.id,
+              result.status,
+              result.events.at(-1)?.cursor,
+              yield* Clock.currentTimeMillis,
+            )
+            yield* projectExecutionResult(thread.id, result)
+            yield* appendProjection(updatedTurn, result.events)
+            return isTerminalStatus(result.status)
+          })
+          const runNext = Effect.fn("Operation.interactive.runNextQueued")(function* () {
+            return yield* Effect.uninterruptibleMask((restore) =>
+              turnObserverAdmission
+                .withPermits(1)(
+                  Effect.gen(function* () {
+                    const promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
+                    if (promoted === undefined) return undefined
+                    const key = String(promoted.id)
+                    if (observedTurns.has(key)) return { _tag: "Collision" as const, turn: promoted }
+                    observedTurns.add(key)
+                    return { _tag: "Claimed" as const, turn: promoted }
+                  }),
+                )
+                .pipe(
+                  Effect.flatMap((claim) =>
+                    claim === undefined
+                      ? Effect.void
+                      : claim._tag === "Collision"
+                        ? Effect.gen(function* () {
+                            yield* setTurnStatus(
+                              claim.turn.id,
+                              "failed",
+                              claim.turn.lastCursor,
+                              yield* Clock.currentTimeMillis,
+                            )
+                            emit(dispatch, {
+                              _tag: "ExecutionFailed",
+                              selectionEpoch: 0,
+                              threadId: claim.turn.threadId,
+                              turnId: claim.turn.id,
+                              message: `Turn ${claim.turn.id} already has an execution observer`,
+                            })
+                            return true
+                          })
+                        : restore(runPromoted(claim.turn)).pipe(Effect.ensuring(releaseTurnObserver(claim.turn.id))),
+                  ),
+                ),
+            )
+          })
+          while (true) {
+            const keepDraining = yield* runNext()
+            if (keepDraining === undefined) break
+            claimed += 1
+            if (!keepDraining) break
           }
-          yield* queueChanged(thread.id, dispatch)
           return claimed
         })
-        const drainQueued = (thread: Thread.Thread, dispatch: (event: InteractiveEvent) => void) =>
-          queueDrain.withPermits(1)(drainQueuedUnlocked(thread, dispatch))
         const promoterFor =
           (dispatch: (event: InteractiveEvent) => void) =>
-          (threadId: string): Effect.Effect<number> =>
+          (threadId: string, generation: number): Effect.Effect<number> =>
             Effect.gen(function* () {
               const threads = yield* ThreadRepository.Service
+              const turns = yield* TurnRepository.Service
+              if (!(yield* turns.consumeQueueWake(Thread.ThreadId.make(threadId), generation))) return 0
               const thread = yield* threads.get(Thread.ThreadId.make(threadId))
               if (thread === undefined) return 0
               return yield* drainQueued(thread, dispatch)
@@ -1300,29 +1282,25 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             )
         const promoteThread = Effect.fn("Operation.interactive.promoteThread")(function* (
           thread: Thread.Thread,
-          turnId: Turn.TurnId | undefined,
           dispatch: (event: InteractiveEvent) => void,
         ) {
           const backend = yield* ExecutionBackend.Service
-          if (
-            backend.ensureThreadHost === undefined ||
-            backend.notifyThreadHost === undefined ||
-            backend.registerTurnPromoter === undefined
-          ) {
+          if (backend.wakeThreadHost === undefined || backend.registerTurnPromoter === undefined) {
             yield* drainQueued(thread, dispatch)
             return
           }
+          const turns = yield* TurnRepository.Service
+          const wake = yield* turns.requestQueueWake(thread.id)
+          if (wake === undefined) return
           const now = yield* Clock.currentTimeMillis
-          yield* backend.ensureThreadHost(thread.id, now)
-          yield* backend.notifyThreadHost(thread.id, turnId === undefined ? undefined : String(turnId), now)
-          yield* queueChanged(thread.id, dispatch)
+          yield* backend.wakeThreadHost({ ...wake, now })
         })
         const settleThread = Effect.fn("Operation.interactive.settleThread")(function* (
           thread: Thread.Thread,
           dispatch: (event: InteractiveEvent) => void,
         ) {
-          yield* promoteThread(thread, undefined, dispatch).pipe(
-            Effect.catch(() => queueChanged(thread.id, dispatch)),
+          yield* promoteThread(thread, dispatch).pipe(
+            Effect.catch(() => drainQueued(thread, dispatch).pipe(Effect.asVoid)),
             Effect.orElseSucceed(() => undefined),
           )
         })
@@ -1339,7 +1317,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           if (thread === undefined) return yield* operationError(`Thread ${turn.threadId} does not exist`)
           return thread
         })
-        const followTurn = Effect.fn("Operation.interactive.followTurn")(function* (
+        const followClaimedTurn = Effect.fn("Operation.interactive.followClaimedTurn")(function* (
           turnId: Turn.TurnId,
           dispatch: (event: InteractiveEvent) => void,
         ) {
@@ -1347,35 +1325,94 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           const backend = yield* ExecutionBackend.Service
           if (backend.follow === undefined) return
           const follow = backend.follow
-          yield* followOwnership.withPermits(1)(
-            Effect.gen(function* () {
-              const turn = yield* turns.get(turnId)
-              if (turn === undefined) return yield* operationError(`Turn ${turnId} does not exist`)
-              const thread = yield* threadForTurn(turn)
-              const deliveredCursors = new Set<string>()
-              const result = yield* follow(turn.id, turn.lastCursor, (event) => {
-                deliveredCursors.add(event.cursor)
-                enqueueTranscriptPatch(turn, event, dispatch)
-              })
-              for (const event of result.events)
-                if (!deliveredCursors.has(event.cursor)) enqueueTranscriptPatch(turn, event, dispatch)
-              const updatedTurn = yield* setTurnStatus(
-                turn.id,
-                result.status,
-                result.events.at(-1)?.cursor ?? turn.lastCursor,
-                yield* Clock.currentTimeMillis,
+          const turn = yield* turns.get(turnId)
+          if (turn === undefined) return yield* operationError(`Turn ${turnId} does not exist`)
+          const thread = yield* threadForTurn(turn)
+          const deliveredCursors = new Set<string>()
+          const result = yield* follow(turn.id, turn.lastCursor, (event) => {
+            deliveredCursors.add(event.cursor)
+            emit(dispatch, transcriptPatch(turn, event))
+          })
+          for (const event of result.events)
+            if (!deliveredCursors.has(event.cursor)) emit(dispatch, transcriptPatch(turn, event))
+          const updatedTurn = yield* setTurnStatus(
+            turn.id,
+            result.status,
+            result.events.at(-1)?.cursor ?? turn.lastCursor,
+            yield* Clock.currentTimeMillis,
+          )
+          yield* projectExecutionResult(turn.threadId, result)
+          yield* appendProjection(updatedTurn, result.events)
+          if (isTerminalStatus(result.status)) yield* settleThread(thread, dispatch)
+          else if (result.status !== "waiting" && result.status !== "running" && result.status !== "queued")
+            emit(dispatch, {
+              _tag: "ExecutionFailed",
+              selectionEpoch: 0,
+              threadId: turn.threadId,
+              turnId: turn.id,
+              message: `Execution ${result.status}`,
+            })
+        })
+        const followTurn = Effect.fn("Operation.interactive.followTurn")(function* (
+          turnId: Turn.TurnId,
+          dispatch: (event: InteractiveEvent) => void,
+        ) {
+          return yield* Effect.uninterruptibleMask((restore) =>
+            turnObserverAdmission
+              .withPermits(1)(
+                Effect.gen(function* () {
+                  const key = String(turnId)
+                  if (observedTurns.has(key)) return undefined
+                  const turns = yield* TurnRepository.Service
+                  const current = yield* turns.get(turnId)
+                  if (current === undefined || current.status === "queued" || isTerminalStatus(current.status))
+                    return undefined
+                  observedTurns.add(key)
+                  return current
+                }),
               )
-              yield* projectExecutionResult(turn.threadId, result)
-              yield* appendProjection(updatedTurn, result.events)
-              if (isTerminalStatus(result.status)) yield* settleThread(thread, dispatch)
-              else if (result.status !== "waiting" && result.status !== "running" && result.status !== "queued")
-                dispatch({
-                  _tag: "ExecutionFailed",
-                  threadId: turn.threadId,
-                  turnId: turn.id,
-                  message: `Execution ${result.status}`,
-                })
-            }),
+              .pipe(
+                Effect.flatMap((current) =>
+                  current === undefined
+                    ? Effect.succeed(false)
+                    : restore(followClaimedTurn(current.id, dispatch)).pipe(
+                        Effect.as(true),
+                        Effect.ensuring(releaseTurnObserver(current.id)),
+                      ),
+                ),
+              ),
+          )
+        })
+        const observeTurn = Effect.fn("Operation.interactive.observeTurn")(function* (
+          turn: Turn.Turn,
+          dispatch: (event: InteractiveEvent) => void,
+        ) {
+          const backend = yield* ExecutionBackend.Service
+          if ((yield* backend.inspect(turn.id)) === undefined) return false
+          return yield* Effect.uninterruptibleMask((restore) =>
+            turnObserverAdmission
+              .withPermits(1)(
+                Effect.gen(function* () {
+                  const key = String(turn.id)
+                  if (observedTurns.has(key)) return undefined
+                  const turns = yield* TurnRepository.Service
+                  const current = yield* turns.get(turn.id)
+                  if (current === undefined || current.status === "queued" || isTerminalStatus(current.status))
+                    return undefined
+                  observedTurns.add(key)
+                  return current
+                }),
+              )
+              .pipe(
+                Effect.flatMap((current) =>
+                  current === undefined
+                    ? Effect.succeed(false)
+                    : restore(followClaimedTurn(current.id, dispatch)).pipe(
+                        Effect.as(true),
+                        Effect.ensuring(releaseTurnObserver(current.id)),
+                      ),
+                ),
+              ),
           )
         })
         const titleThread = Effect.fn("Operation.interactive.titleThread")(function* (
@@ -1389,12 +1426,16 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             const threads = yield* ThreadRepository.Service
             const startedAt = yield* Clock.currentTimeMillis
             const turnId = `title:${thread.id}:${startedAt}`
+            const titleExecutionRoute =
+              executionRoute.title === undefined
+                ? executionRoute
+                : { ...executionRoute, main: { ...executionRoute.title, role: "main" as const } }
             const result = yield* backend.start({
               threadId: thread.id,
               turnId,
               prompt: `Generate a concise 3-6 word title for a conversation that starts with the following user message. Reply with only the title, no quotes, no punctuation.\n\n${seedPrompt.slice(0, 2000)}`,
               startedAt,
-              executionRoute,
+              executionRoute: titleExecutionRoute,
             })
             const text = result.events
               .filter((event) => event.type === "model.output.completed")
@@ -1461,9 +1502,6 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 )
                   return
                 if (turn.status === "queued") {
-                  yield* projectionAdmission.withPermits(1)(
-                    transcripts.replace(turn, Transcript.empty(turn.id, turn.prompt)),
-                  )
                   return
                 }
                 const execution = yield* backend.inspect(turn.id)
@@ -1527,22 +1565,40 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           const entries = olderPages.length === 0 ? page.entries : olderPages.toReversed().flat().concat(page.entries)
           const hasOlder = storedHasOlder || (yield* Ref.get(transcriptHasUnprojectedTurns))
           const completedAt = yield* Clock.currentTimeMillis
+          if ((yield* Ref.get(selectionRequest)) !== request) return
           yield* Ref.set(transcriptCursor, oldestCursor)
           yield* Ref.set(transcriptHasOlder, hasOlder)
           if (before === undefined) {
-            yield* Ref.set(interactiveThread, thread)
-            dispatch({
-              _tag: "TranscriptPageReceived",
-              thread,
-              entries,
-              hasOlder,
-              threadCostUsd: page.threadCostUsd,
-              ...(oldestCursor === undefined ? {} : { oldestCursor }),
-            })
-            dispatch({ _tag: "QueueChanged", threadId: thread.id, turns: yield* turns.listQueued(thread.id) })
+            const queue = yield* turns.readQueue(thread.id)
+            const activeTurn = yield* turns.findActive(thread.id)
+            yield* Effect.uninterruptible(
+              Effect.gen(function* () {
+                if ((yield* Ref.get(selectionRequest)) !== request) return
+                yield* Ref.set(interactiveThread, thread)
+                selectedThreadId = String(thread.id)
+                const loading = selectionLoad
+                if (loading !== undefined && loading.epoch === request && loading.threadId === String(thread.id))
+                  loading.committed = true
+                dispatch({
+                  _tag: "SelectionLoaded",
+                  selectionEpoch: request,
+                  activitySequence,
+                  thread,
+                  entries,
+                  hasOlder,
+                  threadCostUsd: page.threadCostUsd,
+                  ...(oldestCursor === undefined ? {} : { oldestCursor }),
+                  queueRevision: queue.revision,
+                  queuedCount: queue.queuedCount,
+                  queue: queue.turns.map(queueItem),
+                  ...(activeTurn === undefined ? {} : { activeTurn }),
+                })
+              }),
+            )
           } else
             dispatch({
               _tag: "TranscriptPagePrepended",
+              selectionEpoch: request,
               threadId: thread.id,
               entries,
               hasOlder,
@@ -1564,6 +1620,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           request: number,
           dispatch: (event: InteractiveEvent) => void,
         ) {
+          if ((yield* Ref.get(selectionRequest)) !== request) return
           yield* Ref.set(transcriptCursor, undefined)
           yield* Ref.set(projectedTurnCursor, undefined)
           yield* Ref.set(transcriptHasUnprojectedTurns, false)
@@ -1574,27 +1631,113 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           yield* summaries.markRead(thread.id, yield* Clock.currentTimeMillis)
           yield* notifyThreadSummaries
         })
-        const session: InteractiveSession = {
-          initialize: (dispatch) => safe(dispatch, dispatchThreadSummaries(dispatch)),
-          watchThreads: (dispatch) =>
-            safe(
-              dispatch,
-              Effect.scoped(
+        const supervise =
+          acquiredBackend.follow === undefined
+            ? Effect.void
+            : Effect.scoped(
                 Effect.gen(function* () {
-                  const subscription = yield* PubSub.subscribe(threadSummaryChanges)
-                  yield* dispatchThreadSummaries(dispatch)
+                  const changes = yield* PubSub.subscribe(turnChanges)
+                  const turns = yield* TurnRepository.Service
+                  const launch = (turn: Turn.Turn) =>
+                    Effect.forkChild(
+                      observeTurn(turn, () => undefined).pipe(
+                        Effect.flatMap((observed) => {
+                          if (!observed) return Effect.void
+                          return turns
+                            .get(turn.id)
+                            .pipe(
+                              Effect.flatMap((current) =>
+                                current !== undefined &&
+                                !isTerminalStatus(current.status) &&
+                                current.status !== "queued"
+                                  ? Effect.sleep("50 millis").pipe(Effect.andThen(notifyTurnChanged(current)))
+                                  : Effect.void,
+                              ),
+                            )
+                        }),
+                        Effect.catch((error) =>
+                          Effect.logError("turn.observer.failed").pipe(
+                            Effect.annotateLogs({
+                              "rika.thread.id": String(turn.threadId),
+                              "rika.turn.id": String(turn.id),
+                              "rika.failure.kind": String(error),
+                            }),
+                            Effect.andThen(Effect.sleep("50 millis")),
+                            Effect.andThen(notifyTurnChanged(turn)),
+                          ),
+                        ),
+                      ),
+                    )
+                  const scan = Effect.gen(function* () {
+                    for (const turn of yield* turns.listNonterminal) if (turn.status !== "queued") yield* launch(turn)
+                  })
+                  yield* scan
                   while (true) {
-                    yield* PubSub.take(subscription)
-                    yield* dispatchThreadSummaries(dispatch)
+                    yield* PubSub.take(changes)
+                    yield* scan
                   }
                 }),
+              ).pipe(Effect.provide(executionDependencies))
+        if (!registerPromoter)
+          interactiveSinks.set(sessionId, (_origin, event) => {
+            const threadId = interactiveEventThreadId(event)
+            if (threadId !== undefined && bufferSelectionEvent(event)) return
+            if (threadId === undefined || threadId === selectedThreadId)
+              deliver(event, { selectedThreadOnly: threadId !== undefined })
+          })
+        const implementation: InteractiveSession = {
+          events: (dispatch) =>
+            Effect.gen(function* () {
+              yield* dispatchThreadSummaries(sessionDispatch)
+              while (true) {
+                if (overflow !== undefined) {
+                  const state = overflow
+                  for (const discarded of yield* Queue.takeAll(sessionEvents))
+                    InteractiveFeedOverflow.remember(state, discarded.event)
+                  overflow = undefined
+                  if (state.criticalOverflowed)
+                    return yield* OperationUnavailable.make({
+                      operation: "InteractiveSession.events",
+                      message: "Interactive event feed exceeded its bounded non-recoverable event capacity",
+                    })
+                  for (const event of InteractiveFeedOverflow.events(
+                    state,
+                    yield* Ref.get(selectionRequest),
+                    "Interactive event feed exceeded its bounded live window",
+                  ))
+                    dispatch(event)
+                  continue
+                }
+                const envelope = yield* Queue.take(sessionEvents)
+                if (overflow !== undefined) {
+                  InteractiveFeedOverflow.remember(overflow, envelope.event)
+                  continue
+                }
+                if (
+                  envelope.selectionRequest !== undefined &&
+                  envelope.selectionRequest !== (yield* Ref.get(selectionRequest))
+                )
+                  continue
+                if (envelope.selectedThreadOnly === true) {
+                  const threadId = interactiveEventThreadId(envelope.event)
+                  if (threadId !== undefined && threadId !== selectedThreadId) continue
+                }
+                dispatch(envelope.event)
+              }
+            }).pipe(
+              Effect.provide(executionDependencies),
+              Effect.mapError((error) =>
+                Schema.is(OperationUnavailable)(error)
+                  ? error
+                  : OperationUnavailable.make({ operation: "InteractiveSession.events", message: String(error) }),
               ),
             ),
-          submit,
-          shell: (command, incognito, dispatch) => {
+          submit: (prompt, mode, parts, tuning) => submit(prompt, sessionDispatch, mode, parts, tuning),
+          shell: (command, incognito) => {
+            const dispatch = sessionDispatch
             const toolRuntimeLayer = options.toolRuntimeLayer?.(workspace)
             if (toolRuntimeLayer === undefined) {
-              dispatch({ _tag: "ExecutionFailed", message: "Shell runtime is unavailable" })
+              dispatch({ _tag: "ExecutionFailed", selectionEpoch: 0, message: "Shell runtime is unavailable" })
               return Effect.void
             }
             const program = Effect.gen(function* () {
@@ -1603,11 +1746,12 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 const approval = yield* Deferred.make<boolean>()
                 shellApprovals.set(permissionId, approval)
                 dispatch({ _tag: "ShellPermissionRequested", id: permissionId, command })
-                const approved = yield* Deferred.await(approval).pipe(
-                  Effect.ensuring(Effect.sync(() => shellApprovals.delete(permissionId))),
-                )
+                const approved = yield* Effect.raceFirst(
+                  Deferred.await(approval),
+                  Deferred.await(closed).pipe(Effect.as(false)),
+                ).pipe(Effect.ensuring(Effect.sync(() => shellApprovals.delete(permissionId))))
                 if (!approved) {
-                  dispatch({ _tag: "ExecutionFailed", message: "Shell command denied" })
+                  dispatch({ _tag: "ExecutionFailed", selectionEpoch: 0, message: "Shell command denied" })
                   return
                 }
               }
@@ -1632,18 +1776,20 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     now,
                   })
                   yield* Ref.set(interactiveThread, thread)
+                  selectedThreadId = String(thread.id)
                 }
                 const turn = yield* turns.createForSubmission({
                   id: yield* options.makeTurnId,
                   threadId: thread.id,
                   prompt: `$ ${command}\n\n<shell-result>\n${text}\n</shell-result>`,
                   executionRoute: yield* resolveExecutionRoute("medium", undefined, thread.workspace),
+                  queueCapacity: pendingTurnCapacity,
                   now,
                 })
                 yield* ensureTurnSummary(turn)
-                if (turn.status !== "queued")
-                  yield* setTurnStatus(turn.id, "completed", undefined, yield* Clock.currentTimeMillis)
-                yield* queueChangedCurrent(dispatch)
+                if (turn.status === "queued") {
+                  if (turn.queue !== undefined) emit(dispatch, queueMutationEvent(turn.queue))
+                } else yield* setTurnStatus(turn.id, "completed", undefined, yield* Clock.currentTimeMillis)
               }
               dispatch({ _tag: "ShellCompleted", command, text, incognito })
             })
@@ -1651,48 +1797,46 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               const toolContext = yield* Layer.build(toolRuntimeLayer)
               yield* program.pipe(
                 Effect.provide(Context.merge(executionDependencies, toolContext)),
-                Effect.catch((error) =>
-                  Effect.sync(() => dispatch({ _tag: "ExecutionFailed", message: String(error) })),
-                ),
+                Effect.catch((error) => Effect.sync(() => dispatchFailure(dispatch, error))),
               )
             }).pipe(
               Effect.scoped,
-              Effect.catch((error) => Effect.sync(() => dispatch({ _tag: "ExecutionFailed", message: String(error) }))),
+              Effect.catch((error) => Effect.sync(() => dispatchFailure(dispatch, error))),
             )
           },
-          editQueued: (id, prompt, dispatch) =>
+          editQueued: (id, prompt) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
                 const turns = yield* TurnRepository.Service
                 const turn = yield* turns.editQueued(Turn.TurnId.make(id), prompt, yield* Clock.currentTimeMillis)
-                const transcripts = yield* TranscriptRepository.Service
-                yield* transcripts.replace(turn, Transcript.empty(turn.id, turn.prompt))
-                dispatch({ _tag: "QueuedTurnEdited", threadId: turn.threadId, turnId: turn.id, prompt: turn.prompt })
-                yield* queueChangedCurrent(dispatch)
+                emit(sessionDispatch, queueMutationEvent(turn.queue))
               }),
             ),
-          dequeue: (id, dispatch) =>
+          dequeue: (id) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
                 const turns = yield* TurnRepository.Service
-                yield* turns.dequeue(Turn.TurnId.make(id))
-                yield* queueChangedCurrent(dispatch)
+                emit(sessionDispatch, queueMutationEvent(yield* turns.dequeue(Turn.TurnId.make(id))))
               }),
             ),
-          steerQueued: (id, text, dispatch) =>
+          steerQueued: (id, text) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
                 const turns = yield* TurnRepository.Service
                 const backend = yield* ExecutionBackend.Service
                 const turn = yield* active()
-                const queued = yield* turns.get(Turn.TurnId.make(id))
-                if (queued === undefined || queued.status !== "queued")
-                  return yield* operationError(`Turn ${id} is not queued`)
-                if (queued.promptParts !== undefined && queued.promptParts.some((part) => part.type === "image"))
+                const candidate = yield* turns.get(Turn.TurnId.make(id))
+                if (
+                  candidate?.status === "queued" &&
+                  candidate.promptParts !== undefined &&
+                  candidate.promptParts.some((part) => part.type === "image")
+                )
                   return yield* operationError("Queued turns with images cannot be steered")
+                const taken = yield* turns.takeQueued(Turn.TurnId.make(id))
+                const queued = taken.turn
                 const steeringText =
                   queued.promptParts
                     ?.filter((part) => part.type === "text")
@@ -1700,78 +1844,104 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     .join("") ??
                   queued.prompt ??
                   text
+                emit(sessionDispatch, queueMutationEvent(taken.queue))
                 yield* backend.steer(turn.id, steeringText, yield* Clock.currentTimeMillis)
-                yield* turns.dequeue(queued.id)
-                yield* queueChanged(turn.threadId, dispatch)
-                dispatch({ _tag: "ExecutionControlled", threadId: turn.threadId, turnId: turn.id, action: "steered" })
+                emit(sessionDispatch, {
+                  _tag: "ExecutionControlled",
+                  selectionEpoch: 0,
+                  threadId: turn.threadId,
+                  turnId: turn.id,
+                  action: "steered",
+                })
               }),
             ),
-          steer: (text, dispatch) =>
+          steer: (text) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
                 const turn = yield* active()
                 yield* backend.steer(turn.id, text, yield* Clock.currentTimeMillis)
-                dispatch({ _tag: "ExecutionControlled", threadId: turn.threadId, turnId: turn.id, action: "steered" })
+                emit(sessionDispatch, {
+                  _tag: "ExecutionControlled",
+                  selectionEpoch: 0,
+                  threadId: turn.threadId,
+                  turnId: turn.id,
+                  action: "steered",
+                })
               }),
             ),
-          interruptAndSend: (prompt, dispatch) =>
+          interruptAndSend: (prompt) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
                 const turns = yield* TurnRepository.Service
                 const backend = yield* ExecutionBackend.Service
                 const turn = yield* active()
                 const thread = yield* threadForTurn(turn)
-                const executionRoute =
-                  turn.executionRoute ?? (yield* resolveExecutionRoute("medium", undefined, thread.workspace))
                 const pending = yield* turns.createForSubmission({
                   id: yield* options.makeTurnId,
                   threadId: turn.threadId,
                   prompt,
-                  executionRoute,
+                  executionRoute: turn.executionRoute,
+                  queueCapacity: pendingTurnCapacity,
                   now: yield* Clock.currentTimeMillis,
                 })
                 yield* ensureTurnSummary(pending)
-                if (pending.status !== "queued") return yield* operationError("Pending turn was not queued")
-                yield* backend.cancel(turn.id, yield* Clock.currentTimeMillis)
-                yield* setTurnStatus(turn.id, "cancelled", turn.lastCursor, yield* Clock.currentTimeMillis)
-                yield* drainQueued(thread, dispatch)
-              }),
-            ),
-          cancel: (dispatch) =>
-            safe(
-              dispatch,
-              Effect.gen(function* () {
-                const backend = yield* ExecutionBackend.Service
-                const turn = yield* active().pipe(Effect.orElseSucceed(() => undefined))
-                if (turn === undefined) {
-                  dispatch({ _tag: "ExecutionControlled", action: "cancelled" })
+                if (pending.status === "accepted") {
+                  const requeued = yield* turns.requeueAccepted(
+                    pending.id,
+                    pendingTurnCapacity,
+                    yield* Clock.currentTimeMillis,
+                  )
+                  emit(sessionDispatch, queueMutationEvent(requeued.queue))
+                  yield* drainQueued(thread, sessionDispatch)
                   return
                 }
-                const thread = yield* threadForTurn(turn)
-                const result = yield* backend.cancel(turn.id, yield* Clock.currentTimeMillis)
-                yield* setTurnStatus(
-                  turn.id,
-                  result.status,
-                  result.events.at(-1)?.cursor ?? turn.lastCursor,
-                  yield* Clock.currentTimeMillis,
-                )
-                yield* projectExecutionResult(turn.threadId, result)
-                dispatch({ _tag: "ExecutionControlled", threadId: turn.threadId, turnId: turn.id, action: "cancelled" })
-                if (isTerminalStatus(result.status)) yield* settleThread(thread, dispatch)
+                if (pending.status !== "queued") return yield* operationError("Pending turn was not queued")
+                if (pending.queue !== undefined) emit(sessionDispatch, queueMutationEvent(pending.queue))
+                yield* backend.cancel(turn.id, yield* Clock.currentTimeMillis)
+                yield* setTurnStatus(turn.id, "cancelled", turn.lastCursor, yield* Clock.currentTimeMillis)
+                yield* drainQueued(thread, sessionDispatch)
               }),
             ),
-          resolvePermission: (waitId, kind, decision, dispatch) =>
+          cancel: safe(
+            sessionDispatch,
+            Effect.gen(function* () {
+              const backend = yield* ExecutionBackend.Service
+              const turn = yield* active().pipe(Effect.orElseSucceed(() => undefined))
+              if (turn === undefined) {
+                sessionDispatch({ _tag: "ExecutionControlled", selectionEpoch: 0, action: "cancelled" })
+                return
+              }
+              const thread = yield* threadForTurn(turn)
+              const result = yield* backend.cancel(turn.id, yield* Clock.currentTimeMillis)
+              yield* setTurnStatus(
+                turn.id,
+                result.status,
+                result.events.at(-1)?.cursor ?? turn.lastCursor,
+                yield* Clock.currentTimeMillis,
+              )
+              yield* projectExecutionResult(turn.threadId, result)
+              emit(sessionDispatch, {
+                _tag: "ExecutionControlled",
+                selectionEpoch: 0,
+                threadId: turn.threadId,
+                turnId: turn.id,
+                action: "cancelled",
+              })
+              if (isTerminalStatus(result.status)) yield* settleThread(thread, sessionDispatch)
+            }),
+          ),
+          resolvePermission: (waitId, kind, decision) =>
             shellApprovals.has(waitId)
               ? Effect.gen(function* () {
                   const approval = shellApprovals.get(waitId)
                   if (approval !== undefined) yield* Deferred.succeed(approval, decision !== "deny")
-                  dispatch({ _tag: "ExecutionControlled", action: "permission-resolved" })
+                  sessionDispatch({ _tag: "ExecutionControlled", selectionEpoch: 0, action: "permission-resolved" })
                 })
               : safe(
-                  dispatch,
+                  sessionDispatch,
                   Effect.gen(function* () {
                     const backend = yield* ExecutionBackend.Service
                     const activeTurn = yield* active()
@@ -1784,38 +1954,61 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                         decision === "allow" ? "Approved" : decision === "deny" ? "Denied" : "Always",
                         resolvedAt,
                       )
-                    dispatch({
+                    emit(sessionDispatch, {
                       _tag: "ExecutionControlled",
+                      selectionEpoch: 0,
                       threadId: activeTurn.threadId,
                       turnId: activeTurn.id,
                       action: "permission-resolved",
                     })
-                    yield* followTurn(activeTurn.id, dispatch)
+                    yield* followTurn(activeTurn.id, sessionDispatch)
                   }),
                 ),
-          selectThread: (id, dispatch) =>
+          selectThread: (id, epoch) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
-                const request = yield* Ref.updateAndGet(selectionRequest, (value) => value + 1)
+                if (epoch <= currentSelectionEpoch) return
+                const previousThread = yield* Ref.get(interactiveThread)
+                const previousEpoch = currentSelectionEpoch
+                currentSelectionEpoch = epoch
+                selectedThreadId = id
+                const joined = selectionLoad?.epoch === 0 && selectionLoad.threadId === id ? selectionLoad : undefined
+                selectionLoad = {
+                  epoch,
+                  threadId: id,
+                  previousEpoch,
+                  previousThreadId: previousThread === undefined ? undefined : String(previousThread.id),
+                  events: joined?.events ?? [],
+                  committed: false,
+                  ...(joined?.overflow === undefined ? {} : { overflow: joined.overflow }),
+                }
+                yield* Ref.set(selectionRequest, epoch)
                 const threads = yield* ThreadRepository.Service
                 const thread = yield* threads.get(Thread.ThreadId.make(id))
                 if (thread === undefined) return yield* operationError(`Thread ${id} does not exist`)
-                yield* loadThread(thread, request, dispatch)
-              }),
+                yield* loadThread(thread, epoch, selectionDispatch(epoch))
+              }).pipe(Effect.ensuring(finishSelection(epoch))),
             ),
-          loadOlder: (dispatch) =>
+          readQueue: (id) =>
             safe(
-              dispatch,
-              Effect.gen(function* () {
-                if (!(yield* Ref.get(transcriptHasOlder))) return
-                const thread = yield* Ref.get(interactiveThread)
-                const before = yield* Ref.get(transcriptCursor)
-                if (thread === undefined || before === undefined) return
-                yield* loadTranscriptPage(thread, yield* Ref.get(selectionRequest), dispatch, before)
-              }),
+              sessionDispatch,
+              Ref.get(selectionRequest).pipe(
+                Effect.flatMap((request) => readQueue(Thread.ThreadId.make(id), selectionDispatch(request))),
+              ),
             ),
-          previewThread: (id, dispatch) =>
+          loadOlder: safe(
+            sessionDispatch,
+            Effect.gen(function* () {
+              if (!(yield* Ref.get(transcriptHasOlder))) return
+              const thread = yield* Ref.get(interactiveThread)
+              const before = yield* Ref.get(transcriptCursor)
+              if (thread === undefined || before === undefined) return
+              const request = yield* Ref.get(selectionRequest)
+              yield* loadTranscriptPage(thread, request, selectionDispatch(request), before)
+            }),
+          ),
+          previewThread: (id) =>
             Effect.gen(function* () {
               const threads = yield* ThreadRepository.Service
               const turns = yield* TurnRepository.Service
@@ -1839,58 +2032,39 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   })),
                 ),
               )
-              dispatch({ _tag: "ThreadPreviewLoaded", threadId: id, turns: previewTurns })
+              sessionDispatch({ _tag: "ThreadPreviewLoaded", threadId: id, turns: previewTurns })
             }).pipe(
               Effect.provide(executionDependencies),
               Effect.scoped,
               Effect.orElseSucceed(() => undefined),
             ),
-          reopenThread: (dispatch) =>
+          reopenThread: (epoch) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
-                const request = yield* Ref.updateAndGet(selectionRequest, (value) => value + 1)
+                if (epoch <= currentSelectionEpoch) return
+                const previousThread = yield* Ref.get(interactiveThread)
+                const previousEpoch = currentSelectionEpoch
+                currentSelectionEpoch = epoch
+                yield* Ref.set(selectionRequest, epoch)
                 const threads = yield* ThreadRepository.Service
                 const thread = (yield* threads.list({ limit: 1 }))[0]
                 if (thread === undefined) return yield* operationError("No threads exist")
-                yield* loadThread(thread, request, dispatch)
-              }),
-            ),
-          followSelected: (dispatch) =>
-            safe(
-              dispatch,
-              Effect.gen(function* () {
-                const thread = yield* Ref.get(interactiveThread)
-                if (thread === undefined) return
-                const turns = yield* TurnRepository.Service
-                let followedTurnId: Turn.TurnId | undefined
-                let initialized = false
-                while (true) {
-                  const turn = yield* turns.findActive(thread.id)
-                  if (turn === undefined) {
-                    initialized = true
-                    yield* Effect.sleep("100 millis")
-                    continue
-                  }
-                  if (turn.id !== followedTurnId) {
-                    followedTurnId = turn.id
-                    if (initialized) dispatch({ _tag: "TurnStarted", threadId: thread.id, turn })
-                  }
-                  initialized = true
-                  const backend = yield* ExecutionBackend.Service
-                  const execution = yield* backend.inspect(turn.id)
-                  if (execution === undefined) {
-                    const current = yield* turns.get(turn.id)
-                    if (current !== undefined && !isTerminalStatus(current.status)) yield* Effect.sleep("100 millis")
-                    continue
-                  }
-                  yield* followTurn(turn.id, dispatch)
+                selectedThreadId = String(thread.id)
+                selectionLoad = {
+                  epoch,
+                  threadId: String(thread.id),
+                  previousEpoch,
+                  previousThreadId: previousThread === undefined ? undefined : String(previousThread.id),
+                  events: [],
+                  committed: false,
                 }
-              }),
+                yield* loadThread(thread, epoch, selectionDispatch(epoch))
+              }).pipe(Effect.ensuring(finishSelection(epoch))),
             ),
-          replay: (id, cursor, dispatch) =>
+          replay: (id, cursor) =>
             safe(
-              dispatch,
+              sessionDispatch,
               Effect.gen(function* () {
                 const backend = yield* ExecutionBackend.Service
                 const turnId = Turn.TurnId.make(id)
@@ -1898,8 +2072,9 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 if (thread === undefined) return yield* operationError("No thread selected")
                 const result = yield* backend.replay(id, cursor)
                 for (const event of result.events)
-                  dispatch({
+                  sessionDispatch({
                     _tag: "TranscriptPatched",
+                    selectionEpoch: yield* Ref.get(selectionRequest),
                     threadId: thread.id,
                     turnId,
                     event,
@@ -1908,29 +2083,67 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               }),
             ),
         }
-        const backend = acquiredBackend
-        if (backend.registerTurnPromoter !== undefined) {
-          yield* backend.registerTurnPromoter(promoterFor(startupDispatch))
+        const session: InteractiveSession = {
+          events: (dispatch) => attachFeed(implementation.events(dispatch)),
+          submit: (prompt, mode, parts, tuning) => admit(implementation.submit(prompt, mode, parts, tuning)),
+          shell: (command, incognito) => admitLocal(implementation.shell(command, incognito)),
+          editQueued: (turnId, prompt) => admitLocal(implementation.editQueued(turnId, prompt)),
+          dequeue: (turnId) => admitLocal(implementation.dequeue(turnId)),
+          steerQueued: (turnId, text) => admitLocal(implementation.steerQueued(turnId, text)),
+          steer: (text) => admitLocal(implementation.steer(text)),
+          interruptAndSend: (prompt) => admitLocal(implementation.interruptAndSend(prompt)),
+          cancel: admitLocal(implementation.cancel),
+          resolvePermission: (waitId, kind, decision) =>
+            admitLocal(implementation.resolvePermission(waitId, kind, decision)),
+          selectThread: (threadId, epoch) => admitLocal(implementation.selectThread(threadId, epoch)),
+          readQueue: (threadId) => admitLocal(implementation.readQueue(threadId)),
+          loadOlder: admitLocal(implementation.loadOlder),
+          previewThread: (threadId) => admitLocal(implementation.previewThread(threadId)),
+          reopenThread: (epoch) => admitLocal(implementation.reopenThread(epoch)),
+          replay: (turnId, afterCursor) => admitLocal(implementation.replay(turnId, afterCursor)),
         }
-        return session
+        const backend = acquiredBackend
+        if (registerPromoter && backend.registerTurnPromoter !== undefined)
+          yield* backend.registerTurnPromoter(promoterFor(() => undefined))
+        return {
+          session,
+          supervise,
+          close: lifecycleAdmission.withPermits(1)(
+            Effect.suspend(() => {
+              if (lifecycle === "closed") return Effect.void
+              lifecycle = "closed"
+              interactiveSinks.delete(sessionId)
+              const approvals = [...shellApprovals.values()]
+              shellApprovals.clear()
+              return Effect.forEach(approvals, (approval) => Deferred.succeed(approval, false), { discard: true }).pipe(
+                Effect.andThen(Deferred.succeed(closed, undefined)),
+                Effect.andThen(Queue.shutdown(sessionEvents)),
+                Effect.andThen(Scope.close(sessionScope, Exit.void)),
+              )
+            }),
+          ),
+        }
       })
-      yield* makeInteractiveSession(options.defaultWorkspace)
-      const reconcileOnce = yield* Effect.cached(
-        Effect.gen(function* () {
-          yield* Effect.forkIn(reconcileExecutions, ownerScope).pipe(Effect.flatMap(Fiber.join))
-          yield* Effect.forkIn(
-            repairThreadSummaries().pipe(
-              Effect.provide(executionDependencies),
-              Effect.catch((error) =>
-                Effect.logError("thread-summary.repair.failed").pipe(
-                  Effect.annotateLogs("rika.failure.kind", String(error)),
-                ),
-              ),
+      const owner = yield* makeInteractiveSession(options.defaultWorkspace, { registerPromoter: true })
+      yield* Effect.forkIn(owner.supervise, ownerScope)
+      const repairSummariesOnce = yield* Effect.cached(
+        repairThreadSummaries().pipe(
+          Effect.provide(executionDependencies),
+          Effect.catch((error) =>
+            Effect.logError("thread-summary.repair.failed").pipe(
+              Effect.annotateLogs("rika.failure.kind", String(error)),
             ),
-            ownerScope,
-          )
-        }).pipe(Effect.uninterruptible),
+          ),
+        ),
       )
+      const scheduleReconcile = Effect.forkIn(
+        reconcileExecutions.pipe(
+          Effect.catch((error) =>
+            Effect.logError("execution.repair.failed").pipe(Effect.annotateLogs("rika.failure.kind", String(error))),
+          ),
+        ),
+        ownerScope,
+      ).pipe(Effect.asVoid)
       return Service.of({
         run: Effect.fn("Operation.product.run")(function* (input) {
           if (
@@ -1938,11 +2151,16 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             input._tag === "Run" ||
             input._tag === "Review" ||
             input._tag === "Workflow"
-          )
-            yield* reconcileOnce.pipe(Effect.mapError((error) => unavailable(input, String(error))))
+          ) {
+            yield* scheduleReconcile
+            yield* repairSummariesOnce
+          }
           if (input._tag === "Interactive" && options.interactive !== undefined) {
-            const session = yield* makeInteractiveSession(input.workspace ?? options.defaultWorkspace)
-            yield* options.interactive(input, session)
+            const made = yield* makeInteractiveSession(
+              input.workspace ?? options.defaultWorkspace,
+              input.threadId === undefined ? {} : { initialThreadId: input.threadId },
+            )
+            yield* options.interactive(input, made.session).pipe(Effect.ensuring(made.close))
             return
           }
           if (input._tag === "Run") {
@@ -1968,24 +2186,6 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                             : Effect.succeed(existingThread),
                         ),
                       )
-              const turnId = yield* options.makeTurnId
-              const prompt = input.prompt.join(" ")
-              const submitted = yield* turns.createForSubmission({
-                id: turnId,
-                threadId: thread.id,
-                prompt,
-                executionRoute: yield* resolveExecutionRoute(input.mode ?? "medium", undefined, thread.workspace),
-                now,
-              })
-              yield* ensureTurnSummary(submitted)
-              yield* Effect.logInfo("turn.accepted").pipe(
-                Effect.annotateLogs({
-                  "rika.thread.id": String(thread.id),
-                  "rika.turn.id": String(submitted.id),
-                  "rika.turn.status": submitted.status,
-                }),
-              )
-              if (submitted.status === "queued") return
               const runTurn = Effect.fn("Operation.runTurn")(function* (turn: Turn.Turn) {
                 const startedAt = yield* Clock.currentTimeMillis
                 yield* Effect.logInfo("turn.started").pipe(
@@ -1996,13 +2196,19 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 )
                 const result = yield* Effect.gen(function* () {
                   const prepared = yield* prepareExecution(turn, thread.workspace)
-                  yield* setTurnStatus(turn.id, "running", turn.lastCursor, startedAt)
+                  const runningTurn = yield* setTurnStatus(turn.id, "running", turn.lastCursor, startedAt)
+                  publishInteractiveActivity(0, {
+                    _tag: "TurnStarted",
+                    selectionEpoch: 0,
+                    threadId: thread.id,
+                    turn: runningTurn,
+                  })
                   return yield* backend.start({
                     threadId: turn.threadId,
                     turnId: turn.id,
                     prompt: prepared.prompt,
                     startedAt,
-                    executionRoute: turn.executionRoute!,
+                    executionRoute: turn.executionRoute,
                     ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
                   })
                 }).pipe(
@@ -2035,12 +2241,35 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 yield* projectExecutionResult(thread.id, result)
                 return result
               })
+              const drainRunQueue = Effect.fn("Operation.drainRunQueue")(function* () {
+                while (true) {
+                  const promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
+                  if (promoted === undefined) return
+                  yield* runTurn(promoted)
+                }
+              })
+              yield* drainRunQueue()
+              const turnId = yield* options.makeTurnId
+              const prompt = input.prompt.join(" ")
+              const submitted = yield* turns.createForSubmission({
+                id: turnId,
+                threadId: thread.id,
+                prompt,
+                executionRoute: yield* resolveExecutionRoute(input.mode ?? "medium", undefined, thread.workspace),
+                queueCapacity: pendingTurnCapacity,
+                now,
+              })
+              yield* ensureTurnSummary(submitted)
+              yield* Effect.logInfo("turn.accepted").pipe(
+                Effect.annotateLogs({
+                  "rika.thread.id": String(thread.id),
+                  "rika.turn.id": String(submitted.id),
+                  "rika.turn.status": submitted.status,
+                }),
+              )
+              if (submitted.status === "queued") return
               const result = yield* runTurn(submitted)
-              let promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
-              while (promoted !== undefined) {
-                yield* runTurn(promoted)
-                promoted = yield* turns.claimNextQueued(thread.id, yield* Clock.currentTimeMillis)
-              }
+              yield* drainRunQueue()
               if (input.streamJson) {
                 yield* Effect.forEach(result.events, (event) => Console.log(JSON.stringify(event)), { discard: true })
                 return
@@ -2104,6 +2333,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   prompt: "Review workspace changes",
                   executionRoute,
                   reviewFanOutId: fanOutId,
+                  queueCapacity: pendingTurnCapacity,
                   now,
                 })
                 yield* ensureTurnSummary(parentTurn)
@@ -2386,22 +2616,31 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     : sourceTurns.findIndex((turn) => turn.id === input.atTurn)
                 if (boundary < 0 && input.atTurn !== undefined)
                   return yield* operationError(`Turn ${input.atTurn} does not exist in thread ${input.threadId}`)
+                const copiedSourceTurns = sourceTurns.slice(0, boundary + 1)
+                const forkId = yield* options.makeThreadId
+                const queuedCopies = copiedSourceTurns.filter((turn) => turn.status === "queued").length
+                if (queuedCopies > pendingTurnCapacity)
+                  return yield* TurnRepository.QueueFull.make({
+                    threadId: forkId,
+                    capacity: pendingTurnCapacity,
+                    count: queuedCopies,
+                  })
                 const fork = yield* repository.create({
-                  id: yield* options.makeThreadId,
+                  id: forkId,
                   workspace: source.workspace,
                   title: source.title,
                   now,
                 })
                 if (source.labels.length > 0) yield* repository.label(fork.id, source.labels, now)
-                for (const sourceTurn of sourceTurns.slice(0, boundary + 1)) {
-                  const copied = yield* turns.createForSubmission({
-                    id: yield* options.makeTurnId,
-                    threadId: fork.id,
-                    prompt: sourceTurn.prompt,
-                    ...(sourceTurn.executionRoute === undefined ? {} : { executionRoute: sourceTurn.executionRoute }),
-                    now: sourceTurn.createdAt,
-                  })
-                  yield* setTurnStatus(copied.id, sourceTurn.status, sourceTurn.lastCursor, sourceTurn.updatedAt)
+                for (const sourceTurn of copiedSourceTurns) {
+                  const copied = yield* turns.copy(
+                    {
+                      ...sourceTurn,
+                      id: yield* options.makeTurnId,
+                      threadId: fork.id,
+                    },
+                    pendingTurnCapacity,
+                  )
                   const execution = yield* acquiredBackend.inspect(sourceTurn.id)
                   if (execution === undefined) yield* ensureTurnSummary(copied)
                   else {

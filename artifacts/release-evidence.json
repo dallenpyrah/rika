@@ -5,7 +5,7 @@
     {
       "target": "darwin-arm64",
       "archive": "rika-darwin-arm64.tar.gz",
-      "sha256": "c781ebefbc2958762d33a22015c261305749e14d2b46b07e1462aea9d0e8f062",
+      "sha256": "d206039302892950f9f1d8eff21a4d9913e23da04e9510aa116ae27419a209ed",
       "opentui": "@opentui/core-darwin-arm64"
     }
   ]

@@ -1649,7 +1649,7 @@
           "width": 5
         },
         {
-          "text": " toggle file tree",
+          "text": " toggle tool details",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -1667,10 +1667,10 @@
             }
           },
           "attributes": 0,
-          "width": 17
+          "width": 20
         },
         {
-          "text": "                       ",
+          "text": "                    ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -1688,7 +1688,7 @@
             }
           },
           "attributes": 0,
-          "width": 23
+          "width": 20
         },
         {
           "text": "│",

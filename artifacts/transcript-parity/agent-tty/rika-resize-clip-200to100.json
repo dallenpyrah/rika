@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "command": "snapshot",
+  "timestamp": "2026-07-16T21:08:04.670Z",
+  "result": {
+    "format": "text",
+    "sessionId": "01KXPC3BC21F0QCHAFG87EBEWP",
+    "capturedAtSeq": 92,
+    "cols": 100,
+    "rows": 30,
+    "cursorRow": 29,
+    "cursorCol": 2,
+    "text": " This paragraph is intentionally long so it exercises soft wrapping at both the wide and narrow term\n emphasis runs and inline code spans survive the wrap boundary without breaking the surrounding flow\n\n ╭───────────────────────────┬────────────────────────────────────────────────────┬─────────────────\n │ Capability                │ Rika behavior                                      │ Amp behavior\n ├───────────────────────────┼────────────────────────────────────────────────────┼─────────────────\n │ Wide table cell wrapping  │ Renders inside a bounded rounded grid that keeps   │ Renders inside i\n │                           │ the border intact                                  │ separators\n ├───────────────────────────┼────────────────────────────────────────────────────┼─────────────────\n │ Terminal background       │ Inherits the terminal background instead of        │ Inherits the ter\n │ inheritance               │ painting its own                                   │ painting its own\n ├───────────────────────────┼────────────────────────────────────────────────────┼─────────────────\n │ Fenced code block styling │ Preserves indentation and monospace alignment for  │ Preserves indent\n │                           │ every line                                         │ for every line\n ╰───────────────────────────┴────────────────────────────────────────────────────┴─────────────────\n\n     export const renderReference = (input: ReferenceInput): Effect.Effect<Rendered, RenderError> =>\n       Effect.gen(function* () {\n         const width = yield* Terminal.currentWidth\n         const wrapped = wrapParagraph(input.paragraph, width)\n         const table = layoutTable(input.rows, { border: \"rounded\", inheritBackground: true })\n         return { headings: input.headings, paragraph: wrapped, table }\n       })\n\n The closing paragraph adds one more long wrapping line so the reviewer can compare the blank-row rh\n╭───────────────────────────────────────────────────────────────────────────────────────────────────\n│\n│\n│\n╰───────────────────────────────────────────────────────────────────────────────────────────────────",
+    "screenHash": "fc7827c7dbf05ab321232e09e303e1ab7ff2c5bf11dfec6ab25e8d86ca658c04"
+  }
+}

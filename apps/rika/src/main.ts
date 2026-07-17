@@ -52,9 +52,7 @@ import {
   Redacted,
   Ref,
   References,
-  Schedule,
   Schema,
-  Scope,
   Stream,
 } from "effect"
 import { Command } from "effect/unstable/cli"
@@ -63,7 +61,9 @@ import { command, version } from "./command"
 import { renderGoodbye } from "./goodbye"
 import * as InteractiveController from "./interactive-controller"
 import * as Logging from "./logging"
-import { layer as residentLayer, serve as serveResident } from "./resident-transport"
+import { layer as residentLayer } from "./resident-client-transport"
+import { serve as serveResident } from "./resident-host-transport"
+import * as ResidentProcessStartup from "./resident-process-startup"
 
 const pathService = Effect.runSync(Effect.scoped(Layer.build(Path.layer))).pipe((context) =>
   Context.get(context, Path.Path),
@@ -74,6 +74,7 @@ const isAbsolute = pathService.isAbsolute
 const join = pathService.join
 const relativePathFrom = pathService.relative
 const resolve = pathService.resolve
+const ignoreSelectionResync = (_threadId: string, _selectionEpoch: number) => {}
 
 const provideLayerScoped =
   <ROut, E2, RIn>(layer: Layer.Layer<ROut, E2, RIn>) =>
@@ -107,6 +108,9 @@ const imageMediaType = (path: string) => {
   if (lower.endsWith(".webp")) return "image/webp"
   return "application/octet-stream"
 }
+
+export const imagePasteBlockedNotice = (model: Pick<ViewState.Model, "editingTurnId">): string | undefined =>
+  model.editingTurnId === undefined ? undefined : "Images cannot be pasted while editing a queued prompt"
 
 const pastedImageFormat = (bytes: Uint8Array, declaredMediaType?: string) => {
   const prefix = (start: number, end: number) => new TextDecoder().decode(bytes.subarray(start, end))
@@ -315,24 +319,6 @@ export const parseChangedFiles: {
   (statusText: string, numstatText: string): ReadonlyArray<ViewState.ChangedFile>
 } = Function.dual(2, parseChangedFilesImpl)
 
-export const countAddedLines = (bytes: Uint8Array): number => {
-  if (bytes.length === 0 || bytes.includes(0)) return 0
-  let lines = bytes[bytes.length - 1] === 10 ? 0 : 1
-  for (const byte of bytes) if (byte === 10) lines += 1
-  return lines
-}
-
-const countAddedLinesFromFileImpl = (workspace: string, path: string) =>
-  resolveWorkspaceFileImpl(workspace, { path }).pipe(
-    Effect.flatMap((file) => FileSystem.FileSystem.pipe(Effect.flatMap((fileSystem) => fileSystem.readFile(file)))),
-    Effect.map(countAddedLines),
-  )
-
-export const countAddedLinesFromFile: {
-  (path: string): (workspace: string) => ReturnType<typeof countAddedLinesFromFileImpl>
-  (workspace: string, path: string): ReturnType<typeof countAddedLinesFromFileImpl>
-} = Function.dual(2, countAddedLinesFromFileImpl)
-
 const gitOutput = (arguments_: ReadonlyArray<string>) => {
   const [executable, ...args] = arguments_
   if (executable === undefined)
@@ -391,20 +377,32 @@ const readChangedFilesEffect = Effect.fn("Main.readChangedFiles")(function* (wor
   if (base === undefined) return []
   const [numstatText, numstatExit] = yield* gitOutput(["git", "-C", workspace, "diff", "--numstat", "-z", "-M", base])
   if (numstatExit !== 0) return []
-  return yield* Effect.forEach(
-    parseChangedFiles(statusText, numstatText),
-    (file) =>
-      file.added !== undefined || !file.status.includes("?")
-        ? Effect.succeed(file)
-        : countAddedLinesFromFileImpl(workspace, file.path).pipe(
-            Effect.map((added) => ({ path: file.path, status: file.status, added, removed: 0 })),
-            Effect.orElseSucceed(() => ({ path: file.path, status: file.status, added: 0, removed: 0 })),
-          ),
-    { concurrency: 8 },
-  )
+  return parseChangedFiles(statusText, numstatText)
 })
 
 export const readChangedFiles = readChangedFilesEffect
+
+const refreshChangedFilesOnImpl = <A, E, R, E2, R2>(
+  changes: Stream.Stream<A, E, R>,
+  isOpen: () => boolean,
+  refresh: Effect.Effect<void, E2, R2>,
+) =>
+  changes.pipe(
+    Stream.debounce("150 millis"),
+    Stream.runForEach(() => (isOpen() ? refresh : Effect.void)),
+  )
+
+export const refreshChangedFilesOn: {
+  <E2, R2>(
+    isOpen: () => boolean,
+    refresh: Effect.Effect<void, E2, R2>,
+  ): <A, E, R>(changes: Stream.Stream<A, E, R>) => Effect.Effect<void, E | E2, R | R2>
+  <A, E, R, E2, R2>(
+    changes: Stream.Stream<A, E, R>,
+    isOpen: () => boolean,
+    refresh: Effect.Effect<void, E2, R2>,
+  ): Effect.Effect<void, E | E2, R | R2>
+} = Function.dual(3, refreshChangedFilesOnImpl)
 
 type ClipboardPngExtractor = (
   script: string,
@@ -656,20 +654,68 @@ export const modelRoutePlan = (route: ConfigContract.ResolvedModelRoute) => {
   }
 }
 
+const modeIds = ["low", "medium", "high", "ultra"] as const
+const agentIds = ["librarian", "painter", "review", "readThread", "task"] as const
+
+const resolveTunedModeRoute = (
+  settings: ConfigContract.Settings,
+  mode: ConfigContract.ModeId,
+  role: ConfigContract.Role,
+  tuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
+) => {
+  const configured = settings.modes[mode][role]
+  const effort = (tuning?.reasoningEffort ?? configured.effort) as ConfigContract.Effort
+  const fast = tuning?.fastMode ?? configured.fast ?? false
+  const routedSettings: ConfigContract.Settings = {
+    ...settings,
+    modes: { ...settings.modes, [mode]: { ...settings.modes[mode], [role]: { ...configured, effort, fast } } },
+  }
+  return ConfigContract.resolveModelRoute(routedSettings, mode, role)
+}
+
+const supportingModelRoutes = (settings: ConfigContract.Settings) => [
+  ConfigContract.resolveThreadTitleRoute(settings),
+  ConfigContract.resolveCompactionSummaryRoute(settings),
+  ...agentIds.map((agent) => ConfigContract.resolveAgentRoute(settings, agent)),
+]
+
+const modelRoutesForExecutionImpl = (
+  settings: ConfigContract.Settings,
+  mode: ConfigContract.ModeId,
+  tuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
+) => [
+  resolveTunedModeRoute(settings, mode, "main", tuning),
+  resolveTunedModeRoute(settings, mode, "oracle", tuning),
+  ...supportingModelRoutes(settings),
+]
+
+export const modelRoutesForExecution: {
+  (
+    mode: ConfigContract.ModeId,
+    tuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
+  ): (settings: ConfigContract.Settings) => ReturnType<typeof modelRoutesForExecutionImpl>
+  (
+    settings: ConfigContract.Settings,
+    mode: ConfigContract.ModeId,
+    tuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
+  ): ReturnType<typeof modelRoutesForExecutionImpl>
+} = Function.dual((args) => typeof args[0] === "object", modelRoutesForExecutionImpl)
+
+const defaultModelRoutes = (settings: ConfigContract.Settings) => [
+  ...modeIds.flatMap((mode) => [
+    ConfigContract.resolveModelRoute(settings, mode, "main"),
+    ConfigContract.resolveModelRoute(settings, mode, "oracle"),
+  ]),
+  ...supportingModelRoutes(settings),
+]
+
 const executionRoutePinImpl = (
   settings: ConfigContract.Settings,
   mode: ConfigContract.ModeId,
   tuning?: { readonly reasoningEffort?: string; readonly fastMode?: boolean },
 ): Turn.ExecutionRoutePin => {
   const resolveRole = (role: ConfigContract.Role) => {
-    const configured = settings.modes[mode][role]
-    const effort = (tuning?.reasoningEffort ?? configured.effort) as ConfigContract.Effort
-    const fast = tuning?.fastMode ?? configured.fast ?? false
-    const routedSettings: ConfigContract.Settings = {
-      ...settings,
-      modes: { ...settings.modes, [mode]: { ...settings.modes[mode], [role]: { ...configured, effort, fast } } },
-    }
-    const route = ConfigContract.resolveModelRoute(routedSettings, mode, role)
+    const route = resolveTunedModeRoute(settings, mode, role, tuning)
     const plan = modelRoutePlan(route)
     return {
       role,
@@ -706,11 +752,27 @@ const executionRoutePinImpl = (
       compaction: route.compaction,
     }
   }
+  const titleRoute = ConfigContract.resolveThreadTitleRoute(settings)
+  const titlePlan = modelRoutePlan(titleRoute)
   const summaryRoute = ConfigContract.resolveCompactionSummaryRoute(settings)
   const summaryPlan = modelRoutePlan(summaryRoute)
   return {
-    version: 1,
     mode,
+    title: {
+      role: "title",
+      alias: titleRoute.alias,
+      provider: titlePlan.selection.provider,
+      model: titlePlan.selection.model,
+      registrationKey: titlePlan.registrationKey,
+      gatewayProtocol: titleRoute.gateway.protocol,
+      gatewayBaseUrl: normalizedBaseUrl(titleRoute.gateway.baseUrl),
+      gatewayAuth: titleRoute.gateway.auth.type === "none" ? "none" : `bearer-env:${titleRoute.gateway.auth.variable}`,
+      effort: titleRoute.effort,
+      fast: titleRoute.fast,
+      requestVariant: titlePlan.registrationKey,
+      providerOptions: titleRoute.options,
+      compaction: titleRoute.compaction,
+    },
     compactionSummary: {
       role: "compaction",
       alias: summaryRoute.alias,
@@ -995,13 +1057,6 @@ const configuredBackendLayerImpl = (
           modelVariantPolicy,
           compaction: routePlan.compaction,
           oracleCompaction: oracleRoutePlan.compaction,
-          resolveExecutionRoute: (turnId) =>
-            TurnRepository.Service.pipe(
-              Effect.flatMap((turns) => turns.get(Turn.TurnId.make(turnId))),
-              Effect.map((turn) => turn?.executionRoute),
-              provideLayerScoped(turnRepositoryLayer),
-              Effect.mapError((cause) => ExecutionBackend.BackendError.make({ message: String(cause) })),
-            ),
           toolRuntimeLayerForWorkspace: (runtimeWorkspace) =>
             ToolRuntime.layer(runtimeWorkspace).pipe(
               Layer.provide(
@@ -1125,16 +1180,10 @@ const lazyBackendLayer = (
           load.pipe(Effect.flatMap((backend) => backend.startWorkflow(name, runId, revision))),
         inspectWorkflow: (runId) => load.pipe(Effect.flatMap((backend) => backend.inspectWorkflow(runId))),
         cancelWorkflow: (runId) => load.pipe(Effect.flatMap((backend) => backend.cancelWorkflow(runId))),
-        ensureThreadHost: (threadId, createdAt) =>
+        wakeThreadHost: (wake) =>
           load.pipe(
             Effect.flatMap((backend) =>
-              backend.ensureThreadHost === undefined ? Effect.void : backend.ensureThreadHost(threadId, createdAt),
-            ),
-          ),
-        notifyThreadHost: (threadId, turnId, now) =>
-          load.pipe(
-            Effect.flatMap((backend) =>
-              backend.notifyThreadHost === undefined ? Effect.void : backend.notifyThreadHost(threadId, turnId, now),
+              backend.wakeThreadHost === undefined ? Effect.void : backend.wakeThreadHost(wake),
             ),
           ),
         registerTurnPromoter: (registered) =>
@@ -1255,16 +1304,13 @@ export const gatewayCredentialsForRoutes: {
 } = Function.dual(4, gatewayCredentialsForRoutesImpl)
 
 export const persistedModelRoutesForStartup = (turns: ReadonlyArray<Turn.Turn>) =>
-  turns.flatMap((turn) =>
-    turn.executionRoute === undefined
-      ? []
-      : [
-          turn.executionRoute.main,
-          turn.executionRoute.oracle,
-          ...(turn.executionRoute.compactionSummary === undefined ? [] : [turn.executionRoute.compactionSummary]),
-          ...Object.values(turn.executionRoute.agents ?? {}),
-        ],
-  )
+  turns.flatMap((turn) => [
+    turn.executionRoute.main,
+    turn.executionRoute.oracle,
+    ...(turn.executionRoute.title === undefined ? [] : [turn.executionRoute.title]),
+    ...(turn.executionRoute.compactionSummary === undefined ? [] : [turn.executionRoute.compactionSummary]),
+    ...Object.values(turn.executionRoute.agents ?? {}),
+  ])
 
 const canonicalDatabaseRootImpl = Effect.fn("Main.canonicalDatabaseRoot")(function* (
   productDatabase: string,
@@ -1437,18 +1483,32 @@ if (import.meta.main) {
         let renderer: Effect.Success<ReturnType<typeof createTui>> | undefined
         let initialization: Fiber.Fiber<void, never> | undefined
         let closed = false
+        const recoverSession = <R>(
+          effect: Effect.Effect<void, Operation.OperationUnavailable, R>,
+        ): Effect.Effect<void, never, R> =>
+          effect.pipe(
+            Effect.catchTag("OperationUnavailable", (error) => (closed ? Effect.void : Effect.logError(error.message))),
+          )
         let previewTimer: Fiber.Fiber<void, never> | undefined
         let renderTimer: Fiber.Fiber<void, never> | undefined
+        let feedTimer: Fiber.Fiber<void, never> | undefined
+        let applyingFeedBatch = false
+        let feedPreserveAnchor = false
         let replayTurns = new Map<string, Turn.Turn>()
         let loadedTranscriptEntries: ReadonlyArray<TranscriptRepository.Entry> = []
         let projectionRevisions = new Map<string, number>()
         let transcriptProjections = new Map<string, Transcript.Projection>()
         let threadCostUsd = 0
+        let activeSelectionEpoch = 0
         const fibers = new Set<Fiber.Fiber<void, never>>()
-        let followFiber: Fiber.Fiber<void, never> | undefined
+        let selectionFiber: Fiber.Fiber<void, never> | undefined
+        let selectionGeneration = 0
         let renderSuppressed = false
         let loadingOlder = false
+        const selectionResyncs = new Set<string>()
+        let requestSelectionResync = ignoreSelectionResync
         const render = (immediate = false) => {
+          if (applyingFeedBatch) return
           if (renderer === undefined || renderSuppressed) return
           if (immediate) {
             if (renderTimer !== undefined) fork(Fiber.interrupt(renderTimer))
@@ -1471,7 +1531,7 @@ if (import.meta.main) {
         const dispatch = (event: Operation.InteractiveEvent) => {
           if (closed) return
           if (
-            event._tag === "TranscriptPageReceived" ||
+            event._tag === "SelectionLoaded" ||
             event._tag === "TranscriptPagePrepended" ||
             event._tag === "TranscriptPatched" ||
             event._tag === "TranscriptResyncRequired"
@@ -1479,6 +1539,7 @@ if (import.meta.main) {
             const controlled = InteractiveController.update(
               {
                 model,
+                selectionEpoch: activeSelectionEpoch,
                 replayTurns,
                 entries: loadedTranscriptEntries,
                 revisions: projectionRevisions,
@@ -1488,15 +1549,18 @@ if (import.meta.main) {
               event,
             )
             model = controlled.state.model
+            activeSelectionEpoch = controlled.state.selectionEpoch
             replayTurns = new Map(controlled.state.replayTurns)
             loadedTranscriptEntries = controlled.state.entries
             projectionRevisions = new Map(controlled.state.revisions)
             transcriptProjections = new Map(controlled.state.projections)
             threadCostUsd = controlled.state.threadCostUsd
             if (event._tag === "TranscriptResyncRequired" && model.currentThreadId !== undefined)
-              fork(session.selectThread(model.currentThreadId, dispatch))
-            if (controlled.preserveAnchor) renderer?.surface.update(model, true)
-            else
+              requestSelectionResync(model.currentThreadId, event.selectionEpoch)
+            if (controlled.preserveAnchor) {
+              if (applyingFeedBatch) feedPreserveAnchor = true
+              else renderer?.surface.update(model, true)
+            } else
               render(
                 event._tag === "TranscriptResyncRequired" ||
                   (event._tag === "TranscriptPatched" &&
@@ -1508,26 +1572,38 @@ if (import.meta.main) {
               )
             return
           }
-          if (event._tag === "QueueChanged") {
-            if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
-              model = ViewState.replaceQueue(
-                model,
-                event.turns
-                  .filter((turn) => turn.status === "queued")
-                  .map((turn) => {
-                    const attachments = turn.promptParts
-                      ?.filter((part) => part.type === "image")
-                      .flatMap((part) => (part.filename === undefined ? [] : [part.filename]))
-                    if (attachments === undefined || attachments.length === 0)
-                      return { id: turn.id, prompt: turn.prompt }
-                    return { id: turn.id, prompt: turn.prompt, attachments }
-                  }),
-              )
-          } else if (event._tag === "QueuedTurnEdited") {
-            if (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
-              model = ViewState.replaceTurnPrompt(model, event.turnId, event.prompt)
+          if (event._tag === "QueueUpdated") {
+            if (
+              event.selectionEpoch === activeSelectionEpoch &&
+              (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+            ) {
+              const updated = InteractiveController.updateQueue(model, event)
+              model = updated.model
+              if (updated.resync) requestSelectionResync(event.threadId, event.selectionEpoch)
+            }
+          } else if (event._tag === "QueueResyncRequired") {
+            if (
+              event.selectionEpoch === activeSelectionEpoch &&
+              (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+            )
+              requestSelectionResync(event.threadId, event.selectionEpoch)
           } else if (event._tag === "TurnStarted") {
-            if (model.currentThreadId === undefined || model.currentThreadId === event.threadId) {
+            if (
+              event.selectionEpoch === activeSelectionEpoch &&
+              (model.currentThreadId === undefined || model.currentThreadId === event.threadId)
+            ) {
+              const known = replayTurns.get(event.turn.id)
+              if (
+                known?.status === "completed" ||
+                known?.status === "failed" ||
+                known?.status === "cancelled" ||
+                model.activeTurnId === event.turn.id
+              )
+                return
+              if (model.queue.some((item) => item.id === event.turn.id)) {
+                model = InteractiveController.removePromotedTurn(model, event.threadId, event.turn.id)
+                fork(session.readQueue(event.threadId))
+              }
               replayTurns.set(event.turn.id, event.turn)
               transcriptProjections.set(event.turn.id, Transcript.empty(event.turn.id, event.turn.prompt))
               model = ViewState.update(model, {
@@ -1551,40 +1627,8 @@ if (import.meta.main) {
                 ...(thread.editTotals === undefined ? {} : { editTotals: thread.editTotals }),
               })),
             })
-          } else if (event._tag === "ThreadSelected") {
-            replayTurns = new Map(event.turns.map((turn) => [turn.id, turn]))
-            loadedTranscriptEntries = []
-            projectionRevisions = new Map()
-            transcriptProjections = new Map()
-            threadCostUsd = 0
-            const activeTurn = event.turns.find(
-              (turn) => turn.status === "accepted" || turn.status === "running" || turn.status === "waiting",
-            )
-            model = {
-              ...model,
-              entries: [],
-              blocks: [],
-              items: [],
-              seenEventIds: [],
-              seenExecutionEventKeys: [],
-              eventCursor: undefined,
-              activeTurnId: activeTurn?.id,
-              busy: activeTurn !== undefined,
-              busyStatus: activeTurn === undefined ? undefined : "Working",
-              currentThreadId: String(event.thread.id),
-              currentThreadTitle: event.thread.title,
-              threadSidebar: {
-                ...model.threadSidebar,
-                selected: Math.max(
-                  0,
-                  (model.threads as ReadonlyArray<ViewState.ThreadItem>).findIndex(
-                    (thread) => thread.id === event.thread.id,
-                  ),
-                ),
-              },
-              threadPreview: ViewState.idle,
-            }
           } else if (event._tag === "ExecutionControlled") {
+            if (event.threadId !== undefined && event.selectionEpoch !== activeSelectionEpoch) return
             if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
             if (event.action === "cancelled" && model.busy)
               model = ViewState.update(model, {
@@ -1592,12 +1636,17 @@ if (import.meta.main) {
                 ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
               })
           } else if (event._tag === "ExecutionFailed") {
+            if (event.threadId !== undefined && event.selectionEpoch !== activeSelectionEpoch) return
             if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
             model = ViewState.update(model, {
               _tag: "ExecutionFailed",
               ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
               message: event.message,
             })
+          } else if (event._tag === "QueueFull") {
+            if (event.selectionEpoch !== activeSelectionEpoch) return
+            if (model.currentThreadId !== undefined && model.currentThreadId !== event.threadId) return
+            model = InteractiveController.updateQueue(model, event).model
           } else if (event._tag === "ShellPermissionRequested") {
             model = ViewState.update(model, {
               _tag: "BlockAdded",
@@ -1636,8 +1685,34 @@ if (import.meta.main) {
           } else {
             model = ViewState.update(model, event)
           }
-          render(event._tag === "ExecutionFailed" || event._tag === "ExecutionControlled")
+          render(event._tag === "ExecutionFailed" || event._tag === "QueueFull" || event._tag === "ExecutionControlled")
         }
+        const feedBatcher = InteractiveController.makeFeedFrameBatcher<Operation.InteractiveEvent>({
+          schedule: (flush) => {
+            feedTimer = fork(
+              Effect.sleep("16 millis").pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    feedTimer = undefined
+                    flush()
+                  }),
+                ),
+              ),
+            )
+          },
+          apply: (events) => {
+            applyingFeedBatch = true
+            try {
+              for (const event of events) dispatch(event)
+            } finally {
+              applyingFeedBatch = false
+            }
+          },
+          render: () => {
+            if (renderer !== undefined && !renderSuppressed) renderer.surface.update(model, feedPreserveAnchor)
+            feedPreserveAnchor = false
+          },
+        })
         let closing = false
         let teardownStarted = false
         const goodbye = () => {
@@ -1667,6 +1742,9 @@ if (import.meta.main) {
               previewTimer = undefined
               if (renderTimer !== undefined) yield* Fiber.interrupt(renderTimer)
               renderTimer = undefined
+              if (feedTimer !== undefined) yield* Fiber.interrupt(feedTimer)
+              feedTimer = undefined
+              Logging.settleActiveLogs()
               renderer?.releaseTerminal()
               if (initialization !== undefined) yield* Fiber.await(initialization)
               yield* interruptTrackedFibers([...fibers])
@@ -1684,22 +1762,6 @@ if (import.meta.main) {
         const terminate = () => close(tuiSignalExitCode("SIGTERM"))
         process.once("SIGINT", interrupt)
         process.once("SIGTERM", terminate)
-        const startSelectedFollow = () => {
-          if (followFiber !== undefined) return
-          const selectedFollowFiber = fork(session.followSelected(dispatch))
-          followFiber = selectedFollowFiber
-          fibers.add(selectedFollowFiber)
-          fork(
-            Fiber.await(selectedFollowFiber).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  fibers.delete(selectedFollowFiber)
-                  if (followFiber === selectedFollowFiber) followFiber = undefined
-                }),
-              ),
-            ),
-          )
-        }
         const submit = (
           prompt: string,
           parts: ReadonlyArray<ViewState.PromptPart>,
@@ -1710,13 +1772,9 @@ if (import.meta.main) {
           const draft = { input: model.input, cursor: model.cursor, pastedText: model.pastedText }
           const effect =
             classified._tag === "Shell"
-              ? session.shell(classified.command, classified.incognito, dispatch)
+              ? session.shell(classified.command, classified.incognito)
               : materializePromptParts(parts, model.workspace).pipe(
-                  Effect.flatMap((materialized) =>
-                    session
-                      .submit(classified.prompt, dispatch, mode, materialized, tuning)
-                      .pipe(Effect.tap(() => Effect.sync(startSelectedFollow))),
-                  ),
+                  Effect.flatMap((materialized) => session.submit(classified.prompt, mode, materialized, tuning)),
                   Effect.catchTag("PromptAttachmentError", (failure) =>
                     Effect.sync(() => {
                       model = ViewState.update(
@@ -1727,7 +1785,7 @@ if (import.meta.main) {
                     }),
                   ),
                 )
-          const fiber = fork(effect.pipe(provideLayerScoped(BunServices.layer)))
+          const fiber = effect.pipe(provideLayerScoped(BunServices.layer), recoverSession, fork)
           fibers.add(fiber)
           fork(Fiber.await(fiber).pipe(Effect.tap(() => Effect.sync(() => fibers.delete(fiber)))))
         }
@@ -1741,16 +1799,10 @@ if (import.meta.main) {
           fibers.add(fiber)
           fork(Fiber.await(fiber).pipe(Effect.tap(() => Effect.sync(() => fibers.delete(fiber)))))
         }
-        const loadSelected = (effect: Effect.Effect<void, never>) =>
+        const loadSelected = (effect: Effect.Effect<void, Operation.OperationUnavailable>, generation: number) =>
           Effect.gen(function* () {
-            if (followFiber !== undefined) {
-              const interruptedFiber = followFiber
-              yield* interruptAndClearTrackedFiber(interruptedFiber, (fiber) => {
-                fibers.delete(fiber)
-                if (followFiber === fiber) followFiber = undefined
-              })
-            }
             yield* Effect.sync(() => {
+              if (generation !== selectionGeneration) return
               model = ViewState.update(model, { _tag: "ThreadOpenRequested" })
               renderer?.surface.update(model)
               renderSuppressed = true
@@ -1758,27 +1810,61 @@ if (import.meta.main) {
             yield* effect.pipe(
               Effect.ensuring(
                 Effect.sync(() => {
+                  if (generation !== selectionGeneration) return
                   renderSuppressed = false
                   model = ViewState.update(model, { _tag: "ThreadOpenCompleted" })
                   renderer?.surface.update(model)
                 }),
               ),
             )
-            yield* Effect.sync(startSelectedFollow)
           })
+        const startSelection = (select: (epoch: number) => Effect.Effect<void, Operation.OperationUnavailable>) => {
+          const generation = (selectionGeneration += 1)
+          const previous = selectionFiber
+          let selectedFiber: Fiber.Fiber<void, never>
+          selectedFiber = fork(
+            (previous === undefined ? Effect.void : Fiber.interrupt(previous)).pipe(
+              Effect.andThen(recoverSession(loadSelected(select(generation), generation))),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  fibers.delete(selectedFiber)
+                  if (selectionFiber === selectedFiber) selectionFiber = undefined
+                }),
+              ),
+            ),
+          )
+          selectionFiber = selectedFiber
+          fibers.add(selectedFiber)
+          return selectedFiber
+        }
+        requestSelectionResync = (threadId, selectionEpoch) => {
+          if (selectionEpoch !== activeSelectionEpoch || model.currentThreadId !== threadId) return
+          const key = `${threadId}:${selectionEpoch}`
+          if (selectionResyncs.has(key)) return
+          selectionResyncs.add(key)
+          startSelection((epoch) =>
+            session
+              .selectThread(threadId, epoch)
+              .pipe(Effect.ensuring(Effect.sync(() => selectionResyncs.delete(key)))),
+          )
+        }
         const loadChangedFiles = () =>
           readChangedFilesEffect(model.workspace).pipe(
             Effect.tap((files) =>
               Effect.sync(() => {
-                model = ViewState.update(model, { _tag: "ChangedFilesReplaced", files })
-                renderer?.surface.update(model)
+                const current = model
+                model = ViewState.update(current, { _tag: "ChangedFilesReplaced", files })
+                if (model !== current) renderer?.surface.update(model)
               }),
             ),
             Effect.asVoid,
           )
-        const watchChangedFiles = Effect.suspend(() =>
-          model.changedFilesOpen ? loadChangedFiles() : Effect.void,
-        ).pipe(Effect.repeat({ schedule: Schedule.spaced("1 second") }), Effect.asVoid)
+        const watchChangedFiles = FileSystem.FileSystem.pipe(
+          Effect.flatMap((fileSystem) =>
+            refreshChangedFilesOn(fileSystem.watch(model.workspace), () => model.changedFilesOpen, loadChangedFiles()),
+          ),
+          Effect.catchCause((cause) => Effect.logWarning(`changed-files watcher stopped: ${Cause.pretty(cause)}`)),
+        )
         const editComposer = () =>
           Clock.currentTimeMillis.pipe(
             Effect.flatMap((now) =>
@@ -1847,14 +1933,16 @@ if (import.meta.main) {
         const adapter: Session.Adapter = {
           submit,
           quit: () => close(),
-          editQueued: (id, prompt) => run(session.editQueued(id, prompt, dispatch)),
-          dequeue: (id) => run(session.dequeue(id, dispatch)),
-          steerQueued: (id, prompt) => run(session.steerQueued(id, prompt, dispatch)),
-          steer: (prompt) => run(session.steer(prompt, dispatch)),
-          interruptAndSend: (prompt) => run(session.interruptAndSend(prompt, dispatch)),
-          cancel: () => run(session.cancel(dispatch)),
-          decidePermission: (id, kind, decision) => run(session.resolvePermission(id, kind, decision, dispatch)),
-          selectThread: (id) => run(session.selectThread(id, dispatch).pipe(loadSelected)),
+          editQueued: (id, prompt) => run(session.editQueued(id, prompt)),
+          dequeue: (id) => run(session.dequeue(id)),
+          steerQueued: (id, prompt) => run(session.steerQueued(id, prompt)),
+          steer: (prompt) => run(session.steer(prompt)),
+          interruptAndSend: (prompt) => run(session.interruptAndSend(prompt)),
+          cancel: () => run(session.cancel),
+          decidePermission: (id, kind, decision) => run(session.resolvePermission(id, kind, decision)),
+          selectThread: (id) => {
+            startSelection((epoch) => session.selectThread(id, epoch))
+          },
         }
         initialization = fork(
           settleTuiInitialization(
@@ -1866,7 +1954,7 @@ if (import.meta.main) {
                 if (offset <= 0 && !loadingOlder) {
                   loadingOlder = true
                   run(
-                    session.loadOlder(dispatch).pipe(
+                    session.loadOlder.pipe(
                       Effect.ensuring(
                         Effect.sync(() => {
                           loadingOlder = false
@@ -1892,6 +1980,11 @@ if (import.meta.main) {
                 renderer?.surface.update(model)
               },
               pasteImage: (image) => {
+                const blocked = imagePasteBlockedNotice(model)
+                if (blocked !== undefined) {
+                  renderer?.surface.showToast(blocked)
+                  return
+                }
                 if (image !== undefined) {
                   const path = pastedImagePath(image.bytes, image.mediaType)
                   if (path === undefined) {
@@ -1945,7 +2038,6 @@ if (import.meta.main) {
                   return
                 }
                 const wasChangedFilesOpen = model.changedFilesOpen
-                const wasThreadSwitcherOpen = model.threadSwitcher.open
                 const beforePreviewId = model.threadSwitcher.open
                   ? ViewState.selectedThreadMetadata(model)?.id
                   : undefined
@@ -1964,27 +2056,20 @@ if (import.meta.main) {
                 if (afterPreviewId !== undefined && afterPreviewId !== beforePreviewId)
                   model = ViewState.update(model, { _tag: "ThreadPreviewRequested" })
                 renderer?.surface.update(model)
-                run(
-                  refreshThreadsOnSwitcherOpen(
-                    wasThreadSwitcherOpen,
-                    model.threadSwitcher.open,
-                    session.initialize(dispatch),
-                  ),
-                )
                 if (key.alt && key.name === "d")
                   renderer?.surface.showToast(`Reasoning effort: ${model.reasoningEffort}`, "#58a6ff")
                 if (!wasChangedFilesOpen && model.changedFilesOpen) run(loadChangedFiles())
                 if (afterPreviewId !== undefined && afterPreviewId !== beforePreviewId) {
                   if (previewTimer !== undefined) fork(Fiber.interrupt(previewTimer))
-                  const selectedPreviewTimer = fork(
-                    Effect.sleep("120 millis").pipe(
-                      Effect.andThen(session.previewThread(afterPreviewId, dispatch)),
-                      Effect.ensuring(
-                        Effect.sync(() => {
-                          if (previewTimer === selectedPreviewTimer) previewTimer = undefined
-                        }),
-                      ),
+                  const selectedPreviewTimer = Effect.sleep("120 millis").pipe(
+                    Effect.andThen(session.previewThread(afterPreviewId)),
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        if (previewTimer === selectedPreviewTimer) previewTimer = undefined
+                      }),
                     ),
+                    recoverSession,
+                    fork,
                   )
                   previewTimer = selectedPreviewTimer
                 }
@@ -2043,7 +2128,7 @@ if (import.meta.main) {
                 created.surface.update(model)
                 run(Effect.logInfo("tui.renderer.started"))
                 if (closed) return
-                run(session.watchThreads(dispatch))
+                run(session.events(feedBatcher.offer))
                 run(watchChangedFiles)
                 run(
                   Effect.gen(function* () {
@@ -2115,14 +2200,16 @@ if (import.meta.main) {
                   ),
                 )
                 run(
-                  session.initialize(dispatch).pipe(
-                    Effect.andThen(
-                      input.last === true
-                        ? loadSelected(session.reopenThread(dispatch))
-                        : input.threadId === undefined
-                          ? Effect.void
-                          : loadSelected(session.selectThread(input.threadId, dispatch)),
-                    ),
+                  (input.last === true
+                    ? Effect.sync(() => startSelection((epoch) => session.reopenThread(epoch))).pipe(
+                        Effect.flatMap(Fiber.join),
+                      )
+                    : input.threadId === undefined
+                      ? Effect.void
+                      : Effect.sync(() => startSelection((epoch) => session.selectThread(input.threadId!, epoch))).pipe(
+                          Effect.flatMap(Fiber.join),
+                        )
+                  ).pipe(
                     Effect.andThen(
                       initialSubmitAction(input.prompt, model.mode) === undefined
                         ? Effect.void
@@ -2189,16 +2276,7 @@ if (import.meta.main) {
             const resolvedWorkspaceConfig = yield* ConfigService.effective().pipe(
               provideLayerScoped(workspaceConfigLayer),
             )
-            const routes = (["low", "medium", "high", "ultra"] as const).flatMap((candidate) => [
-              ConfigContract.resolveModelRoute(resolvedWorkspaceConfig.settings, candidate, "main"),
-              ConfigContract.resolveModelRoute(resolvedWorkspaceConfig.settings, candidate, "oracle"),
-            ])
-            routes.push(
-              ConfigContract.resolveCompactionSummaryRoute(resolvedWorkspaceConfig.settings),
-              ...(["librarian", "painter", "review", "readThread", "task"] as const).map((agent) =>
-                ConfigContract.resolveAgentRoute(resolvedWorkspaceConfig.settings, agent),
-              ),
-            )
+            const routes = modelRoutesForExecution(resolvedWorkspaceConfig.settings, mode, tuning)
             if (!testModelConfigured) {
               const registrations = yield* registrationsForRoutes(
                 routes,
@@ -2210,16 +2288,7 @@ if (import.meta.main) {
             return executionRoutePin(resolvedWorkspaceConfig.settings, mode, tuning)
           }).pipe(provideLayerScoped(BunServices.layer))
         const parallelApiKey = effectiveConfig.environment.parallelApiKey
-        const allModelRoutes = (["low", "medium", "high", "ultra"] as const).flatMap((mode) => [
-          ConfigContract.resolveModelRoute(effectiveConfig.settings, mode, "main"),
-          ConfigContract.resolveModelRoute(effectiveConfig.settings, mode, "oracle"),
-        ])
-        allModelRoutes.push(
-          ConfigContract.resolveCompactionSummaryRoute(effectiveConfig.settings),
-          ...(["librarian", "painter", "review", "readThread", "task"] as const).map((agent) =>
-            ConfigContract.resolveAgentRoute(effectiveConfig.settings, agent),
-          ),
-        )
+        const allModelRoutes = defaultModelRoutes(effectiveConfig.settings)
         const repositories = Layer.succeedContext(
           yield* Layer.build(
             Layer.mergeAll(
@@ -2406,15 +2475,12 @@ if (import.meta.main) {
         return product
       }),
     )
-  const residentOwner = (
-    interactive: Parameters<NonNullable<Parameters<ResidentService.Interface["getOrCreate"]>[0]["owner"]>>[0],
-  ): Effect.Effect<Operation.Interface, ResidentService.ResidentServiceError, Scope.Scope> =>
+  const residentOwner: ResidentService.Owner = (interactive) =>
     Effect.scope.pipe(
       Effect.flatMap((scope) =>
         Layer.buildWithScope(
           operationLayer(interactive).pipe(
             Layer.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)),
-            Layer.orDie,
           ),
           scope,
         ),
@@ -2425,8 +2491,9 @@ if (import.meta.main) {
       ),
       Effect.mapError((cause) =>
         ResidentService.ResidentServiceError.make({
-          reason: "transport-failed",
-          message: String(cause),
+          reason: "startup-failed",
+          message:
+            cause !== null && typeof cause === "object" && "message" in cause ? String(cause.message) : String(cause),
         }),
       ),
     )
@@ -2499,43 +2566,22 @@ if (import.meta.main) {
                                     : clientInput._tag === "Workflow"
                                       ? "workflow"
                                       : "product",
-                          clientVersion: version,
                           startHost: () =>
-                            Effect.gen(function* () {
-                              const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-                              const handle = yield* spawner.spawn(
-                                ChildProcess.make(process.execPath, [import.meta.path], {
-                                  detached: true,
-                                  stdin: "ignore",
-                                  stdout: "ignore",
-                                  stderr: "ignore",
-                                  extendEnv: true,
-                                  env: {
-                                    RIKA_INTERNAL_RESIDENT_HOST: "1",
-                                    RIKA_INTERNAL_RESIDENT_PROFILE: "default",
-                                    RIKA_INTERNAL_RESIDENT_DATA_ROOT: dataRoot,
-                                    ...(environment.testModelResponse._tag === "None"
-                                      ? {}
-                                      : { RIKA_TEST_MODEL_RESPONSE: environment.testModelResponse.value }),
-                                    ...(environment.testModelScript._tag === "None"
-                                      ? {}
-                                      : { RIKA_TEST_MODEL_SCRIPT: environment.testModelScript.value }),
-                                  },
-                                }),
-                              )
-                              const reref = yield* handle.unref
-                              void reref
-                              yield* Effect.logInfo("resident.spawned")
-                            }).pipe(
-                              Effect.mapError((cause) =>
-                                Schema.is(ResidentService.ResidentServiceError)(cause)
-                                  ? cause
-                                  : ResidentService.ResidentServiceError.make({
-                                      reason: "transport-failed",
-                                      message: String(cause),
-                                    }),
-                              ),
-                            ),
+                            ResidentProcessStartup.spawn({
+                              executable: process.execPath,
+                              arguments: [import.meta.path],
+                              environment: {
+                                RIKA_INTERNAL_RESIDENT_HOST: "1",
+                                RIKA_INTERNAL_RESIDENT_PROFILE: "default",
+                                RIKA_INTERNAL_RESIDENT_DATA_ROOT: dataRoot,
+                                ...(environment.testModelResponse._tag === "None"
+                                  ? {}
+                                  : { RIKA_TEST_MODEL_RESPONSE: environment.testModelResponse.value }),
+                                ...(environment.testModelScript._tag === "None"
+                                  ? {}
+                                  : { RIKA_TEST_MODEL_SCRIPT: environment.testModelScript.value }),
+                              },
+                            }).pipe(Effect.tap(() => Effect.logInfo("resident.spawned"))),
                         })
                         .pipe(provideLayerScoped(Layer.merge(BunServices.layer, BunCrypto.layer))),
                     )
@@ -2606,9 +2652,20 @@ if (import.meta.main) {
             graceMilliseconds: Number(
               environment.residentGrace._tag === "Some" ? environment.residentGrace.value : "500",
             ),
+            onReady: ResidentProcessStartup.signalReady,
             owner: residentOwner,
           }),
-        ).pipe(provideLayerScoped(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)))
+        ).pipe(
+          Effect.tapCause((cause) => {
+            const failure = Cause.squash(cause)
+            const message =
+              failure !== null && typeof failure === "object" && "message" in failure
+                ? String(failure.message)
+                : String(failure)
+            return ResidentProcessStartup.signalFailure(message).pipe(Effect.ignore)
+          }),
+          provideLayerScoped(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)),
+        )
   if (environment.residentHost._tag === "Some" && environment.residentHost.value === "1")
     BunRuntime.runMain(observedProgram("resident", hostDataRoot ?? defaultDataRoot, hostProgram))
   else BunRuntime.runMain(clientProgram)
