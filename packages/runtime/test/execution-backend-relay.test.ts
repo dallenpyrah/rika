@@ -1,5 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { AiError, ModelResilience, Response } from "@batonfx/core"
+import { AiError, ModelRegistry, ModelResilience, Response } from "@batonfx/core"
+import { classifyFailure as classifyOpenAiFailure } from "@batonfx/providers/openai"
 import { TestModel } from "@batonfx/test"
 import { Runtime as RikaToolRuntime } from "@rika/tools"
 import { expect, test } from "vitest"
@@ -45,22 +46,25 @@ const withBackend = <A, E>(
     fixture: TestModel.Fixture,
     directory: string,
   ) => Effect.Effect<A, E, ExecutionBackend.Service | FileSystem.FileSystem>,
-  options?: Pick<RelayExecutionBackend.LayerOptions, "modelResilience" | "compaction" | "permissionPolicy">,
+  options?: Pick<RelayExecutionBackend.LayerOptions, "modelResilience" | "compaction" | "permissionPolicy"> & {
+    readonly registration?: (fixture: TestModel.Fixture) => ModelRegistry.Registration
+  },
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
       const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-runtime-" })
       const fixture = yield* TestModel.make(script)
+      const { registration, ...layerOptions } = options ?? {}
       return yield* provide(
         run(fixture, directory),
         RelayExecutionBackend.layer({
           filename: `${directory}/relay.db`,
           workspace: directory,
-          registration: fixture.registration,
+          registration: registration?.(fixture) ?? fixture.registration,
           selection: fixture.selection,
           modelVariantPolicy: "fixed-selection",
-          ...options,
+          ...layerOptions,
         }),
       )
     }),
@@ -724,6 +728,130 @@ test(
             .map((event) => event.text)
             .join(""),
         ).toBe("recovered")
+      }),
+    ),
+  30_000,
+)
+
+test(
+  "durably compacts and replays one classified pre-output context overflow",
+  () =>
+    runNative(
+      Effect.gen(function* () {
+        const overflow = AiError.make({
+          module: "openai",
+          method: "streamText",
+          reason: AiError.InvalidRequestError.make({ description: "maximum context length exceeded" }),
+        })
+        const result = yield* withBackend(
+          [
+            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "overflow-read" })]),
+            TestModel.failure(overflow),
+            TestModel.text(
+              "Goal: Recover the rejected request. The fixture was read. Replay from the compacted projection.",
+            ),
+            TestModel.text("recovered after compaction"),
+          ],
+          (fixture, directory) =>
+            Effect.gen(function* () {
+              const fileSystem = yield* FileSystem.FileSystem
+              yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "durable overflow fixture")
+              const backend = yield* ExecutionBackend.Service
+              const execution = yield* start(backend, {
+                threadId: "thread-overflow-recovery",
+                turnId: "turn-overflow-recovery",
+                prompt: "read fixture.txt and finish",
+                startedAt: 1,
+              })
+              const database = new Database(`${directory}/relay.db`, { readonly: true })
+              const checkpoints = database
+                .query("SELECT checkpoint_id, summary FROM relay_agent_compactions WHERE execution_id = ?")
+                .all("execution:turn-overflow-recovery") as ReadonlyArray<{ checkpoint_id: string; summary: string }>
+              database.close()
+              return { execution, checkpoints, requests: yield* fixture.requests }
+            }),
+          {
+            compaction: { contextWindow: 100_000, reserveTokens: 1, keepRecentTokens: 1 },
+            registration: (fixture) => ({
+              ...fixture.registration,
+              classifyFailure: classifyOpenAiFailure,
+            }),
+          },
+        )
+        expect(result.execution.status).toBe("completed")
+        expect(result.checkpoints).toHaveLength(1)
+        expect(result.checkpoints[0]?.summary).toContain("Recover the rejected request")
+        expect(result.requests.map((request) => request.operation)).toEqual([
+          "streamText",
+          "streamText",
+          "generateText",
+          "streamText",
+        ])
+        expect(result.execution.events.filter((event) => event.type === "tool.result.received")).toHaveLength(1)
+        expect(encodeJson(result.requests[3]?.prompt)).toContain("Recover the rejected request")
+        expect(
+          result.execution.events
+            .filter((event) => event.type === "model.output.delta")
+            .map((event) => event.text)
+            .join(""),
+        ).toBe("recovered after compaction")
+      }),
+    ),
+  30_000,
+)
+
+test(
+  "fails a second classified context overflow after exactly one compacted replay",
+  () =>
+    runNative(
+      Effect.gen(function* () {
+        const overflow = AiError.make({
+          module: "openai",
+          method: "streamText",
+          reason: AiError.InvalidRequestError.make({ description: "maximum context length exceeded" }),
+        })
+        const result = yield* withBackend(
+          [
+            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "overflow-twice-read" })]),
+            TestModel.failure(overflow),
+            TestModel.text("Goal: Retry once. The first request overflowed. Use one compacted replay."),
+            TestModel.failure(overflow),
+          ],
+          (fixture, directory) =>
+            Effect.gen(function* () {
+              const fileSystem = yield* FileSystem.FileSystem
+              yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "overflow twice fixture")
+              const backend = yield* ExecutionBackend.Service
+              const execution = yield* start(backend, {
+                threadId: "thread-overflow-twice",
+                turnId: "turn-overflow-twice",
+                prompt: "read fixture.txt and finish",
+                startedAt: 1,
+              })
+              const database = new Database(`${directory}/relay.db`, { readonly: true })
+              const checkpoint = database
+                .query("SELECT count(*) AS count FROM relay_agent_compactions WHERE execution_id = ?")
+                .get("execution:turn-overflow-twice") as { count: number }
+              database.close()
+              return { execution, checkpointCount: checkpoint.count, requests: yield* fixture.requests }
+            }),
+          {
+            compaction: { contextWindow: 100_000, reserveTokens: 1, keepRecentTokens: 1 },
+            registration: (fixture) => ({
+              ...fixture.registration,
+              classifyFailure: classifyOpenAiFailure,
+            }),
+          },
+        )
+        expect(result.execution.status).toBe("failed")
+        expect(result.checkpointCount).toBe(1)
+        expect(result.requests.map((request) => request.operation)).toEqual([
+          "streamText",
+          "streamText",
+          "generateText",
+          "streamText",
+        ])
+        expect(result.execution.events.filter((event) => event.type === "tool.result.received")).toHaveLength(1)
       }),
     ),
   30_000,

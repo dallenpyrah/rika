@@ -2,7 +2,7 @@ import { expect, test } from "vitest"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { createTestRenderer } from "@opentui/core/testing"
 import { Cause, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Redacted, Schema } from "effect"
-import { LanguageModel } from "effect/unstable/ai"
+import { AiError, LanguageModel } from "effect/unstable/ai"
 import { Operation } from "@rika/app"
 import { ConfigContract } from "@rika/config"
 import * as Database from "@rika/persistence/database"
@@ -409,6 +409,22 @@ test("constructs GPT 5.6 provider registrations for every configured effort and 
         expect(
           registrations.every(({ provider, model }) => provider === "openai" && model.startsWith("gpt-5.6-")),
         ).toBe(true)
+        const overflow = AiError.make({
+          module: "openai",
+          method: "streamText",
+          reason: AiError.InvalidRequestError.make({
+            metadata: { openai: { errorCode: "context_length_exceeded" } },
+          }),
+        })
+        const rateLimit = AiError.make({
+          module: "openai",
+          method: "streamText",
+          reason: AiError.RateLimitError.make({}),
+        })
+        expect(
+          registrations.every((registration) => registration.classifyFailure?.(overflow) === "context-overflow"),
+        ).toBe(true)
+        expect(registrations.every((registration) => registration.classifyFailure?.(rateLimit) === "other")).toBe(true)
         for (const { mode, settings, tuning } of variants) {
           const pin = executionRoutePin(settings, mode, tuning)
           for (const route of [pin.main, pin.oracle, pin.title!, pin.compactionSummary!, ...Object.values(pin.agents!)])
