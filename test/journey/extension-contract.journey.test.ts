@@ -152,6 +152,41 @@ describe("packaged extension and operation contract", () => {
   )
 
   test(
+    "OpenAI account status, logout, and provider override guard run without product initialization",
+    () =>
+      runTest(
+        Effect.scoped(
+          Effect.acquireUseRelease(
+            sandbox,
+            (isolated) =>
+              Effect.gen(function* () {
+                const fileSystem = yield* FileSystem.FileSystem
+                const path = yield* Path.Path
+                const productDatabase = isolated.env.RIKA_DATABASE
+                if (productDatabase === undefined) return yield* Effect.die("missing product database path")
+                yield* fileSystem.writeFileString(productDatabase, "not a sqlite database")
+                const status = yield* run(isolated, ["auth", "status", "openai"])
+                expect(status.exitCode).toBe(0)
+                expect(status.stdout).toContain("unauthenticated")
+                expect((yield* run(isolated, ["auth", "logout", "openai"])).exitCode).toBe(0)
+                const configDirectory = path.join(isolated.workspace, ".rika")
+                yield* fileSystem.makeDirectory(configDirectory, { recursive: true })
+                yield* fileSystem.writeFileString(
+                  path.join(configDirectory, "settings.json"),
+                  encodeJson({ providers: { openai: { baseUrl: "https://models.example.test/v1" } } }),
+                )
+                const rejected = yield* run(isolated, ["auth", "login", "openai"])
+                expect(rejected.exitCode).not.toBe(0)
+                expect(rejected.stderr).toContain("providers.openai.baseUrl")
+              }),
+            (isolated) => isolated.dispose,
+          ),
+        ),
+      ),
+    20_000,
+  )
+
+  test(
     "extension lifecycle state, rollback floor, failures, and concurrent commands survive process reopen",
     () =>
       runTest(
