@@ -2,7 +2,7 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto"
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Compaction, ModelRegistry } from "@batonfx/core"
+import { Compaction, ModelRegistry, Response as AiResponse } from "@batonfx/core"
 import type { TestModel as TestModelTypes } from "@batonfx/test"
 import { anthropic, anthropicClientLayerConfig } from "@batonfx/providers/anthropic"
 import { openAi, openAiClientLayerConfig } from "@batonfx/providers/openai"
@@ -564,14 +564,21 @@ const testModelPartSchema = Schema.Union([
   }),
 ])
 
+const testModelUsageSchema = Schema.Struct({
+  inputTokens: Schema.optionalKey(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  outputTokens: Schema.optionalKey(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+})
+
 const testModelTurnSchema = Schema.Union([
   Schema.Struct({
     parts: Schema.NonEmptyArray(testModelPartSchema),
     delayMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    usage: Schema.optionalKey(testModelUsageSchema),
   }),
   Schema.Struct({
     object: Schema.Unknown,
     delayMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    usage: Schema.optionalKey(testModelUsageSchema),
   }),
 ])
 
@@ -591,7 +598,26 @@ export const buildTestModelScript: (
     catch: (cause) => ExternalBoundaryError.make({ operation: "load test model", message: String(cause) }),
   })
   return script.map((turn) => {
-    const options = turn.delayMs === undefined ? {} : { delay: turn.delayMs }
+    const options = {
+      ...(turn.delayMs === undefined ? {} : { delay: turn.delayMs }),
+      ...(turn.usage === undefined
+        ? {}
+        : {
+            usage: AiResponse.Usage.make({
+              inputTokens: {
+                uncached: turn.usage.inputTokens,
+                total: turn.usage.inputTokens,
+                cacheRead: undefined,
+                cacheWrite: undefined,
+              },
+              outputTokens: {
+                total: turn.usage.outputTokens,
+                text: turn.usage.outputTokens,
+                reasoning: undefined,
+              },
+            }),
+          }),
+    }
     if ("object" in turn) return TestModel.object(turn.object, options)
     return TestModel.turn(
       turn.parts.map((part) => {

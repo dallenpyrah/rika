@@ -9,8 +9,17 @@ type ModelPart =
   | { readonly type: "toolCall"; readonly name: string; readonly params: unknown; readonly id?: string }
 
 type ModelTurn =
-  | { readonly parts: readonly [ModelPart, ...ReadonlyArray<ModelPart>]; readonly delayMs?: number }
-  | { readonly object: unknown; readonly delayMs?: number }
+  | {
+      readonly parts: readonly [ModelPart, ...ReadonlyArray<ModelPart>]
+      readonly delayMs?: number
+      readonly usage?: ModelUsage
+    }
+  | { readonly object: unknown; readonly delayMs?: number; readonly usage?: ModelUsage }
+
+interface ModelUsage {
+  readonly inputTokens?: number
+  readonly outputTokens?: number
+}
 
 type Action = {
   readonly after?: string
@@ -275,8 +284,15 @@ const run = (options: Options) =>
     ),
   )
 
-const withDelay = <A extends object>(value: A, delayMs?: number): A & { readonly delayMs?: number } =>
-  delayMs === undefined ? value : { ...value, delayMs }
+const withOptions = <A extends object>(
+  value: A,
+  delayMs?: number,
+  usage?: ModelUsage,
+): A & { readonly delayMs?: number; readonly usage?: ModelUsage } => ({
+  ...value,
+  ...(delayMs === undefined ? {} : { delayMs }),
+  ...(usage === undefined ? {} : { usage }),
+})
 
 export const Scene = {
   run,
@@ -310,12 +326,13 @@ export const Scene = {
     }),
   },
   model: {
-    text: (text: string, delayMs?: number): ModelTurn =>
-      withDelay({ parts: [{ type: "text" as const, text }] as const }, delayMs),
-    object: (object: unknown, delayMs?: number): ModelTurn => withDelay({ object }, delayMs),
-    turn: (parts: ReadonlyArray<ModelPart>, delayMs?: number): ModelTurn => {
+    text: (text: string, delayMs?: number, usage?: ModelUsage): ModelTurn =>
+      withOptions({ parts: [{ type: "text" as const, text }] as const }, delayMs, usage),
+    object: (object: unknown, delayMs?: number, usage?: ModelUsage): ModelTurn =>
+      withOptions({ object }, delayMs, usage),
+    turn: (parts: ReadonlyArray<ModelPart>, delayMs?: number, usage?: ModelUsage): ModelTurn => {
       if (parts.length === 0) throw new Error("A deterministic model turn needs at least one part")
-      return withDelay({ parts: parts as [ModelPart, ...Array<ModelPart>] }, delayMs)
+      return withOptions({ parts: parts as [ModelPart, ...Array<ModelPart>] }, delayMs, usage)
     },
     textPart: (text: string): ModelPart => ({ type: "text", text }),
     reasoning: (text: string): ModelPart => ({ type: "reasoning", text }),

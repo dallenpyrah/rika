@@ -337,30 +337,30 @@ const processResult = (output: unknown): ToolProcess | undefined => {
 }
 
 const tokenPricing = (model: string): readonly [number, number] =>
-  model.includes("claude") || model.includes("fable") || model.includes("opus")
-    ? [5, 25]
-    : model.includes("haiku") || model.includes("mini") || model.includes("flash")
-      ? [0.8, 4]
+  model.includes("haiku") || model.includes("mini") || model.includes("flash")
+    ? [0.8, 4]
+    : model.includes("claude") || model.includes("fable") || model.includes("opus")
+      ? [5, 25]
       : [1.25, 10]
+
+const nonNegativeFinite = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
 
 const usageCost = (value: Record<string, unknown>): number | undefined => {
   for (const key of ["cost_usd", "costUsd", "total_cost_usd", "cost", "usd"]) {
-    const candidate = value[key]
-    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate
+    const candidate = nonNegativeFinite(value[key])
+    if (candidate !== undefined) return candidate
   }
   const usage = record(value.usage)
   for (const key of ["cost_usd", "costUsd", "cost"]) {
-    const candidate = usage[key]
-    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate
+    const candidate = nonNegativeFinite(usage[key])
+    if (candidate !== undefined) return candidate
   }
-  const inputTokens = value.input_tokens ?? usage.input_tokens
-  const outputTokens = value.output_tokens ?? usage.output_tokens
-  if (typeof inputTokens !== "number" && typeof outputTokens !== "number") return undefined
+  const inputTokens = nonNegativeFinite(value.input_tokens ?? usage.input_tokens)
+  const outputTokens = nonNegativeFinite(value.output_tokens ?? usage.output_tokens)
+  if (inputTokens === undefined && outputTokens === undefined) return undefined
   const [inputPrice, outputPrice] = tokenPricing(string(value.model).toLowerCase())
-  return (
-    ((typeof inputTokens === "number" ? inputTokens : 0) * inputPrice) / 1_000_000 +
-    ((typeof outputTokens === "number" ? outputTokens : 0) * outputPrice) / 1_000_000
-  )
+  return ((inputTokens ?? 0) * inputPrice) / 1_000_000 + ((outputTokens ?? 0) * outputPrice) / 1_000_000
 }
 
 const assistantKey = (turnId: string, phase: number): string => `assistant:${turnId}:${Math.max(0, phase)}`

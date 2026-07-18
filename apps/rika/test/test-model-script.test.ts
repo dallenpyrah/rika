@@ -959,6 +959,7 @@ test("parses and builds multi-part, object, and delayed TestModel turns", () =>
             { type: "toolCall", name: "read_file", params: { path: "a.txt" }, id: "read-1" },
           ],
           delayMs: 25,
+          usage: { inputTokens: 7, outputTokens: 3 },
         },
         { parts: [{ type: "text", text: "done" }] },
         { object: { summary: "reviewed", findings: [] }, delayMs: 10 },
@@ -974,6 +975,10 @@ test("parses and builds multi-part, object, and delayed TestModel turns", () =>
             { _tag: "ToolCall", name: "read_file", params: { path: "a.txt" }, id: "read-1", providerExecuted: false },
           ],
           delay: 25,
+          usage: {
+            inputTokens: { uncached: 7, total: 7, cacheRead: undefined, cacheWrite: undefined },
+            outputTokens: { total: 3, text: 3, reasoning: undefined },
+          },
         },
         { _tag: "Turn", parts: [{ _tag: "Text", text: "done" }] },
         { _tag: "Object", value: { summary: "reviewed", findings: [] }, delay: 10 },
@@ -991,6 +996,7 @@ test("rejects malformed, empty, and unsafe scripts", () =>
           '[{"parts":[]}]',
           '[{"parts":[{"type":"toolCall","name":4}]}]',
           '[{"parts":[{"type":"text","text":"x"}],"delayMs":-1}]',
+          '[{"parts":[{"type":"text","text":"x"}],"usage":{"inputTokens":-1}}]',
         ].map((value) => Effect.exit(parseTestModelScript(value))),
       )
       expect(results.every((result) => result._tag === "Failure")).toBe(true)

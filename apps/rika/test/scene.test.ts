@@ -33,7 +33,6 @@ test(
     ).rejects.toThrow(/completed 1 of 2 actions/),
   15_000,
 )
-
 test(
   "keeps a failed tool result and recovery prose in one deterministic transcript",
   () =>

@@ -19,6 +19,8 @@ export interface Snapshot {
   readonly usageCursors: ReadonlySet<string>
 }
 
+export const maximumGlobalThreads = 100
+
 export const empty: Snapshot = {
   turnCostUsd: new Map(),
   threadCostUsd: new Map(),

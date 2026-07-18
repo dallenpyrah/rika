@@ -722,12 +722,16 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
       const readUsageCosts = Effect.fn("Operation.readUsageCosts")(function* () {
         const threads = yield* ThreadRepository.Service
         const turns = yield* TurnRepository.Service
-        const roots = (yield* Effect.forEach(yield* threads.list({ includeArchived: true, limit: 100 }), (thread) =>
-          turns
-            .list(thread.id)
-            .pipe(
-              Effect.map((values) => values.map((turn) => ({ threadId: String(thread.id), turnId: String(turn.id) }))),
-            ),
+        const roots = (yield* Effect.forEach(
+          yield* threads.list({ includeArchived: true, limit: UsageCost.maximumGlobalThreads }),
+          (thread) =>
+            turns
+              .list(thread.id)
+              .pipe(
+                Effect.map((values) =>
+                  values.map((turn) => ({ threadId: String(thread.id), turnId: String(turn.id) })),
+                ),
+              ),
         )).flat()
         return yield* UsageCost.collect(acquiredBackend, roots)
       })
