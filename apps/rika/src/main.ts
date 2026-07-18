@@ -1311,6 +1311,7 @@ const configuredBackendLayerImpl = (
       const compactionSummaryPlan = modelRoutePlan(resolvedCompactionSummaryRoute)
       const testResponse = yield* Config.option(Config.string("RIKA_TEST_MODEL_RESPONSE"))
       const testScript = yield* Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT"))
+      const testApprovalTools = yield* Config.option(Config.string("RIKA_TEST_APPROVAL_TOOLS"))
       const testMediaAnalyzerResponse = yield* Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_RESPONSE"))
       const testMediaAnalyzerError = yield* Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_ERROR"))
       if (testResponse._tag === "Some" && testScript._tag === "Some") {
@@ -1423,6 +1424,9 @@ const configuredBackendLayerImpl = (
             ),
           resolveWorkspace: (durableExecutionId) =>
             resolveExecutionWorkspace(durableExecutionId, workspace, repositoryLayer, turnRepositoryLayer),
+          ...(testApprovalTools._tag === "Some" && (testScript._tag === "Some" || testResponse._tag === "Some")
+            ? { toolNeedsApproval: (name: string) => testApprovalTools.value.split(",").includes(name) }
+            : {}),
           ...(parallelApiKey === undefined ? {} : { parallelApiKey }),
         },
         repositoryLayer,
