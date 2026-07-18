@@ -1340,6 +1340,46 @@ describe("Surface", () => {
     expect(text).not.toContain(serialized)
   })
 
+  test("presents successful and failed Git inspections with expandable output", () => {
+    const gitStatus = (status: "complete" | "failed", output: string) =>
+      buildTranscript(
+        model({
+          blocks: [
+            {
+              _tag: "ToolCall",
+              id: "git-status",
+              name: "git_status",
+              input: "{}",
+              output,
+              status,
+              presentation: {
+                family: "direct",
+                action: "git-status",
+                activeLabel: "Inspecting",
+                completeLabel: "Inspected",
+              },
+              detail: "git status",
+              files: [],
+            },
+          ],
+          expandedRowKeys: ["tool:git-status"],
+        }),
+      )
+        .styled.chunks.map((chunk) => chunk.text)
+        .join("")
+
+    const successful = gitStatus("complete", "## inspection\nM  staged.ts\n M tracked.ts\n?? untracked.ts")
+    const failed = gitStatus("failed", "fatal: not a git repository")
+
+    expect(successful).toContain("✓ Inspected git status")
+    expect(successful).toContain("## inspection")
+    expect(successful).toContain("M  staged.ts")
+    expect(successful).toContain(" M tracked.ts")
+    expect(successful).toContain("?? untracked.ts")
+    expect(failed).toContain("✕ Inspected git status")
+    expect(failed).toContain("fatal: not a git repository")
+  })
+
   test("uses the child profile activity label with a Subagent fallback", () => {
     const rendered = buildTranscript(
       model({

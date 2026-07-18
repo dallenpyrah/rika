@@ -252,6 +252,7 @@ export const handlerLayer = toolkit.toLayer(
 
 const maxOutput = 40_000
 const bounded = (text: string): Result => ({ text: text.slice(0, maxOutput), truncated: text.length > maxOutput })
+const gitStatusOutputLimit = 20_000
 const toolError = (request: Request, cause: unknown) => ToolError.make({ tool: request._tag, message: String(cause) })
 
 class RuntimeOperationError extends Data.TaggedError("RuntimeOperationError")<{ readonly message: string }> {}
@@ -319,20 +320,35 @@ export const layer = (workspace: string) =>
         yield* visit(workspace)
         return found.toSorted()
       })
-      const runProcess = Effect.fn("ToolRuntime.runProcess")(function* (command: string, args: ReadonlyArray<string>) {
+      const runGitStatus = Effect.fn("ToolRuntime.runGitStatus")(function* () {
         return yield* Effect.scoped(
           Effect.gen(function* () {
-            const handle = yield* spawner.spawn(ChildProcess.make(command, args, { cwd: workspace }))
+            const handle = yield* spawner.spawn(
+              ChildProcess.make("git", ["status", "--short", "--branch"], { cwd: workspace }),
+            )
             const [stdout, stderr, exitCode] = yield* Effect.all(
               [
-                ProcessRegistry.collectBoundedText(handle.stdout, maxOutput),
-                ProcessRegistry.collectBoundedText(handle.stderr, maxOutput),
+                ProcessRegistry.collectBoundedText(handle.stdout, gitStatusOutputLimit),
+                ProcessRegistry.collectBoundedText(handle.stderr, gitStatusOutputLimit),
                 handle.exitCode,
               ],
               { concurrency: 3 },
             )
-            const result = bounded(`${stdout.text}${stderr.text}${exitCode === 0 ? "" : `\nexit ${exitCode}`}`.trim())
+            if (exitCode !== 0)
+              return yield* new RuntimeOperationError({
+                message: `${stdout.text}${stderr.text}`.trim() || `Git status exited with code ${exitCode}`,
+              })
+            const text = `${stdout.text}${stderr.text}`.trim()
+            const result = {
+              text: text.slice(0, gitStatusOutputLimit),
+              truncated: text.length > gitStatusOutputLimit,
+            }
             return { ...result, truncated: result.truncated || stdout.truncated || stderr.truncated }
+          }),
+        ).pipe(
+          Effect.timeoutOrElse({
+            duration: "10 seconds",
+            orElse: () => new RuntimeOperationError({ message: "Git status timed out after 10 seconds" }),
           }),
         )
       })
@@ -454,7 +470,7 @@ export const layer = (workspace: string) =>
                 return { ...output, text: `${output.stdout}${output.stderr}` }
               }
               case "GitStatus":
-                return yield* runProcess("git", ["status", "--short", "--branch"])
+                return yield* runGitStatus()
               case "WebSearch": {
                 const results = yield* parallelSearch.search({
                   objective: request.objective,

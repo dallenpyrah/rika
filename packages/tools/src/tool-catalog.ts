@@ -126,11 +126,10 @@ export const definitions: ReadonlyArray<Definition> = [
     timeoutMillis: 10_000,
     outputLimit: 20_000,
     presentation: {
-      family: "explore",
+      family: "direct",
       action: "git-status",
-      activeLabel: "Exploring",
-      completeLabel: "Explored",
-      counter: "file",
+      activeLabel: "Inspecting",
+      completeLabel: "Inspected",
     },
   },
   {

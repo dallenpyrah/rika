@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path, PlatformError, Schema, Sink, Stream } from "effect"
+import { Effect, Fiber, FileSystem, Layer, Option, Path, PlatformError, Schema, Sink, Stream } from "effect"
+import { TestClock } from "effect/testing"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { MediaView, ParallelSearch, ProcessRegistry, ReadWebPage, Runtime } from "../src"
 import { provide } from "./test-layer"
@@ -55,7 +56,7 @@ const processHandle = ({ stdout, stderr, exitCode }: ProcessResult) => {
   })
 }
 
-const testEnvironment = () => {
+const testEnvironment = (git: "success" | "nonzero" | "missing" | "timeout" | "large" = "success") => {
   const files = new Map([
     ["/workspace/a.txt", "zero\nneedle\nlast"],
     ["/workspace/src/z.ts", "alpha\nalpha2"],
@@ -103,8 +104,18 @@ const testEnvironment = () => {
         return Effect.succeed({ ...handle, stdout: Stream.fail(platformError("stdout", command.command)) })
       }
       if (command.command === "bad") return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 7 }))
-      if (command.command === "git")
+      if (command.command === "git") {
+        if (git === "missing") return Effect.fail(platformError("spawn", command.command))
+        if (git === "nonzero")
+          return Effect.succeed(processHandle({ stdout: "", stderr: "fatal: not a git repository", exitCode: 128 }))
+        if (git === "timeout") {
+          const handle = processHandle({ stdout: "", stderr: "", exitCode: 0 })
+          return Effect.succeed({ ...handle, exitCode: Effect.never })
+        }
+        if (git === "large")
+          return Effect.succeed(processHandle({ stdout: "x".repeat(20_001), stderr: "", exitCode: 0 }))
         return Effect.succeed(processHandle({ stdout: "## main", stderr: "", exitCode: 0 }))
+      }
       return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 0 }))
     }),
   )
@@ -240,6 +251,51 @@ describe("Runtime", () => {
         { command: "stream-failure", args: [], cwd: workspace },
         { command: "unicode-boundary", args: [], cwd: workspace },
       ])
+    }).pipe(provide(environment.runtime))
+  })
+
+  it.effect("fails Git inspection for a nonzero exit", () => {
+    const environment = testEnvironment("nonzero")
+    return Effect.gen(function* () {
+      const runtime = yield* Runtime.Service
+      const result = yield* Effect.flip(runtime.run({ _tag: "GitStatus" }))
+
+      expect(result).toMatchObject({ _tag: "ToolError", tool: "GitStatus" })
+      expect(result.message).toContain("fatal: not a git repository")
+    }).pipe(provide(environment.runtime))
+  })
+
+  it.effect("fails Git inspection when Git is missing", () => {
+    const environment = testEnvironment("missing")
+    return Effect.gen(function* () {
+      const runtime = yield* Runtime.Service
+      const result = yield* Effect.flip(runtime.run({ _tag: "GitStatus" }))
+
+      expect(result).toMatchObject({ _tag: "ToolError", tool: "GitStatus" })
+    }).pipe(provide(environment.runtime))
+  })
+
+  it.effect("fails Git inspection after its timeout", () => {
+    const environment = testEnvironment("timeout")
+    return Effect.gen(function* () {
+      const runtime = yield* Runtime.Service
+      const timeoutFiber = yield* Effect.forkChild(runtime.run({ _tag: "GitStatus" }))
+      yield* TestClock.adjust("10 seconds")
+      const result = yield* Effect.flip(Fiber.join(timeoutFiber))
+
+      expect(result).toMatchObject({ _tag: "ToolError", tool: "GitStatus" })
+      expect(result.message).toContain("timed out")
+    }).pipe(provide(environment.runtime))
+  })
+
+  it.effect("bounds Git inspection output to its catalog limit", () => {
+    const environment = testEnvironment("large")
+    return Effect.gen(function* () {
+      const runtime = yield* Runtime.Service
+      const result = yield* runtime.run({ _tag: "GitStatus" })
+
+      expect(result.text).toHaveLength(20_000)
+      expect(result.truncated).toBe(true)
     }).pipe(provide(environment.runtime))
   })
 

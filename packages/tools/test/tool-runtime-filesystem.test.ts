@@ -29,7 +29,15 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
           runtime.run({ _tag: "EditFile", path: "src/a.ts", oldText: "alpha", newText: "x" }),
         )
         const shell = yield* runtime.run({ _tag: "Shell", command: "bun", args: ["-e", "console.log('ok')"] })
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["init", "-q"] })
+        yield* runtime.run({ _tag: "Shell", command: "git", args: ["init", "-q", "-b", "inspection"] })
+        yield* runtime.run({ _tag: "Shell", command: "git", args: ["config", "user.name", "Rika Test"] })
+        yield* runtime.run({ _tag: "Shell", command: "git", args: ["config", "user.email", "rika@example.test"] })
+        yield* runtime.run({ _tag: "Shell", command: "git", args: ["add", "src/a.ts"] })
+        yield* runtime.run({ _tag: "Shell", command: "git", args: ["commit", "-qm", "base"] })
+        yield* runtime.run({ _tag: "EditFile", path: "src/a.ts", oldText: "beta", newText: "changed" })
+        yield* runtime.run({ _tag: "CreateFile", path: "staged.txt", content: "staged" })
+        yield* runtime.run({ _tag: "Shell", command: "git", args: ["add", "staged.txt"] })
+        yield* runtime.run({ _tag: "CreateFile", path: "untracked.txt", content: "untracked" })
         const git = yield* runtime.run({ _tag: "GitStatus" })
         return { found, literal, regex, read, created, duplicate, edited, stale, ambiguous, shell, git }
       }).pipe(
@@ -61,7 +69,10 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
           expect(result.stale._tag).toBe("Failure")
           expect(result.ambiguous._tag).toBe("Failure")
           expect(result.shell.text).toBe("ok")
-          expect(result.git.text).toContain("No commits yet")
+          expect(result.git.text).toContain("## inspection")
+          expect(result.git.text).toContain(" M src/a.ts")
+          expect(result.git.text).toContain("A  staged.txt")
+          expect(result.git.text).toContain("?? untracked.txt")
         }),
       ),
     ),
