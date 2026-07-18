@@ -5,6 +5,7 @@ import * as Thread from "@rika/persistence/thread"
 import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
+import { Catalog as ToolCatalog } from "@rika/tools"
 import { ExecutionExtensions, PluginRegistry } from "@rika/extensions"
 import { Deferred, Effect, Fiber, Layer, Queue, Ref, Scheduler, Schema } from "effect"
 import { TestConsole } from "effect/testing"
@@ -710,17 +711,56 @@ describe("Operation", () => {
         yield* operation.run({ _tag: "Thread", action: "list", includeArchived: true })
         yield* operation.run({ _tag: "Thread", action: "search", query: ["Named"], includeArchived: true })
         yield* operation.run({ _tag: "Thread", action: "unarchive", threadId: "thread-a" })
+        const catalogLine = (yield* TestConsole.logLines).length
         yield* operation.run({ _tag: "ToolCatalog", action: "list" })
+        for (const mode of ["low", "medium", "high", "ultra"] as const)
+          yield* operation.run({ _tag: "ToolCatalog", action: "list", mode })
         yield* operation.run({ _tag: "ToolCatalog", action: "show", name: "read_file" })
         const missing = yield* Effect.result(operation.run({ _tag: "ToolCatalog", action: "show", name: "missing" }))
+        const catalogOutput = (yield* TestConsole.logLines).slice(catalogLine)
         yield* operation.run({ _tag: "Thread", action: "delete", threadId: "thread-a" })
         expect(missing._tag).toBe("Failure")
-        return yield* TestConsole.logLines
+        if (missing._tag === "Failure")
+          expect(missing.failure).toMatchObject({
+            _tag: "OperationUnavailable",
+            message: "Tool missing does not exist",
+          })
+        return { catalogOutput, lines: yield* TestConsole.logLines }
       }).pipe(provideLayer(layer))
-      const lines = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.String))(output)
+      const lines = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.String))(output.lines)
       expect(lines.some((line) => line.includes('"title":"Named"'))).toBe(true)
       expect(lines.some((line) => line.includes('"workspace":"/client-work"'))).toBe(true)
       expect(lines.some((line) => line.includes('"name":"read_file"'))).toBe(true)
+      const catalogOutput = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.String))(output.catalogOutput)
+      expect(catalogOutput).toHaveLength(6)
+      expect(new Set(catalogOutput.slice(0, 5))).toEqual(new Set([catalogOutput[0]!]))
+      expect(catalogOutput[0]!.length).toBeLessThanOrEqual(40_000)
+      expect(catalogOutput[5]!.length).toBeLessThanOrEqual(4_000)
+      for (const forbidden of ["apiKey", "accessToken", "credential", "secret"]) {
+        expect(catalogOutput[0]!.toLowerCase()).not.toContain(forbidden.toLowerCase())
+        expect(catalogOutput[5]!.toLowerCase()).not.toContain(forbidden.toLowerCase())
+      }
+      const listedJson = yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(catalogOutput[0]!)
+      const definitions = yield* Schema.decodeUnknownEffect(Schema.Array(ToolCatalog.Definition))(listedJson)
+      expect(definitions.length).toBeGreaterThan(0)
+      expect(definitions.length).toBeLessThanOrEqual(64)
+      expect(new Set(definitions.map(({ name }) => name)).size).toBe(definitions.length)
+      expect(
+        definitions.every(
+          ({ description, timeoutMillis, outputLimit, presentation }) =>
+            description.length > 0 &&
+            timeoutMillis > 0 &&
+            timeoutMillis <= 120_000 &&
+            outputLimit > 0 &&
+            outputLimit <= 40_000 &&
+            presentation.action.length > 0 &&
+            presentation.activeLabel.length > 0 &&
+            presentation.completeLabel.length > 0,
+        ),
+      ).toBe(true)
+      const shownJson = yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(catalogOutput[5]!)
+      const shown = yield* Schema.decodeUnknownEffect(ToolCatalog.Definition)(shownJson)
+      expect(shown).toEqual(definitions.find(({ name }) => name === "read_file"))
     }),
   )
 

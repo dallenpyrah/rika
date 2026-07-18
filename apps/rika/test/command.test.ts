@@ -288,6 +288,7 @@ it.effect("rejects invalid thread relationships", () =>
     yield* failsWithoutDispatch(["threads", "continue", "--last", "a"])
     yield* failsWithoutDispatch(["threads", "search"])
     yield* failsWithoutDispatch(["threads", "label", "a"])
+    yield* failsWithoutDispatch(["tools", "list", "--mode", "impossible"])
   }),
 )
 

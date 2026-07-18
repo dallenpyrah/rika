@@ -3,7 +3,7 @@ import { Option } from "effect"
 import { dispatch } from "./shared"
 
 export const command = Command.make("tools").pipe(
-  Command.withDescription("Inspect the effective tool catalog"),
+  Command.withDescription("Inspect the static built-in tool catalog"),
   Command.withSubcommands([
     Command.make(
       "list",

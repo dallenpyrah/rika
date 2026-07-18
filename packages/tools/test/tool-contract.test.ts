@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Ref, Schema, Stream } from "effect"
 import { Tool } from "effect/unstable/ai"
-import { AgentTools, Catalog, ParallelSearch, ProcessRegistry, Runtime } from "../src"
+import { AgentTools, Catalog, ParallelSearch, ProcessRegistry, Runtime, ThreadTools } from "../src"
 import { provide } from "./test-layer"
 
 describe("tool contracts", () => {
@@ -38,11 +38,23 @@ describe("tool contracts", () => {
     expect(Catalog.get("oracle")?.permission).toBe("allow")
     expect(Catalog.get("librarian")?.permission).toBe("allow")
     expect(Catalog.get("painter")?.permission).toBe("allow")
+    expect(Catalog.get("review")?.permission).toBe("allow")
     expect(Catalog.get("task")?.permission).toBe("allow")
     expect(Catalog.get("missing")).toBeUndefined()
     expect(Catalog.definitions.every((definition) => definition.timeoutMillis > 0 && definition.outputLimit > 0)).toBe(
       true,
     )
+  })
+
+  it("keeps the static catalog aligned with every registered built-in runtime tool", () => {
+    const runtimeNames = [
+      ...Object.keys(Runtime.toolkit.tools),
+      ...Object.keys(AgentTools.modelToolkit.tools),
+      ...Object.keys(ThreadTools.toolkit.tools),
+    ]
+    const catalogNames = Catalog.definitions.map(({ name }) => name)
+    expect(new Set(catalogNames).size).toBe(catalogNames.length)
+    expect(catalogNames).toEqual(expect.arrayContaining(runtimeNames))
   })
 
   it("defines an Amp presentation for every built-in tool", () => {

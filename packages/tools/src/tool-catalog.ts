@@ -236,6 +236,20 @@ export const definitions: ReadonlyArray<Definition> = [
     presentation: { family: "direct", action: "painter", activeLabel: "Painter", completeLabel: "Painter" },
   },
   {
+    name: "review",
+    description: "Delegate a focused correctness and regression review to the read-only Review product agent",
+    permission: "allow",
+    timeoutMillis: 120_000,
+    outputLimit: 40_000,
+    presentation: {
+      family: "agent",
+      action: "review",
+      activeLabel: "Reviewing code",
+      completeLabel: "Reviewed code",
+      counter: "review",
+    },
+  },
+  {
     name: "task",
     description: "Start a durable Task child execution with narrowed workspace permissions",
     permission: "allow",
