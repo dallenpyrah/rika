@@ -44,6 +44,7 @@ interface Options {
     readonly rows: number
   }
   readonly editorContent?: string
+  readonly mediaAnalyzer?: { readonly response: string } | { readonly error: string }
 }
 
 class SceneError extends Schema.TaggedErrorClass<SceneError>()("SceneError", {
@@ -134,6 +135,11 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     RIKA_INTERNAL_RESIDENT_GRACE: residentGrace,
     RIKA_INTERNAL_RESIDENT_STARTUP_HOLD: "0",
     ...(options.editorContent === undefined ? {} : { EDITOR: editor, RIKA_TEST_EDITOR_CONTENT: options.editorContent }),
+    ...(options.mediaAnalyzer === undefined
+      ? {}
+      : "response" in options.mediaAnalyzer
+        ? { RIKA_TEST_MEDIA_ANALYZER_RESPONSE: options.mediaAnalyzer.response }
+        : { RIKA_TEST_MEDIA_ANALYZER_ERROR: options.mediaAnalyzer.error }),
     ...modelEnvironment,
   })
   if (options.git === true) {

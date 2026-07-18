@@ -104,22 +104,33 @@ export const layer = (workspace: string) =>
       const analyzer = yield* MediaAnalyzer
       return Service.of({
         view: Effect.fn("MediaView.view")(function* (relativePath) {
-          const target = pathService.resolve(workspace, relativePath)
-          if (target !== workspace && !target.startsWith(`${workspace}${pathService.sep}`))
+          const canonicalWorkspace = yield* fileSystem
+            .realPath(workspace)
+            .pipe(Effect.mapError(() => MediaMissingError.make({ path: relativePath })))
+          const target = pathService.resolve(canonicalWorkspace, relativePath)
+          if (target !== canonicalWorkspace && !target.startsWith(`${canonicalWorkspace}${pathService.sep}`))
             return yield* MediaPathError.make({ path: relativePath })
           const exists = yield* fileSystem
             .exists(target)
             .pipe(Effect.mapError(() => MediaMissingError.make({ path: relativePath })))
           if (!exists) return yield* MediaMissingError.make({ path: relativePath })
+          const canonicalTarget = yield* fileSystem
+            .realPath(target)
+            .pipe(Effect.mapError(() => MediaMissingError.make({ path: relativePath })))
+          if (
+            canonicalTarget !== canonicalWorkspace &&
+            !canonicalTarget.startsWith(`${canonicalWorkspace}${pathService.sep}`)
+          )
+            return yield* MediaPathError.make({ path: relativePath })
           const info = yield* fileSystem
-            .stat(target)
+            .stat(canonicalTarget)
             .pipe(Effect.mapError(() => MediaMissingError.make({ path: relativePath })))
           const size = Number(info.size)
           if (info.type !== "File") return yield* UnsupportedMediaError.make({ path: relativePath })
           if (size > maximumSize)
             return yield* MediaOversizedError.make({ path: relativePath, size, maximum: maximumSize })
           const bytes = yield* fileSystem
-            .readFile(target)
+            .readFile(canonicalTarget)
             .pipe(Effect.mapError(() => MediaMissingError.make({ path: relativePath })))
           const media = classify(bytes)
           if (media === undefined) return yield* UnsupportedMediaError.make({ path: relativePath })

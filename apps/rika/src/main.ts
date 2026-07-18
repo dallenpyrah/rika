@@ -1266,9 +1266,16 @@ const configuredBackendLayerImpl = (
       const compactionSummaryPlan = modelRoutePlan(resolvedCompactionSummaryRoute)
       const testResponse = yield* Config.option(Config.string("RIKA_TEST_MODEL_RESPONSE"))
       const testScript = yield* Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT"))
+      const testMediaAnalyzerResponse = yield* Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_RESPONSE"))
+      const testMediaAnalyzerError = yield* Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_ERROR"))
       if (testResponse._tag === "Some" && testScript._tag === "Some") {
         return yield* ModelConfigurationError.make({
           message: "RIKA_TEST_MODEL_RESPONSE and RIKA_TEST_MODEL_SCRIPT cannot both be set",
+        })
+      }
+      if (testMediaAnalyzerResponse._tag === "Some" && testMediaAnalyzerError._tag === "Some") {
+        return yield* ModelConfigurationError.make({
+          message: "RIKA_TEST_MEDIA_ANALYZER_RESPONSE and RIKA_TEST_MEDIA_ANALYZER_ERROR cannot both be set",
         })
       }
       yield* Effect.logInfo("model.backend.configured").pipe(
@@ -1345,9 +1352,18 @@ const configuredBackendLayerImpl = (
           toolRuntimeLayerForWorkspace: (runtimeWorkspace) =>
             ToolRuntime.layer(runtimeWorkspace).pipe(
               Layer.provide(
-                MediaView.analyzerTestLayer(() =>
-                  Effect.fail(MediaView.MediaAnalysisError.make({ message: "Media analysis is unavailable" })),
-                ),
+                testMediaAnalyzerResponse._tag === "Some"
+                  ? MediaView.analyzerTestLayer(() => Effect.succeed(testMediaAnalyzerResponse.value))
+                  : MediaView.analyzerTestLayer(() =>
+                      Effect.fail(
+                        MediaView.MediaAnalysisError.make({
+                          message:
+                            testMediaAnalyzerError._tag === "Some"
+                              ? testMediaAnalyzerError.value
+                              : "Media analysis is unavailable",
+                        }),
+                      ),
+                    ),
               ),
               Layer.provide(
                 Layer.merge(
@@ -1692,6 +1708,8 @@ if (import.meta.main) {
       editor: Config.option(Config.string("EDITOR")),
       testModelResponse: Config.option(Config.string("RIKA_TEST_MODEL_RESPONSE")),
       testModelScript: Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT")),
+      testMediaAnalyzerResponse: Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_RESPONSE")),
+      testMediaAnalyzerError: Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_ERROR")),
       residentProfile: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_PROFILE")),
       residentGrace: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_GRACE")),
       residentStartupHold: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_STARTUP_HOLD")),
@@ -2991,6 +3009,12 @@ if (import.meta.main) {
                                 ...(environment.testModelScript._tag === "None"
                                   ? {}
                                   : { RIKA_TEST_MODEL_SCRIPT: environment.testModelScript.value }),
+                                ...(environment.testMediaAnalyzerResponse._tag === "None"
+                                  ? {}
+                                  : { RIKA_TEST_MEDIA_ANALYZER_RESPONSE: environment.testMediaAnalyzerResponse.value }),
+                                ...(environment.testMediaAnalyzerError._tag === "None"
+                                  ? {}
+                                  : { RIKA_TEST_MEDIA_ANALYZER_ERROR: environment.testMediaAnalyzerError.value }),
                               },
                             }).pipe(Effect.tap(() => Effect.logInfo("resident.spawned"))),
                         })
