@@ -2620,9 +2620,10 @@ if (import.meta.main) {
                       "--cached",
                       "--others",
                       "--exclude-standard",
+                      "-z",
                     ])
                     if (gitExit === 0) {
-                      const files = gitText.split("\n").filter((line) => line.length > 0)
+                      const files = gitText.split("\0").filter((line) => line.length > 0)
                       if (files.length > 0) {
                         model = ViewState.update(model, { _tag: "FilesReplaced", files: files.toSorted() })
                         created.surface.update(model)

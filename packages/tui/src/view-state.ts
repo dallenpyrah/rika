@@ -657,6 +657,10 @@ const erase = (value: Model, length: number): Model => ({
   cursor: Math.max(0, value.cursor - length),
 })
 
+const lastCharacterLength = (value: string): number => Array.from(value).at(-1)?.length ?? 0
+
+const fileMention = (path: string): string => `@${/\s/u.test(path) ? `"${path}"` : path} `
+
 const questionKey = (key: Key): boolean => !key.ctrl && !key.alt && !key.meta && key.sequence === "?"
 
 const composerContext = (model: Model): boolean =>
@@ -876,13 +880,23 @@ export const update: {
       const boundedSelected = Math.min(selected, Math.max(0, message.threads.length - 1))
       const maximumScrollTop = Math.max(0, message.threads.length - model.height)
       const boundedScrollTop = Math.min(model.threadSidebar.scrollTop, maximumScrollTop)
-      return {
+      const replacedThreads = {
         ...model,
         threads: [...message.threads],
         threadSidebar: {
           ...model.threadSidebar,
           selected: boundedSelected,
           scrollTop: Math.min(boundedScrollTop, boundedSelected),
+        },
+      }
+      return {
+        ...replacedThreads,
+        threadSwitcher: {
+          ...replacedThreads.threadSwitcher,
+          selected: Math.min(
+            replacedThreads.threadSwitcher.selected,
+            Math.max(0, filteredThreads(replacedThreads).length - 1),
+          ),
         },
       }
     }
@@ -902,8 +916,16 @@ export const update: {
       return model.filePicker.items._tag === "Ready"
         ? model
         : { ...model, filePicker: { ...model.filePicker, items: loading } }
-    case "FilesReplaced":
-      return { ...model, filePicker: { ...model.filePicker, items: ready([...message.files]) } }
+    case "FilesReplaced": {
+      const replacedFiles = { ...model, filePicker: { ...model.filePicker, items: ready([...message.files]) } }
+      return {
+        ...replacedFiles,
+        filePicker: {
+          ...replacedFiles.filePicker,
+          selected: Math.min(replacedFiles.filePicker.selected, Math.max(0, filteredFiles(replacedFiles).length - 1)),
+        },
+      }
+    }
     case "BranchDetected":
       return { ...model, branch: message.branch }
     case "WorkspaceFilesToggled":
@@ -1521,12 +1543,14 @@ export const update: {
             ...model,
             threadSwitcher: {
               ...model.threadSwitcher,
-              query: model.threadSwitcher.query.slice(0, -1),
+              query: model.threadSwitcher.query.slice(0, -lastCharacterLength(model.threadSwitcher.query)),
               selected: 0,
               previewScroll: 0,
             },
           }
-          return model.threadSwitcher.kind === "mention" ? erase(next, 1) : next
+          return model.threadSwitcher.kind === "mention"
+            ? erase(next, lastCharacterLength(model.threadSwitcher.query))
+            : next
         }
         const selected =
           key.name === "up"
@@ -1714,7 +1738,7 @@ export const update: {
                   { ...model, filePicker: { ...model.filePicker, open: false, query: "", selected: 0 } },
                   mentionLength,
                 ),
-                `@${file} `,
+                fileMention(file),
               )
         }
         if (key.name === "backspace") {
@@ -1722,9 +1746,13 @@ export const update: {
             return erase(
               {
                 ...model,
-                filePicker: { ...model.filePicker, query: model.filePicker.query.slice(0, -1), selected: 0 },
+                filePicker: {
+                  ...model.filePicker,
+                  query: model.filePicker.query.slice(0, -lastCharacterLength(model.filePicker.query)),
+                  selected: 0,
+                },
               },
-              1,
+              lastCharacterLength(model.filePicker.query),
             )
           return erase({ ...model, filePicker: { ...model.filePicker, open: false, selected: 0 } }, 1)
         }

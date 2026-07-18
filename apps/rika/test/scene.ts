@@ -144,7 +144,9 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     yield* fs.writeFileString(`${workspace}/.rika/settings.json`, settings)
   }
   yield* Effect.forEach(Object.entries(options.workspace ?? {}), ([path, contents]) =>
-    fs.writeFileString(`${workspace}/${path}`, contents),
+    fs
+      .makeDirectory(`${workspace}/${path.split("/").slice(0, -1).join("/")}`, { recursive: true })
+      .pipe(Effect.andThen(fs.writeFileString(`${workspace}/${path}`, contents))),
   )
   yield* Effect.forEach(
     options.files ?? [],

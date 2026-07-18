@@ -2696,7 +2696,7 @@ export class Surface {
       const visibleEntries = entries.slice(0, Math.max(1, maxRows))
       const innerWidth = Math.max(...visibleEntries.map((row) => row.length), 19)
       const boxWidth = Math.min(innerWidth + 4, model.width - 4)
-      const boxHeight = visibleEntries.length + 2
+      const boxHeight = Math.max(3, visibleEntries.length + 2)
       this.paletteBox.width = boxWidth
       this.paletteBox.height = boxHeight
       this.paletteBox.left = 2

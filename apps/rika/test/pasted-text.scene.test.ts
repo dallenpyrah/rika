@@ -98,7 +98,11 @@ test("opens a collapsed token for editing and persists only the edited expansion
 test("replays a submitted paste as a token and persists the exact expansion again", () => {
   const paste = "durable\r\n履歴😀"
   return Scene.run({
-    script: [Scene.model.text("FIRST_COMPLETE"), Scene.model.text("Pasted text replay"), Scene.model.text("REPLAY_COMPLETE")],
+    script: [
+      Scene.model.text("FIRST_COMPLETE"),
+      Scene.model.text("Pasted text replay"),
+      Scene.model.text("REPLAY_COMPLETE"),
+    ],
     actions: [
       Scene.action.writeAfter("Welcome to Rika", bracketedPaste(paste)),
       Scene.action.writeAfter("[Pasted text #1 +2 lines]", "\r"),

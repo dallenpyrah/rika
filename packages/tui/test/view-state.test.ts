@@ -999,6 +999,47 @@ describe("ViewState", () => {
     expect(model.input).toBe("@thread-2 ")
   })
 
+  test("removes a complete Unicode query character and keeps file completion open", () => {
+    let model = ViewState.update(ViewState.initial("/work"), {
+      _tag: "FilesReplaced",
+      files: ["src/😀.ts"],
+    })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "@", sequence: "@" }) })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "😀", sequence: "😀" }) })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "backspace" }) })
+    expect(model.input).toBe("@")
+    expect(model.filePicker).toMatchObject({ open: true, query: "", selected: 0 })
+  })
+
+  test("selects from refreshed file and thread results without retaining stale indexes", () => {
+    let files = ViewState.update(ViewState.initial("/work"), {
+      _tag: "FilesReplaced",
+      files: ["a.ts", "b.ts", "c.ts"],
+    })
+    files = ViewState.update(files, { _tag: "KeyPressed", key: key({ name: "@", sequence: "@" }) })
+    files = ViewState.update(files, { _tag: "KeyPressed", key: key({ name: "t", sequence: "t" }) })
+    files = ViewState.update(files, { _tag: "KeyPressed", key: key({ name: "down" }) })
+    files = ViewState.update(files, { _tag: "KeyPressed", key: key({ name: "down" }) })
+    files = ViewState.update(files, { _tag: "FilesReplaced", files: ["only.ts"] })
+    files = ViewState.update(files, { _tag: "KeyPressed", key: key({ name: "return" }) })
+    expect(files.input).toBe("@only.ts ")
+
+    let threads = ViewState.update(ViewState.initial("/work"), {
+      _tag: "ThreadsReplaced",
+      threads: [thread({ id: "a", title: "A" }), thread({ id: "b", title: "B" }), thread({ id: "c", title: "C" })],
+    })
+    threads = ViewState.update(threads, { _tag: "KeyPressed", key: key({ name: "@", sequence: "@" }) })
+    threads = ViewState.update(threads, { _tag: "KeyPressed", key: key({ name: "@", sequence: "@" }) })
+    threads = ViewState.update(threads, { _tag: "KeyPressed", key: key({ name: "down" }) })
+    threads = ViewState.update(threads, { _tag: "KeyPressed", key: key({ name: "down" }) })
+    threads = ViewState.update(threads, {
+      _tag: "ThreadsReplaced",
+      threads: [thread({ id: "only", title: "Only" })],
+    })
+    threads = ViewState.update(threads, { _tag: "KeyPressed", key: key({ name: "return" }) })
+    expect(threads.input).toBe("@only ")
+  })
+
   test("opens, focuses, navigates, and closes the fixed thread sidebar with ctrl+backslash", () => {
     let model = ViewState.update(ViewState.initial("/work"), {
       _tag: "ThreadsReplaced",
@@ -1162,6 +1203,19 @@ describe("ViewState", () => {
     expect(model.filePicker.open).toBe(false)
     expect(ViewState.canSubmit(model)).toBe(true)
     expect(model.entries).toHaveLength(0)
+  })
+
+  test("quotes a selected file mention containing spaces", () => {
+    let model = ViewState.update(ViewState.initial("/work"), {
+      _tag: "FilesReplaced",
+      files: ["docs/read me.md"],
+    })
+    model = { ...model, input: "read ", cursor: 5 }
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "@", sequence: "@" }) })
+    for (const character of "read")
+      model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: character, sequence: character }) })
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "return" }) })
+    expect(model.input).toBe('read @"docs/read me.md" ')
   })
 })
 
