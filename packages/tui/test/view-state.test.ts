@@ -1073,6 +1073,7 @@ describe("ViewState", () => {
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "m", ctrl: true }) })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "up" }) })
     expect(model.modePicker.selected).toBe(3)
+    expect(model.mode).toBe("low")
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "x", sequence: "x" }) })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "escape" }) })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "o", ctrl: true }) })

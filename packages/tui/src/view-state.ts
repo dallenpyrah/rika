@@ -1628,9 +1628,13 @@ export const update: {
             : key.name === "right" || key.name === "down"
               ? (model.modePicker.selected + 1) % 4
               : model.modePicker.selected
-        const mode = model.busy ? model.mode : (["low", "medium", "high", "ultra"] as const)[selected]!
-        if (key.name === "return") return { ...model, mode, modePicker: { open: false, selected } }
-        return { ...model, mode, modePicker: { open: true, selected } }
+        if (key.name === "return")
+          return {
+            ...model,
+            mode: (["low", "medium", "high", "ultra"] as const)[selected]!,
+            modePicker: { open: false, selected },
+          }
+        return { ...model, modePicker: { open: true, selected } }
       }
       if (model.palette.open) {
         const results = filter(model.palette.query)

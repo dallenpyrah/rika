@@ -228,14 +228,28 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
   }
   const { Database } = yield* Effect.promise(() => import("bun:sqlite"))
   const database = new Database(`${state}/rika.db`, { readonly: true })
-  const persistedTurns = database
+  const rawTurns = database
     .query<
-      { readonly prompt: string; readonly prompt_parts_json: string | null },
+      {
+        readonly prompt: string
+        readonly prompt_parts_json: string | null
+        readonly status: string
+        readonly execution_route_json: string
+      },
       []
-    >("SELECT prompt, prompt_parts_json FROM rika_turns ORDER BY created_at ASC, rowid ASC")
+    >(
+      "SELECT prompt, prompt_parts_json, status, execution_route_json FROM rika_turns ORDER BY created_at ASC, rowid ASC",
+    )
     .all()
   database.close()
-  return { ...completed, persistedTurns }
+  const persistedTurns = rawTurns.map(({ prompt, prompt_parts_json }) => ({ prompt, prompt_parts_json }))
+  const turns = rawTurns.map(({ prompt, status, execution_route_json }) => ({
+    prompt,
+    status,
+    execution_route_json,
+    executionRoute: JSON.parse(execution_route_json) as unknown,
+  }))
+  return { ...completed, persistedTurns, turns }
 })
 
 const run = (options: Options) =>
