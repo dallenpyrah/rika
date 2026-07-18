@@ -194,14 +194,20 @@ export const layer = Layer.effect(
     })
     return Service.of({
       create: Effect.fn("ThreadRepository.create")(function* (input) {
-        yield* sql`INSERT INTO rika_workspaces (path, created_at) VALUES (${input.workspace}, ${input.now}) ON CONFLICT(path) DO NOTHING`.pipe(
-          Effect.mapError(repositoryError),
-        )
-        yield* sql`INSERT INTO rika_threads (id, workspace, title, labels_json, pinned, archived, created_at, updated_at)
-          VALUES (${input.id}, ${input.workspace}, ${input.title}, '[]', 0, 0, ${input.now}, ${input.now})`.pipe(
-          Effect.mapError(repositoryError),
-        )
-        return yield* requireThread(input.id)
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`INSERT INTO rika_workspaces (path, created_at) VALUES (${input.workspace}, ${input.now}) ON CONFLICT(path) DO NOTHING`.pipe(
+                Effect.mapError(repositoryError),
+              )
+              yield* sql`INSERT INTO rika_threads (id, workspace, title, labels_json, pinned, archived, created_at, updated_at)
+                VALUES (${input.id}, ${input.workspace}, ${input.title}, '[]', 0, 0, ${input.now}, ${input.now})`.pipe(
+                Effect.mapError(repositoryError),
+              )
+              return yield* requireThread(input.id)
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
       }),
       get,
       list: Effect.fn("ThreadRepository.list")(function* (input = {}) {

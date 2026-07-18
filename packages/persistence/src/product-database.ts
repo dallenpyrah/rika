@@ -375,16 +375,12 @@ const validateKnown = (state: Effect.Success<ReturnType<typeof inspectDatabase>>
 
 const inspectExisting = (filename: string) =>
   Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem
-    const walExists = yield* fileSystem
-      .exists(`${filename}-wal`)
-      .pipe(Effect.mapError((error) => fail(`Could not inspect product database journal state: ${String(error)}`)))
     const outcome = yield* Effect.exit(
       Effect.scoped(
         Effect.gen(function* () {
           const context = yield* Layer.build(
             SqliteClient.layer({
-              filename: walExists ? filename : `file:${encodeURIComponent(filename)}?immutable=1`,
+              filename,
               readonly: true,
               readwrite: false,
               create: false,

@@ -121,3 +121,30 @@ test(
     ),
   30_000,
 )
+
+test(
+  "packaged clients refuse a malformed canonical database without creating fallback state",
+  () =>
+    runTest(
+      Effect.acquireUseRelease(
+        sandbox,
+        (context) =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem
+            const path = yield* Path.Path
+            const database = context.env.RIKA_DATABASE!
+            const malformed = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7])
+            yield* fileSystem.writeFile(database, malformed)
+            const result = yield* run(context, ["threads", "list"])
+            expect(result.exitCode).not.toBe(0)
+            expect(`${result.stdout}\n${result.stderr}`).toContain("Use a fresh Rika data root")
+            expect([...(yield* fileSystem.readFile(database))]).toEqual([...malformed])
+            expect(yield* fileSystem.exists(context.env.RIKA_RELAY_DATABASE!)).toBe(false)
+            const files = yield* fileSystem.readDirectory(path.dirname(database))
+            expect(files.filter((name) => name.endsWith(".db"))).toEqual(["rika.db"])
+          }),
+        (context) => context.dispose,
+      ),
+    ),
+  30_000,
+)

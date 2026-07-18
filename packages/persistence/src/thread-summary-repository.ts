@@ -189,19 +189,21 @@ export const makeMemory = Effect.fn("ThreadSummaryRepository.makeMemory")(functi
     }),
     replaceTurn: Effect.fn("ThreadSummaryRepository.replaceTurn")(function* (input) {
       yield* Ref.update(activities, (current) =>
-        new Map(current).set(input.turnId, {
-          turnId: input.turnId,
-          threadId: input.threadId,
-          ...(input.projectedCursor === undefined ? {} : { projectedCursor: input.projectedCursor }),
-          complete: input.complete,
-          editTotals: structuredClone(input.editTotals),
-          ...(input.lastEventAt === undefined ? {} : { lastEventAt: input.lastEventAt }),
-          updatedAt: input.now,
-        }),
+        (current.get(input.turnId)?.updatedAt ?? Number.NEGATIVE_INFINITY) > input.now
+          ? current
+          : new Map(current).set(input.turnId, {
+              turnId: input.turnId,
+              threadId: input.threadId,
+              ...(input.projectedCursor === undefined ? {} : { projectedCursor: input.projectedCursor }),
+              complete: input.complete,
+              editTotals: structuredClone(input.editTotals),
+              ...(input.lastEventAt === undefined ? {} : { lastEventAt: input.lastEventAt }),
+              updatedAt: input.now,
+            }),
       )
     }),
     markRead: Effect.fn("ThreadSummaryRepository.markRead")(function* (threadId, now) {
-      yield* Ref.update(readAt, (current) => new Map(current).set(threadId, now))
+      yield* Ref.update(readAt, (current) => new Map(current).set(threadId, Math.max(current.get(threadId) ?? 0, now)))
     }),
     listRepairCandidates: Effect.fn("ThreadSummaryRepository.listRepairCandidates")(function* (limit = 25) {
       const activityValues = yield* Ref.get(activities)
@@ -294,12 +296,14 @@ export const layer = Layer.effect(
             modified = excluded.modified,
             removed = excluded.removed,
             last_event_at = excluded.last_event_at,
-            updated_at = excluded.updated_at`.pipe(Effect.mapError(repositoryError))
+            updated_at = excluded.updated_at
+          WHERE excluded.updated_at >= rika_thread_turn_activity.updated_at`.pipe(Effect.mapError(repositoryError))
       }),
       markRead: Effect.fn("ThreadSummaryRepository.markRead")(function* (threadId, now) {
         yield* sql`INSERT INTO rika_thread_read_state (thread_id, last_read_at)
           VALUES (${threadId}, ${now})
-          ON CONFLICT(thread_id) DO UPDATE SET last_read_at = excluded.last_read_at`.pipe(
+          ON CONFLICT(thread_id) DO UPDATE SET
+            last_read_at = MAX(rika_thread_read_state.last_read_at, excluded.last_read_at)`.pipe(
           Effect.mapError(repositoryError),
         )
       }),

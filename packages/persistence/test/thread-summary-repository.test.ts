@@ -75,4 +75,35 @@ describe("memory thread summaries", () => {
       expect(yield* summaries.listRepairCandidates()).toMatchObject([{ turnId, lastCursor: "cursor-2" }])
     }).pipe(provideLayer(layer)),
   )
+
+  it.effect("does not let an older activity projection overwrite newer state", () =>
+    Effect.gen(function* () {
+      const threads = yield* ThreadRepository.Service
+      const turns = yield* TurnRepository.Service
+      const summaries = yield* ThreadSummaryRepository.Service
+      yield* threads.create({ id: threadId, workspace: "/work", title: "First", now: 1 })
+      const turn = yield* create(turns, { id: turnId, threadId, prompt: "edit", now: 2 })
+      yield* summaries.replaceTurn({
+        turnId: turn.id,
+        threadId,
+        projectedCursor: "newer",
+        complete: true,
+        editTotals: { added: 5, modified: 4, removed: 3 },
+        lastEventAt: 10,
+        now: 10,
+      })
+      yield* summaries.replaceTurn({
+        turnId: turn.id,
+        threadId,
+        projectedCursor: "older",
+        complete: false,
+        editTotals: { added: 1, modified: 0, removed: 0 },
+        lastEventAt: 3,
+        now: 3,
+      })
+      expect(yield* summaries.list()).toMatchObject([
+        { lastActivityAt: 10, editTotals: { added: 5, modified: 4, removed: 3 } },
+      ])
+    }).pipe(provideLayer(layer)),
+  )
 })
