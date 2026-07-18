@@ -20,6 +20,25 @@ const program = Effect.gen(function* () {
   const state = path.join(temporary, "state")
   yield* fileSystem.makeDirectory(home)
   const archive = path.join(root, "artifacts", `rika-${platform}.tar.gz`)
+  const archiveName = path.basename(archive)
+  const digest = new Bun.CryptoHasher("sha256").update(yield* fileSystem.readFile(archive)).digest("hex")
+  const checksums = yield* fileSystem.readFileString(path.join(root, "artifacts", "SHA256SUMS"))
+  const release = JSON.parse(
+    yield* fileSystem.readFileString(path.join(root, "artifacts", "release-evidence.json")),
+  ) as {
+    readonly schemaVersion: number
+    readonly artifacts: ReadonlyArray<{ readonly target: string; readonly archive: string; readonly sha256: string }>
+  }
+  if (checksums !== `${digest}  ${archiveName}\n`)
+    return yield* failure("Checksum manifest does not match host archive")
+  if (
+    release.schemaVersion !== 1 ||
+    release.artifacts.length !== 1 ||
+    release.artifacts[0]?.target !== platform ||
+    release.artifacts[0]?.archive !== archiveName ||
+    release.artifacts[0]?.sha256 !== digest
+  )
+    return yield* failure("Release evidence does not match host archive")
   const run = Effect.fn("PackageSmoke.run")(
     (command: string, args: ReadonlyArray<string>, env?: Record<string, string>) =>
       spawner.exitCode(ChildProcess.make(command, args, { cwd: temporary, env })),

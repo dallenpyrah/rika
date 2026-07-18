@@ -124,15 +124,44 @@ export const installLocal = Effect.fn("LocalInstall.installLocal")(() =>
         return yield* installFailure("extract host archive", `tar exited with code ${exitCode}`)
       }
       const payload = path.join(staging, `rika-${platform}`)
-      yield* fileSystem
-        .remove(installRoot, { recursive: true, force: true })
-        .pipe(mapInstallError("remove prior install"))
-      yield* fileSystem.rename(payload, installRoot).pipe(mapInstallError("publish install"))
+      const payloadBinary = path.join(payload, "bin", "rika")
+      if (!(yield* fileSystem.exists(payloadBinary).pipe(mapInstallError("validate package payload")))) {
+        return yield* installFailure("validate package payload", `Package does not contain bin/rika: ${archive}`)
+      }
       yield* fileSystem
         .makeDirectory(path.dirname(command), { recursive: true })
         .pipe(mapInstallError("create bin directory"))
-      if (commandExists) yield* fileSystem.remove(command).pipe(mapInstallError("remove prior command"))
-      yield* fileSystem.symlink(binary, command).pipe(mapInstallError("link command"))
+      const commandStaging = yield* fileSystem
+        .makeTempDirectoryScoped({ directory: path.dirname(command), prefix: ".rika-link-" })
+        .pipe(mapInstallError("create command staging directory"))
+      const stagedCommand = path.join(commandStaging, "rika")
+      yield* fileSystem.symlink(binary, stagedCommand).pipe(mapInstallError("stage command"))
+      const priorInstall = path.join(staging, ".prior-install")
+      const installExists = yield* fileSystem.exists(installRoot).pipe(mapInstallError("check prior install"))
+      if (installExists)
+        yield* fileSystem.rename(installRoot, priorInstall).pipe(mapInstallError("stage prior install"))
+      yield* fileSystem.rename(payload, installRoot).pipe(
+        mapInstallError("publish install"),
+        Effect.tapError(() =>
+          installExists
+            ? fileSystem.rename(priorInstall, installRoot).pipe(mapInstallError("restore prior install"))
+            : Effect.void,
+        ),
+      )
+      yield* fileSystem.rename(stagedCommand, command).pipe(
+        mapInstallError("link command"),
+        Effect.tapError(() =>
+          fileSystem
+            .remove(installRoot, { recursive: true, force: true })
+            .pipe(
+              Effect.andThen(
+                installExists
+                  ? fileSystem.rename(priorInstall, installRoot).pipe(mapInstallError("restore prior install"))
+                  : Effect.void,
+              ),
+            ),
+        ),
+      )
       yield* Console.log(`Installed rika at ${binary}\nLinked ${command}`)
     }),
   ),

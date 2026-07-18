@@ -74,6 +74,30 @@ describe("release target construction", () => {
     expect(Object.keys(targets).some((target) => target.startsWith("win32-"))).toBe(false)
   })
 
+  test("rejects an unsupported command target before touching artifacts", async () => {
+    const root = fileURLToPath(new URL("../..", import.meta.url))
+    const artifacts = join(root, "artifacts")
+    const sentinel = join(artifacts, "unrelated-command-output")
+    await Bun.write(sentinel, "preserve me")
+    try {
+      const child = Bun.spawn(["bun", "run", "scripts/package.ts", "--target", "freebsd-x64"], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect(exitCode).not.toBe(0)
+      expect(`${stdout}\n${stderr}`).toContain("Unsupported target: freebsd-x64")
+      expect(await Bun.file(sentinel).text()).toBe("preserve me")
+    } finally {
+      await Bun.file(sentinel).delete()
+    }
+  })
+
   test("cleans only packager-owned artifact entries", () => {
     expect(isManagedPackagingEntry("rika-linux-x64.tar.gz")).toBe(true)
     expect(isManagedPackagingEntry("rika-darwin-arm64")).toBe(true)
