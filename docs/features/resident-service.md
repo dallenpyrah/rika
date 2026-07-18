@@ -1,9 +1,5 @@
-# Resident service and persistence
+# Resident service ownership
 
-One Resident Rika Service owns each canonical Profile and data root. It binds an authenticated loopback listener before opening `rika.db` and `relay.db`, then owns product SQLite, one Relay runtime graph, route registration, admission, reconciliation, and runtime fibers. Stateful clients attach to it and never open a fallback database.
+One Resident Rika Service owns each canonical Profile and data root. It binds the Profile's authenticated loopback listener before opening `rika.db` and `relay.db`, then owns product SQLite, one Relay runtime graph, model registration, admission, reconciliation, and runtime fibers.
 
-The local typed WebSocket contract carries bidirectional requests, events, actions, heartbeats, transcript pages, keyed patches, acknowledgements, and resync. Transport queues and frames are bounded. When live transcript delivery exceeds its window, the resident drops the stale live tail, sends one ordered resync request, and continues the action. Display backpressure never fails or cancels durable execution. A logical client may reconnect and restore reads, but it never automatically resends a mutation whose outcome is unknown.
-
-Admission is separate from execution. Every admitted prompt persists immediately as a durable Turn in product SQLite; a submission behind active work is queued. Each thread's pending queue is bounded, and an over-capacity submission returns a typed queue-full event to its submitter. `QueueUpdated` carries the thread's queue revision and queued count. `TurnStarted` is emitted only after preparation succeeds and the Turn enters `running`, not at admission or queue claim.
-
-The lifecycle is `starting -> ready -> grace -> draining -> stopped`; a new authenticated client may cancel grace. The listener remains owned until Relay and product SQLite close. Shutdown closes attached client transports concurrently with per-socket time bounds, then closes the server scope within its own time bound, so `SIGTERM` exits promptly with attached clients. `SIGKILL` relies on OS listener release and durable reconciliation.
+Stateful CLI and terminal clients attach to that owner. They never open a fallback database or create a second execution graph when the resident is unavailable, incompatible, or still starting.

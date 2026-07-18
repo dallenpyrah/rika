@@ -1,0 +1,5 @@
+# Shortcut help
+
+Typing `?` into an empty composer inserts the character and opens an in-terminal shortcut reference. The overlay shows Rika's built-in shortcut list without starting an operation.
+
+Users may keep editing the draft while the reference remains open. Escape closes the reference and returns to the composer.
