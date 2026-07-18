@@ -138,6 +138,27 @@ const exactKeys = (path: string, label: string, value: Record<string, unknown>, 
   if (unknown !== undefined) throw ConfigFileError.make({ path, message: `${label} contains unknown key ${unknown}` })
 }
 
+const stringMap = (path: string, label: string, value: unknown): Record<string, string> => {
+  if (!object(value)) throw ConfigFileError.make({ path, message: `${label} must be an object` })
+  if (Object.values(value).some((entry) => typeof entry !== "string"))
+    throw ConfigFileError.make({ path, message: `${label} values must be strings` })
+  return value as Record<string, string>
+}
+
+const httpUrl = (path: string, label: string, value: unknown) => {
+  if (typeof value !== "string") throw ConfigFileError.make({ path, message: `${label} must be a string` })
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw ConfigFileError.make({ path, message: `${label} must be an absolute HTTP or HTTPS URL` })
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.hostname.length === 0)
+    throw ConfigFileError.make({ path, message: `${label} must be an absolute HTTP or HTTPS URL` })
+  if (url.username.length > 0 || url.password.length > 0)
+    throw ConfigFileError.make({ path, message: `${label} cannot contain credentials` })
+}
+
 const resolveRoute = (settings: Settings, route: RoleRoute, owner: string): ResolvedModelRoute => {
   const alias = settings.models[route.alias]
   if (alias === undefined)
@@ -239,6 +260,51 @@ export const decodeSettingsInput: {
       providerUrl.hash.length > 0
     )
       throw ConfigFileError.make({ path, message: `Provider ${name} baseUrl cannot contain credentials` })
+  }
+  if (value.keymap !== undefined) stringMap(path, "Keymap", value.keymap)
+  if (value.permissions !== undefined) {
+    const permissions = stringMap(path, "Permissions", value.permissions)
+    if (
+      Object.values(permissions).some((decision) => decision !== "allow" && decision !== "ask" && decision !== "deny")
+    )
+      throw ConfigFileError.make({ path, message: "Permission values must be allow, ask, or deny" })
+  }
+  if (
+    value.extensionRoots !== undefined &&
+    (!Array.isArray(value.extensionRoots) || value.extensionRoots.some((root) => typeof root !== "string"))
+  )
+    throw ConfigFileError.make({ path, message: "Extension roots must be an array of strings" })
+  if (value.mcp !== undefined) {
+    if (!object(value.mcp)) throw ConfigFileError.make({ path, message: "MCP must be an object" })
+    for (const [name, definition] of Object.entries(value.mcp)) {
+      if (!object(definition)) throw ConfigFileError.make({ path, message: `MCP ${name} must be an object` })
+      if (definition.transport === "command") {
+        exactKeys(path, `MCP ${name}`, definition, ["transport", "command", "args", "cwd", "environment", "enabled"])
+        if (typeof definition.command !== "string" || definition.command.length === 0)
+          throw ConfigFileError.make({ path, message: `MCP ${name} command must be a non-empty string` })
+        if (!Array.isArray(definition.args) || definition.args.some((argument) => typeof argument !== "string"))
+          throw ConfigFileError.make({ path, message: `MCP ${name} args must be an array of strings` })
+        if (definition.cwd !== undefined && typeof definition.cwd !== "string")
+          throw ConfigFileError.make({ path, message: `MCP ${name} cwd must be a string` })
+        stringMap(path, `MCP ${name} environment`, definition.environment)
+      } else if (definition.transport === "remote") {
+        exactKeys(path, `MCP ${name}`, definition, ["transport", "url", "headers", "enabled"])
+        httpUrl(path, `MCP ${name} url`, definition.url)
+        stringMap(path, `MCP ${name} headers`, definition.headers)
+      } else {
+        throw ConfigFileError.make({ path, message: `MCP ${name} transport must be command or remote` })
+      }
+      if (typeof definition.enabled !== "boolean")
+        throw ConfigFileError.make({ path, message: `MCP ${name} enabled must be a boolean` })
+    }
+  }
+  if (value.notifications !== undefined) {
+    if (!object(value.notifications)) throw ConfigFileError.make({ path, message: "Notifications must be an object" })
+    exactKeys(path, "Notifications", value.notifications, ["enabled", "command"])
+    if (value.notifications.enabled !== undefined && typeof value.notifications.enabled !== "boolean")
+      throw ConfigFileError.make({ path, message: "Notifications enabled must be a boolean" })
+    if (value.notifications.command !== undefined && typeof value.notifications.command !== "string")
+      throw ConfigFileError.make({ path, message: "Notifications command must be a string" })
   }
   if (value.logging !== undefined) {
     if (!object(value.logging)) throw ConfigFileError.make({ path, message: "Logging must be an object" })

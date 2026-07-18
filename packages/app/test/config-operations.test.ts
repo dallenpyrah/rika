@@ -19,6 +19,23 @@ it.effect("prints effective redacted config and keymap", () =>
       TestConsole.layer,
       ConfigService.memoryLayer({
         environment: { providerCredentials: {}, parallelApiKey: Redacted.make("never-print-this") },
+        workspace: {
+          mcp: {
+            local: {
+              transport: "command",
+              command: "mcp",
+              args: [],
+              environment: { TOKEN: "local-mcp-secret" },
+              enabled: true,
+            },
+            remote: {
+              transport: "remote",
+              url: "https://mcp.test",
+              headers: { Authorization: "remote-mcp-secret" },
+              enabled: true,
+            },
+          },
+        },
       }),
       ConfigOperations.testLayer({ edit: () => Effect.void, exists: () => Effect.succeed(false) }),
     )
@@ -29,6 +46,8 @@ it.effect("prints effective redacted config and keymap", () =>
     }).pipe(provideLayer(layer))
     expect(lines[0]).toContain('"parallelApiKey": "present"')
     expect(lines.join("\n")).not.toContain("never-print-this")
+    expect(lines.join("\n")).not.toContain("local-mcp-secret")
+    expect(lines.join("\n")).not.toContain("remote-mcp-secret")
     expect(lines[0]).toContain('"providerId": "openai"')
     expect(lines[0]).toContain('"apiKey": "missing"')
     expect(lines[1]).toContain('"submit": "enter"')

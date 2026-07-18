@@ -170,6 +170,62 @@ describe("packaged CLI contract", () => {
   )
 
   test(
+    "configuration precedence, malformed files, and editor targets work through packaged processes",
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem
+          const isolated = yield* sandbox
+          const globalDirectory = `${isolated.root}/home/.config/rika`
+          const workspaceDirectory = `${isolated.workspace}/.rika`
+          const editorDirectory = `${isolated.root}/editor with spaces`
+          const editorPath = `${editorDirectory}/capture editor`
+          const capturePath = `${isolated.root}/edited-paths.txt`
+          yield* fileSystem.makeDirectory(globalDirectory, { recursive: true })
+          yield* fileSystem.makeDirectory(workspaceDirectory, { recursive: true })
+          yield* fileSystem.makeDirectory(editorDirectory)
+          yield* fileSystem.writeFileString(editorPath, `#!/bin/sh\nprintf '%s\\n' "$1" >> "${capturePath}"\n`)
+          yield* fileSystem.chmod(editorPath, 0o755)
+          isolated.env.EDITOR = editorPath
+          yield* fileSystem.writeFileString(
+            `${globalDirectory}/settings.json`,
+            JSON.stringify({
+              keymap: { submit: "ctrl+enter", newline: "alt+enter" },
+              notifications: { enabled: false },
+            }),
+          )
+          yield* fileSystem.writeFileString(
+            `${workspaceDirectory}/settings.json`,
+            JSON.stringify({ keymap: { submit: "alt+s" } }),
+          )
+          const listed = yield* run(isolated, ["config", "list"])
+          expect(listed.exitCode, `${listed.stdout}\n${listed.stderr}`).toBe(0)
+          expect(listed.stdout).toContain('"submit": "alt+s"')
+          expect(listed.stdout).toContain('"newline": "alt+enter"')
+          expect(listed.stdout).toContain('"enabled": false')
+
+          yield* fileSystem.writeFileString(
+            `${workspaceDirectory}/settings.json`,
+            '{"notifications":{"enabled":"yes"}}',
+          )
+          const malformed = yield* run(isolated, ["config", "list"])
+          expect(malformed.exitCode).not.toBe(0)
+          expect(`${malformed.stdout}${malformed.stderr}`).toContain("Notifications enabled must be a boolean")
+
+          yield* fileSystem.writeFileString(`${workspaceDirectory}/settings.json`, "{}")
+          expect((yield* run(isolated, ["config", "edit"])).exitCode).toBe(0)
+          expect((yield* run(isolated, ["config", "edit", "--workspace"])).exitCode).toBe(0)
+          expect((yield* fileSystem.readFileString(capturePath)).trim().split("\n")).toEqual([
+            `${globalDirectory}/settings.json`,
+            `${workspaceDirectory}/settings.json`,
+          ])
+          yield* isolated.dispose
+        }),
+      ),
+    30_000,
+  )
+
+  test(
     "continue, fork, export, and usage work across real processes",
     () =>
       runTest(

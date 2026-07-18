@@ -166,4 +166,44 @@ describe("ConfigService", () => {
       ),
     ),
   )
+
+  it.effect("applies workspace scalar values and merges every map-shaped setting by key", () =>
+    Effect.gen(function* () {
+      const config = yield* ConfigService.effective()
+      expect(config.settings.keymap).toMatchObject({ mode: "alt+m", submit: "ctrl+enter", newline: "alt+enter" })
+      expect(config.settings.permissions).toMatchObject({ read: "deny", write: "ask", shell: "deny" })
+      expect(Object.keys(config.settings.mcp).toSorted()).toEqual(["global", "shared", "workspace"])
+      expect(config.settings.mcp.shared).toMatchObject({ command: "workspace-shared" })
+      expect(config.settings.notifications).toEqual({ enabled: false, command: "workspace-notify" })
+      expect(config.settings.extensionRoots).toEqual(["workspace-extensions"])
+      expect(config.settings.logging).toEqual({ level: "error" })
+    }).pipe(
+      provideLayer(
+        ConfigService.memoryLayer({
+          global: {
+            keymap: { mode: "alt+m", submit: "alt+enter" },
+            permissions: { read: "deny", shell: "ask" },
+            mcp: {
+              global: { transport: "command", command: "global", args: [], environment: {}, enabled: true },
+              shared: { transport: "command", command: "global-shared", args: [], environment: {}, enabled: true },
+            },
+            notifications: { enabled: true, command: "global-notify" },
+            extensionRoots: ["global-extensions"],
+            logging: { level: "warning" },
+          },
+          workspace: {
+            keymap: { submit: "ctrl+enter", newline: "alt+enter" },
+            permissions: { write: "ask", shell: "deny" },
+            mcp: {
+              workspace: { transport: "command", command: "workspace", args: [], environment: {}, enabled: true },
+              shared: { transport: "command", command: "workspace-shared", args: [], environment: {}, enabled: true },
+            },
+            notifications: { enabled: false, command: "workspace-notify" },
+            extensionRoots: ["workspace-extensions"],
+            logging: { level: "error" },
+          },
+        }),
+      ),
+    ),
+  )
 })

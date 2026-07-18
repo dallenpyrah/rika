@@ -138,4 +138,19 @@ describe("ConfigContract", () => {
       ConfigContract.decodeSettingsInput("settings.json", { logging: { level: "info", file: "/tmp/rika.log" } }),
     ).toThrowError(/unknown key file/)
   })
+
+  it.each([
+    ["keymap", []],
+    ["keymap", { submit: 1 }],
+    ["permissions", { shell: "sometimes" }],
+    ["extensionRoots", "extensions"],
+    ["extensionRoots", ["valid", 1]],
+    ["mcp", []],
+    ["mcp", { local: { transport: "command", command: "mcp", args: "--serve", environment: {}, enabled: true } }],
+    ["mcp", { remote: { transport: "remote", url: "not-a-url", headers: {}, enabled: true } }],
+    ["notifications", { enabled: "yes" }],
+    ["notifications", { enabled: true, unsupported: true }],
+  ])("rejects malformed %s configuration", (key, value) => {
+    expect(() => ConfigContract.decodeSettingsInput("settings.json", { [key]: value })).toThrowError()
+  })
 })

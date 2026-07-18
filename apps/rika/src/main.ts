@@ -1222,6 +1222,7 @@ const configuredBackendLayerImpl = (
     },
     ExecutionBackend.BackendError
   >,
+  toolNeedsApproval?: (name: string) => boolean,
 ): Layer.Layer<
   Layer.Success<ReturnType<typeof relayBackendLayer>>,
   Layer.Error<ReturnType<typeof relayBackendLayer>> | Config.ConfigError | Error | Schema.SchemaError,
@@ -1325,6 +1326,7 @@ const configuredBackendLayerImpl = (
             ),
           resolveWorkspace: (durableExecutionId) =>
             resolveExecutionWorkspace(durableExecutionId, workspace, repositoryLayer, turnRepositoryLayer),
+          ...(toolNeedsApproval === undefined ? {} : { toolNeedsApproval }),
           ...(parallelApiKey === undefined ? {} : { parallelApiKey }),
         },
         repositoryLayer,
@@ -1360,6 +1362,7 @@ export const configuredBackendLayer: {
     persistedModelRoutes?: ReadonlyArray<Turn.ExecutionModelRoute>,
     compactionSummaryRoute?: ConfigContract.ResolvedModelRoute,
     resolveLegacyRoute?: Parameters<typeof configuredBackendLayerImpl>[11],
+    toolNeedsApproval?: Parameters<typeof configuredBackendLayerImpl>[12],
   ): (filename: string) => ReturnType<typeof configuredBackendLayerImpl>
   (
     filename: string,
@@ -1374,6 +1377,7 @@ export const configuredBackendLayer: {
     persistedModelRoutes?: ReadonlyArray<Turn.ExecutionModelRoute>,
     compactionSummaryRoute?: ConfigContract.ResolvedModelRoute,
     resolveLegacyRoute?: Parameters<typeof configuredBackendLayerImpl>[11],
+    toolNeedsApproval?: Parameters<typeof configuredBackendLayerImpl>[12],
   ): ReturnType<typeof configuredBackendLayerImpl>
 } = Function.dual((args) => args.length >= 4, configuredBackendLayerImpl)
 
@@ -2631,6 +2635,7 @@ if (import.meta.main) {
           persistedModelRoutes,
           ConfigContract.resolveCompactionSummaryRoute(effectiveConfig.settings),
           resolveLegacyRoute,
+          (name) => name === "shell" && effectiveConfig.settings.permissions.shell !== "allow",
         ).pipe(Layer.provide(BunServices.layer), Layer.provide(BunCrypto.layer))
         const configAdapter = Layer.effect(
           ConfigOperations.Adapter,

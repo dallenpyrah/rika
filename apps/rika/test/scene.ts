@@ -24,6 +24,8 @@ interface Options {
   readonly actions: ReadonlyArray<Action>
   readonly script?: readonly [ModelTurn, ...ReadonlyArray<ModelTurn>]
   readonly response?: string
+  readonly globalSettings?: unknown
+  readonly workspaceSettings?: unknown
 }
 
 class SceneError extends Schema.TaggedErrorClass<SceneError>()("SceneError", {
@@ -75,6 +77,16 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
   const workspace = `${root}/workspace`
   const state = `${root}/state`
   yield* Effect.forEach([home, workspace, state], (directory) => fs.makeDirectory(directory))
+  if (options.globalSettings !== undefined) {
+    yield* fs.makeDirectory(`${home}/.config/rika`, { recursive: true })
+    const settings = yield* Schema.encodeUnknownEffect(UnknownJson)(options.globalSettings)
+    yield* fs.writeFileString(`${home}/.config/rika/settings.json`, settings)
+  }
+  if (options.workspaceSettings !== undefined) {
+    yield* fs.makeDirectory(`${workspace}/.rika`, { recursive: true })
+    const settings = yield* Schema.encodeUnknownEffect(UnknownJson)(options.workspaceSettings)
+    yield* fs.writeFileString(`${workspace}/.rika/settings.json`, settings)
+  }
   const testDirectory = fileURLToPath(new URL(".", import.meta.url))
   const appDirectory = testDirectory.replace(/\/test\/$/, "")
   const helper = `${testDirectory}/fixtures/interactive-pty.py`

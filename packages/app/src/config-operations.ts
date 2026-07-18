@@ -49,15 +49,14 @@ export const run = Effect.fn("ConfigOperations.run")(function* (
   const providerApiKeys = Object.fromEntries(
     Object.entries(config.settings.providers).map(([id, provider]) => [id, apiKeyStatus(provider.apiKeyEnv)]),
   )
+  const mcp = Object.fromEntries(
+    Object.entries(config.settings.mcp).map(([name, definition]) => [
+      name,
+      { transport: definition.transport, enabled: definition.enabled },
+    ]),
+  )
   if (input._tag === "Mcp") {
-    yield* json(
-      Object.fromEntries(
-        Object.entries(config.settings.mcp).map(([name, definition]) => [
-          name,
-          { transport: definition.transport, enabled: definition.enabled },
-        ]),
-      ),
-    )
+    yield* json(mcp)
     return
   }
   if (input._tag === "Config") {
@@ -68,7 +67,7 @@ export const run = Effect.fn("ConfigOperations.run")(function* (
           keymap: config.settings.keymap,
           permissions: config.settings.permissions,
           extensionRoots: config.settings.extensionRoots,
-          mcp: config.settings.mcp,
+          mcp,
           notifications: config.settings.notifications,
           logging: config.settings.logging,
         },
