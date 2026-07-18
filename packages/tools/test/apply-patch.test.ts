@@ -27,10 +27,11 @@ describe("ApplyPatch", () => {
   it.effect("adds, updates with multiple hunks, moves, and deletes atomically", () =>
     Effect.gen(function* () {
       const result = yield* run(
-        "*** Begin Patch\n*** Add File: empty.txt\n*** Add File: new.txt\n+first\n+second\n*** Update File: old.txt\n@@ heading\n one\n-two\n+changed\n@@ tail\n three\n-four\n+last\n*** Update File: new.txt\n*** Move to: nested/moved.txt\n*** Delete File: gone.txt\n*** End Patch\n",
+        "*** Begin Patch\n*** Add File: empty.txt\n*** Add File: new.txt\n+first\n+second\n*** Update File: old.txt\n@@ heading\n one\n-two\n+changed\n@@ tail\n three\n-four\n+last\n*** Update File: move.txt\n*** Move to: nested/moved.txt\n*** Delete File: gone.txt\n*** End Patch\n",
         (fs, workspace) =>
           Effect.all([
             fs.writeFileString(`${workspace}/old.txt`, "one\ntwo\nthree\nfour\n"),
+            fs.writeFileString(`${workspace}/move.txt`, "moved\n"),
             fs.writeFileString(`${workspace}/gone.txt`, "gone"),
           ]).pipe(Effect.asVoid),
       )
@@ -107,6 +108,11 @@ describe("ApplyPatch", () => {
       (fs: FileSystem.FileSystem, root: string) =>
         Effect.all([fs.writeFileString(`${root}/a`, "a"), fs.writeFileString(`${root}/b`, "b")]).pipe(Effect.asVoid),
     ],
+    [
+      "conflicting operations",
+      "*** Begin Patch\n*** Add File: a\n+x\n*** Delete File: ./a\n*** End Patch\n",
+      undefined,
+    ],
   ] as const
   for (const [name, patch, setup] of rejected) {
     it.effect(`rejects ${name}`, () =>
@@ -116,4 +122,27 @@ describe("ApplyPatch", () => {
       }),
     )
   }
+
+  it.effect("rejects symlink sources and destinations without changing their targets", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-apply-links-" })
+        const outside = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-apply-outside-" })
+        yield* fileSystem.writeFileString(path.join(outside, "target.txt"), "outside\n")
+        yield* fileSystem.symlink(outside, path.join(workspace, "link"))
+        const error = yield* Effect.flip(
+          ApplyPatch.apply(
+            workspace,
+            "*** Begin Patch\n*** Update File: link/target.txt\n@@\n-outside\n+escaped\n*** End Patch\n",
+            fileSystem,
+            path,
+          ),
+        )
+        expect(error.message).toContain("symbolic link")
+        expect(yield* fileSystem.readFileString(path.join(outside, "target.txt"))).toBe("outside\n")
+      }),
+    ).pipe(provide(BunServices.layer)),
+  )
 })

@@ -34,7 +34,9 @@ describe("tool contracts", () => {
   it("defines permission and output policies for every initial tool", () => {
     expect(Catalog.definitions.length).toBeGreaterThanOrEqual(9)
     expect(Catalog.get("read_file")?.permission).toBe("allow")
+    expect(Catalog.get("create_file")?.permission).toBe("allow")
     expect(Catalog.get("edit_file")?.permission).toBe("allow")
+    expect(Catalog.get("apply_patch")?.permission).toBe("allow")
     expect(Catalog.get("oracle")?.permission).toBe("allow")
     expect(Catalog.get("librarian")?.permission).toBe("allow")
     expect(Catalog.get("painter")?.permission).toBe("allow")

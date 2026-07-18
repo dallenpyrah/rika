@@ -91,13 +91,30 @@ const replaceHunk = (content: string, hunk: Hunk): string => {
   return [...lines.slice(0, first), ...after, ...lines.slice(first + before.length)].join("\n")
 }
 
-const contained = (workspace: string, value: string, path: Path.Path): string => {
+export const resolveContained = Effect.fn("ApplyPatch.resolveContained")(function* (
+  workspace: string,
+  value: string,
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  allowWorkspace: boolean = false,
+) {
   const absolute = path.resolve(workspace, value)
   const relative = path.relative(workspace, absolute)
-  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
-    fail(`path escapes workspace: ${value}`)
+  if (
+    (!allowWorkspace && relative === "") ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  )
+    return yield* ApplyPatchError.make({ message: `path escapes workspace: ${value}` })
+  let current = workspace
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment)
+    if ((yield* fileSystem.readLink(current).pipe(Effect.option))._tag === "Some")
+      return yield* ApplyPatchError.make({ message: `symbolic link is not writable: ${value}` })
+  }
   return absolute
-}
+})
 
 export const apply = Effect.fn("ApplyPatch.apply")(function* (
   workspace: string,
@@ -125,8 +142,21 @@ export const apply = Effect.fn("ApplyPatch.apply")(function* (
             ),
           )
   yield* Effect.gen(function* () {
+    const claimed = new Set<string>()
     for (const operation of operations) {
-      const source = contained(workspace, operation.path, path)
+      const targets = [
+        yield* resolveContained(workspace, operation.path, fileSystem, path),
+        ...(operation.kind === "update" && operation.moveTo !== undefined
+          ? [yield* resolveContained(workspace, operation.moveTo, fileSystem, path)]
+          : []),
+      ]
+      for (const target of targets) {
+        if (claimed.has(target)) fail(`conflicting file operation: ${path.relative(workspace, target)}`)
+        claimed.add(target)
+      }
+    }
+    for (const operation of operations) {
+      const source = yield* resolveContained(workspace, operation.path, fileSystem, path)
       const current = yield* load(source)
       if (!originals.has(source)) originals.set(source, current)
       relativePath.set(source, operation.path)
@@ -142,7 +172,7 @@ export const apply = Effect.fn("ApplyPatch.apply")(function* (
         for (const hunk of operation.hunks) next = replaceHunk(next, hunk)
         if (operation.moveTo === undefined) staged.set(source, next)
         else {
-          const destination = contained(workspace, operation.moveTo, path)
+          const destination = yield* resolveContained(workspace, operation.moveTo, fileSystem, path)
           if ((yield* load(destination)) !== null) fail(`${operation.moveTo} already exists`)
           if (!originals.has(destination)) originals.set(destination, null)
           relativePath.set(destination, operation.moveTo)
@@ -160,7 +190,7 @@ export const apply = Effect.fn("ApplyPatch.apply")(function* (
       if (yield* fileSystem.exists(target)) yield* fileSystem.remove(target)
     } else {
       yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true })
-      yield* fileSystem.writeFileString(target, content)
+      yield* fileSystem.writeFileString(target, content, originals.get(target) === null ? { flag: "wx" } : undefined)
     }
   }
   const patches: Array<string> = []

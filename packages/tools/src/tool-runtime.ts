@@ -379,6 +379,8 @@ export const layer = (workspace: string) =>
               : Effect.fail(new RuntimeOperationError({ message: `Path escapes workspace: ${value}` })),
           ),
         )
+      const resolveEdit = (value: string) =>
+        ApplyPatch.resolveContained(workspace, value, fileSystem, path, true).pipe(Effect.mapError(operationError))
       const listFiles = Effect.fn("ToolRuntime.listFiles")(function* () {
         const found: Array<string> = []
         const visit = (directory: string): Effect.Effect<void, PlatformError.PlatformError> =>
@@ -496,18 +498,18 @@ export const layer = (workspace: string) =>
                 )
               }
               case "CreateFile": {
-                const target = yield* resolve(request.path)
+                const target = yield* resolveEdit(request.path)
                 if (yield* fileSystem.exists(target))
                   return yield* new RuntimeOperationError({ message: `${request.path} already exists` })
                 yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true })
-                yield* fileSystem.writeFileString(target, request.content)
+                yield* fileSystem.writeFileString(target, request.content, { flag: "wx" })
                 return {
                   ...bounded(`created ${request.path}`),
                   ...boundedDiff(unifiedDiff(request.path, "", request.content, true)),
                 }
               }
               case "EditFile": {
-                const target = yield* resolve(request.path)
+                const target = yield* resolveEdit(request.path)
                 const content = yield* fileSystem.readFileString(target)
                 const first = content.indexOf(request.oldText)
                 if (first < 0) return yield* new RuntimeOperationError({ message: "stale anchor" })

@@ -48,6 +48,7 @@ interface Options {
   }
   readonly editorContent?: string
   readonly mediaAnalyzer?: { readonly response: string } | { readonly error: string }
+  readonly inspectPaths?: ReadonlyArray<string>
 }
 
 class SceneError extends Schema.TaggedErrorClass<SceneError>()("SceneError", {
@@ -269,6 +270,14 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
       }),
   )
   const rawOutput = Buffer.from(result.output, "base64").toString("utf8")
+  const workspaceFiles = Object.fromEntries(
+    yield* Effect.forEach(options.inspectPaths ?? [], (name) =>
+      fs.readFileString(`${workspace}/${name}`).pipe(
+        Effect.map((content) => [name, content] as const),
+        Effect.orElseSucceed(() => [name, null] as const),
+      ),
+    ),
+  )
   const completed = {
     ...result,
     rawOutput,
@@ -283,6 +292,7 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     diagnostics,
     names,
     workspaceContents,
+    workspaceFiles,
   }
   const { Database } = yield* Effect.promise(() => import("bun:sqlite"))
   const database = new Database(`${state}/rika.db`, { readonly: true })
