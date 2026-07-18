@@ -541,6 +541,9 @@ export const isNarrow = (model: Model): boolean => model.width < 60
 
 export const threadSidebarWidth = 36
 
+export const boundedThreadSidebarWidth = (terminalWidth: number): number =>
+  Math.min(threadSidebarWidth, Math.max(8, terminalWidth - 24))
+
 export const contentColumnWidth = (model: Model): number => {
   const fileTreeVisible =
     !isNarrow(model) &&
@@ -548,7 +551,9 @@ export const contentColumnWidth = (model: Model): number => {
       (model.workspaceFilesOpen && isReady(model.filePicker.items)))
   return Math.max(
     1,
-    model.width - (fileTreeVisible ? model.sidebarWidth : 0) - (model.threadSidebar.open ? threadSidebarWidth : 0),
+    model.width -
+      (fileTreeVisible ? model.sidebarWidth : 0) -
+      (model.threadSidebar.open ? boundedThreadSidebarWidth(model.width) : 0),
   )
 }
 
@@ -868,12 +873,16 @@ export const update: {
         0,
         selectedId === undefined ? 0 : message.threads.findIndex((thread) => thread.id === selectedId),
       )
+      const boundedSelected = Math.min(selected, Math.max(0, message.threads.length - 1))
+      const maximumScrollTop = Math.max(0, message.threads.length - model.height)
+      const boundedScrollTop = Math.min(model.threadSidebar.scrollTop, maximumScrollTop)
       return {
         ...model,
         threads: [...message.threads],
         threadSidebar: {
           ...model.threadSidebar,
-          selected: Math.min(selected, Math.max(0, message.threads.length - 1)),
+          selected: boundedSelected,
+          scrollTop: Math.min(boundedScrollTop, boundedSelected),
         },
       }
     }

@@ -83,7 +83,8 @@ while time.monotonic() < deadline:
         output.extend(chunk)
     while action_index < len(actions):
         action = actions[action_index]
-        if action["after"].encode() not in output[action_offset:]:
+        after = action.get("after")
+        if after is not None and after.encode() not in output[action_offset:]:
             break
         waited, current_status = os.waitpid(pid, os.WNOHANG)
         running = waited == 0
@@ -95,9 +96,26 @@ while time.monotonic() < deadline:
         delay_ms = action.get("delayMs", 0)
         if delay_ms > 0:
             time.sleep(delay_ms / 1000)
+        for path, contents in action.get("files", {}).items():
+            target = os.path.join(cwd, path)
+            if contents is None:
+                try:
+                    os.remove(target)
+                except FileNotFoundError:
+                    pass
+            else:
+                os.makedirs(os.path.dirname(target) or cwd, exist_ok=True)
+                with open(target, "w") as file:
+                    file.write(contents)
+        resize = action.get("resize")
+        if resize is not None:
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", resize["height"], resize["width"], 0, 0))
+            os.kill(pid, signal.SIGWINCH)
         restart_arguments = action.get("restartArguments")
         if restart_arguments is None:
-            os.write(master, action["write"].encode())
+            write = action.get("write")
+            if write is not None:
+                os.write(master, write.encode())
         else:
             for child in children(pid):
                 os.kill(child, signal.SIGKILL)

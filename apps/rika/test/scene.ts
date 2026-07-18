@@ -13,11 +13,13 @@ type ModelTurn =
   | { readonly object: unknown; readonly delayMs?: number }
 
 type Action = {
-  readonly after: string
-  readonly write: string
+  readonly after?: string
+  readonly write?: string
   readonly checkRunning?: boolean
   readonly delayMs?: number
   readonly restartArguments?: ReadonlyArray<string>
+  readonly resize?: { readonly width: number; readonly height: number }
+  readonly files?: Readonly<Record<string, string | null>>
 }
 
 interface Options {
@@ -26,6 +28,8 @@ interface Options {
   readonly response?: string
   readonly globalSettings?: unknown
   readonly workspaceSettings?: unknown
+  readonly workspace?: Readonly<Record<string, string>>
+  readonly git?: boolean
 }
 
 class SceneError extends Schema.TaggedErrorClass<SceneError>()("SceneError", {
@@ -42,11 +46,13 @@ const PtyResult = Schema.fromJsonString(
   }),
 )
 const PtyAction = Schema.Struct({
-  after: Schema.String,
-  write: Schema.String,
+  after: Schema.optionalKey(Schema.String),
+  write: Schema.optionalKey(Schema.String),
   checkRunning: Schema.optionalKey(Schema.Boolean),
   delayMs: Schema.optionalKey(Schema.Int),
   restartArguments: Schema.optionalKey(Schema.Array(Schema.String)),
+  resize: Schema.optionalKey(Schema.Struct({ width: Schema.Int, height: Schema.Int })),
+  files: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
 })
 const PtyActions = Schema.fromJsonString(Schema.Array(PtyAction))
 const UnknownJson = Schema.UnknownFromJsonString
@@ -87,6 +93,9 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     const settings = yield* Schema.encodeUnknownEffect(UnknownJson)(options.workspaceSettings)
     yield* fs.writeFileString(`${workspace}/.rika/settings.json`, settings)
   }
+  yield* Effect.forEach(Object.entries(options.workspace ?? {}), ([path, contents]) =>
+    fs.writeFileString(`${workspace}/${path}`, contents),
+  )
   const testDirectory = fileURLToPath(new URL(".", import.meta.url))
   const appDirectory = testDirectory.replace(/\/test\/$/, "")
   const helper = `${testDirectory}/fixtures/interactive-pty.py`
@@ -108,6 +117,38 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     RIKA_INTERNAL_RESIDENT_STARTUP_HOLD: "0",
     ...modelEnvironment,
   })
+  if (options.git === true) {
+    const runGit = (args: ReadonlyArray<string>) =>
+      Effect.scoped(
+        spawner
+          .spawn(
+            ChildProcess.make("git", ["-C", workspace, ...args], {
+              stdin: "ignore",
+              stdout: "ignore",
+              stderr: "pipe",
+            }),
+          )
+          .pipe(
+            Effect.flatMap((child) => child.exitCode),
+            Effect.filterOrFail(
+              (exitCode) => Number(exitCode) === 0,
+              () => SceneError.make({ message: `git ${args[0]} failed` }),
+            ),
+          ),
+      )
+    yield* runGit(["init", "--quiet"])
+    yield* runGit(["add", "."])
+    yield* runGit([
+      "-c",
+      "user.name=Rika Scene",
+      "-c",
+      "user.email=scene@rika.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "scene baseline",
+    ])
+  }
   const encodedActions = yield* Schema.encodeUnknownEffect(PtyActions)(options.actions)
   const handle = yield* spawner.spawn(
     ChildProcess.make(
@@ -199,6 +240,22 @@ export const Scene = {
       after,
       write: "",
       restartArguments,
+    }),
+    writeAfterDelay: (write: string, delayMs: number): Action => ({ write, delayMs }),
+    resizeAfter: (after: string, width: number, height: number, write?: string): Action => ({
+      after,
+      resize: { width, height },
+      ...(write === undefined ? {} : { write }),
+    }),
+    resizeAfterDelay: (width: number, height: number, delayMs: number, write?: string): Action => ({
+      resize: { width, height },
+      delayMs,
+      ...(write === undefined ? {} : { write }),
+    }),
+    filesAfter: (after: string, files: Readonly<Record<string, string | null>>, write?: string): Action => ({
+      after,
+      files,
+      ...(write === undefined ? {} : { write }),
     }),
   },
   model: {

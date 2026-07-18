@@ -1020,6 +1020,33 @@ describe("ViewState", () => {
     expect(model.threadSidebar.open).toBe(false)
   })
 
+  test("keeps the thread sidebar selection visible when stale threads disappear", () => {
+    let model = ViewState.update(ViewState.initial("/work"), {
+      _tag: "ThreadsReplaced",
+      threads: Array.from({ length: 40 }, (_, index) => thread({ id: String(index), title: `Thread ${index}` })),
+    })
+    model = {
+      ...model,
+      height: 8,
+      threadSidebar: { open: true, focused: true, selected: 39, scrollTop: 32 },
+    }
+    model = ViewState.update(model, {
+      _tag: "ThreadsReplaced",
+      threads: [thread({ id: "fresh", title: "Fresh" })],
+    })
+    expect(model.threadSidebar).toMatchObject({ selected: 0, scrollTop: 0 })
+  })
+
+  test("bounds the thread sidebar on tiny terminals to preserve the main column", () => {
+    const model = {
+      ...ViewState.initial("/work"),
+      width: 20,
+      threadSidebar: { ...ViewState.initial("/work").threadSidebar, open: true },
+    }
+    expect(ViewState.boundedThreadSidebarWidth(model.width)).toBe(8)
+    expect(ViewState.contentColumnWidth(model)).toBe(12)
+  })
+
   test("covers reducer boundaries and every busy shortcut", () => {
     let model = ViewState.initial("/work")
     expect(ViewState.update(model, { _tag: "ThreadSidebarSelectionConfirmed" })).toBe(model)

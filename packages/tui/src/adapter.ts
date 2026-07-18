@@ -33,6 +33,7 @@ import { fromOpenTui, type Key } from "./keys"
 import {
   composerHeight,
   contentColumnWidth,
+  boundedThreadSidebarWidth,
   displayInput,
   filteredFiles,
   filteredThreads,
@@ -45,7 +46,6 @@ import {
   queueContentWidth,
   readyOr,
   selectedThreadMetadata,
-  threadSidebarWidth,
   wrappedRowCount,
   type Mode,
   type Model,
@@ -234,6 +234,7 @@ export const renderSidebar: {
   (model: Model, spinnerFrame = idleSpinnerFrame): StyledText => {
     const chunks: Array<TextChunk> = []
     const threads = model.threads as ReadonlyArray<ThreadItem>
+    const sidebarWidth = boundedThreadSidebarWidth(model.width)
     threads
       .slice(model.threadSidebar.scrollTop, model.threadSidebar.scrollTop + model.height)
       .forEach((thread, row) => {
@@ -248,8 +249,8 @@ export const renderSidebar: {
               : thread.unread
                 ? "○"
                 : " "
-        const title = truncateToWidth(thread.title, threadSidebarWidth - 4)
-        const padding = " ".repeat(Math.max(0, threadSidebarWidth - 4 - stringWidth(title)))
+        const title = truncateToWidth(thread.title, sidebarWidth - 4)
+        const padding = " ".repeat(Math.max(0, sidebarWidth - 4 - stringWidth(title)))
         const renderedRow = ` ${marker} ${title}${padding}`
         if (selected) chunks.push(bg(colors.amber)(fg(colors.surface)(renderedRow)))
         else {
@@ -1591,7 +1592,7 @@ export class Surface {
     })
     this.sidebar = new TextRenderable(renderer, {
       content: "",
-      width: threadSidebarWidth,
+      width: boundedThreadSidebarWidth(renderer.terminalWidth),
       flexShrink: 0,
       visible: false,
       fg: colors.text,
@@ -2505,6 +2506,7 @@ export class Surface {
     this.composerEditor.height = Math.max(1, renderedInputHeight - 2)
     this.composerEditor.sync(displayInput(model), displayCursorOffset(model))
     this.sidebar.visible = model.threadSidebar.open
+    this.sidebar.width = boundedThreadSidebarWidth(model.width)
     this.sidebar.content = renderSidebar(model, spinnerFrames[this.loaderPhase % spinnerFrames.length]!)
     this.changedFilesBox.visible = sidebarVisible
     if (this.changedFilesBox.visible) {
