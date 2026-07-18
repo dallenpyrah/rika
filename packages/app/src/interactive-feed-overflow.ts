@@ -39,6 +39,7 @@ const rememberThread = (state: State, threadIds: Set<string>, id: string) => {
 export const isCritical = (event: InteractiveEvent): boolean => {
   switch (event._tag) {
     case "AssistantCompleted":
+    case "ContextDiagnostics":
     case "ExecutionFailed":
     case "QueueFull":
     case "ShellPermissionRequested":
@@ -82,6 +83,7 @@ const rememberImpl = (state: State, event: InteractiveEvent) => {
       state.summaries = event
       return
     case "AssistantCompleted":
+    case "ContextDiagnostics":
     case "ExecutionFailed":
     case "QueueFull":
     case "ShellPermissionRequested":

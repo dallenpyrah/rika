@@ -85,6 +85,18 @@ const stripTerminalControl = (text: string) =>
     .replaceAll(new RegExp(`${escape}\\[[0-?]*[ -/]*[@-~]`, "g"), "")
     .replaceAll(new RegExp(`${escape}[@-_]`, "g"), "")
 
+const diagnosticProcessRunning = (name: string) => {
+  if (!name.endsWith(".open.jsonl")) return false
+  const pid = Number.parseInt(name.slice(0, -".open.jsonl".length).split("-").at(-1) ?? "", 10)
+  if (!Number.isInteger(pid)) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 10_000) =>
   Effect.gen(function* () {
     const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
@@ -244,13 +256,7 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
   yield* waitUntil(
     fs
       .readDirectory(`${state}/diagnostics`)
-      .pipe(
-        Effect.map((names) =>
-          names.every(
-            (name) => !name.endsWith(".open.jsonl") || (residentGrace !== "100" && name.startsWith("client-")),
-          ),
-        ),
-      ),
+      .pipe(Effect.map((names) => names.every((name) => !diagnosticProcessRunning(name)))),
   )
   const names = yield* fs.readDirectory(`${state}/diagnostics`)
   const logs = yield* Effect.forEach(

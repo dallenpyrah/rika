@@ -598,7 +598,7 @@ export const classifyPrompt = (input: string): PromptSubmission => {
 }
 
 const imagePathPattern =
-  /\[([^\]\n]+\.(?:png|jpe?g|gif|webp))\]|(?:file:\/\/[^\s]+\.(?:png|jpe?g|gif|webp))|(?:(?:\\ |[^\s[\]])+\.(?:png|jpe?g|gif|webp))/gi
+  /@image:(?:"([^"]+\.(?:png|jpe?g|gif|webp))"|'([^']+\.(?:png|jpe?g|gif|webp))'|([^\s,;]+\.(?:png|jpe?g|gif|webp)))|\[([^\]\n]+\.(?:png|jpe?g|gif|webp))\]|(?:file:\/\/[^\s]+\.(?:png|jpe?g|gif|webp))|(?:(?:\\ |[^\s[\]])+\.(?:png|jpe?g|gif|webp))/gi
 
 const appendPromptPart = (parts: Array<PromptPart>, part: PromptPart): void => {
   const previous = parts.at(-1)
@@ -614,7 +614,7 @@ const appendParsedText = (parts: Array<PromptPart>, text: string): void => {
   for (const match of text.matchAll(imagePathPattern)) {
     const index = match.index
     if (index > offset) appendPromptPart(parts, { type: "text", text: text.slice(offset, index) })
-    const value = match[1] ?? match[0]
+    const value = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[0]
     let path = value
     if (path.startsWith("file://")) {
       try {

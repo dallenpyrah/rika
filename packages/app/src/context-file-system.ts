@@ -2,6 +2,7 @@ import { Context, Effect, FileSystem, Function, Layer, Path, PlatformError } fro
 
 export interface Interface {
   readonly exists: (path: string) => Effect.Effect<boolean, PlatformError.PlatformError>
+  readonly realPath: (path: string) => Effect.Effect<string, PlatformError.PlatformError>
   readonly readDirectory: (path: string) => Effect.Effect<ReadonlyArray<string> | undefined>
   readonly readFileString: (path: string) => Effect.Effect<string, PlatformError.PlatformError>
 }
@@ -14,6 +15,7 @@ export const liveLayer = Layer.effect(
     const fileSystem = yield* FileSystem.FileSystem
     return Service.of({
       exists: Effect.fn("ContextFileSystem.exists")((path) => fileSystem.exists(path)),
+      realPath: Effect.fn("ContextFileSystem.realPath")((path) => fileSystem.realPath(path)),
       readDirectory: Effect.fn("ContextFileSystem.readDirectory")((path) =>
         fileSystem.readDirectory(path).pipe(
           Effect.map((entries): ReadonlyArray<string> | undefined => entries),
@@ -44,6 +46,7 @@ export const testLayer: {
         const listed = new Map(Object.entries(directories).map(([name, entries]) => [path.resolve(name), entries]))
         return Service.of({
           exists: (name) => Effect.succeed(normalized.has(path.resolve(name)) || listed.has(path.resolve(name))),
+          realPath: (name) => Effect.succeed(path.resolve(name)),
           readDirectory: (name) => Effect.succeed(listed.get(path.resolve(name))),
           readFileString: (name) => {
             const content = normalized.get(path.resolve(name))

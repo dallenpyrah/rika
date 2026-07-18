@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Path, PlatformError } from "effect"
+import * as BunServices from "@effect/platform-bun/BunServices"
+import { Effect, FileSystem, Layer, Path, PlatformError } from "effect"
 import { ContextFileSystem, ContextMentions, FileMentions, ResolvedContext } from "../src/index"
 import { provideLayer } from "./layer"
 
@@ -67,6 +68,7 @@ describe("ResolvedContext", () => {
           Layer.provide(
             Layer.succeed(ContextFileSystem.Service, {
               exists: (name) => Effect.succeed(name === "/work" || name === "/work/AGENTS.md"),
+              realPath: (name) => Effect.succeed(name),
               readDirectory: (name) => Effect.succeed(name === "/work" ? ["AGENTS.md"] : undefined),
               readFileString: (path) =>
                 Effect.fail(
@@ -154,6 +156,88 @@ describe("ResolvedContext", () => {
           ),
           Layer.provide(Path.layer),
         ),
+      ),
+    ),
+  )
+
+  it.effect("applies the one thousand file bound globally across sibling directories", () =>
+    Effect.gen(function* () {
+      const resolver = yield* ResolvedContext.Service
+      const result = yield* resolver.resolve({ workspace: "/large", references: ["**/*.txt"] })
+      expect(result.sources).toHaveLength(1_000)
+      expect(result.sources[0]?.path).toBe("a/0000.txt")
+      expect(result.sources.at(-1)?.path).toBe("a/0999.txt")
+    }).pipe(
+      provideLayer(
+        ResolvedContext.layer.pipe(
+          Layer.provide(
+            ContextFileSystem.testLayer(
+              Object.fromEntries(
+                ["a", "b"].flatMap((directory) =>
+                  Array.from({ length: 1_000 }, (_, index) => [
+                    `/large/${directory}/${String(index).padStart(4, "0")}.txt`,
+                    `${directory}-${index}`,
+                  ]),
+                ),
+              ),
+              {
+                "/large": ["a", "b"],
+                "/large/a": Array.from({ length: 1_000 }, (_, index) => `${String(index).padStart(4, "0")}.txt`),
+                "/large/b": Array.from({ length: 1_000 }, (_, index) => `${String(index).padStart(4, "0")}.txt`),
+              },
+            ).pipe(Layer.provide(Path.layer)),
+          ),
+          Layer.provide(Path.layer),
+        ),
+      ),
+    ),
+  )
+
+  it.effect("includes files at depth thirty-two and excludes files below it", () =>
+    Effect.gen(function* () {
+      const resolver = yield* ResolvedContext.Service
+      const result = yield* resolver.resolve({ workspace: "/deep", references: ["**/*.txt"] })
+      expect(result.sources.map((source) => source.content)).toEqual(["boundary"])
+    }).pipe(
+      provideLayer(
+        ResolvedContext.layer.pipe(
+          Layer.provide(
+            ContextFileSystem.testLayer(
+              {
+                [`/deep/${Array.from({ length: 32 }, (_, index) => `d${index}`).join("/")}/boundary.txt`]: "boundary",
+                [`/deep/${Array.from({ length: 33 }, (_, index) => `d${index}`).join("/")}/too-deep.txt`]: "too deep",
+              },
+              Object.fromEntries(
+                Array.from({ length: 34 }, (_entry, depth) => {
+                  const directory = `/deep${depth === 0 ? "" : `/${Array.from({ length: depth }, (_, index) => `d${index}`).join("/")}`}`
+                  return [
+                    directory,
+                    depth === 32 ? ["boundary.txt", "d32"] : depth === 33 ? ["too-deep.txt"] : [`d${depth}`],
+                  ]
+                }),
+              ),
+            ).pipe(Layer.provide(Path.layer)),
+          ),
+          Layer.provide(Path.layer),
+        ),
+      ),
+    ),
+  )
+
+  it.effect("rejects reference symlinks that escape the workspace", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const resolver = yield* ResolvedContext.Service
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-context-root-" })
+      const outside = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-context-outside-" })
+      yield* fileSystem.writeFileString(`${outside}/secret.txt`, "secret")
+      yield* fileSystem.symlink(`${outside}/secret.txt`, `${root}/escape.txt`)
+      const result = yield* resolver.resolve({ workspace: root, references: ["escape.txt"] })
+      expect(result.sources).toEqual([])
+      expect(result.diagnostics.map((diagnostic) => diagnostic._tag)).toEqual(["PathOutsideWorkspace"])
+    }).pipe(
+      provideLayer(
+        ResolvedContext.layer.pipe(Layer.provide(ContextFileSystem.liveLayer), Layer.provideMerge(BunServices.layer)),
       ),
     ),
   )

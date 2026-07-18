@@ -50,12 +50,16 @@ export const layer = Layer.effect(
     const fileSystem = yield* ContextFileSystem.Service
     const path = yield* Path.Path
     const resolve = Effect.fn("ResolvedContext.resolve")(function* (input: Input) {
-      const root = path.resolve(input.workspace)
+      const root = yield* fileSystem.realPath(path.resolve(input.workspace))
       const contained = (candidate: string) =>
         candidate === root ||
         (!path.relative(root, candidate).startsWith("..") &&
           !path.resolve(path.relative(root, candidate)).startsWith(".."))
       const diagnostics: Array<Diagnostic> = []
+      const physicallyContained = Effect.fn("ResolvedContext.physicallyContained")(function* (candidate: string) {
+        const resolved = yield* Effect.option(fileSystem.realPath(candidate))
+        return resolved._tag === "Some" && contained(resolved.value)
+      })
       const selected = new Map<string, "guidance" | "reference">()
       const targets = [...(input.targetPaths ?? [])]
         .map((target) => path.resolve(root, target))
@@ -80,7 +84,7 @@ export const layer = Layer.effect(
       for (const directory of [...directories].toSorted((a, b) => a.length - b.length || a.localeCompare(b))) {
         for (const name of ["AGENTS.md", "AGENT.md", "CLAUDE.md"]) {
           const candidate = path.resolve(directory, name)
-          if (yield* fileSystem.exists(candidate)) {
+          if ((yield* fileSystem.exists(candidate)) && (yield* physicallyContained(candidate))) {
             selected.set(candidate, "guidance")
             break
           }
@@ -97,6 +101,7 @@ export const layer = Layer.effect(
           if (nested.length >= maximumReferenceFiles) break
           const candidate = path.resolve(directory, entry)
           if (!contained(candidate)) continue
+          if (!(yield* physicallyContained(candidate))) continue
           if ((yield* fileSystem.readDirectory(candidate)) !== undefined)
             nested.push(...(yield* walk(candidate, depth + 1)))
           else nested.push(candidate)
@@ -123,6 +128,12 @@ export const layer = Layer.effect(
             })
           else if (!(yield* fileSystem.exists(candidate)))
             diagnostics.push({ _tag: "ReferenceNotFound", path: candidate, message: "Referenced file does not exist" })
+          else if (!(yield* physicallyContained(candidate)))
+            diagnostics.push({
+              _tag: "PathOutsideWorkspace",
+              path: candidate,
+              message: "Referenced path resolves outside the Workspace",
+            })
           else selected.set(candidate, "reference")
         }
       }

@@ -1967,6 +1967,17 @@ if (import.meta.main) {
                 _tag: "ExecutionCancelled",
                 ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
               })
+          } else if (event._tag === "ContextDiagnostics") {
+            if (event.selectionEpoch !== activeSelectionEpoch) return
+            if (model.currentThreadId !== event.threadId) return
+            model = ViewState.update(model, {
+              _tag: "BlockAdded",
+              block: {
+                _tag: "Notification",
+                title: "Context resolution",
+                detail: event.messages.join("\n"),
+              },
+            })
           } else if (event._tag === "ExecutionFailed") {
             if (event.threadId !== undefined && event.selectionEpoch !== activeSelectionEpoch) return
             if (event.threadId !== undefined && model.currentThreadId !== event.threadId) return
@@ -2018,7 +2029,12 @@ if (import.meta.main) {
           } else {
             model = ViewState.update(model, event)
           }
-          render(event._tag === "ExecutionFailed" || event._tag === "QueueFull" || event._tag === "ExecutionControlled")
+          render(
+            event._tag === "ContextDiagnostics" ||
+              event._tag === "ExecutionFailed" ||
+              event._tag === "QueueFull" ||
+              event._tag === "ExecutionControlled",
+          )
         }
         const feedBatcher = InteractiveController.makeFeedFrameBatcher<Operation.InteractiveEvent>({
           schedule: (flush) => {

@@ -88,6 +88,22 @@ test("materializes ordered text and dropped image paths for submission", () =>
     }),
   ))
 
+test("materializes typed image mentions in text order without retaining mention syntax", () =>
+  run(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const root = yield* workspace("rika-prompt-parts-")
+      yield* fileSystem.writeFile(path.join(root, "diagram one.png"), Uint8Array.from([1, 2, 3]))
+      const prompt = 'before @image:"diagram one.png" after'
+      expect(yield* materializePromptParts(ViewState.promptParts(prompt), root)).toEqual([
+        { type: "text", text: "before " },
+        { type: "image", mediaType: "image/png", data: "AQID", filename: "diagram one.png" },
+        { type: "text", text: " after" },
+      ])
+    }),
+  ))
+
 test("materializes exact precomputed pasted text and image parts without reparsing text", () =>
   run(
     Effect.gen(function* () {

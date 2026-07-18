@@ -288,6 +288,13 @@ export type QueueChange =
 export type InteractiveEvent =
   | { readonly _tag: "ThreadsListed"; readonly threads: ReadonlyArray<ThreadSummary.ThreadSummary> }
   | {
+      readonly _tag: "ContextDiagnostics"
+      readonly selectionEpoch: number
+      readonly threadId: Thread.ThreadId
+      readonly turnId: Turn.TurnId
+      readonly messages: ReadonlyArray<string>
+    }
+  | {
       readonly _tag: "TranscriptPatched"
       readonly selectionEpoch: number
       readonly threadId: Thread.ThreadId
@@ -383,6 +390,13 @@ export type InteractiveEvent =
     }
 
 export const InteractiveEventSchema = Schema.Union([
+  Schema.Struct({
+    _tag: Schema.tag("ContextDiagnostics"),
+    selectionEpoch: Schema.Int,
+    threadId: Thread.ThreadId,
+    turnId: Turn.TurnId,
+    messages: Schema.Array(Schema.String),
+  }),
   Schema.Struct({
     _tag: Schema.tag("TranscriptPatched"),
     selectionEpoch: Schema.Int,

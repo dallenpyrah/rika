@@ -262,6 +262,7 @@ test("drives bypassed recorded and incognito shell commands through Operation an
           event._tag !== "QueueResyncRequired" &&
           event._tag !== "QueueFull" &&
           event._tag !== "ExecutionControlled" &&
+          event._tag !== "ContextDiagnostics" &&
           event._tag !== "ThreadsListed" &&
           event._tag !== "ThreadTitled" &&
           event._tag !== "ThreadActivated" &&

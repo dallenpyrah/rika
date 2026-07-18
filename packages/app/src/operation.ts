@@ -86,6 +86,7 @@ const withSelectionEpoch = (event: InteractiveEvent, selectionEpoch: number): In
     case "QueueResyncRequired":
     case "QueueFull":
     case "TurnStarted":
+    case "ContextDiagnostics":
     case "ExecutionFailed":
     case "ExecutionControlled":
       return { ...event, selectionEpoch }
@@ -100,6 +101,7 @@ class OperationError extends Schema.TaggedErrorClass<OperationError>()("Operatio
 
 const operationError = (message: string) => OperationError.make({ message })
 const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString)
+const untrustedData = (value: unknown) => JSON.stringify(value).replaceAll("<", "\\u003c")
 
 export interface ProductLayerOptions<
   ThreadError,
@@ -902,18 +904,28 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           (id) =>
             Effect.gen(function* () {
               const thread = yield* threads.get(Thread.ThreadId.make(id))
-              if (thread === undefined) return `--- thread: ${id} ---\nThread not found`
+              if (thread === undefined) return `Thread ${id} was not found`
               const history = yield* turns.list(thread.id)
-              return `--- thread: ${id} ---\n${markdownExport(thread, history)}`
+              return `<thread-data format="json">${untrustedData({ id, content: markdownExport(thread, history) })}</thread-data>`
             }),
           { concurrency: 1 },
         )
-        if (resolved.sources.length === 0 && threadBlocks.length === 0) return { prompt, digest: resolved.digest }
+        const messages = resolved.diagnostics.map((diagnostic) => diagnostic.message + `: ${diagnostic.path}`)
+        if (resolved.sources.length === 0 && threadBlocks.length === 0)
+          return { prompt, digest: resolved.digest, messages }
         const block = [
-          ...resolved.sources.map((source) => `--- ${source.kind}: ${source.path} ---\n${source.content}`),
+          ...resolved.sources.map((source) =>
+            source.kind === "guidance"
+              ? `<guidance-instructions path=${JSON.stringify(source.path)}>\n${source.content}\n</guidance-instructions>`
+              : `<reference-data format="json">${untrustedData({ path: source.path, content: source.content })}</reference-data>`,
+          ),
           ...threadBlocks,
         ].join("\n\n")
-        return { prompt: `${prompt}\n\n<resolved-context>\n${block}\n</resolved-context>`, digest: resolved.digest }
+        return {
+          prompt: `${prompt}\n\n<resolved-context>\n${block}\n</resolved-context>`,
+          digest: resolved.digest,
+          messages,
+        }
       })
       const prepareExecution = Effect.fn("Operation.prepareExecution")(function* (turn: Turn.Turn, workspace: string) {
         const resolved = yield* executionPrompt(workspace, turn.prompt)
@@ -924,16 +936,16 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               ? turn.promptParts
               : [...turn.promptParts, { type: "text" as const, text: resolved.prompt.slice(turn.prompt.length) }]
         if (options.executionExtensions === undefined)
-          return { prompt: resolved.prompt, promptParts, extensionPin: turn.extensionPin }
+          return { prompt: resolved.prompt, promptParts, extensionPin: turn.extensionPin, messages: resolved.messages }
         const extensions = yield* ExecutionExtensions.Service
         if (turn.extensionPin !== undefined) {
           yield* extensions.resume(turn.extensionPin)
-          return { prompt: resolved.prompt, promptParts, extensionPin: turn.extensionPin }
+          return { prompt: resolved.prompt, promptParts, extensionPin: turn.extensionPin, messages: resolved.messages }
         }
         const activated = yield* extensions.future(yield* options.executionExtensions.mcpFingerprint, resolved.digest)
         const turns = yield* TurnRepository.Service
         yield* turns.setExtensionPin(turn.id, activated.pin)
-        return { prompt: resolved.prompt, promptParts, extensionPin: activated.pin }
+        return { prompt: resolved.prompt, promptParts, extensionPin: activated.pin, messages: resolved.messages }
       })
       const reconcileExecutions = reconcileInternal(
         extensionService,
@@ -1303,6 +1315,14 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     Effect.gen(function* () {
                       yield* Effect.logInfo("turn.started")
                       const prepared = yield* prepareExecution(turn, thread.workspace)
+                      if (prepared.messages.length > 0)
+                        emit(dispatch, {
+                          _tag: "ContextDiagnostics",
+                          selectionEpoch: 0,
+                          threadId: thread.id,
+                          turnId: turn.id,
+                          messages: prepared.messages,
+                        })
                       const runningTurn = yield* setTurnStatus(turn.id, "running", turn.lastCursor, startedAt)
                       if (runningTurn.status !== "running") return undefined
                       emit(dispatch, { _tag: "TurnStarted", selectionEpoch: 0, threadId: thread.id, turn: runningTurn })
@@ -1534,6 +1554,14 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             const outcome = yield* Effect.exit(
               Effect.gen(function* () {
                 const prepared = yield* prepareExecution(promotedTurn, thread.workspace)
+                if (prepared.messages.length > 0)
+                  emit(dispatch, {
+                    _tag: "ContextDiagnostics",
+                    selectionEpoch: 0,
+                    threadId: thread.id,
+                    turnId: promotedTurn.id,
+                    messages: prepared.messages,
+                  })
                 const promotedAt = yield* Clock.currentTimeMillis
                 const runningTurn = yield* setTurnStatus(
                   promotedTurn.id,
