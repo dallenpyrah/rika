@@ -35,7 +35,7 @@ const program = Effect.gen(function* () {
   const extracted = yield* spawner.exitCode(ChildProcess.make("tar", ["-xzf", archive, "-C", temporary]))
   expect(Number(extracted)).toBe(0)
   const binary = path.join(temporary, `rika-${kernel}-${architecture}`, "bin", "rika")
-  const helper = path.join(directory, "native-pty.py")
+  const helper = path.join(directory, "tui-pty.py")
   const environment = {
     HOME: home,
     PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",

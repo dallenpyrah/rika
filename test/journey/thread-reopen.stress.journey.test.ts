@@ -1,7 +1,7 @@
 import { expect, test } from "vitest"
 import { Config, Effect, Schema } from "effect"
 import { assertNoResidueFiles } from "./lease-files"
-import { startPackagedPty } from "./packaged-pty"
+import { startPackagedPty } from "./pty"
 import { run, runTest, sandbox } from "./process"
 import * as ResourceSampler from "./resource-sampler"
 import { cleanupScenario, configureHomeState, printMetrics } from "./stress-support"

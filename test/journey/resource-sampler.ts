@@ -55,7 +55,7 @@ export interface Interface {
   readonly terminateOrphans: Effect.Effect<ProcessCleanup, ResourceSamplingError>
 }
 
-export class Service extends Context.Service<Service, Interface>()("rika/test/e2e/ResourceSampler") {}
+export class Service extends Context.Service<Service, Interface>()("rika/test/journey/ResourceSampler") {}
 
 const failure = (operation: string, cause: unknown) => ResourceSamplingError.make({ operation, message: String(cause) })
 

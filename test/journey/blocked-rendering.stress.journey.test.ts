@@ -1,7 +1,7 @@
 import { expect, test } from "vitest"
 import { Effect } from "effect"
 import { assertNoResidueFiles, findResidueFiles } from "./lease-files"
-import { startPackagedPty } from "./packaged-pty"
+import { startPackagedPty } from "./pty"
 import { runTest, sandbox } from "./process"
 import * as ResourceSampler from "./resource-sampler"
 import {

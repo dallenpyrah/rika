@@ -10,7 +10,8 @@ import sys
 import termios
 import time
 
-executable, cwd, environment_json, actions_json = sys.argv[1:]
+executable, cwd, environment_json, actions_json, *arguments = sys.argv[1:]
+entrypoint = arguments[0] if arguments else "src/client-main.ts"
 environment = {key: value for key, value in json.loads(environment_json).items() if value is not None}
 actions = json.loads(actions_json)
 master, slave = pty.openpty()
@@ -25,7 +26,7 @@ if pid == 0:
     if slave > 2:
         os.close(slave)
     os.chdir(cwd)
-    os.execve(executable, [executable, "src/client-main.ts"], environment)
+    os.execve(executable, [executable, entrypoint], environment)
 
 os.close(slave)
 output = bytearray()
@@ -59,6 +60,9 @@ while time.monotonic() < deadline:
         if not running:
             status = current_status
             break
+        delay_ms = action.get("delayMs", 0)
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
         os.write(master, action["write"].encode())
         action_index += 1
         action_offset = len(output)

@@ -1,6 +1,7 @@
-const root = new URL("..", import.meta.url).pathname
+const root = new URL("../..", import.meta.url).pathname
 
 export const packageCli = async () => {
+  if (process.argv.includes("list")) return
   const target = `${process.platform}-${process.arch}`
   const child = Bun.spawn(["bun", "run", "package", "--", "--target", target], {
     cwd: root,

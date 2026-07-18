@@ -211,7 +211,7 @@ export const renderBlock: {
               : block.status === "cancelled"
                 ? "⊘"
                 : "✗"
-        return `${icon} Subagent ${block.status === "running" ? "working" : "finished"} ▸\n  ${block.name} · ${block.summary}`
+        return `${icon} Subagent ${block.status === "running" ? "working" : block.status === "cancelled" ? "cancelled" : "finished"} ▸\n  ${block.name} · ${block.summary}`
       }
       case "Workflow":
         return `◫ Workflow ${block.name} [${block.status}]\n  ${block.step}`
@@ -505,6 +505,8 @@ const iconChar = (failed: boolean, running: boolean, frame = idleSpinnerFrame, c
   running ? frame : cancelled ? "⊘" : failed ? "✕" : "✓"
 
 const markerText = (expanded: boolean): string => (expanded ? " ▾" : " ▸")
+
+const cancelledAgentLabel = (activeLabel: string): string => `${activeLabel.split(" ")[0] ?? "Subagent"} cancelled`
 
 export interface UnitLineRange {
   readonly start: number
@@ -950,7 +952,11 @@ export const buildTranscript: {
       const failed = unit.block.status === "failed"
       const running = unit.block.status === "running"
       const cancelled = unit.block.status === "cancelled"
-      const label = running ? unit.block.presentation.activeLabel : unit.block.presentation.completeLabel
+      const label = running
+        ? unit.block.presentation.activeLabel
+        : cancelled && unit.block.presentation.family === "agent"
+          ? cancelledAgentLabel(unit.block.presentation.activeLabel)
+          : unit.block.presentation.completeLabel
       const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
       const agent = unit.block.presentation.family === "agent"
       const output = agent ? visibleAgentOutput(unit.block.output) : unit.block.output
@@ -1050,15 +1056,17 @@ export const buildTranscript: {
           ? "Subagent"
           : name.charAt(0).toUpperCase() + name.slice(1)
       const phrase =
-        display === "Oracle"
-          ? running
-            ? "Oracle exploring"
-            : "Oracle has spoken"
-          : display === "Librarian"
+        block.status === "cancelled"
+          ? `${display} cancelled`
+          : display === "Oracle"
             ? running
-              ? "Librarian is researching"
-              : "Librarian researched"
-            : `${display} ${running ? "working" : block.status === "failed" ? "failed" : "finished"}`
+              ? "Oracle exploring"
+              : "Oracle has spoken"
+            : display === "Librarian"
+              ? running
+                ? "Librarian is researching"
+                : "Librarian researched"
+              : `${display} ${running ? "working" : block.status === "failed" ? "failed" : "finished"}`
       append(statusIcon(block.status === "failed", running, block.status === "cancelled"))
       append(fg(colors.text)(` ${phrase}`))
       append(marker(expanded))

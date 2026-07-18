@@ -1,7 +1,7 @@
 import { expect, test } from "vitest"
 import { Effect } from "effect"
 import { assertNoResidueFiles } from "./lease-files"
-import { runPackagedFanOut } from "./packaged-fan-out"
+import { runPackagedFanOut } from "./fan-out"
 import { runTest, sandbox } from "./process"
 import * as ResourceSampler from "./resource-sampler"
 import { printMetrics } from "./stress-support"

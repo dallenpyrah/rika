@@ -802,7 +802,7 @@ it("keeps cancelled child tools terminal in live and reloaded projections", () =
       renderTranscriptStyled(model)
         .chunks.map((chunk) => chunk.text)
         .join(""),
-    ).toContain("⊘ Subagent finished")
+    ).toContain("⊘ Subagent cancelled")
   }
 })
 

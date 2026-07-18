@@ -913,7 +913,7 @@ describe("Surface", () => {
     const text = built.styled.chunks.map((chunk) => chunk.text).join("")
     const marker = built.styled.chunks.find((chunk) => chunk.text === "⊘")
 
-    expect(text).toContain("⊘ Subagent finished ▾")
+    expect(text).toContain("⊘ Subagent cancelled ▾")
     expect(text).toContain("$ sleep 60 (cancelled)")
     expect(
       text

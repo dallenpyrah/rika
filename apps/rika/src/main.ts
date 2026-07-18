@@ -1655,6 +1655,7 @@ if (import.meta.main) {
       testModelScript: Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT")),
       residentProfile: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_PROFILE")),
       residentGrace: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_GRACE")),
+      residentStartupHold: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_STARTUP_HOLD")),
       residentHost: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_HOST")),
     }),
   )
@@ -2950,6 +2951,9 @@ if (import.meta.main) {
             dataRoot: hostDataRoot,
             graceMilliseconds: Number(
               environment.residentGrace._tag === "Some" ? environment.residentGrace.value : "500",
+            ),
+            startupHoldMilliseconds: Number(
+              environment.residentStartupHold._tag === "Some" ? environment.residentStartupHold.value : "10000",
             ),
             onReady: ResidentProcessStartup.signalReady,
             owner: residentOwner,

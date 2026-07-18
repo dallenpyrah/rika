@@ -884,6 +884,8 @@ describe("ViewState", () => {
     expect(model.detailSelection).toBe("block:Diff:2")
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "tab" }) })
     expect(model.detailSelection).toBe("block:Reasoning:0")
+    model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "return" }) })
+    expect(model.expandedRowKeys).toEqual(["block:Diff:2", "tool:1", "block:Reasoning:0"])
   })
 
   test("keeps an expanded streamed tool group open as new children arrive", () => {

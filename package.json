@@ -64,7 +64,7 @@
     "package": "bun run scripts/package.ts",
     "pattern-check": "ast-grep scan --config sgconfig.yml --filter '^(no-|tenant-|update-)' apps packages scripts",
     "stress": "bun --bun vitest run --project stress",
-    "test": "bun --bun vitest run --project unit --project native --project packaged",
+    "test": "bun --bun vitest run --project unit --project scene --project journey",
     "typecheck": "bun turbo run typecheck \"//#diagnostics\" \"//#effect-check\"",
     "uninstall-local": "bun run scripts/uninstall-local.ts"
   },

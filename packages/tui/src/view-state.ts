@@ -1751,6 +1751,16 @@ export const update: {
       }
       if ((key.name === "tab" || key.name === "backtab") && !key.ctrl && !key.alt && !key.meta)
         return update(model, { _tag: "DetailMoved", offset: key.name === "backtab" || key.shift ? -1 : 1 })
+      if (
+        key.name === "return" &&
+        !key.ctrl &&
+        !key.alt &&
+        !key.meta &&
+        !key.shift &&
+        model.input.length === 0 &&
+        model.detailSelection !== undefined
+      )
+        return update(model, { _tag: "DetailToggled" })
       const queued = model.queue as ReadonlyArray<QueueItem>
       if (model.busy && model.input.length === 0 && queued.length > 0 && model.editingTurnId === undefined) {
         const current = queued.findIndex((item) => item.id === model.queueSelection)

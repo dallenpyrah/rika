@@ -9,7 +9,7 @@ import termios
 import time
 
 binary, cwd, env_json, *arguments = sys.argv[1:]
-idle = arguments == ["idle"]
+idle_mode = arguments == ["idle"]
 palette_quit = arguments == ["palette-quit"]
 environment = json.loads(env_json)
 master, slave = pty.openpty()
@@ -53,7 +53,7 @@ while time.monotonic() < deadline:
         if not chunk:
             break
         output.extend(chunk)
-    if idle and b"Welcome to Rika" in output and time.monotonic() + 0.5 < deadline:
+    if idle_mode and b"Welcome to Rika" in output and time.monotonic() + 0.5 < deadline:
         deadline = time.monotonic() + 0.5
     if palette_quit and not palette_opened and b"Welcome to Rika" in output:
         os.write(master, b"\x0f")
@@ -65,7 +65,7 @@ while time.monotonic() < deadline:
         waited, status = os.waitpid(pid, os.WNOHANG)
         if waited == pid:
             break
-    if not idle and not palette_quit and not shortcuts_opened and b"Welcome to Rika" in output:
+    if not idle_mode and not palette_quit and not shortcuts_opened and b"Welcome to Rika" in output:
         os.write(master, b"?")
         shortcuts_opened = True
         shortcuts_sent_at = time.monotonic()
@@ -94,7 +94,7 @@ while time.monotonic() < deadline:
         os.write(master, b" after\r")
         submitted = True
         sent_at = time.monotonic()
-    if not idle and not palette_quit and submitted and (b"deterministic response" in output or b"ExecutionBackendError" in output or b"Execution failed" in output):
+    if not idle_mode and not palette_quit and submitted and (b"deterministic response" in output or b"ExecutionBackendError" in output or b"Execution failed" in output):
         break
 
 fallback_signal_used = False

@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest"
 import { Effect, Schema } from "effect"
 import { run, runCommand, runTest, sandbox } from "./process"
 
-const helper = new URL("native-pty.py", import.meta.url).pathname
+const helper = new URL("tui-pty.py", import.meta.url).pathname
 const IdleResultJson = Schema.fromJsonString(Schema.Struct({ capture: Schema.String, submitted: Schema.Boolean }))
 const SubmissionResultJson = Schema.fromJsonString(
   Schema.Struct({
