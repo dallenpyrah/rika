@@ -37,9 +37,21 @@ describe("packaged extension and operation contract", () => {
           expect((yield* run(context, ["skills", "add", source])).exitCode).toBe(0)
           const listed = yield* run(context, ["skills", "list"])
           expect(listed.exitCode).toBe(0)
-          expect(listed.stdout).toContain("example-skill")
-          expect((yield* run(context, ["skills", "inspect", "example-skill"])).stdout).toContain("# Example")
+          expect(listed.stdout).toBe('["- example-skill: E2E skill"]')
+          const inspected = yield* run(context, ["skills", "inspect", "example-skill"])
+          expect(inspected.exitCode).toBe(0)
+          expect(inspected.stdout).toBe('{"body":"\\n# Example\\n","resources":[]}')
+          const duplicate = yield* run(context, ["skills", "add", source])
+          expect(duplicate.exitCode).not.toBe(0)
+          expect(duplicate.stderr).not.toBe("")
+          const outside = path.join(context.workspace, ".rika", "outside")
+          yield* fileSystem.makeDirectory(outside, { recursive: true })
+          yield* fileSystem.writeFileString(path.join(outside, "keep.txt"), "keep")
+          const escaped = yield* run(context, ["skills", "remove", "../outside"])
+          expect(escaped.exitCode).not.toBe(0)
+          expect(yield* fileSystem.readFileString(path.join(outside, "keep.txt"))).toBe("keep")
           expect((yield* run(context, ["skills", "remove", "example-skill"])).exitCode).toBe(0)
+          expect((yield* run(context, ["skills", "list"])).stdout).toBe("[]")
         }),
       ),
     20_000,

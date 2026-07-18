@@ -69,7 +69,7 @@ it("returns a typed missing activation error through the test filesystem", () =>
     }),
   ))
 
-it("activates a discovered skill with no resource directory", () =>
+it("fails when a discovered skill directory is deleted before activation", () =>
   Effect.runPromise(
     Effect.scoped(
       provideLayer(
@@ -82,7 +82,8 @@ it("activates a discovered skill with no resource directory", () =>
           yield* fileSystem.makeDirectory(workspaceRoot, { recursive: true })
           yield* fileSystem.writeFileString(`${globalRoot}/plain/SKILL.md`, document("plain", "plain", "body"))
           const registry = yield* SkillRegistry.discover({ globalRoot, workspaceRoot })
-          expect(yield* registry.activate("plain")).toEqual({ body: "body", resources: [] })
+          const error = yield* Effect.flip(registry.activate("plain"))
+          expect(error.message).toBe("Skill directory was deleted")
         }),
         Layer.merge(
           SkillRegistry.fileSystemTestLayer({}, {}).pipe(Layer.provide(BunServices.layer)),

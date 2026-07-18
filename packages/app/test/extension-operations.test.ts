@@ -119,6 +119,72 @@ describe("ExtensionOperations", () => {
     ),
   )
 
+  it.effect("keeps skill mutations contained and never overwrites an existing workspace skill", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-app-skill-mutations-" })
+        const source = `${root}/source/review`
+        const fileSource = `${root}/source/not-a-directory`
+        const emptySource = `${root}/source/empty`
+        const malformedSource = `${root}/malformed-source/malformed`
+        const concurrentSource = `${root}/concurrent-source/concurrent`
+        const workspaceRoot = `${root}/workspace/.rika/skills`
+        const existing = `${workspaceRoot}/review/SKILL.md`
+        const outside = `${root}/workspace/.rika/outside/SKILL.md`
+        const options = {
+          globalRoot: `${root}/global`,
+          workspaceRoot,
+          configPath: `${root}/workspace/.rika/mcp.json`,
+          trustPath: `${root}/trust.json`,
+          generationsPath: `${root}/workspace/.rika/extensions.json`,
+        }
+        yield* fs.makeDirectory(source, { recursive: true })
+        yield* fs.makeDirectory(emptySource, { recursive: true })
+        yield* fs.makeDirectory(malformedSource, { recursive: true })
+        yield* fs.makeDirectory(concurrentSource, { recursive: true })
+        yield* fs.makeDirectory(`${workspaceRoot}/review`, { recursive: true })
+        yield* fs.makeDirectory(`${root}/workspace/.rika/outside`, { recursive: true })
+        yield* fs.writeFileString(`${source}/SKILL.md`, "---\nname: review\ndescription: New\n---\nnew")
+        yield* fs.writeFileString(fileSource, "not a skill directory")
+        yield* fs.writeFileString(`${malformedSource}/SKILL.md`, "not frontmatter")
+        yield* fs.writeFileString(
+          `${concurrentSource}/SKILL.md`,
+          "---\nname: concurrent\ndescription: Concurrent\n---\ncomplete",
+        )
+        yield* fs.writeFileString(existing, "---\nname: review\ndescription: Existing\n---\nexisting")
+        yield* fs.writeFileString(outside, "keep")
+        const run = (input: Parameters<typeof ExtensionOperations.run>[0]) =>
+          ExtensionOperations.run(input).pipe(provideLayer(Layer.merge(ExtensionOperations.layer(options), oauthLayer)))
+        const duplicate = yield* Effect.flip(run({ _tag: "Skill", action: "add", source }))
+        const invalidSource = yield* Effect.flip(run({ _tag: "Skill", action: "add", source: fileSource }))
+        const missingManifest = yield* Effect.flip(run({ _tag: "Skill", action: "add", source: emptySource }))
+        const malformed = yield* Effect.flip(run({ _tag: "Skill", action: "add", source: malformedSource }))
+        const concurrent = yield* Effect.all(
+          [
+            run({ _tag: "Skill", action: "add", source: concurrentSource }).pipe(Effect.exit),
+            run({ _tag: "Skill", action: "add", source: concurrentSource }).pipe(Effect.exit),
+          ],
+          { concurrency: 2 },
+        )
+        const escaped = yield* Effect.flip(run({ _tag: "Skill", action: "remove", name: "../outside" }))
+        expect(duplicate.message).toContain("already exists")
+        expect(invalidSource.message).toContain("not a directory")
+        expect(missingManifest.message).toContain("SKILL.md")
+        expect(malformed.message).not.toBe("")
+        expect(concurrent.filter((result) => result._tag === "Success")).toHaveLength(1)
+        expect(yield* fs.readFileString(`${workspaceRoot}/concurrent/SKILL.md`)).toContain("complete")
+        expect(yield* fs.readFileString(existing)).toContain("existing")
+        expect(escaped.message).toContain("outside the Workspace skill directory")
+        expect(yield* fs.readFileString(outside)).toBe("keep")
+      }).pipe(
+        provideLayer(
+          Layer.merge(BunServices.layer, SkillRegistry.fileSystemLayer.pipe(Layer.provide(BunServices.layer))),
+        ),
+      ),
+    ),
+  )
+
   it.effect("returns typed errors for unsupported actions and invalid documents", () =>
     Effect.scoped(
       Effect.gen(function* () {

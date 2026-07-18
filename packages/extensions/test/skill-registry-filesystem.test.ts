@@ -46,6 +46,49 @@ test("workspace skills override global skills and activation lazily loads contai
   )
 })
 
+test("rejects a resource symlink that escapes the selected skill directory", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-skill-symlink-" })
+        const globalRoot = `${root}/global`
+        const workspaceRoot = `${root}/workspace`
+        const skillRoot = `${workspaceRoot}/review`
+        const outside = `${root}/outside.txt`
+        yield* fileSystem.makeDirectory(skillRoot, { recursive: true })
+        yield* fileSystem.writeFileString(`${skillRoot}/SKILL.md`, document("review", "review", "body"))
+        yield* fileSystem.writeFileString(outside, "outside")
+        yield* fileSystem.symlink(outside, `${skillRoot}/outside.txt`)
+        const registry = yield* SkillRegistry.discover({ globalRoot, workspaceRoot })
+        const error = yield* Effect.flip(registry.activate("review"))
+        expect(error.operation).toBe("activate")
+        expect(error.message).toBe("Resource path escapes skill directory")
+      }).pipe(provideLayer(SkillRegistry.fileSystemLayer)),
+    ).pipe(provideLayer(BunServices.layer)),
+  ))
+
+test("rejects a manifest symlink that escapes the selected skill directory", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-skill-manifest-symlink-" })
+        const globalRoot = `${root}/global`
+        const workspaceRoot = `${root}/workspace`
+        const skillRoot = `${workspaceRoot}/review`
+        const outside = `${root}/SKILL.md`
+        yield* fileSystem.makeDirectory(skillRoot, { recursive: true })
+        yield* fileSystem.writeFileString(outside, document("review", "review", "outside"))
+        yield* fileSystem.symlink(outside, `${skillRoot}/SKILL.md`)
+        const registry = yield* SkillRegistry.discover({ globalRoot, workspaceRoot })
+        const error = yield* Effect.flip(registry.activate("review"))
+        expect(error.operation).toBe("activate")
+        expect(error.message).toBe("Skill manifest escapes skill directory")
+      }).pipe(provideLayer(SkillRegistry.fileSystemLayer)),
+    ).pipe(provideLayer(BunServices.layer)),
+  ))
+
 test("returns a typed error for missing activation", () =>
   Effect.runPromise(
     Effect.gen(function* () {

@@ -40,6 +40,7 @@ export interface FileSystemInterface {
   readonly readDirectory: (path: string) => Effect.Effect<ReadonlyArray<string>, PlatformError.PlatformError>
   readonly readFileString: (path: string) => Effect.Effect<string, PlatformError.PlatformError>
   readonly isFile: (path: string) => Effect.Effect<boolean, PlatformError.PlatformError>
+  readonly realPath: (path: string) => Effect.Effect<string, PlatformError.PlatformError>
 }
 
 export class SkillFileSystem extends Context.Service<SkillFileSystem, FileSystemInterface>()(
@@ -55,6 +56,7 @@ export const fileSystemLayer = Layer.effect(
       readDirectory: (path) => fileSystem.readDirectory(path, { recursive: true }),
       readFileString: (path) => fileSystem.readFileString(path),
       isFile: (path) => fileSystem.stat(path).pipe(Effect.map((info) => info.type === "File")),
+      realPath: (path) => fileSystem.realPath(path),
     })
   }),
 )
@@ -83,6 +85,7 @@ const fileSystemTestLayerImpl = (
           return content === undefined ? Effect.die(`Missing test file: ${name}`) : Effect.succeed(content)
         },
         isFile: (name) => Effect.succeed(normalizedFiles.has(path.resolve(name))),
+        realPath: (name) => Effect.succeed(path.resolve(name)),
       })
     }),
   )
@@ -133,7 +136,6 @@ export const discover = (
       Effect.gen(function* () {
         const skill = yield* source.get(name).pipe(Effect.mapError(failure.bind(undefined, "activate", name)))
         if (skill === undefined) return yield* failure("activate", name, "Skill not found")
-        const body = yield* skill.body.pipe(Effect.mapError(failure.bind(undefined, "activate", name)))
         const workspaceSkill = yield* workspace
           .get(name)
           .pipe(Effect.mapError(failure.bind(undefined, "activate", name)))
@@ -142,22 +144,37 @@ export const discover = (
         const exists = yield* skillFileSystem
           .exists(directory)
           .pipe(Effect.mapError((cause) => failure("activate", directory, cause)))
-        if (!exists) return { body, resources: [] }
+        if (!exists) return yield* failure("activate", directory, "Skill directory was deleted")
+        const realDirectory = yield* skillFileSystem
+          .realPath(directory)
+          .pipe(Effect.mapError((cause) => failure("activate", directory, cause)))
+        const manifest = path.join(directory, "SKILL.md")
+        const realManifest = yield* skillFileSystem
+          .realPath(manifest)
+          .pipe(Effect.mapError((cause) => failure("activate", manifest, cause)))
+        if (!contained(path, realDirectory, realManifest))
+          return yield* failure("activate", manifest, "Skill manifest escapes skill directory")
+        const body = yield* skill.body.pipe(Effect.mapError(failure.bind(undefined, "activate", name)))
         const entries = yield* skillFileSystem
           .readDirectory(directory)
           .pipe(Effect.mapError((cause) => failure("activate", directory, cause)))
         const resources: Array<Resource> = []
         for (const entry of entries.toSorted()) {
           const resourcePath = path.resolve(directory, entry)
-          if (path.basename(resourcePath) === "SKILL.md") continue
           if (!contained(path, directory, resourcePath))
             return yield* failure("activate", resourcePath, "Resource path escapes skill directory")
+          if (path.basename(resourcePath) === "SKILL.md") continue
           const isFile = yield* skillFileSystem
             .isFile(resourcePath)
             .pipe(Effect.mapError((cause) => failure("activate", resourcePath, cause)))
           if (!isFile) continue
+          const realResourcePath = yield* skillFileSystem
+            .realPath(resourcePath)
+            .pipe(Effect.mapError((cause) => failure("activate", resourcePath, cause)))
+          if (!contained(path, realDirectory, realResourcePath))
+            return yield* failure("activate", resourcePath, "Resource path escapes skill directory")
           const content = yield* skillFileSystem
-            .readFileString(resourcePath)
+            .readFileString(realResourcePath)
             .pipe(Effect.mapError((cause) => failure("activate", resourcePath, cause)))
           resources.push({ path: path.relative(directory, resourcePath), content })
         }

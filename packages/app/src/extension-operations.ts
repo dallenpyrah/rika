@@ -182,13 +182,60 @@ export const run = Effect.fn("ExtensionOperations.run")(function* (
       return
     }
     if (input.action === "remove") {
+      const root = path.resolve(options.workspaceRoot)
+      const target = path.resolve(path.join(root, input.name))
+      if (path.dirname(target) !== root)
+        return yield* Error.make({ message: `Skill is outside the Workspace skill directory: ${input.name}` })
       yield* fileSystem
-        .remove(path.join(options.workspaceRoot, input.name), { recursive: true })
+        .remove(target, { recursive: true })
         .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
     } else if ("source" in input) {
-      yield* fileSystem
-        .copy(input.source, path.join(options.workspaceRoot, path.basename(input.source)), { overwrite: false })
+      const sourcePath = path.resolve(input.source)
+      const name = path.basename(sourcePath)
+      const root = path.resolve(options.workspaceRoot)
+      const target = path.resolve(path.join(root, name))
+      if (name === "" || path.dirname(target) !== root)
+        return yield* Error.make({ message: `Skill source does not name a Workspace skill: ${input.source}` })
+      const source = yield* fileSystem
+        .stat(sourcePath)
         .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
+      if (source.type !== "Directory")
+        return yield* Error.make({ message: `Skill source is not a directory: ${sourcePath}` })
+      const manifest = path.join(sourcePath, "SKILL.md")
+      const manifestInfo = yield* fileSystem
+        .stat(manifest)
+        .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
+      if (manifestInfo.type !== "File")
+        return yield* Error.make({ message: `Skill manifest is not a file: ${manifest}` })
+      const realSource = yield* fileSystem
+        .realPath(sourcePath)
+        .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
+      const realManifest = yield* fileSystem
+        .realPath(manifest)
+        .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
+      const relativeManifest = path.relative(realSource, realManifest)
+      if (relativeManifest.startsWith("..") || path.isAbsolute(relativeManifest))
+        return yield* Error.make({ message: `Skill manifest escapes its source directory: ${manifest}` })
+      const validation = yield* SkillRegistry.discover({
+        globalRoot: path.join(sourcePath, ".rika-validation-empty"),
+        workspaceRoot: path.dirname(sourcePath),
+      }).pipe(Effect.mapError((cause) => Error.make({ message: cause.message })))
+      if (
+        (yield* validation.source
+          .get(name)
+          .pipe(Effect.mapError((cause) => Error.make({ message: cause.message })))) === undefined
+      )
+        return yield* Error.make({ message: `Skill source is not discoverable: ${sourcePath}` })
+      yield* fileSystem
+        .makeDirectory(root, { recursive: true })
+        .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
+      yield* fileSystem
+        .makeDirectory(target)
+        .pipe(Effect.mapError(() => Error.make({ message: `Skill already exists: ${target}` })))
+      yield* fileSystem.copy(sourcePath, target, { overwrite: false }).pipe(
+        Effect.mapError((cause) => Error.make({ message: String(cause) })),
+        Effect.onError(() => fileSystem.remove(target, { recursive: true, force: true }).pipe(Effect.ignore)),
+      )
     }
     return
   }

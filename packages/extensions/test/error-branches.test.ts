@@ -27,13 +27,14 @@ const skillLayer = (operation: keyof SkillRegistry.FileSystemInterface) =>
       isFile: () => (operation === "isFile" ? Effect.fail(platformFailure("isFile")) : Effect.succeed(true)),
       readFileString: () =>
         operation === "readFileString" ? Effect.fail(platformFailure("readFileString")) : Effect.succeed("resource"),
+      realPath: (path) => (operation === "realPath" ? Effect.fail(platformFailure("realPath")) : Effect.succeed(path)),
     }),
   )
 
 it.layer(BunServices.layer)((test) => {
   test.effect("maps every skill resource filesystem failure", () =>
     Effect.gen(function* () {
-      const operations = ["exists", "readDirectory", "isFile", "readFileString"] as const
+      const operations = ["exists", "realPath", "readDirectory", "isFile", "readFileString"] as const
       const results = yield* Effect.forEach(operations, (operation) =>
         Effect.gen(function* () {
           const context = yield* Layer.build(skillLayer(operation))
@@ -80,8 +81,10 @@ it.layer(BunServices.layer)((test) => {
         })
       const success = yield* activate(["SKILL.md", "directory", "resource.txt"])
       const escaped = yield* Effect.flip(activate(["../outside.txt"]))
+      const escapedManifest = yield* Effect.flip(activate(["../SKILL.md"]))
       expect(success.resources).toEqual([{ path: "resource.txt", content: "resource" }])
       expect(escaped.message).toBe("Resource path escapes skill directory")
+      expect(escapedManifest.message).toBe("Resource path escapes skill directory")
     }).pipe(Effect.scoped),
   )
 
