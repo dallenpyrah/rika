@@ -716,7 +716,7 @@ const pastedImagePath = (value: string): string | undefined => {
 const insertPaste = (model: Model, value: string): Model => {
   const imagePath = pastedImagePath(value)
   if (imagePath !== undefined) return insertImage(model, imagePath)
-  if (!value.includes("\n") && !value.includes("\r") && value.length <= 120) return insert(model, value)
+  if (!value.includes("\n") && !value.includes("\r") && [...value].length <= 120) return insert(model, value)
   const token = String.fromCharCode(0xe000 + model.pastedText.length)
   const lines = value.split(/\r\n|\r|\n/).length
   const label =

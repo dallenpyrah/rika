@@ -214,7 +214,16 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     diagnostics,
     names,
   }
-  return completed
+  const { Database } = yield* Effect.promise(() => import("bun:sqlite"))
+  const database = new Database(`${state}/rika.db`, { readonly: true })
+  const persistedTurns = database
+    .query<
+      { readonly prompt: string; readonly prompt_parts_json: string | null },
+      []
+    >("SELECT prompt, prompt_parts_json FROM rika_turns ORDER BY created_at ASC, rowid ASC")
+    .all()
+  database.close()
+  return { ...completed, persistedTurns }
 })
 
 const run = (options: Options) =>

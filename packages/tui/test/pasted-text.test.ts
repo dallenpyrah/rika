@@ -13,6 +13,28 @@ describe("pasted text attachments", () => {
     const short = ViewState.update(ViewState.initial("/work"), { _tag: "Pasted", text: "short paste" })
     expect(short.input).toBe("short paste")
     expect(short.pastedText).toEqual([])
+
+    const unicodeBoundary = ViewState.update(ViewState.initial("/work"), {
+      _tag: "Pasted",
+      text: "😀".repeat(120),
+    })
+    expect(unicodeBoundary.input).toBe("😀".repeat(120))
+    expect(unicodeBoundary.pastedText).toEqual([])
+  })
+
+  it("does not reuse a pasted-text token after an earlier token is deleted", () => {
+    let model = ViewState.update(ViewState.initial("/work"), { _tag: "Pasted", text: "delete\nthis" })
+    model = ViewState.update(model, { _tag: "Pasted", text: "keep\nthis" })
+    model = { ...model, input: model.input.slice(1), cursor: 1 }
+    model = ViewState.update(model, { _tag: "Pasted", text: "add\nthis" })
+
+    expect(model.pastedText.map((attachment) => attachment.token)).toEqual([
+      String.fromCharCode(0xe000),
+      String.fromCharCode(0xe001),
+      String.fromCharCode(0xe002),
+    ])
+    expect(ViewState.displayInput(model)).toBe("[Pasted text #2 +2 lines][Pasted text #3 +2 lines]")
+    expect(ViewState.expandPastedText(model.input, model.pastedText)).toBe("keep\nthisadd\nthis")
   })
 
   it("preserves surrounding typed text and pasted content through submission", () => {
