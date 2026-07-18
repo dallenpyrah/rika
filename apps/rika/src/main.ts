@@ -2,7 +2,7 @@
 import * as BunCrypto from "@effect/platform-bun/BunCrypto"
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Compaction, ModelRegistry, Response as AiResponse } from "@batonfx/core"
+import { AiError, Compaction, ModelRegistry, Response as AiResponse } from "@batonfx/core"
 import type { TestModel as TestModelTypes } from "@batonfx/test"
 import { anthropic, anthropicClientLayerConfig } from "@batonfx/providers/anthropic"
 import { openAi, openAiClientLayerConfig } from "@batonfx/providers/openai"
@@ -587,6 +587,11 @@ const testModelTurnSchema = Schema.Union([
     delayMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
     usage: Schema.optionalKey(testModelUsageSchema),
   }),
+  Schema.Struct({
+    failure: Schema.String,
+    delayMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    usage: Schema.optionalKey(testModelUsageSchema),
+  }),
 ])
 
 const testModelScriptSchema = Schema.NonEmptyArray(testModelTurnSchema)
@@ -626,6 +631,15 @@ export const buildTestModelScript: (
           }),
     }
     if ("object" in turn) return TestModel.object(turn.object, options)
+    if ("failure" in turn)
+      return TestModel.failure(
+        AiError.make({
+          module: "rika/test-model",
+          method: "streamText",
+          reason: AiError.UnknownError.make({ description: turn.failure }),
+        }),
+        options,
+      )
     return TestModel.turn(
       turn.parts.map((part) => {
         if (part.type === "text") return TestModel.text(part.text)

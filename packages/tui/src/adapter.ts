@@ -514,6 +514,7 @@ const iconChar = (failed: boolean, running: boolean, frame = idleSpinnerFrame, c
 const markerText = (expanded: boolean): string => (expanded ? " ▾" : " ▸")
 
 const cancelledAgentLabel = (activeLabel: string): string => `${activeLabel.split(" ")[0] ?? "Subagent"} cancelled`
+const failedAgentLabel = (activeLabel: string): string => `${activeLabel.split(" ")[0] ?? "Subagent"} failed`
 
 export interface UnitLineRange {
   readonly start: number
@@ -955,7 +956,13 @@ export const buildTranscript: {
           nestedRanges.push({ start, end: line, unit: childId, expandable })
         }
     }
-    const renderOtherToolBody = (unit: ToolUnit, selected: boolean, expanded: boolean, hasChildren = false) => {
+    const renderOtherToolBody = (
+      unit: ToolUnit,
+      selected: boolean,
+      expanded: boolean,
+      hasChildren = false,
+      hasResponse = false,
+    ) => {
       const failed = unit.block.status === "failed"
       const running = unit.block.status === "running"
       const cancelled = unit.block.status === "cancelled"
@@ -963,10 +970,12 @@ export const buildTranscript: {
         ? unit.block.presentation.activeLabel
         : cancelled && unit.block.presentation.family === "agent"
           ? cancelledAgentLabel(unit.block.presentation.activeLabel)
-          : unit.block.presentation.completeLabel
+          : failed && unit.block.presentation.family === "agent"
+            ? failedAgentLabel(unit.block.presentation.activeLabel)
+            : unit.block.presentation.completeLabel
       const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
       const agent = unit.block.presentation.family === "agent"
-      const output = agent ? visibleAgentOutput(unit.block.output) : unit.block.output
+      const output = agent ? (hasResponse ? undefined : visibleAgentOutput(unit.block.output)) : unit.block.output
       const expandable =
         hasChildren ||
         (agent
@@ -984,8 +993,10 @@ export const buildTranscript: {
       }
       if (expanded && agent && unit.block.detail.length > 0) {
         append(dim(fg(colors.text)(`\n  ${unit.block.detail}`)))
-        if (failed && output !== undefined && output.length > 0)
-          append(fg(colors.red)(`\n  ${output.split("\n").slice(0, 12).join("\n  ")}`))
+        if (output !== undefined && output.length > 0) {
+          const renderedOutput = output.split("\n").slice(0, 12).join("\n  ")
+          append(failed ? fg(colors.red)(`\n  ${renderedOutput}`) : dim(fg(colors.text)(`\n  ${renderedOutput}`)))
+        }
       } else if (expanded && output !== undefined) {
         append(fg(colors.text)("\n"))
         const body = output.split("\n").slice(0, 12).join("\n")
@@ -1002,7 +1013,12 @@ export const buildTranscript: {
       const cancelled = block.status === "cancelled"
       const detail = toolDetail(index, block)
       const children = unit.children ?? []
-      const output = block.presentation.family === "agent" ? visibleAgentOutput(block.output) : block.output
+      const output =
+        block.presentation.family === "agent" && unit.response !== undefined
+          ? undefined
+          : block.presentation.family === "agent"
+            ? visibleAgentOutput(block.output)
+            : block.output
       const expandable =
         children.length > 0 ||
         unit.response !== undefined ||
@@ -1141,7 +1157,13 @@ export const buildTranscript: {
       else if (unit.kind === "diff") renderDiffBody(unit.block, selected, expanded)
       else if (unit.kind === "block") renderPlainBlock(unit.block)
       else if (unit.children !== undefined || unit.response !== undefined) {
-        renderOtherToolBody(toolUnitsFor(model, unit.blocks)[0]!, selected, expanded, true)
+        renderOtherToolBody(
+          toolUnitsFor(model, unit.blocks)[0]!,
+          selected,
+          expanded,
+          unit.children !== undefined,
+          unit.response !== undefined,
+        )
         if (expanded)
           for (const [childIndex, child] of (unit.children ?? []).entries())
             renderNestedTool(child, "  ", childIndex === (unit.children?.length ?? 0) - 1)
@@ -1263,6 +1285,16 @@ const visibleAgentOutput = (output: string | undefined): string | undefined => {
   if (!(value.startsWith("{") || value.startsWith("["))) return output
   try {
     const decoded: unknown = JSON.parse(value)
+    if (typeof decoded === "object" && decoded !== null && "output" in decoded && Array.isArray(decoded.output)) {
+      const text = decoded.output
+        .flatMap((part) =>
+          typeof part === "object" && part !== null && "text" in part && typeof part.text === "string"
+            ? [part.text]
+            : [],
+        )
+        .join("\n")
+      if (text.length > 0) return text
+    }
     return typeof decoded === "object" && decoded !== null ? undefined : output
   } catch {
     return output

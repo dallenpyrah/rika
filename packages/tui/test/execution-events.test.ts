@@ -1,6 +1,7 @@
 import * as Transcript from "@rika/transcript"
 import { describe, expect, it } from "vitest"
 import { ExecutionEvents, ViewState } from "../src"
+import { renderTranscriptStyled } from "../src/adapter"
 import { transcriptUnitId, transcriptUnits } from "../src/transcript-units"
 
 const event = (
@@ -250,6 +251,64 @@ describe("ExecutionEvents.projectUnits", () => {
         parentId: "turn:agent",
       }),
     )
+  })
+
+  it("renders a failed linked child as failed instead of finished", () => {
+    const childId = "execution:child:turn:failed"
+    const projection = Transcript.project("turn", "prompt", [
+      event("agent", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Attempt the work" } },
+      }),
+      event("agent-spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent", child_execution_id: childId },
+      }),
+      event("agent-failed", 2, "child_run.failed", {
+        data: { child_execution_id: childId, profile: "task", error: "Child model failed" },
+      }),
+      event("agent-result", 3, "tool.result.received", {
+        data: {
+          tool_call_id: "agent",
+          output: { childExecutionId: childId, status: "failed", output: [] },
+        },
+      }),
+    ])
+    const model = ExecutionEvents.projectUnits(ViewState.initial("/work"), projection.units)
+    const rendered = renderTranscriptStyled(model)
+      .chunks.map((chunk) => chunk.text)
+      .join("")
+
+    expect(rendered).toContain("Subagent failed")
+    expect(rendered).not.toContain("Subagent finished")
+  })
+
+  it("renders a completed child response from its parent result when child events are unavailable", () => {
+    const childId = "execution:child:turn:complete"
+    const projection = Transcript.project("turn", "prompt", [
+      event("agent", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Complete the work" } },
+      }),
+      event("agent-spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent", child_execution_id: childId },
+      }),
+      event("agent-result", 2, "tool.result.received", {
+        data: {
+          tool_call_id: "agent",
+          output: {
+            childExecutionId: childId,
+            status: "completed",
+            output: [{ _tag: "text", text: "Child completed the boundary." }],
+          },
+        },
+      }),
+    ])
+    const projected = ExecutionEvents.projectUnits(ViewState.initial("/work"), projection.units)
+    const model = { ...projected, expandedRowKeys: ["tool:turn:agent"] }
+    const rendered = renderTranscriptStyled(model)
+      .chunks.map((chunk) => chunk.text)
+      .join("")
+
+    expect(rendered).toContain("Subagent finished")
+    expect(rendered).toContain("Child completed the boundary.")
   })
 
   it("merges Relay child ids that encode the uncorrelated tool call", () => {

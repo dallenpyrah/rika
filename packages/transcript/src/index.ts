@@ -656,6 +656,7 @@ const applyToolResult = (projection: Projection, turnId: string, event: SourceEv
   const failed =
     typeof value.error === "string" ||
     record(output)._tag === "ToolError" ||
+    string(record(output).status).toLowerCase() === "failed" ||
     (process?.exitCode !== undefined && process.exitCode !== 0)
   const errorText = string(value.error, string(record(output).message))
   const resultText = failed && errorText.length > 0 ? errorText : outputText(output)

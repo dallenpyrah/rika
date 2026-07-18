@@ -15,6 +15,7 @@ type ModelTurn =
       readonly usage?: ModelUsage
     }
   | { readonly object: unknown; readonly delayMs?: number; readonly usage?: ModelUsage }
+  | { readonly failure: string; readonly delayMs?: number; readonly usage?: ModelUsage }
 
 interface ModelUsage {
   readonly inputTokens?: number
@@ -364,6 +365,8 @@ export const Scene = {
       withOptions({ parts: [{ type: "text" as const, text }] as const }, delayMs, usage),
     object: (object: unknown, delayMs?: number, usage?: ModelUsage): ModelTurn =>
       withOptions({ object }, delayMs, usage),
+    failure: (message: string, delayMs?: number, usage?: ModelUsage): ModelTurn =>
+      withOptions({ failure: message }, delayMs, usage),
     turn: (parts: ReadonlyArray<ModelPart>, delayMs?: number, usage?: ModelUsage): ModelTurn => {
       if (parts.length === 0) throw new Error("A deterministic model turn needs at least one part")
       return withOptions({ parts: parts as [ModelPart, ...Array<ModelPart>] }, delayMs, usage)
