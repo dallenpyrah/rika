@@ -879,15 +879,16 @@ describe("InteractiveSession controls", () => {
           status: "completed",
         })
 
-        const beforeIncognito = (yield* turns.list(Thread.ThreadId.make("shell-thread"))).length
-        const incognito = yield* runShell("printf secret", true, "always")
-        expect(incognito.find((event) => event._tag === "ShellCompleted")).toMatchObject({ incognito: true })
-        expect((yield* turns.list(Thread.ThreadId.make("shell-thread"))).length).toBe(beforeIncognito)
-
         const denied = yield* runShell("printf denied", false, "deny")
         expect(denied.find((event) => event._tag === "ExecutionFailed")).toMatchObject({
           message: "Shell command denied",
         })
+        expect(yield* Ref.get(commands)).toEqual(["-lc printf persisted"])
+
+        const beforeIncognito = (yield* turns.list(Thread.ThreadId.make("shell-thread"))).length
+        const incognito = yield* runShell("printf secret", true, "always")
+        expect(incognito.find((event) => event._tag === "ShellCompleted")).toMatchObject({ incognito: true })
+        expect((yield* turns.list(Thread.ThreadId.make("shell-thread"))).length).toBe(beforeIncognito)
         expect(yield* Ref.get(commands)).toEqual(["-lc printf persisted", "-lc printf secret"])
 
         yield* createTurn(turns, {
@@ -896,7 +897,11 @@ describe("InteractiveSession controls", () => {
           prompt: "active",
           now: 2,
         })
-        const queued = yield* runShell("printf queued", false, "allow")
+        const queuedStart = allEvents.length
+        yield* session.shell("printf queued", false)
+        yield* Effect.yieldNow
+        const queued = allEvents.slice(queuedStart)
+        expect(queued.some((event) => event._tag === "ShellPermissionRequested")).toBe(false)
         expect(queued.findLast((event) => event._tag === "QueueUpdated")).toMatchObject({
           change: { _tag: "Added", item: { prompt: expect.stringContaining("printf queued") } },
         })

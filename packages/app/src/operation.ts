@@ -1121,6 +1121,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           typeof options.shellPermission === "function"
             ? yield* options.shellPermission(workspace)
             : (options.shellPermission ?? "allow")
+        let shellPermissionAlways = shellPermission === "allow"
         const interactiveThread = yield* Ref.make<Thread.Thread | undefined>(undefined)
         const selectionRequest = yield* Ref.make(0)
         const transcriptCursor = yield* Ref.make<TranscriptRepository.PageCursor | undefined>(undefined)
@@ -2204,7 +2205,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               return Effect.void
             }
             const program = Effect.gen(function* () {
-              if (shellPermission === "ask") {
+              if (!shellPermissionAlways) {
                 const permissionId = `shell-permission-${shellPermissionSequence++}`
                 const approval = yield* Deferred.make<boolean>()
                 shellApprovals.set(permissionId, approval)
@@ -2439,6 +2440,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             shellApprovals.has(waitId)
               ? Effect.gen(function* () {
                   const approval = shellApprovals.get(waitId)
+                  if (decision === "always") shellPermissionAlways = true
                   if (approval !== undefined) yield* Deferred.succeed(approval, decision !== "deny")
                   sessionDispatch({ _tag: "ExecutionControlled", selectionEpoch: 0, action: "permission-resolved" })
                 })

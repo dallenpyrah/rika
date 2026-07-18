@@ -716,11 +716,24 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                 ),
               )
               active.commands.set(message.commandSequence, cancelled)
-              yield* Queue.offer(active.commandQueue, {
-                sequence: message.commandSequence,
-                cancelled,
-                effect,
-              })
+              if (message.command._tag === "ResolvePermission")
+                yield* Effect.forkIn(
+                  effect.pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        if (active.commands.get(message.commandSequence) === cancelled)
+                          active.commands.delete(message.commandSequence)
+                      }),
+                    ),
+                  ),
+                  hostScope,
+                )
+              else
+                yield* Queue.offer(active.commandQueue, {
+                  sequence: message.commandSequence,
+                  cancelled,
+                  effect,
+                })
             }
             if (message._tag === "operation") {
               yield* Effect.logInfo("resident.operation.accepted").pipe(

@@ -958,6 +958,7 @@ export const update: {
               }
             : block,
         ),
+        permissionSelection: 0,
         pendingAction: { _tag: "DecidePermission", id: message.id, kind: permission.kind, decision },
       }
     }
