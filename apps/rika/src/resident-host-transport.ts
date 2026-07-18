@@ -723,9 +723,9 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                 ),
               )
               active.commands.set(message.commandSequence, cancelled)
-              if (message.command._tag === "ResolvePermission")
+              if (message.command._tag === "ResolvePermission" || message.command._tag === "Cancel")
                 yield* Effect.forkIn(
-                  effect.pipe(
+                  Effect.raceFirst(Deferred.await(cancelled), effect).pipe(
                     Effect.ensuring(
                       Effect.sync(() => {
                         if (active.commands.get(message.commandSequence) === cancelled)

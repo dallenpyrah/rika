@@ -47,6 +47,7 @@ const stripTerminalControl = (text: string) =>
 const interactivePty = Effect.fn("ClientMainTest.interactivePty")(function* (
   actions: ReadonlyArray<{ readonly after: string; readonly write: string; readonly checkRunning?: boolean }>,
   modelScript?: string,
+  toolApprovals?: ReadonlyArray<string>,
 ) {
   const fs = yield* FileSystem.FileSystem
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
@@ -67,6 +68,7 @@ const interactivePty = Effect.fn("ClientMainTest.interactivePty")(function* (
     RIKA_DATABASE: `${state}/rika.db`,
     RIKA_RELAY_DATABASE: `${state}/relay.db`,
     RIKA_INTERNAL_RESIDENT_GRACE: "100",
+    ...(toolApprovals === undefined ? {} : { RIKA_TEST_APPROVAL_TOOLS: toolApprovals.join(",") }),
     ...(modelScript === undefined
       ? { RIKA_TEST_MODEL_RESPONSE: "completed" }
       : { RIKA_TEST_MODEL_SCRIPT: modelScript }),
@@ -138,19 +140,27 @@ test(
   () =>
     run(
       Effect.gen(function* () {
-        const script = yield* Schema.encodeUnknownEffect(UnknownJson)(
-          Array.from({ length: 4 }, () => ({
-            parts: [{ type: "text", text: "too late" }],
-            delayMs: 8_000,
-          })),
-        )
+        const script = yield* Schema.encodeUnknownEffect(UnknownJson)([
+          {
+            parts: [
+              {
+                type: "toolCall",
+                name: "shell",
+                params: { command: "printf", args: ["TOO_LATE"] },
+                id: "cancel-busy-turn",
+              },
+            ],
+          },
+          { parts: [{ type: "text", text: "too late" }] },
+        ])
         const result = yield* interactivePty(
           [
             { after: "Welcome to Rika", write: "cancel this turn\r" },
-            { after: "Waiting", write: "\u0003" },
+            { after: "› Allow once", write: "\u0003" },
             { after: "⊘", write: "\u0003", checkRunning: true },
           ],
           script,
+          ["shell"],
         )
         expect(result.timedOut, result.output).toBe(false)
         expect(result.actionsCompleted).toBe(3)

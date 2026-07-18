@@ -351,6 +351,7 @@ export type Message =
   | { readonly _tag: "ThreadPreviewScrolled"; readonly offset: number }
   | { readonly _tag: "PermissionSelectionMoved"; readonly offset: number }
   | { readonly _tag: "PermissionDecisionSelected"; readonly id: string; readonly decision?: PermissionDecision }
+  | { readonly _tag: "PermissionCancelled"; readonly id: string }
   | { readonly _tag: "EventReplayed"; readonly event: UiEvent }
   | { readonly _tag: "DetailMoved"; readonly offset: number }
   | { readonly _tag: "DetailToggled"; readonly id?: string }
@@ -986,7 +987,7 @@ export const update: {
         (block): block is Extract<TranscriptBlock, { _tag: "Permission" }> =>
           block._tag === "Permission" && block.id === message.id,
       )
-      if (permission?.kind === undefined) return model
+      if (permission?.kind === undefined || permission.status !== "pending") return model
       return {
         ...model,
         blocks: model.blocks.map((block) =>
@@ -1000,6 +1001,23 @@ export const update: {
         ),
         permissionSelection: 0,
         pendingAction: { _tag: "DecidePermission", id: message.id, kind: permission.kind, decision },
+      }
+    }
+    case "PermissionCancelled": {
+      const pendingAction = model.pendingAction as { readonly _tag?: string; readonly id?: string } | undefined
+      return {
+        ...model,
+        blocks: model.blocks.map((block) =>
+          (block as TranscriptBlock)._tag === "Permission" &&
+          (block as Extract<TranscriptBlock, { _tag: "Permission" }>).id === message.id
+            ? { ...(block as Extract<TranscriptBlock, { _tag: "Permission" }>), status: "denied" as const }
+            : block,
+        ),
+        permissionSelection: 0,
+        pendingAction:
+          pendingAction?._tag === "DecidePermission" && pendingAction.id === message.id
+            ? undefined
+            : model.pendingAction,
       }
     }
     case "EventReplayed":

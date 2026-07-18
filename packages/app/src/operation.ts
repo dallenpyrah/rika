@@ -2627,11 +2627,13 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           cancel: safe(
             sessionDispatch,
             Effect.gen(function* () {
-              const localApprovals = [...shellApprovals.values()]
+              const localApprovals = [...shellApprovals.entries()]
               if (localApprovals.length > 0) {
-                yield* Effect.forEach(localApprovals, (approval) => Deferred.succeed(approval, false), {
-                  discard: true,
-                })
+                for (const [id, approval] of localApprovals) {
+                  shellApprovals.delete(id)
+                  yield* Deferred.succeed(approval, false)
+                  sessionDispatch({ _tag: "ShellPermissionCancelled", id })
+                }
                 sessionDispatch({ _tag: "ExecutionControlled", selectionEpoch: 0, action: "cancelled" })
                 return
               }
@@ -2799,13 +2801,13 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               sessionDispatch,
               Effect.gen(function* () {
                 if (epoch <= currentSelectionEpoch) return
+                const threads = yield* ThreadRepository.Service
+                const thread = (yield* threads.list({ limit: 1 }))[0]
+                if (thread === undefined || epoch <= currentSelectionEpoch) return
                 const previousThread = yield* Ref.get(interactiveThread)
                 const previousEpoch = currentSelectionEpoch
                 currentSelectionEpoch = epoch
                 yield* Ref.set(selectionRequest, epoch)
-                const threads = yield* ThreadRepository.Service
-                const thread = (yield* threads.list({ limit: 1 }))[0]
-                if (thread === undefined) return yield* operationError("No threads exist")
                 selectedThreadId = String(thread.id)
                 selectionLoad = {
                   epoch,

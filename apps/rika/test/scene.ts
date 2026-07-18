@@ -67,6 +67,7 @@ interface Options {
   }
   readonly editorContent?: string
   readonly mediaAnalyzer?: { readonly response: string } | { readonly error: string }
+  readonly toolApprovals?: ReadonlyArray<string>
   readonly inspectPaths?: ReadonlyArray<string>
   readonly outsideFiles?: Readonly<Record<string, string>>
   readonly symlinks?: ReadonlyArray<SceneSymlink>
@@ -231,6 +232,7 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
       : "response" in options.mediaAnalyzer
         ? { RIKA_TEST_MEDIA_ANALYZER_RESPONSE: options.mediaAnalyzer.response }
         : { RIKA_TEST_MEDIA_ANALYZER_ERROR: options.mediaAnalyzer.error }),
+    ...(options.toolApprovals === undefined ? {} : { RIKA_TEST_APPROVAL_TOOLS: options.toolApprovals.join(",") }),
     ...(options.executable === undefined ? {} : { RIKA_SCENE_OPEN_LOG: openLog }),
     ...options.environment,
     ...modelEnvironment,
@@ -387,6 +389,9 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
       ),
     ),
   )
+  const inspectedPaths = Object.fromEntries(
+    Object.entries(workspaceFiles).map(([name, contents]) => [name, contents !== null]),
+  )
   const opens = yield* fs.readFileString(openLog).pipe(
     Effect.map((contents) =>
       contents
@@ -398,16 +403,21 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     Effect.orElseSucceed(() => [] as ReadonlyArray<ReadonlyArray<string>>),
   )
   const { Database } = yield* Effect.promise(() => import("bun:sqlite"))
-  const relayDatabase = yield* Effect.acquireRelease(
-    Effect.sync(() => new Database(`${state}/relay.db`, { readonly: true })),
-    (connection) => Effect.sync(() => connection.close()),
-  )
-  const childExecutions = relayDatabase
-    .query<
-      { readonly id: string; readonly status: string },
-      []
-    >("select id, status from relay_executions where id like 'child:%' order by id")
-    .all()
+  const childExecutions = (yield* fs.exists(`${state}/relay.db`))
+    ? yield* Effect.acquireUseRelease(
+        Effect.sync(() => new Database(`${state}/relay.db`, { readonly: true })),
+        (relayDatabase) =>
+          Effect.sync(() =>
+            relayDatabase
+              .query<
+                { readonly id: string; readonly status: string },
+                []
+              >("select id, status from relay_executions where id like 'child:%' order by id")
+              .all(),
+          ),
+        (connection) => Effect.sync(() => connection.close()),
+      )
+    : []
   const completed = {
     ...result,
     rawOutput,
@@ -428,6 +438,7 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     names,
     workspaceContents,
     workspaceFiles,
+    inspectedPaths,
     childExecutions,
   }
   const database = new Database(`${state}/rika.db`, { readonly: true })
@@ -518,6 +529,11 @@ export const Scene = {
       after,
       write: "",
       restartArguments,
+    }),
+    reconnectAfter: (after: string, write = ""): Action => ({
+      after,
+      write,
+      restartArguments: ["threads", "continue", "--last"],
     }),
     writeAfterDelay: (write: string, delayMs: number): Action => ({ write, delayMs }),
     resizeAfter: (after: string, width: number, height: number, write?: string): Action => ({

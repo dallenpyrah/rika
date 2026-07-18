@@ -247,6 +247,8 @@ test("drives bypassed recorded and incognito shell commands through Operation an
               status: "pending",
             },
           })
+        else if (event._tag === "ShellPermissionCancelled")
+          model = ViewState.update(model, { _tag: "PermissionCancelled", id: event.id })
         else if (event._tag === "ShellCompleted") {
           model = ViewState.update(model, { _tag: "AssistantCompleted", text: event.text })
           Queue.offerUnsafe(completedShells, event.command)

@@ -360,6 +360,7 @@ describe("InteractiveSession controls", () => {
       if (session === undefined) return yield* Effect.die("Missing interactive session")
       const events: Array<Operation.InteractiveEvent> = []
       yield* collectEvents(session, events)
+      yield* session.reopenThread(1)
       yield* session.submit("")
       while ((yield* turns.get(Turn.TurnId.make("created-turn")))?.status !== "completed") yield* Effect.yieldNow
       while (events.filter((event) => event._tag !== "ThreadsListed").length < 4) yield* Effect.yieldNow

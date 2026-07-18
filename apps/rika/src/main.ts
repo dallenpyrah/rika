@@ -2030,6 +2030,8 @@ if (import.meta.main) {
                 status: "pending",
               },
             })
+          } else if (event._tag === "ShellPermissionCancelled") {
+            model = ViewState.update(model, { _tag: "PermissionCancelled", id: event.id })
           } else if (event._tag === "ShellCompleted") {
             model = ViewState.update(model, { _tag: "AssistantCompleted", text: event.text })
             model = ViewState.update(model, { _tag: "ExecutionCompleted" })

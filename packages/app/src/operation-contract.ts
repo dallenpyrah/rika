@@ -381,6 +381,7 @@ export type InteractiveEvent =
       readonly oldestCursor?: TranscriptPage.PageCursor
     }
   | { readonly _tag: "ShellPermissionRequested"; readonly id: string; readonly command: string }
+  | { readonly _tag: "ShellPermissionCancelled"; readonly id: string }
   | { readonly _tag: "ShellCompleted"; readonly command: string; readonly text: string; readonly incognito: boolean }
   | {
       readonly _tag: "ExecutionControlled"
@@ -527,6 +528,7 @@ export const InteractiveEventSchema = Schema.Union([
     oldestCursor: Schema.optionalKey(TranscriptPage.PageCursor),
   }),
   Schema.Struct({ _tag: Schema.tag("ShellPermissionRequested"), id: Schema.String, command: Schema.String }),
+  Schema.Struct({ _tag: Schema.tag("ShellPermissionCancelled"), id: Schema.String }),
   Schema.Struct({
     _tag: Schema.tag("ShellCompleted"),
     command: Schema.String,

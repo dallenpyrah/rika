@@ -693,6 +693,26 @@ describe("ViewState", () => {
     expect(model.blocks[0]).toMatchObject({ status: "approved" })
   })
 
+  test("cancels only the matching permission and clears its stale action", () => {
+    let model = ViewState.update(ViewState.initial("/work"), {
+      _tag: "BlockAdded",
+      block: { _tag: "Permission", id: "old", kind: "permission", title: "Old", detail: "old", status: "pending" },
+    })
+    model = ViewState.update(model, {
+      _tag: "BlockAdded",
+      block: { _tag: "Permission", id: "new", kind: "permission", title: "New", detail: "new", status: "pending" },
+    })
+    model = ViewState.update(model, { _tag: "PermissionDecisionSelected", id: "old" })
+    model = ViewState.update(model, { _tag: "PermissionCancelled", id: "old" })
+
+    expect(model.blocks).toMatchObject([
+      { id: "old", status: "denied" },
+      { id: "new", status: "pending" },
+    ])
+    expect(model.pendingAction).toBeUndefined()
+    expect(model.permissionSelection).toBe(0)
+  })
+
   test("moves up into queued turns and down or Escape back to the composer", () => {
     let model = ViewState.replaceQueue({ ...ViewState.initial("/work"), busy: true }, [
       { id: "one", prompt: "one" },
