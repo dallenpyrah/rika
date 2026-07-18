@@ -57,7 +57,7 @@ const SummaryRow = Schema.Struct({
   last_activity_at: Schema.Finite,
   last_read_at: Schema.NullOr(Schema.Finite),
   turn_count: Schema.Finite,
-  activity_count: Schema.Finite,
+  current_activity_count: Schema.Finite,
   added: Schema.Finite,
   modified: Schema.Finite,
   removed: Schema.Finite,
@@ -81,7 +81,7 @@ const decodeSummary = (row: unknown) =>
   Schema.decodeUnknownEffect(SummaryRow)(row).pipe(
     Effect.map((value): ThreadSummary => {
       const editTotals =
-        value.turn_count > 0 && value.turn_count === value.activity_count
+        value.turn_count > 0 && value.turn_count === value.current_activity_count
           ? {
               added: Math.max(0, value.added),
               modified: Math.max(0, value.modified),
@@ -139,13 +139,22 @@ export const makeMemory = Effect.fn("ThreadSummaryRepository.makeMemory")(functi
           const activity = activityValues.get(turn.id)
           return activity === undefined ? [] : [activity]
         })
+        const currentProjected = history.flatMap((turn) => {
+          const activity = activityValues.get(turn.id)
+          return activity !== undefined &&
+            activity.projectedCursor === turn.lastCursor &&
+            (!(["completed", "failed", "cancelled"] as ReadonlyArray<Status>).includes(turn.status) ||
+              activity.complete)
+            ? [activity]
+            : []
+        })
         const rank = history.reduce((maximum, turn) => Math.max(maximum, statusRank(turn.status)), 0)
         const lastActivityAt = Math.max(
-          thread.updatedAt,
+          thread.createdAt,
           ...history.map((turn) => turn.updatedAt),
-          ...projected.map((activity) => activity.lastEventAt ?? activity.updatedAt),
+          ...projected.flatMap((activity) => (activity.lastEventAt === undefined ? [] : [activity.lastEventAt])),
         )
-        const totals = projected.reduce(
+        const totals = currentProjected.reduce(
           (total, activity) => ({
             added: total.added + activity.editTotals.added,
             modified: total.modified + activity.editTotals.modified,
@@ -162,7 +171,7 @@ export const makeMemory = Effect.fn("ThreadSummaryRepository.makeMemory")(functi
           status: summaryStatus(rank),
           unread: lastActivityAt > (readValues.get(thread.id) ?? 0),
           lastActivityAt,
-          ...(history.length > 0 && projected.length === history.length ? { editTotals: totals } : {}),
+          ...(history.length > 0 && currentProjected.length === history.length ? { editTotals: totals } : {}),
         })
       }),
     )
@@ -256,13 +265,19 @@ export const layer = Layer.effect(
             ELSE 0
           END) AS status_rank,
           MAX(
-            thread.updated_at,
-            COALESCE(MAX(turn.updated_at), thread.updated_at),
-            COALESCE(MAX(activity.last_event_at), thread.updated_at)
+            thread.created_at,
+            COALESCE(MAX(turn.updated_at), thread.created_at),
+            COALESCE(MAX(activity.last_event_at), thread.created_at)
           ) AS last_activity_at,
           read_state.last_read_at,
           COUNT(turn.id) AS turn_count,
-          COUNT(activity.turn_id) AS activity_count,
+          COALESCE(SUM(CASE
+            WHEN activity.turn_id IS NOT NULL
+              AND activity.projected_cursor IS turn.last_cursor
+              AND (turn.status NOT IN ('completed', 'failed', 'cancelled') OR activity.complete = 1)
+            THEN 1
+            ELSE 0
+          END), 0) AS current_activity_count,
           COALESCE(SUM(activity.added), 0) AS added,
           COALESCE(SUM(activity.modified), 0) AS modified,
           COALESCE(SUM(activity.removed), 0) AS removed
@@ -316,7 +331,7 @@ export const layer = Layer.effect(
         FROM rika_turns AS turn
         LEFT JOIN rika_thread_turn_activity AS activity ON activity.turn_id = turn.id
         WHERE activity.turn_id IS NULL
-          OR COALESCE(activity.projected_cursor, '') <> COALESCE(turn.last_cursor, '')
+          OR activity.projected_cursor IS NOT turn.last_cursor
           OR (turn.status IN ('completed', 'failed', 'cancelled') AND activity.complete = 0)
         ORDER BY turn.created_at ASC, turn.rowid ASC
         LIMIT ${listLimit(limit)}`.pipe(Effect.mapError(repositoryError))

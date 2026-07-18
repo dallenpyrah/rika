@@ -197,6 +197,26 @@ it.effect("memory terminal status is immutable against every stale lifecycle upd
   }).pipe(provideLayer(TurnRepository.memoryLayer())),
 )
 
+it.effect("memory cursor repair compares status and cursor without changing activity time", () =>
+  Effect.gen(function* () {
+    const repository = yield* TurnRepository.Service
+    const created = yield* create(repository, {
+      id: Turn.TurnId.make("terminal-repair"),
+      threadId: Thread.ThreadId.make("terminal-repair-thread"),
+      prompt: "repair",
+      now: 1,
+    })
+    yield* repository.setStatus(created.id, "completed", "cursor-a", 2)
+    expect(yield* repository.repairCursor(created.id, "completed", "stale", "cursor-b")).toBe(false)
+    expect(yield* repository.repairCursor(created.id, "completed", "cursor-a", "cursor-b")).toBe(true)
+    expect(yield* repository.get(created.id)).toMatchObject({
+      status: "completed",
+      lastCursor: "cursor-b",
+      updatedAt: 2,
+    })
+  }).pipe(provideLayer(TurnRepository.memoryLayer())),
+)
+
 it.effect("memory turns reject duplicates and missing updates", () =>
   Effect.gen(function* () {
     const repository = yield* TurnRepository.Service

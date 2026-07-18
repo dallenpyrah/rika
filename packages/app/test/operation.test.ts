@@ -1133,6 +1133,52 @@ describe("Operation", () => {
     }),
   )
 
+  it.effect("drains more than one batch of thread summary repairs", () =>
+    Effect.gen(function* () {
+      const thread = selectionThread("summary-repair-thread")
+      const turns = Array.from(
+        { length: 101 },
+        (_, index): Turn.Turn => ({
+          id: Turn.TurnId.make(`summary-repair-${index}`),
+          threadId: thread.id,
+          prompt: `repair ${index}`,
+          executionRoute: executionRoute(),
+          status: "completed",
+          createdAt: index + 1,
+          updatedAt: index + 1,
+        }),
+      )
+      const inspections = yield* Ref.make<ReadonlyArray<string>>([])
+      const repairBackend = ExecutionBackend.Service.of({
+        ...backend,
+        inspect: (turnId) =>
+          Ref.update(inspections, (values) => [...values, String(turnId)]).pipe(
+            Effect.as({ turnId, status: "completed" as const, waits: [], pendingTools: [], children: [] }),
+          ),
+        replay: (turnId) => Effect.succeed({ turnId, status: "completed" as const, events: [] }),
+      })
+      yield* Effect.gen(function* () {
+        const operation = yield* Operation.Service
+        yield* operation.run({ _tag: "Interactive", prompt: [], workspace: "/work", ephemeral: false })
+      }).pipe(
+        provideLayer(
+          Operation.productLayer({
+            repositoryLayer: ThreadRepository.memoryLayer([thread]),
+            turnRepositoryLayer: TurnRepository.memoryLayer(turns),
+            backendLayer: Layer.succeed(ExecutionBackend.Service, repairBackend),
+            defaultWorkspace: "/work",
+            makeThreadId: Effect.die("unused"),
+            makeTurnId: Effect.die("unused"),
+            interactive: () => Effect.void,
+          }),
+        ),
+      )
+      expect(new Set((yield* Ref.get(inspections)).filter((turnId) => turnId.startsWith("summary-repair-"))).size).toBe(
+        101,
+      )
+    }),
+  )
+
   it.effect("repairs each orphan once in the owner scope and scans again on reconnect", () =>
     Effect.gen(function* () {
       const thread = selectionThread("repair-thread")

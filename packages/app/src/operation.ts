@@ -276,7 +276,12 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
                       executionRoute: turn.executionRoute,
                       ...(prepared.extensionPin === undefined ? {} : { extensionPin: prepared.extensionPin }),
                     })
-                    yield* turns.setStatus(turn.id, result.status, result.events.at(-1)?.cursor ?? turn.lastCursor, now)
+                    yield* turns.setStatus(
+                      turn.id,
+                      result.status,
+                      ThreadActivity.latestCursor(result.events) ?? turn.lastCursor,
+                      now,
+                    )
                     return
                   }
                   yield* turns.setStatus(turn.id, inspection.status, inspection.lastCursor ?? turn.lastCursor, now)
@@ -385,7 +390,7 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
           yield* turns.setStatus(
             promotedTurn.id,
             result.status,
-            result.events.at(-1)?.cursor,
+            ThreadActivity.latestCursor(result.events),
             yield* Clock.currentTimeMillis,
           )
           if (!isTerminalStatus(result.status)) return
@@ -910,31 +915,68 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
       const repairThreadSummaries = Effect.fn("Operation.repairThreadSummaries")(function* () {
         const summaries = yield* ThreadSummaryRepository.Service
         const backend = yield* ExecutionBackend.Service
-        const candidates = yield* summaries.listRepairCandidates(100)
-        yield* Effect.forEach(
-          candidates,
-          (candidate) =>
-            Effect.gen(function* () {
-              if (candidate.status === "queued") {
-                yield* summaries.ensureTurn(candidate.turnId, candidate.threadId, yield* Clock.currentTimeMillis)
-                return
-              }
-              const inspection = yield* backend.inspect(candidate.turnId)
-              if (inspection === undefined) {
-                yield* summaries.ensureTurn(candidate.turnId, candidate.threadId, yield* Clock.currentTimeMillis)
-                return
-              }
-              yield* projectExecutionResult(candidate.threadId, yield* backend.replay(candidate.turnId))
-            }).pipe(
-              Effect.catch((error) =>
-                Effect.logError("thread-summary.repair.failed").pipe(
-                  Effect.annotateLogs("rika.turn.id", candidate.turnId),
-                  Effect.annotateLogs("rika.failure.kind", String(error)),
+        let previousBatch: ReadonlyArray<readonly [string, string, string | undefined]> = []
+        while (true) {
+          const candidates = yield* summaries.listRepairCandidates(100)
+          if (candidates.length === 0) return
+          const batch = candidates.map(
+            (candidate) => [candidate.turnId, candidate.status, candidate.lastCursor] as const,
+          )
+          if (
+            batch.length === previousBatch.length &&
+            batch.every(
+              (candidate, index) =>
+                candidate[0] === previousBatch[index]?.[0] &&
+                candidate[1] === previousBatch[index]?.[1] &&
+                candidate[2] === previousBatch[index]?.[2],
+            )
+          )
+            return
+          previousBatch = batch
+          yield* Effect.forEach(
+            candidates,
+            (candidate) =>
+              Effect.gen(function* () {
+                if (candidate.status === "queued") {
+                  yield* summaries.ensureTurn(candidate.turnId, candidate.threadId, yield* Clock.currentTimeMillis)
+                  return
+                }
+                const inspection = yield* backend.inspect(candidate.turnId)
+                if (inspection === undefined) {
+                  yield* summaries.ensureTurn(candidate.turnId, candidate.threadId, yield* Clock.currentTimeMillis)
+                  return
+                }
+                const result = yield* backend.replay(candidate.turnId)
+                const turns = yield* TurnRepository.Service
+                const current = yield* turns.get(candidate.turnId)
+                if (
+                  current === undefined ||
+                  current.status !== candidate.status ||
+                  current.lastCursor !== candidate.lastCursor
+                )
+                  return
+                if (
+                  result.status !== candidate.status ||
+                  !(yield* turns.repairCursor(
+                    candidate.turnId,
+                    candidate.status,
+                    candidate.lastCursor,
+                    ThreadActivity.latestCursor(result.events) ?? candidate.lastCursor,
+                  ))
+                )
+                  return
+                yield* projectExecutionResult(candidate.threadId, result)
+              }).pipe(
+                Effect.catch((error) =>
+                  Effect.logError("thread-summary.repair.failed").pipe(
+                    Effect.annotateLogs("rika.turn.id", candidate.turnId),
+                    Effect.annotateLogs("rika.failure.kind", String(error)),
+                  ),
                 ),
               ),
-            ),
-          { concurrency: 4, discard: true },
-        )
+            { concurrency: 4, discard: true },
+          )
+        }
       })
       const settleReviewOwner = Effect.fn("Operation.settleReviewOwner")(function* (
         turn: Pick<Turn.Turn, "id" | "lastCursor">,
@@ -1514,7 +1556,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                       const updatedTurn = yield* setTurnStatus(
                         turn.id,
                         result.status,
-                        result.events.at(-1)?.cursor,
+                        ThreadActivity.latestCursor(result.events),
                         completedAt,
                       )
                       yield* projectExecutionResult(thread.id, result)
@@ -1621,7 +1663,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             if (result === undefined || childFollowerSelection !== job.selection) return
             for (const event of result.events) deliverEvent(event)
             if (isTerminalStatus(result.status)) return
-            const nextCursor = result.events.at(-1)?.cursor
+            const nextCursor = ThreadActivity.latestCursor(result.events)
             if (nextCursor === undefined || nextCursor === afterCursor) return
             afterCursor = nextCursor
           }
@@ -1736,7 +1778,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             const updatedTurn = yield* setTurnStatus(
               promotedTurn.id,
               result.status,
-              result.events.at(-1)?.cursor,
+              ThreadActivity.latestCursor(result.events),
               yield* Clock.currentTimeMillis,
             )
             yield* projectExecutionResult(thread.id, result)
@@ -1866,7 +1908,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           const updatedTurn = yield* setTurnStatus(
             turn.id,
             result.status,
-            result.events.at(-1)?.cursor ?? turn.lastCursor,
+            ThreadActivity.latestCursor(result.events) ?? turn.lastCursor,
             yield* Clock.currentTimeMillis,
           )
           yield* projectExecutionResult(turn.threadId, result)
@@ -2558,7 +2600,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               yield* setTurnStatus(
                 turn.id,
                 result.status,
-                result.events.at(-1)?.cursor ?? turn.lastCursor,
+                ThreadActivity.latestCursor(result.events) ?? turn.lastCursor,
                 yield* Clock.currentTimeMillis,
               )
               yield* projectExecutionResult(turn.threadId, result)
@@ -2992,7 +3034,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   const updated = yield* setTurnStatus(
                     turn.id,
                     result.status,
-                    result.events.at(-1)?.cursor,
+                    ThreadActivity.latestCursor(result.events),
                     completedAt,
                   )
                   yield* projectExecutionResult(thread.id, result)

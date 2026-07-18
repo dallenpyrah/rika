@@ -71,4 +71,22 @@ describe("thread activity projection", () => {
       now: 20,
     })
   })
+
+  it("projects the highest event sequence when replay delivery is out of order", () => {
+    expect(
+      ThreadActivity.projectionInput(
+        Thread.ThreadId.make("thread-a"),
+        {
+          turnId: "turn-a",
+          status: "running",
+          events: [
+            event({ cursor: "cursor-3", sequence: 3, createdAt: 12 }),
+            event({ cursor: "cursor-1", sequence: 1, createdAt: 20 }),
+            event({ cursor: "cursor-2", sequence: 2, createdAt: 16 }),
+          ],
+        },
+        30,
+      ),
+    ).toMatchObject({ projectedCursor: "cursor-3", complete: false, lastEventAt: 20 })
+  })
 })

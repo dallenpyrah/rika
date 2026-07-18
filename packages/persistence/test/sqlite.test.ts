@@ -351,6 +351,9 @@ test("creates, persists, and reopens the current schema", () => {
           prompt: "hello",
           now: 3,
         })
+        const summaries = yield* ThreadSummaryRepository.Service
+        yield* summaries.ensureTurn(Turn.TurnId.make("turn-a"), id, 100)
+        expect((yield* summaries.list())[0]?.lastActivityAt).toBe(3)
         yield* turns.setExtensionPin(Turn.TurnId.make("turn-a"), {
           generation: "generation-a",
           sourceDigest: "source-a",
@@ -360,7 +363,19 @@ test("creates, persists, and reopens the current schema", () => {
           resolvedContextDigest: "context-a",
         })
         yield* turns.setStatus(Turn.TurnId.make("turn-a"), "completed", "cursor-a", 4)
-        const summaries = yield* ThreadSummaryRepository.Service
+        expect(yield* turns.repairCursor(Turn.TurnId.make("turn-a"), "completed", "stale", "cursor-repaired")).toBe(
+          false,
+        )
+        expect(yield* turns.repairCursor(Turn.TurnId.make("turn-a"), "completed", "cursor-a", "cursor-repaired")).toBe(
+          true,
+        )
+        expect(yield* turns.get(Turn.TurnId.make("turn-a"))).toMatchObject({
+          lastCursor: "cursor-repaired",
+          updatedAt: 4,
+        })
+        expect(yield* turns.repairCursor(Turn.TurnId.make("turn-a"), "completed", "cursor-repaired", "cursor-a")).toBe(
+          true,
+        )
         yield* summaries.replaceTurn({
           turnId: Turn.TurnId.make("turn-a"),
           threadId: id,
@@ -368,9 +383,69 @@ test("creates, persists, and reopens the current schema", () => {
           complete: true,
           editTotals: { added: 3, modified: 2, removed: 1 },
           lastEventAt: 5,
-          now: 5,
+          now: 101,
         })
         yield* summaries.markRead(id, 6)
+        yield* summaries.markRead(id, 1)
+        yield* repository.setPinned(id, true, 100)
+        expect(yield* summaries.list()).toMatchObject([
+          { id, pinned: true, unread: false, lastActivityAt: 5, editTotals: { added: 3, modified: 2, removed: 1 } },
+        ])
+        yield* summaries.replaceTurn({
+          turnId: Turn.TurnId.make("turn-a"),
+          threadId: id,
+          projectedCursor: "cursor-a",
+          complete: false,
+          editTotals: { added: 99, modified: 99, removed: 99 },
+          lastEventAt: 5,
+          now: 102,
+        })
+        expect((yield* summaries.list())[0]?.editTotals).toBeUndefined()
+        expect(yield* summaries.listRepairCandidates()).toMatchObject([{ turnId: "turn-a", lastCursor: "cursor-a" }])
+        yield* summaries.replaceTurn({
+          turnId: Turn.TurnId.make("turn-a"),
+          threadId: id,
+          projectedCursor: "cursor-a",
+          complete: true,
+          editTotals: { added: 3, modified: 2, removed: 1 },
+          lastEventAt: 5,
+          now: 103,
+        })
+        expect(yield* turns.repairCursor(Turn.TurnId.make("turn-a"), "completed", "cursor-a", "")).toBe(true)
+        yield* summaries.replaceTurn({
+          turnId: Turn.TurnId.make("turn-a"),
+          threadId: id,
+          complete: true,
+          editTotals: { added: 3, modified: 2, removed: 1 },
+          lastEventAt: 5,
+          now: 104,
+        })
+        expect((yield* summaries.list())[0]?.editTotals).toBeUndefined()
+        expect(yield* summaries.listRepairCandidates()).toMatchObject([{ lastCursor: "" }])
+        expect(yield* turns.repairCursor(Turn.TurnId.make("turn-a"), "completed", "", undefined)).toBe(true)
+        yield* summaries.replaceTurn({
+          turnId: Turn.TurnId.make("turn-a"),
+          threadId: id,
+          projectedCursor: "",
+          complete: true,
+          editTotals: { added: 3, modified: 2, removed: 1 },
+          lastEventAt: 5,
+          now: 105,
+        })
+        expect((yield* summaries.list())[0]?.editTotals).toBeUndefined()
+        const missingCursorCandidates = yield* summaries.listRepairCandidates()
+        expect(missingCursorCandidates).toHaveLength(1)
+        expect(missingCursorCandidates[0]).not.toHaveProperty("lastCursor")
+        expect(yield* turns.repairCursor(Turn.TurnId.make("turn-a"), "completed", undefined, "cursor-a")).toBe(true)
+        yield* summaries.replaceTurn({
+          turnId: Turn.TurnId.make("turn-a"),
+          threadId: id,
+          projectedCursor: "cursor-a",
+          complete: true,
+          editTotals: { added: 3, modified: 2, removed: 1 },
+          lastEventAt: 5,
+          now: 106,
+        })
         const transcript = yield* TranscriptRepository.Service
         const storedTurn = yield* turns.get(Turn.TurnId.make("turn-a"))
         if (storedTurn === undefined) return yield* Effect.die("turn-a was not stored")

@@ -111,6 +111,12 @@ export interface Interface {
     lastCursor: string | undefined,
     now: number,
   ) => Effect.Effect<Turn, RepositoryError>
+  readonly repairCursor: (
+    id: TurnId,
+    status: Status,
+    expectedCursor: string | undefined,
+    cursor: string | undefined,
+  ) => Effect.Effect<boolean, RepositoryError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@rika/persistence/turn-repository/Service") {}
@@ -606,6 +612,17 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
           })
         return updated.turn
       }),
+      repairCursor: Effect.fn("TurnRepository.repairCursor")(function* (id, status, expectedCursor, cursor) {
+        return yield* Ref.modify(state, (currentState) => {
+          const current = currentState.turns.get(id)
+          if (current === undefined || current.status !== status || current.lastCursor !== expectedCursor)
+            return [false, currentState]
+          const { lastCursor: previousCursor, ...withoutCursor } = current
+          void previousCursor
+          const next: Turn = { ...withoutCursor, ...(cursor === undefined ? {} : { lastCursor: cursor }) }
+          return [true, { ...currentState, turns: new Map(currentState.turns).set(id, next) }]
+        })
+      }),
     })
   })
 
@@ -1004,6 +1021,14 @@ export const layer = Layer.effect(
             }),
           )
           .pipe(Effect.mapError(repositoryError))
+      }),
+      repairCursor: Effect.fn("TurnRepository.repairCursor")(function* (id, status, expectedCursor, cursor) {
+        const rows = yield* sql`UPDATE rika_turns SET last_cursor = ${cursor ?? null}
+          WHERE id = ${id}
+            AND status = ${status}
+            AND (last_cursor = ${expectedCursor ?? null} OR (last_cursor IS NULL AND ${expectedCursor ?? null} IS NULL))
+          RETURNING id`.pipe(Effect.mapError(repositoryError))
+        return rows[0] !== undefined
       }),
     })
   }),

@@ -81,6 +81,12 @@ export const editTotals = (events: ReadonlyArray<ExecutionBackend.Event>): Threa
   )
 }
 
+export const latestCursor = (events: ReadonlyArray<ExecutionBackend.Event>): string | undefined =>
+  events.reduce<ExecutionBackend.Event | undefined>(
+    (current, event) => (current === undefined || event.sequence >= current.sequence ? event : current),
+    undefined,
+  )?.cursor
+
 export const projectionInput: {
   (
     result: ExecutionBackend.Result,
@@ -93,13 +99,18 @@ export const projectionInput: {
     threadId: Thread.ThreadId,
     result: ExecutionBackend.Result,
     now: number,
-  ): ThreadSummaryRepository.TurnActivityInput => ({
-    turnId: Turn.TurnId.make(result.turnId),
-    threadId,
-    ...(result.events.at(-1)?.cursor === undefined ? {} : { projectedCursor: result.events.at(-1)!.cursor }),
-    complete: result.status === "completed" || result.status === "failed" || result.status === "cancelled",
-    editTotals: editTotals(result.events),
-    ...(result.events.length === 0 ? {} : { lastEventAt: Math.max(...result.events.map((event) => event.createdAt)) }),
-    now,
-  }),
+  ): ThreadSummaryRepository.TurnActivityInput => {
+    const projectedCursor = latestCursor(result.events)
+    return {
+      turnId: Turn.TurnId.make(result.turnId),
+      threadId,
+      ...(projectedCursor === undefined ? {} : { projectedCursor }),
+      complete: result.status === "completed" || result.status === "failed" || result.status === "cancelled",
+      editTotals: editTotals(result.events),
+      ...(result.events.length === 0
+        ? {}
+        : { lastEventAt: Math.max(...result.events.map((event) => event.createdAt)) }),
+      now,
+    }
+  },
 )
