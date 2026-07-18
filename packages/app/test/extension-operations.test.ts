@@ -275,4 +275,121 @@ describe("ExtensionOperations", () => {
       ),
     ),
   )
+
+  it.effect("stores exact lifecycle state and never rolls back below the first generation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-app-extension-lifecycle-" })
+        const options = {
+          globalRoot: `${root}/global`,
+          workspaceRoot: `${root}/skills`,
+          configPath: `${root}/mcp.json`,
+          trustPath: `${root}/trust.json`,
+          generationsPath: `${root}/extensions.json`,
+        }
+        const run = (action: "enable" | "disable" | "rollback", name: string) =>
+          ExtensionOperations.run({ _tag: "Extension", action, name }).pipe(
+            provideLayer(Layer.merge(ExtensionOperations.layer(options), oauthLayer)),
+          )
+        yield* run("enable", "alpha")
+        yield* run("disable", "beta")
+        yield* fs.writeFileString(
+          options.generationsPath,
+          '{"extensions":{"alpha":{"enabled":true,"generation":3},"beta":{"enabled":false,"generation":1}}}',
+        )
+        yield* run("rollback", "alpha")
+        yield* run("rollback", "beta")
+        yield* run("rollback", "beta")
+        expect(decodeJson(yield* fs.readFileString(options.generationsPath))).toEqual({
+          extensions: {
+            alpha: { enabled: true, generation: 2 },
+            beta: { enabled: false, generation: 1 },
+          },
+        })
+        expect(yield* fs.exists(`${options.generationsPath}.lock`)).toBe(false)
+      }).pipe(
+        provideLayer(
+          Layer.merge(BunServices.layer, SkillRegistry.fileSystemLayer.pipe(Layer.provide(BunServices.layer))),
+        ),
+      ),
+    ),
+  )
+
+  it.effect("lists without creating storage and rejects malformed records without replacing them", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-app-extension-errors-" })
+        const options = {
+          globalRoot: `${root}/global`,
+          workspaceRoot: `${root}/skills`,
+          configPath: `${root}/mcp.json`,
+          trustPath: `${root}/trust.json`,
+          generationsPath: `${root}/extensions.json`,
+        }
+        const run = (input: Parameters<typeof ExtensionOperations.run>[0]) =>
+          ExtensionOperations.run(input).pipe(provideLayer(Layer.merge(ExtensionOperations.layer(options), oauthLayer)))
+        const logs = yield* Effect.gen(function* () {
+          yield* run({ _tag: "Extension", action: "list" })
+          return yield* TestConsole.logLines
+        }).pipe(provideLayer(TestConsole.layer))
+        expect(logs).toEqual(["{}"])
+        expect(yield* fs.exists(options.generationsPath)).toBe(false)
+        for (const invalid of [
+          "{",
+          '{"extensions":[]}',
+          '{"extensions":{"bad":{"enabled":"yes","generation":1}}}',
+          '{"extensions":{"bad":{"enabled":true,"generation":0}}}',
+        ]) {
+          yield* fs.writeFileString(options.generationsPath, invalid)
+          const failure = yield* Effect.flip(run({ _tag: "Extension", action: "enable", name: "safe" }))
+          expect(failure._tag).toBe("@rika/app/ExtensionOperationError")
+          expect(yield* fs.readFileString(options.generationsPath)).toBe(invalid)
+          expect(yield* fs.exists(`${options.generationsPath}.lock`)).toBe(false)
+        }
+      }).pipe(
+        provideLayer(
+          Layer.merge(BunServices.layer, SkillRegistry.fileSystemLayer.pipe(Layer.provide(BunServices.layer))),
+        ),
+      ),
+    ),
+  )
+
+  it.live("serializes concurrent lifecycle updates without losing records", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-app-extension-concurrency-" })
+        const options = {
+          globalRoot: `${root}/global`,
+          workspaceRoot: `${root}/skills`,
+          configPath: `${root}/mcp.json`,
+          trustPath: `${root}/trust.json`,
+          generationsPath: `${root}/extensions.json`,
+        }
+        const names = Array.from({ length: 32 }, (_, index) => `extension-${index}`)
+        yield* Effect.forEach(
+          names,
+          (name) =>
+            ExtensionOperations.run({ _tag: "Extension", action: "enable", name }).pipe(
+              provideLayer(Layer.merge(ExtensionOperations.layer(options), oauthLayer)),
+            ),
+          { concurrency: "unbounded" },
+        )
+        const stored = decodeJson(yield* fs.readFileString(options.generationsPath)) as {
+          extensions: Record<string, { enabled: boolean; generation: number }>
+        }
+        expect(Object.keys(stored.extensions).toSorted()).toEqual(names.toSorted())
+        expect(Object.values(stored.extensions).every(({ enabled, generation }) => enabled && generation === 1)).toBe(
+          true,
+        )
+        expect(yield* fs.exists(`${options.generationsPath}.lock`)).toBe(false)
+      }).pipe(
+        provideLayer(
+          Layer.merge(BunServices.layer, SkillRegistry.fileSystemLayer.pipe(Layer.provide(BunServices.layer))),
+        ),
+      ),
+    ),
+  )
 })

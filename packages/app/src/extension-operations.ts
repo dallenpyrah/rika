@@ -1,5 +1,5 @@
 import { McpConfig, McpOAuth, SkillRegistry } from "@rika/extensions"
-import { Console, Context, Effect, FileSystem, Layer, Path, Schema, Semaphore } from "effect"
+import { Console, Context, Effect, FileSystem, Layer, Path, PlatformError, Schema, Semaphore } from "effect"
 import type * as Operation from "./operation"
 
 export interface Options {
@@ -28,6 +28,10 @@ export const layer = (options: Options) => {
 
 const Json = Schema.UnknownFromJsonString
 const JsonObject = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+const ExtensionRecords = Schema.Record(
+  Schema.String,
+  Schema.Struct({ enabled: Schema.Boolean, generation: Schema.Int }),
+)
 const encodeJson = Schema.encodeSync(Json)
 const encodePrettyJson = (value: unknown, depth = 0): string => {
   if (Array.isArray(value)) {
@@ -58,6 +62,55 @@ const writeDocument = (fileSystem: FileSystem.FileSystem, path: Path.Path, filen
     Effect.andThen(fileSystem.writeFileString(filename, `${encodePrettyJson(value)}\n`)),
     Effect.mapError((cause) => Error.make({ message: String(cause) })),
   )
+
+const writeDocumentAtomically = (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  filename: string,
+  value: unknown,
+) =>
+  fileSystem.makeDirectory(path.dirname(filename), { recursive: true }).pipe(
+    Effect.andThen(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const temporaryPath = yield* fileSystem.makeTempFileScoped({
+            directory: path.dirname(filename),
+            prefix: `.${path.basename(filename)}-`,
+          })
+          yield* fileSystem.writeFileString(temporaryPath, `${encodePrettyJson(value)}\n`)
+          yield* fileSystem.rename(temporaryPath, filename)
+        }),
+      ),
+    ),
+    Effect.mapError((cause) => Error.make({ message: String(cause) })),
+  )
+
+const acquireLock = Effect.fn("ExtensionOperations.acquireLock")(function* (
+  fileSystem: FileSystem.FileSystem,
+  lockPath: string,
+) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const result = yield* Effect.result(fileSystem.writeFileString(lockPath, "", { flag: "wx", mode: 0o600 }))
+    if (result._tag === "Success") return
+    if (!(result.failure.reason instanceof PlatformError.SystemError) || result.failure.reason._tag !== "AlreadyExists")
+      return yield* Error.make({ message: String(result.failure) })
+    yield* Effect.sleep("10 millis")
+  }
+  return yield* Error.make({ message: `Extension lifecycle storage is busy: ${lockPath}` })
+})
+
+const readExtensionRecords = Effect.fn("ExtensionOperations.readExtensionRecords")(function* (
+  fileSystem: FileSystem.FileSystem,
+  filename: string,
+) {
+  const state = yield* readDocument(fileSystem, filename)
+  const extensions = yield* Schema.decodeUnknownEffect(ExtensionRecords)(state.extensions ?? {}).pipe(
+    Effect.mapError((cause) => Error.make({ message: String(cause) })),
+  )
+  if (Object.values(extensions).some(({ generation }) => generation < 1))
+    return yield* Error.make({ message: "Extension generations must be positive integers" })
+  return extensions
+})
 
 const stringArray = (value: unknown, field: string) => {
   if (value === undefined) return Effect.succeed<ReadonlyArray<string>>([])
@@ -223,20 +276,40 @@ export const run = Effect.fn("ExtensionOperations.run")(function* (
       }),
     )
   }
-  const state = yield* readDocument(fileSystem, options.generationsPath)
-  const extensions = {
-    ...(state.extensions as Record<string, { enabled: boolean; generation: number }> | undefined),
-  }
+  if (input.action === "create-skill" || input.action === "create-plugin")
+    return yield* Error.make({ message: `${input.action} is outside extension lifecycle behavior` })
   if (input.action === "list") {
+    const extensions = yield* readExtensionRecords(fileSystem, options.generationsPath)
     yield* Console.log(encodeJson(extensions))
     return
   }
-  const current = extensions[input.name] ?? { enabled: false, generation: 1 }
-  if (input.action === "enable") extensions[input.name] = { ...current, enabled: true }
-  if (input.action === "disable") extensions[input.name] = { ...current, enabled: false }
-  if (input.action === "rollback")
-    extensions[input.name] = { ...current, generation: Math.max(1, current.generation - 1) }
-  if (input.action === "create-skill" || input.action === "create-plugin")
-    return yield* Error.make({ message: `${input.action} is outside extension lifecycle behavior` })
-  yield* writeDocument(fileSystem, path, options.generationsPath, { extensions })
+  yield* fileSystem
+    .makeDirectory(path.dirname(options.generationsPath), { recursive: true })
+    .pipe(Effect.mapError((cause) => Error.make({ message: String(cause) })))
+  const lockPath = `${options.generationsPath}.lock`
+  yield* Effect.acquireUseRelease(
+    acquireLock(fileSystem, lockPath),
+    () =>
+      Effect.gen(function* () {
+        const extensions = { ...(yield* readExtensionRecords(fileSystem, options.generationsPath)) }
+        const current = extensions[input.name] ?? { enabled: false, generation: 1 }
+        if (input.action === "enable") extensions[input.name] = { ...current, enabled: true }
+        if (input.action === "disable") extensions[input.name] = { ...current, enabled: false }
+        if (input.action === "rollback")
+          extensions[input.name] = { ...current, generation: Math.max(1, current.generation - 1) }
+        yield* writeDocumentAtomically(fileSystem, path, options.generationsPath, {
+          extensions: Object.fromEntries(
+            Object.entries(extensions).toSorted(([left], [right]) => left.localeCompare(right)),
+          ),
+        })
+      }),
+    () =>
+      fileSystem
+        .remove(lockPath, { force: true })
+        .pipe(
+          Effect.mapError((cause) =>
+            Error.make({ message: `Could not release extension lifecycle storage: ${String(cause)}` }),
+          ),
+        ),
+  )
 })

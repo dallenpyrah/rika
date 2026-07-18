@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest"
 import { Effect, FileSystem, Path, Schema } from "effect"
-import { run, runTest, sandbox, type Sandbox } from "./process"
+import { run, runCommand, runTest, sandbox, type Sandbox } from "./process"
 
 const decodeJson = Schema.decodeSync(Schema.UnknownFromJsonString)
 const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString)
@@ -123,16 +123,77 @@ describe("packaged extension and operation contract", () => {
   )
 
   test(
-    "plugin and extension generations persist across process reopen",
+    "extension lifecycle state, rollback floor, failures, and concurrent commands survive process reopen",
     () =>
       runTest(
         Effect.gen(function* () {
-          for (const action of ["enable", "disable", "rollback"] as const)
-            expect((yield* run(context, ["extensions", action, "fixture"])).exitCode).toBe(0)
-          expect((yield* run(context, ["extensions", "list"])).stdout).toContain("fixture")
+          const fileSystem = yield* FileSystem.FileSystem
+          const path = yield* Path.Path
+          const storage = path.join(context.workspace, ".rika", "extensions.json")
+          expect((yield* run(context, ["extensions", "enable", "enabled"])).exitCode).toBe(0)
+          expect((yield* run(context, ["extensions", "disable", "disabled"])).exitCode).toBe(0)
+          yield* fileSystem.writeFileString(
+            storage,
+            '{"extensions":{"enabled":{"enabled":true,"generation":3},"disabled":{"enabled":false,"generation":1}}}',
+          )
+          expect((yield* run(context, ["extensions", "rollback", "enabled"])).exitCode).toBe(0)
+          expect((yield* run(context, ["extensions", "rollback", "disabled"])).exitCode).toBe(0)
+          const listed = yield* run(context, ["extensions", "list"])
+          expect(listed.exitCode).toBe(0)
+          expect(decodeJson(listed.stdout)).toEqual({
+            disabled: { enabled: false, generation: 1 },
+            enabled: { enabled: true, generation: 2 },
+          })
+          for (const action of ["create-skill", "create-plugin"] as const) {
+            const rejected = yield* run(context, ["extensions", action, "forbidden"])
+            expect(rejected.exitCode).not.toBe(0)
+            expect(rejected.stderr).toContain("outside extension lifecycle behavior")
+          }
+          const malformed = '{"extensions":{"broken":{"enabled":true,"generation":0}}}'
+          yield* fileSystem.writeFileString(storage, malformed)
+          const failed = yield* run(context, ["extensions", "enable", "safe"])
+          expect(failed.exitCode).not.toBe(0)
+          expect(failed.stderr).toContain("positive integers")
+          expect(yield* fileSystem.readFileString(storage)).toBe(malformed)
+          yield* fileSystem.writeFileString(storage, '{"extensions":{}}')
+          const names = Array.from({ length: 4 }, (_, index) => `concurrent-${index}`)
+          const [results, observed] = yield* Effect.all(
+            [
+              Effect.forEach(
+                names,
+                (name, index) =>
+                  runCommand(context, context.binary, ["extensions", "enable", name], {
+                    env: {
+                      RIKA_DATABASE: path.join(context.root, "writers", String(index), "rika.db"),
+                      RIKA_RELAY_DATABASE: path.join(context.root, "writers", String(index), "relay.db"),
+                      RIKA_INTERNAL_RESIDENT_STARTUP_HOLD: "1000",
+                    },
+                  }),
+                { concurrency: "unbounded" },
+              ),
+              Effect.forEach(
+                Array.from({ length: 20 }),
+                (_, index) =>
+                  Effect.sleep(`${index * 50} millis`).pipe(
+                    Effect.andThen(fileSystem.readFileString(storage)),
+                    Effect.map(decodeJson),
+                  ),
+                { concurrency: "unbounded" },
+              ),
+            ],
+            { concurrency: 2 },
+          )
+          expect(results.every(({ exitCode }) => exitCode === 0)).toBe(true)
+          expect(observed.every((value) => value !== undefined)).toBe(true)
+          const concurrent = decodeJson((yield* run(context, ["extensions", "list"])).stdout) as Record<
+            string,
+            { enabled: boolean; generation: number }
+          >
+          expect(Object.keys(concurrent).toSorted()).toEqual(names.toSorted())
+          expect(Object.values(concurrent).every(({ enabled, generation }) => enabled && generation === 1)).toBe(true)
         }),
       ),
-    20_000,
+    30_000,
   )
 
   test(
