@@ -124,6 +124,9 @@ while time.monotonic() < deadline:
         if not running:
             status = current_status
             break
+        for size in action.get("resizes", []):
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", size["height"], size["width"], 0, 0))
+            os.killpg(pid, signal.SIGWINCH)
         delay_ms = action.get("delayMs", 0)
         if delay_ms > 0:
             time.sleep(delay_ms / 1000)
@@ -199,6 +202,7 @@ while True:
         break
     output.extend(chunk)
 
+final_height, final_width, _, _ = struct.unpack("HHHH", fcntl.ioctl(master, termios.TIOCGWINSZ, b"\0" * 8))
 os.close(master)
 print(json.dumps({
     "output": base64.b64encode(output).decode(),
@@ -206,4 +210,6 @@ print(json.dumps({
     "actionsCompleted": action_index,
     "runningChecks": running_checks,
     "timedOut": timed_out,
+    "finalWidth": final_width,
+    "finalHeight": final_height,
 }))

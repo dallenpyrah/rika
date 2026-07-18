@@ -29,6 +29,7 @@ type Action = {
   readonly delayMs?: number
   readonly restartArguments?: ReadonlyArray<string>
   readonly resize?: { readonly width: number; readonly height: number }
+  readonly resizes?: ReadonlyArray<{ readonly width: number; readonly height: number }>
   readonly files?: Readonly<Record<string, string | null>>
   readonly queueCount?: number
   readonly queuePrompt?: string
@@ -82,6 +83,8 @@ const PtyResult = Schema.fromJsonString(
     actionsCompleted: Schema.Int,
     runningChecks: Schema.Array(Schema.Boolean),
     timedOut: Schema.Boolean,
+    finalWidth: Schema.Int,
+    finalHeight: Schema.Int,
   }),
 )
 const PtyAction = Schema.Struct({
@@ -91,6 +94,14 @@ const PtyAction = Schema.Struct({
   delayMs: Schema.optionalKey(Schema.Int),
   restartArguments: Schema.optionalKey(Schema.Array(Schema.String)),
   resize: Schema.optionalKey(Schema.Struct({ width: Schema.Int, height: Schema.Int })),
+  resizes: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        width: Schema.Int,
+        height: Schema.Int,
+      }),
+    ),
+  ),
   files: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
   queueCount: Schema.optionalKey(Schema.Int),
   queuePrompt: Schema.optionalKey(Schema.String),
@@ -479,6 +490,12 @@ export const Scene = {
       after,
       write: rows.flatMap((row) => columns.map((column) => mouseClick(column, row))).join(""),
     }),
+    resizeBurstAfter: (
+      after: string,
+      resizes: ReadonlyArray<{ readonly width: number; readonly height: number }>,
+      write = "",
+      delayMs = 150,
+    ): Action => ({ after, write, resizes, delayMs, checkRunning: true }),
   },
   model: {
     text: (text: string, delayMs?: number, usage?: ModelUsage): ModelTurn =>

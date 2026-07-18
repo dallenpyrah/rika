@@ -544,25 +544,28 @@ export const threadSidebarWidth = 36
 export const boundedThreadSidebarWidth = (terminalWidth: number): number =>
   Math.min(threadSidebarWidth, Math.max(8, terminalWidth - 24))
 
-export const contentColumnWidth = (model: Model): number => {
-  const fileTreeVisible =
+export const threadSidebarLayoutWidth = (model: Model): number =>
+  model.threadSidebar.open ? boundedThreadSidebarWidth(model.width) : 0
+
+export const fileSidebarLayoutWidth = (model: Model): number => {
+  const visible =
     !isNarrow(model) &&
     ((model.changedFilesOpen && isReady(model.changedFiles)) ||
       (model.workspaceFilesOpen && isReady(model.filePicker.items)))
-  return Math.max(
-    1,
-    model.width -
-      (fileTreeVisible ? model.sidebarWidth : 0) -
-      (model.threadSidebar.open ? boundedThreadSidebarWidth(model.width) : 0),
-  )
+  return visible ? Math.max(0, Math.min(model.sidebarWidth, model.width - threadSidebarLayoutWidth(model) - 4)) : 0
 }
+
+export const contentColumnWidth = (model: Model): number =>
+  Math.max(1, model.width - fileSidebarLayoutWidth(model) - threadSidebarLayoutWidth(model))
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 
 const wrappedRowsForLine = (text: string, width: number): number => {
   if (width <= 0) return 1
   let rows = 1
   let column = 0
-  for (const character of text) {
-    const cells = stringWidth(character)
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const cells = stringWidth(segment)
     if (cells === 0) continue
     if (column + cells > width) {
       rows += 1
@@ -584,8 +587,11 @@ export const queueContentWidth = (model: Model): number => Math.max(1, contentCo
 export const inputRows = (model: Model): number =>
   Math.min(8, Math.max(1, wrappedRowCount(displayInput(model), Math.max(1, contentColumnWidth(model) - 4))))
 
+const composerHeightLimit = (terminalHeight: number): number =>
+  Math.max(1, Math.min(5, terminalHeight), terminalHeight - 4)
+
 export const composerHeight = (model: Model): number =>
-  Math.min(Math.max(5, model.height - 4), Math.max(5, model.composerHeight, inputRows(model) + 2))
+  Math.min(composerHeightLimit(model.height), Math.max(5, model.composerHeight, inputRows(model) + 2))
 
 export type PromptSubmission =
   | { readonly _tag: "Prompt"; readonly prompt: string }
@@ -1087,11 +1093,17 @@ export const update: {
         ...model,
         width: message.width,
         height: message.height,
-        composerHeight: Math.min(model.composerHeight, Math.max(5, message.height - 4)),
+        composerHeight: Math.min(model.composerHeight, composerHeightLimit(message.height)),
         sidebarWidth: clampSidebarWidth(model.sidebarWidth, message.width),
       }
     case "ComposerHeightChanged":
-      return { ...model, composerHeight: Math.max(5, Math.min(message.height, Math.max(5, model.height - 4))) }
+      return {
+        ...model,
+        composerHeight: Math.max(
+          Math.min(5, model.height),
+          Math.min(message.height, composerHeightLimit(model.height)),
+        ),
+      }
     case "SidebarWidthChanged":
       return { ...model, sidebarWidth: clampSidebarWidth(message.width, model.width) }
     case "ScrollMoved":

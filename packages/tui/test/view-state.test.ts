@@ -313,6 +313,8 @@ describe("ViewState", () => {
     const combining = { ...ViewState.initial("/work", "high"), width: 12, input: "e\u0301".repeat(8) }
     expect(ViewState.inputRows(combining)).toBe(1)
 
+    expect(ViewState.wrappedRowCount("👩‍💻", 3)).toBe(1)
+
     const sidebar = {
       ...ViewState.initial("/work", "high"),
       width: 100,

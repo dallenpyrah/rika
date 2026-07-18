@@ -35,6 +35,7 @@ import {
   contentColumnWidth,
   boundedThreadSidebarWidth,
   displayInput,
+  fileSidebarLayoutWidth,
   filteredFiles,
   filteredThreads,
   formatActivity,
@@ -46,6 +47,7 @@ import {
   queueContentWidth,
   readyOr,
   selectedThreadMetadata,
+  threadSidebarLayoutWidth,
   wrappedRowCount,
   type Mode,
   type Model,
@@ -293,11 +295,16 @@ interface ChangedFileRow {
   readonly nameIndex?: number
 }
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
+
 const truncateToWidth = (text: string, width: number): string => {
   let truncated = ""
-  for (const character of text) {
-    if (stringWidth(truncated + character) > width) break
-    truncated += character
+  let used = 0
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const cells = stringWidth(segment)
+    if (used + cells > width) break
+    truncated += segment
+    used += cells
   }
   return truncated
 }
@@ -387,7 +394,7 @@ const fileTreeRows = (
   return rows
 }
 
-const sidebarInnerWidth = (model: Model): number => Math.max(8, model.sidebarWidth - 8)
+const sidebarInnerWidth = (model: Model): number => Math.max(1, fileSidebarLayoutWidth(model) - 8)
 
 const sidebarFileRows = (model: Model, innerWidth: number): ReadonlyArray<ChangedFileRow> =>
   model.changedFilesOpen
@@ -2289,9 +2296,14 @@ export class Surface {
     return Math.max(1, contentColumnWidth(model) - spacing.transcript * 2)
   }
   showToast(message: string, color: ColorInput = colors.green): void {
-    this.toast.content = new StyledText([fg(color)("✓ "), fg(colors.text)(message)])
+    const terminalWidth = Math.max(1, this.model?.width ?? this.renderer.width)
+    const right = Math.min(2, Math.max(0, terminalWidth - 1))
+    const width = Math.max(1, Math.min(stringWidth(message) + 6, terminalWidth - right))
+    const visibleMessage = truncateToWidth(message, Math.max(0, width - 6))
+    this.toast.content = new StyledText([fg(color)("✓ "), fg(colors.text)(visibleMessage)])
     this.toastBox.borderColor = color
-    this.toastBox.width = message.length + 6
+    this.toastBox.right = right
+    this.toastBox.width = width
     this.toastBox.visible = true
     this.renderer.requestRender()
     this.cancelTimer(this.toastTimer)
@@ -2347,12 +2359,16 @@ export class Surface {
     this.statusLabel.bg = cutoutBackground(this.renderer)
     if (model.shortcutsOpen) this.setComposerResizePointer(false)
     const inputHeight = composerHeight(model)
-    const renderedInputHeight = model.shortcutsOpen ? Math.min(model.height - 4, spacing.inputHeight + 12) : inputHeight
-    const sidebarVisible =
-      !isNarrow(model) &&
-      ((model.changedFilesOpen && isReady(model.changedFiles)) ||
-        (model.workspaceFilesOpen && isReady(model.filePicker.items)))
-    const sidebarWidth = sidebarVisible ? model.sidebarWidth : 0
+    const renderedInputHeight = model.shortcutsOpen
+      ? Math.min(Math.max(1, model.height - 4), spacing.inputHeight + 12)
+      : model.queue.length > 0
+        ? Math.min(inputHeight, Math.max(1, model.height - 2))
+        : inputHeight
+    this.inputBox.minHeight = Math.min(spacing.inputHeight, renderedInputHeight)
+    const sidebarWidth = fileSidebarLayoutWidth(model)
+    const sidebarVisible = sidebarWidth > 0
+    const contentLeft = threadSidebarLayoutWidth(model)
+    const threadSidebarVisible = contentLeft > 0
     const contentWidth = contentColumnWidth(model)
     const modeColor = colors[model.mode]
     const isWelcome = model.entries.length === 0 && model.blocks.length === 0
@@ -2385,7 +2401,7 @@ export class Surface {
         existingWelcome.content = welcomeContent(welcomeWidth, model.height, this.welcomePhase, model.mode)
       }
     } else {
-      const renderModel = sidebarWidth === 0 && !model.threadSidebar.open ? model : { ...model, width: contentWidth }
+      const renderModel = sidebarWidth === 0 && !threadSidebarVisible ? model : { ...model, width: contentWidth }
       const transcriptInput = {
         entries: renderModel.entries,
         blocks: renderModel.blocks,
@@ -2463,6 +2479,8 @@ export class Surface {
       this.welcomeTimer = undefined
     }
     const queue = model.queue as ReadonlyArray<QueueItem>
+    this.queueBox.marginLeft = contentWidth <= 4 ? 0 : 1
+    this.queueBox.marginRight = contentWidth <= 4 ? 0 : 1
     this.queueBox.visible = queue.length > 0
     const queueTextWidth = queueContentWidth(model)
     const queueLength = queue.length
@@ -2483,7 +2501,11 @@ export class Surface {
     })
     const heights = labels.map((label) => wrappedRowCount(label, queueTextWidth))
     const queueRows = heights.reduce((sum, rows) => sum + rows, 0)
-    const queueBoxHeight = Math.min(Math.max(3, model.height - renderedInputHeight - 2), Math.max(3, queueRows + 2))
+    const queueBoxHeight = Math.min(
+      Math.max(1, model.height),
+      Math.min(Math.max(3, model.height - renderedInputHeight - 2), Math.max(3, queueRows + 2)),
+    )
+    this.queueBox.minHeight = Math.min(3, queueBoxHeight)
     this.queueBox.height = queueBoxHeight
     const availableRows = Math.max(1, queueBoxHeight - 2)
     const clampToRows = (text: string, rows: number): string =>
@@ -2567,12 +2589,14 @@ export class Surface {
     this.composerEditor.visible = !model.shortcutsOpen
     this.composerEditor.height = Math.max(1, renderedInputHeight - 2)
     this.composerEditor.sync(displayInput(model), displayCursorOffset(model))
-    this.sidebar.visible = model.threadSidebar.open
+    this.sidebar.visible = threadSidebarVisible
     this.sidebar.width = boundedThreadSidebarWidth(model.width)
-    this.sidebar.content = renderSidebar(model, spinnerFrames[this.loaderPhase % spinnerFrames.length]!)
+    this.sidebar.content = threadSidebarVisible
+      ? renderSidebar(model, spinnerFrames[this.loaderPhase % spinnerFrames.length]!)
+      : ""
     this.changedFilesBox.visible = sidebarVisible
     if (this.changedFilesBox.visible) {
-      this.changedFilesBox.width = Math.max(8, model.sidebarWidth - 2)
+      this.changedFilesBox.width = Math.max(1, sidebarWidth - 2)
       this.changedFilesBox.title = model.changedFilesOpen
         ? ` Changed files (${readyOr(model.changedFiles, []).length}) `
         : ` Files (${readyOr(model.filePicker.items, []).length}) `
@@ -2663,10 +2687,10 @@ export class Surface {
     this.palette.visible = this.paletteBox.visible
     this.paletteBox.bottomTitle = ""
     let cursorEditor: ProjectedEditorRenderable | undefined =
-      model.shortcutsOpen || model.threadSidebar.focused ? undefined : this.composerEditor
+      model.shortcutsOpen || (threadSidebarVisible && model.threadSidebar.focused) ? undefined : this.composerEditor
     if (overlay === "palette") {
       const results = filter(model.palette.query)
-      const boxWidth = Math.max(20, Math.min(80, model.width - 4))
+      const boxWidth = Math.max(1, Math.min(80, model.width - 4))
       const boxHeight = Math.min(Math.max(1, composerTop), results.length + 5)
       this.paletteBox.width = boxWidth
       this.paletteBox.height = boxHeight
@@ -2675,37 +2699,38 @@ export class Surface {
       this.paletteBox.title = " Command Palette "
       this.paletteBox.titleColor = colors.amber
       this.paletteBox.titleAlignment = "left"
-      this.palette.content = paletteContent(model, results, boxWidth - 4, boxHeight - 2)
+      this.palette.content = paletteContent(model, results, Math.max(1, boxWidth - 4), Math.max(1, boxHeight - 2))
       this.syncOverlayEditor(`> ${model.palette.query}`, 2 + model.palette.query.length, 0, boxHeight - 2, boxWidth - 4)
       cursorEditor = this.overlayEditor
     } else if (overlay === "modes") {
       const boxWidth = Math.min(58, contentWidth)
-      const boxHeight = Math.min(9, Math.max(3, composerTop))
+      const boxHeight = Math.min(9, Math.max(1, composerTop))
       this.paletteBox.width = boxWidth
       this.paletteBox.height = boxHeight
-      this.paletteBox.left = Math.max(0, contentWidth - boxWidth)
+      this.paletteBox.left = contentLeft + Math.max(0, contentWidth - boxWidth)
       this.paletteBox.top = Math.max(0, composerTop - boxHeight)
       this.paletteBox.title = ""
       this.paletteBox.bottomTitle = " ←→ turn · esc"
       this.paletteBox.bottomTitleAlignment = "right"
-      this.palette.content = modePickerContent(model, boxWidth - 4)
+      this.palette.content = modePickerContent(model, Math.max(1, boxWidth - 4))
       cursorEditor = undefined
     } else if (overlay === "files") {
       const entries = filteredFiles(model).map((file) => `@${file}`)
       const maxRows = Math.max(1, Math.min(20, composerTop - 1))
       const visibleEntries = entries.slice(0, Math.max(1, maxRows))
-      const innerWidth = Math.max(...visibleEntries.map((row) => row.length), 19)
-      const boxWidth = Math.min(innerWidth + 4, model.width - 4)
-      const boxHeight = Math.max(3, visibleEntries.length + 2)
+      const innerWidth = Math.max(...visibleEntries.map((entry) => stringWidth(entry)), 19)
+      const availableWidth = contentWidth > 4 ? contentWidth - 4 : contentWidth
+      const boxWidth = Math.max(1, Math.min(innerWidth + 4, availableWidth))
+      const boxHeight = Math.min(Math.max(1, composerTop), Math.max(3, visibleEntries.length + 2))
       this.paletteBox.width = boxWidth
       this.paletteBox.height = boxHeight
-      this.paletteBox.left = 2
+      this.paletteBox.left = contentLeft + Math.min(2, Math.max(0, contentWidth - boxWidth))
       this.paletteBox.top = Math.max(0, composerTop - boxHeight)
       this.paletteBox.title = ""
-      this.palette.content = filePickerContent(model, visibleEntries, boxWidth - 4)
+      this.palette.content = filePickerContent(model, visibleEntries, Math.max(1, boxWidth - 4))
     } else if (overlay === "threads") {
-      const overlayWidth = Math.max(10, Math.min(140, model.width - 4))
-      const overlayHeight = Math.max(6, composerTop - 2)
+      const overlayWidth = Math.max(1, Math.min(140, model.width - 4))
+      const overlayHeight = Math.min(Math.max(1, composerTop), Math.max(6, composerTop - 2))
       this.paletteBox.width = overlayWidth
       this.paletteBox.height = overlayHeight
       this.paletteBox.left = Math.max(0, Math.floor((model.width - overlayWidth) / 2))
@@ -2714,7 +2739,7 @@ export class Surface {
       this.paletteBox.titleAlignment = "left"
       this.paletteBox.bottomTitle = " Opt+W/Ctrl+T all workspaces · Esc close "
       this.paletteBox.bottomTitleAlignment = "right"
-      this.palette.content = threadSwitcherContent(model, overlayWidth - 4, overlayHeight - 2)
+      this.palette.content = threadSwitcherContent(model, Math.max(1, overlayWidth - 4), Math.max(1, overlayHeight - 2))
       this.syncOverlayEditor(
         `> ${model.threadSwitcher.query}`,
         2 + model.threadSwitcher.query.length,
@@ -2907,6 +2932,16 @@ const paletteContent = (
     const selected = index === model.palette.selected
     const keybinding = command.keybinding ?? ""
     const label = command.label
+    if (innerWidth < 48) {
+      const visible = truncateToWidth(label, innerWidth)
+      const padding = " ".repeat(Math.max(0, innerWidth - stringWidth(visible)))
+      chunks.push(
+        selected
+          ? bold(bg(colors.selectionBg)(fg(colors.selectionFg)(`${visible}${padding}`)))
+          : bold(fg(colors.text)(visible)),
+      )
+      return
+    }
     const category = command.category.padStart(categoryWidth)
     const used = categoryWidth + 2 + label.length
     const padding = Math.max(1, innerWidth - used - keybinding.length - 1)
@@ -2950,6 +2985,12 @@ const modeDescription = {
 const modePickerContent = (model: Model, innerWidth: number): StyledText => {
   const modes = ["low", "medium", "high", "ultra"] as const
   const selected = modes[model.modePicker.selected] ?? model.mode
+  if (innerWidth < 40)
+    return new StyledText([
+      bold(fg(colors[selected])(truncateToWidth(selected, innerWidth))),
+      fg(colors.text)("\n"),
+      fg(colors.muted)(truncateToWidth(modeDescription[selected], innerWidth)),
+    ])
   const gaugeWidth = Math.min(54, innerWidth)
   const fill = Math.min(gaugeWidth, modeGaugeFill[selected])
   const chunks: Array<TextChunk> = []
@@ -3077,9 +3118,12 @@ const threadListRows = (
     const statsWidth = stats.reduce((total, [text]) => total + text.length + 1, 0)
     const rightWidth = statsWidth + (stats.length > 0 && age.length > 0 ? 1 : 0) + age.length
     const titleWidth = Math.max(1, width - rightWidth - 4)
-    const title = thread.title.length > titleWidth ? `${thread.title.slice(0, titleWidth - 1)}…` : thread.title
+    const title =
+      stringWidth(thread.title) > titleWidth
+        ? `${truncateToWidth(thread.title, Math.max(0, titleWidth - 1))}…`
+        : thread.title
     const leftText = `  ${title}`
-    const padding = Math.max(1, width - leftText.length - rightWidth - 1)
+    const padding = Math.max(1, width - stringWidth(leftText) - rightWidth - 1)
     if (selected) {
       const right = `${stats.map(([text]) => text).join(" ")}${stats.length > 0 && age.length > 0 ? " " : ""}${age}`
       listRows.set(index + 3, [
@@ -3182,14 +3226,14 @@ export const previewBoxRows: {
 const threadSwitcherContent = (model: Model, innerWidth: number, innerHeight: number): StyledText => {
   const horizontal = model.width >= 120
   const showPreview = horizontal || innerHeight >= 9
-  const layoutWidth = Math.max(8, innerWidth - 1)
+  const layoutWidth = Math.max(1, innerWidth - 1)
   const listWidth = threadSwitcherListWidth(model, innerWidth)
   const listHeight = horizontal
     ? innerHeight
     : showPreview
       ? Math.max(5, Math.min(innerHeight - 4, Math.floor(innerHeight * 0.42)))
       : innerHeight
-  const previewWidth = horizontal ? Math.max(8, layoutWidth - listWidth - 2) : layoutWidth
+  const previewWidth = horizontal ? Math.max(1, layoutWidth - listWidth - 2) : layoutWidth
   const previewHeight = horizontal ? Math.max(4, innerHeight - 3) : Math.max(4, innerHeight - listHeight - 2)
   const previewTop = horizontal ? 1 : listHeight
   const now = Effect.runSync(Clock.currentTimeMillis)
@@ -3210,7 +3254,7 @@ const threadSwitcherContent = (model: Model, innerWidth: number, innerHeight: nu
       if (listRow === undefined) chunks.push(fg(colors.text)(" ".repeat(listWidth)))
       else {
         chunks.push(...listRow)
-        const used = listRow.reduce((total, chunk) => total + chunk.text.length, 0)
+        const used = listRow.reduce((total, chunk) => total + stringWidth(chunk.text), 0)
         chunks.push(fg(colors.text)(" ".repeat(Math.max(0, listWidth - used))))
       }
     }
@@ -3223,8 +3267,8 @@ const threadSwitcherContent = (model: Model, innerWidth: number, innerHeight: nu
 }
 
 const threadSwitcherListWidth = (model: Model, innerWidth: number): number => {
-  const layoutWidth = Math.max(8, innerWidth - 1)
-  return model.width >= 120 ? Math.max(8, Math.floor((layoutWidth - 2) / 2)) : layoutWidth
+  const layoutWidth = Math.max(1, innerWidth - 1)
+  return model.width >= 120 ? Math.max(1, Math.floor((layoutWidth - 2) / 2)) : layoutWidth
 }
 
 const filePickerContent = (model: Model, entries: ReadonlyArray<string>, innerWidth: number): StyledText => {
@@ -3233,20 +3277,26 @@ const filePickerContent = (model: Model, entries: ReadonlyArray<string>, innerWi
     if (index > 0) chunks.push(fg(colors.text)("\n"))
     const marker = /^@{1,2}/.exec(entry)?.[0] ?? ""
     const rest = entry.slice(marker.length)
-    const clipped = rest.slice(0, Math.max(0, innerWidth - marker.length))
+    const markerWidth = stringWidth(marker)
+    const clipped = truncateToWidth(rest, Math.max(0, innerWidth - markerWidth))
+    const padding = " ".repeat(Math.max(0, innerWidth - markerWidth - stringWidth(clipped)))
     if (index === model.filePicker.selected) {
       chunks.push(bg(colors.muted)(fg(colors.teal)(marker)))
       chunks.push(bg(colors.muted)(fg(colors.text)(clipped)))
-      chunks.push(
-        bg(colors.muted)(fg(colors.text)(" ".repeat(Math.max(0, innerWidth - marker.length - clipped.length)))),
-      )
+      chunks.push(bg(colors.muted)(fg(colors.text)(padding)))
     } else {
       chunks.push(fg(colors.teal)(marker))
       chunks.push(fg(colors.text)(clipped))
     }
   })
   if (chunks.length === 0)
-    chunks.push(dim(fg(colors.text)(isLoading(model.filePicker.items) ? "Loading files" : "no matches")))
+    chunks.push(
+      dim(
+        fg(colors.text)(
+          truncateToWidth(isLoading(model.filePicker.items) ? "Loading files" : "no matches", innerWidth),
+        ),
+      ),
+    )
   return new StyledText(chunks)
 }
 
