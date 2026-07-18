@@ -2879,6 +2879,12 @@ if (import.meta.main) {
                                 RIKA_INTERNAL_RESIDENT_HOST: "1",
                                 RIKA_INTERNAL_RESIDENT_PROFILE: "default",
                                 RIKA_INTERNAL_RESIDENT_DATA_ROOT: dataRoot,
+                                ...(environment.residentGrace._tag === "None"
+                                  ? {}
+                                  : { RIKA_INTERNAL_RESIDENT_GRACE: environment.residentGrace.value }),
+                                ...(environment.residentStartupHold._tag === "None"
+                                  ? {}
+                                  : { RIKA_INTERNAL_RESIDENT_STARTUP_HOLD: environment.residentStartupHold.value }),
                                 ...(environment.testModelResponse._tag === "None"
                                   ? {}
                                   : { RIKA_TEST_MODEL_RESPONSE: environment.testModelResponse.value }),

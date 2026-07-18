@@ -30,6 +30,10 @@ interface Options {
   readonly workspaceSettings?: unknown
   readonly workspace?: Readonly<Record<string, string>>
   readonly git?: boolean
+  readonly terminal?: {
+    readonly columns: number
+    readonly rows: number
+  }
 }
 
 class SceneError extends Schema.TaggedErrorClass<SceneError>()("SceneError", {
@@ -112,6 +116,8 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     HOME: home,
     PATH: path,
     TERM: "xterm-256color",
+    RIKA_TEST_TERMINAL_COLUMNS: options.terminal?.columns,
+    RIKA_TEST_TERMINAL_ROWS: options.terminal?.rows,
     RIKA_DATABASE: `${state}/rika.db`,
     RIKA_RELAY_DATABASE: `${state}/relay.db`,
     RIKA_INTERNAL_RESIDENT_GRACE: residentGrace,

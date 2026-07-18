@@ -2794,7 +2794,6 @@ const shortcutRows: ReadonlyArray<ReadonlyArray<readonly [string, string]>> = [
 const sidebarShortcutRows: ReadonlyArray<readonly [string, string]> = [
   ["Opt+S", "toggle changed files"],
   ["Enter", "open selected thread"],
-  ["Cmd+Shift+E", "archive selected thread"],
 ]
 
 const shortcutsContent = (model: Model, innerWidth: number): StyledText => {

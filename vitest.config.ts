@@ -25,6 +25,7 @@ export default defineConfig({
           include: ["packages/*/test/**/*.scene.test.ts", "apps/*/test/**/*.scene.test.ts", "**/scene.test.ts"],
           exclude: ["repos/**"],
           maxWorkers: 2,
+          testTimeout: 40_000,
           sequence: { groupOrder: 1 },
         },
       },

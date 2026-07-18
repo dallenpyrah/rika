@@ -15,7 +15,9 @@ entrypoint = arguments[0] if arguments else "src/client-main.ts"
 environment = {key: value for key, value in json.loads(environment_json).items() if value is not None}
 actions = json.loads(actions_json)
 master, slave = pty.openpty()
-fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+rows = int(environment.pop("RIKA_TEST_TERMINAL_ROWS", 30))
+columns = int(environment.pop("RIKA_TEST_TERMINAL_COLUMNS", 100))
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 pid = os.fork()
 if pid == 0:
     os.setsid()
