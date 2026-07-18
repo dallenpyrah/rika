@@ -117,6 +117,8 @@ while time.monotonic() < deadline:
         if restart_arguments is None:
             write = action.get("write")
             if write is not None:
+                if resize is not None:
+                    time.sleep(0.5)
                 for fragment in write.split("\0"):
                     os.write(master, fragment.encode())
                     time.sleep(0.01)
