@@ -1973,6 +1973,34 @@ if (import.meta.main) {
         })
         let closing = false
         let teardownStarted = false
+        let terminalPauseCount = 0
+        let pendingJobControlPause = false
+        let releaseJobControlPause: (() => boolean) | undefined
+        const pauseTerminal = () => {
+          if (closed) return () => false
+          if (terminalPauseCount === 0)
+            try {
+              renderer?.suspendTerminal()
+            } catch (cause) {
+              close(1)
+              throw cause
+            }
+          terminalPauseCount += 1
+          let released = false
+          return () => {
+            if (released) return false
+            released = true
+            terminalPauseCount = Math.max(0, terminalPauseCount - 1)
+            if (closed || terminalPauseCount > 0) return false
+            try {
+              renderer?.resumeTerminal()
+            } catch (cause) {
+              close(1)
+              throw cause
+            }
+            return true
+          }
+        }
         const goodbye = () => {
           const threadId = model.currentThreadId
           const threadTitle =
@@ -1996,6 +2024,8 @@ if (import.meta.main) {
               closed = true
               process.off("SIGINT", interrupt)
               process.off("SIGTERM", terminate)
+              process.off("SIGTSTP", suspend)
+              process.off("SIGCONT", continueFromSuspend)
               if (previewTimer !== undefined) yield* Fiber.interrupt(previewTimer)
               previewTimer = undefined
               if (renderTimer !== undefined) yield* Fiber.interrupt(renderTimer)
@@ -2018,8 +2048,39 @@ if (import.meta.main) {
         }
         const interrupt = () => close(tuiSignalExitCode("SIGINT"))
         const terminate = () => close(tuiSignalExitCode("SIGTERM"))
+        const suspend = () => {
+          if (closed || pendingJobControlPause || releaseJobControlPause !== undefined) return
+          if (renderer === undefined) {
+            pendingJobControlPause = true
+            return
+          }
+          try {
+            releaseJobControlPause = pauseTerminal()
+            process.kill(process.pid, "SIGSTOP")
+          } catch {
+            releaseJobControlPause?.()
+            releaseJobControlPause = undefined
+            close(1)
+          }
+        }
+        const continueFromSuspend = () => {
+          if (pendingJobControlPause) {
+            pendingJobControlPause = false
+            return
+          }
+          if (closed || releaseJobControlPause === undefined) return
+          const release = releaseJobControlPause
+          releaseJobControlPause = undefined
+          try {
+            if (release()) renderer?.surface.update(model)
+          } catch {
+            close(1)
+          }
+        }
         process.once("SIGINT", interrupt)
         process.once("SIGTERM", terminate)
+        process.on("SIGTSTP", suspend)
+        process.on("SIGCONT", continueFromSuspend)
         const submit = (
           prompt: string,
           parts: ReadonlyArray<ViewState.PromptPart>,
@@ -2136,12 +2197,12 @@ if (import.meta.main) {
                 const file = `${model.workspace}/${relative}`
                 yield* mkdir(`${model.workspace}/.rika`, { recursive: true })
                 yield* fileSystem.writeFileString(file, ViewState.displayInput(model))
-                renderer?.suspendTerminal()
+                const resumeTerminal = pauseTerminal()
                 yield* childExit("run editor", [editor, file], {
                   stdin: "inherit",
                   stdout: "inherit",
                   stderr: "inherit",
-                }).pipe(Effect.ensuring(Effect.sync(() => renderer?.resumeTerminal())))
+                }).pipe(Effect.ensuring(Effect.sync(resumeTerminal)))
                 const edited = yield* fileSystem.readFileString(file)
                 yield* rm(file, { force: true })
                 model = ViewState.update(model, { _tag: "ComposerReplaced", text: edited.replace(/\n$/, "") })
@@ -2170,7 +2231,7 @@ if (import.meta.main) {
                       renderer?.surface.showToast("Could not open the file in the default application", "#e06c75")
                       return
                     }
-                    renderer?.suspendTerminal()
+                    const resumeTerminal = pauseTerminal()
                     yield* childExit("open editor", editorArguments(editor, path, target.line, target.column), {
                       stdin: "inherit",
                       stdout: "inherit",
@@ -2178,8 +2239,7 @@ if (import.meta.main) {
                     }).pipe(
                       Effect.ensuring(
                         Effect.sync(() => {
-                          renderer?.resumeTerminal()
-                          if (!closed) renderer?.surface.update(model)
+                          if (resumeTerminal() && !closed) renderer?.surface.update(model)
                         }),
                       ),
                     )
@@ -2380,6 +2440,10 @@ if (import.meta.main) {
                 if (closed) {
                   created.releaseTerminal()
                   return
+                }
+                if (pendingJobControlPause) {
+                  pendingJobControlPause = false
+                  suspend()
                 }
                 model = ViewState.update(model, { _tag: "FilesRequested" })
                 created.surface.update(model)
