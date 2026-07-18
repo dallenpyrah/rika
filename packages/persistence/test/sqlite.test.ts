@@ -793,7 +793,13 @@ test("turn SQL mutations, ordering, and rejection branches", () => {
           turn: { id: third.id, prompt: "c" },
           queue: { change: { _tag: "Removed", turnId: third.id } },
         })
-        yield* turns.setStatus(active.id, "completed", undefined, 7)
+        yield* turns.setStatus(active.id, "completed", "terminal-cursor", 7)
+        for (const [index, staleStatus] of Turn.Status.literals.filter((candidate) => candidate !== "queued").entries())
+          expect(yield* turns.setStatus(active.id, staleStatus, `stale-${staleStatus}`, index + 8)).toMatchObject({
+            status: "completed",
+            lastCursor: "terminal-cursor",
+            updatedAt: 7,
+          })
         expect((yield* turns.claimNextQueued(id, 8))?.id).toBe(second.id)
         expect((yield* turns.list(id)).map((turn) => turn.id)).toEqual([active.id, second.id])
       }).pipe(provideLayer(layer))

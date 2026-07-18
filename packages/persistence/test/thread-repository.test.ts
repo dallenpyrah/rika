@@ -43,7 +43,7 @@ const behavior = (name: string, layer: Layer.Layer<ThreadRepository.Service>) =>
         const removed = yield* repository.get(first.id)
         expect(renamed.title).toBe("Renamed")
         expect(labeled.labels).toEqual(["bug", "urgent"])
-        expect(pinned.pinned).toBe(true)
+        expect(pinned).toMatchObject({ workspace: "/work/a", pinned: true, archived: false })
         expect(archived.archived).toBe(true)
         expect(visible.map((thread) => thread.id)).toEqual([id("thread-a")])
         expect(all.map((thread) => thread.id)).toEqual([id("thread-a"), id("thread-b")])

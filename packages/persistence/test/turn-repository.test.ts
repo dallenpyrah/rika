@@ -42,6 +42,38 @@ it.effect("memory turns preserve structured image prompt parts", () =>
   }).pipe(provideLayer(TurnRepository.memoryLayer())),
 )
 
+it.effect("memory turns snapshot attachments and execution pins at the repository boundary", () =>
+  Effect.gen(function* () {
+    const repository = yield* TurnRepository.Service
+    const promptParts: Array<Turn.PromptPart> = [
+      { type: "text", text: "inspect " },
+      { type: "image", mediaType: "image/png", data: "b3JpZ2luYWw=", filename: "original.png" },
+    ]
+    const executionRoute = Turn.testExecutionRoute("high")
+    const created = yield* create(repository, {
+      id: Turn.TurnId.make("snapshot-turn"),
+      threadId: Thread.ThreadId.make("snapshot-thread"),
+      prompt: "inspect [Image 1]",
+      promptParts,
+      executionRoute,
+      now: 1,
+    })
+    const mutableRoute = executionRoute.main as { model: string }
+    const mutableCreatedParts = created.promptParts as Array<Turn.PromptPart> | undefined
+    promptParts[0] = { type: "text", text: "mutated" }
+    mutableRoute.model = "mutated"
+    mutableCreatedParts?.splice(0)
+
+    expect(yield* repository.get(created.id)).toMatchObject({
+      promptParts: [
+        { type: "text", text: "inspect " },
+        { type: "image", data: "b3JpZ2luYWw=", filename: "original.png" },
+      ],
+      executionRoute: { mode: "high", main: { model: "test" } },
+    })
+  }).pipe(provideLayer(TurnRepository.memoryLayer())),
+)
+
 it.effect("memory turns preserve immutable execution extension pins", () =>
   Effect.gen(function* () {
     const repository = yield* TurnRepository.Service
@@ -120,7 +152,7 @@ it.effect("memory turns preserve deterministic identity and status", () =>
     const listed = yield* repository.list(created.threadId)
     expect(created.status).toBe("accepted")
     expect(completed.lastCursor).toBe("cursor-a")
-    expect(failed.lastCursor).toBeUndefined()
+    expect(failed).toMatchObject({ status: "completed", lastCursor: "cursor-a", updatedAt: 2 })
     expect(listed.map((turn) => turn.id)).toEqual([Turn.TurnId.make("turn-a"), Turn.TurnId.make("turn-b")])
   }).pipe(provideLayer(TurnRepository.memoryLayer())),
 )
@@ -148,7 +180,7 @@ it.effect("memory pages newest turns without loading the full thread", () =>
   }).pipe(provideLayer(TurnRepository.memoryLayer())),
 )
 
-it.effect("memory terminal status does not regress to nonterminal", () =>
+it.effect("memory terminal status is immutable against every stale lifecycle update", () =>
   Effect.gen(function* () {
     const repository = yield* TurnRepository.Service
     const created = yield* create(repository, {
@@ -158,8 +190,10 @@ it.effect("memory terminal status does not regress to nonterminal", () =>
       now: 1,
     })
     yield* repository.setStatus(created.id, "completed", "terminal-cursor", 2)
-    const unchanged = yield* repository.setStatus(created.id, "running", "stale-cursor", 3)
-    expect(unchanged).toMatchObject({ status: "completed", lastCursor: "terminal-cursor", updatedAt: 2 })
+    for (const [index, staleStatus] of Turn.Status.literals.filter((candidate) => candidate !== "queued").entries()) {
+      const unchanged = yield* repository.setStatus(created.id, staleStatus, `stale-${staleStatus}`, index + 3)
+      expect(unchanged).toMatchObject({ status: "completed", lastCursor: "terminal-cursor", updatedAt: 2 })
+    }
   }).pipe(provideLayer(TurnRepository.memoryLayer())),
 )
 
@@ -606,6 +640,30 @@ it.effect("sql turns create, get, list, and decode cursor variants", () =>
   ),
 )
 
+it.effect("sql turns encode and decode structured attachments", () =>
+  sqlTest((sql) =>
+    Effect.gen(function* () {
+      const promptParts: ReadonlyArray<Turn.PromptPart> = [
+        { type: "text", text: "inspect " },
+        { type: "image", mediaType: "image/png", data: "cG5n", filename: "shot.png" },
+      ]
+      const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Turn.PromptPart)))(promptParts)
+      sql.rows()
+      sql.rows(row({ prompt: "inspect [Image 1]", prompt_parts_json: encoded }))
+      const repository = yield* TurnRepository.Service
+      const created = yield* create(repository, {
+        id: Turn.TurnId.make("turn-a"),
+        threadId: Thread.ThreadId.make("thread-a"),
+        prompt: "inspect [Image 1]",
+        promptParts,
+        now: 1,
+      })
+      expect(created.promptParts).toEqual(promptParts)
+      expect(sql.statements[0]?.parameters[3]).toBe(encoded)
+    }),
+  ),
+)
+
 it.effect("sql status updates bind cursor and null cursor", () =>
   sqlTest((sql) =>
     Effect.gen(function* () {
@@ -617,8 +675,8 @@ it.effect("sql status updates bind cursor and null cursor", () =>
       yield* repository.setStatus(Turn.TurnId.make("turn-a"), "running", "cursor-a", 2)
       yield* repository.setStatus(Turn.TurnId.make("turn-a"), "completed", undefined, 3)
       expect(sql.statements[0]?.parameters).toEqual(["turn-a"])
-      expect(sql.statements[1]?.parameters).toEqual(["running", "cursor-a", 2, "turn-a", "running"])
-      expect(sql.statements[3]?.parameters).toEqual(["completed", null, 3, "turn-a", "completed"])
+      expect(sql.statements[1]?.parameters).toEqual(["running", "cursor-a", 2, "turn-a"])
+      expect(sql.statements[3]?.parameters).toEqual(["completed", null, 3, "turn-a"])
     }),
   ),
 )
@@ -633,7 +691,7 @@ it.effect("sql setStatus decrements the queued count when a queued turn leaves t
       yield* repository.setStatus(Turn.TurnId.make("turn-a"), "completed", undefined, 5)
       expect(sql.statements.map((statement) => statement.sql)).toEqual([
         "SELECT * FROM rika_turns WHERE id = ?",
-        "UPDATE rika_turns SET status = ?, last_cursor = ?, updated_at = ? WHERE id = ? AND (status NOT IN ('completed', 'failed', 'cancelled') OR ? IN ('completed', 'failed', 'cancelled')) RETURNING *",
+        "UPDATE rika_turns SET status = ?, last_cursor = ?, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled') RETURNING *",
         "UPDATE rika_thread_queue_state SET revision = revision + 1, queued_count = MAX(queued_count - 1, 0) WHERE thread_id = ?",
       ])
     }),

@@ -266,7 +266,7 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
             createdAt: now,
             updatedAt: now,
           }
-          const withTurn: MemoryState = { ...current, turns: new Map(current.turns).set(turn.id, turn) }
+          const withTurn: MemoryState = { ...current, turns: new Map(current.turns).set(turn.id, clone(turn)) }
           if (turn.status !== "queued")
             return [{ _tag: "Created" as const, submission: clone(turn) }, withTurn] as const
           const nextQueue = {
@@ -576,8 +576,7 @@ export const makeMemory = (initial: ReadonlyArray<Turn> = []) =>
             const current = currentState.turns.get(id)
             if (current === undefined) return [{ _tag: "Missing" }, currentState]
             if (status === "queued") return [{ _tag: "Queued" }, currentState]
-            if (isTerminalStatus(current.status) && !isTerminalStatus(status))
-              return [{ _tag: "Ok", turn: clone(current) }, currentState]
+            if (isTerminalStatus(current.status)) return [{ _tag: "Ok", turn: clone(current) }, currentState]
             const { lastCursor: previousCursor, ...withoutCursor } = current
             void previousCursor
             const next: Turn = {
@@ -993,7 +992,7 @@ export const layer = Layer.effect(
               const wasQueued = String((before[0] as { status?: unknown }).status) === "queued"
               const rows =
                 yield* sql`UPDATE rika_turns SET status = ${status}, last_cursor = ${lastCursor ?? null}, updated_at = ${now}
-                WHERE id = ${id} AND (status NOT IN ('completed', 'failed', 'cancelled') OR ${status} IN ('completed', 'failed', 'cancelled'))
+                WHERE id = ${id} AND status NOT IN ('completed', 'failed', 'cancelled')
                 RETURNING *`
               if (rows[0] === undefined) return yield* decode(before[0])
               const turn = yield* decode(rows[0])
