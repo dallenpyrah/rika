@@ -372,6 +372,30 @@ describe("Transcript projection", () => {
       })
   })
 
+  it("keeps a terminal child result from presenting a failed or cancelled subagent as finished", () => {
+    for (const status of ["failed", "cancelled"] as const) {
+      const projection = project("turn-a", "delegate", [
+        {
+          cursor: `call-${status}`,
+          sequence: 1,
+          type: "tool.call.requested",
+          createdAt: 1,
+          data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Inspect the projection" } },
+        },
+        {
+          cursor: `result-${status}`,
+          sequence: 2,
+          type: "tool.result.received",
+          createdAt: 2,
+          data: { tool_call_id: "agent", output: { childExecutionId: "child:agent", status, output: [] } },
+        },
+      ])
+      expect(projection.units[1]).toMatchObject({
+        content: { _tag: "Block", block: { _tag: "ToolCall", status } },
+      })
+    }
+  })
+
   it("keeps the ToolError message as the output of a failed tool result", () => {
     const projection = project("turn-a", "prompt", [
       {

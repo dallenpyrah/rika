@@ -70,6 +70,7 @@ const definitions = {
       Tools.createFileTool,
       Tools.editFileTool,
       Tools.shellTool,
+      Tools.shellCommandStatusTool,
     ],
     permissions: ["workspace.read", "workspace.write", "process.run"],
     schema: "rika.agent.task.v1",

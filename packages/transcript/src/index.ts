@@ -653,18 +653,20 @@ const applyToolResult = (projection: Projection, turnId: string, event: SourceEv
   const value = resultPayload(event)
   const id = eventId(turnId, rawToolId(event))
   const output = value.output
+  const outputStatus = string(record(output).status).toLowerCase()
   const process = processResult(output)
   const failed =
     typeof value.error === "string" ||
     record(output)._tag === "ToolError" ||
-    string(record(output).status).toLowerCase() === "failed" ||
+    outputStatus === "failed" ||
     (process?.exitCode !== undefined && process.exitCode !== 0)
+  const cancelled = outputStatus === "cancelled" || outputStatus === "canceled"
   const errorText = string(value.error, string(record(output).message))
   const resultText = failed && errorText.length > 0 ? errorText : outputText(output)
   const diff = string(record(output).diff)
   const updated = updateTool(projection, id, event.sequence, (tool) => ({
     ...tool,
-    status: failed ? "failed" : process?.running === true ? "running" : "complete",
+    status: failed ? "failed" : cancelled ? "cancelled" : process?.running === true ? "running" : "complete",
     output: resultText,
     ...(process === undefined ? {} : { process: { ...tool.process, ...process } }),
     files:

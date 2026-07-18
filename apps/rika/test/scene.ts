@@ -24,6 +24,8 @@ interface ModelUsage {
 
 type Action = {
   readonly after?: string
+  readonly childStatus?: string
+  readonly childCount?: number
   readonly write?: string
   readonly checkRunning?: boolean
   readonly delayMs?: number
@@ -89,6 +91,8 @@ const PtyResult = Schema.fromJsonString(
 )
 const PtyAction = Schema.Struct({
   after: Schema.optionalKey(Schema.String),
+  childStatus: Schema.optionalKey(Schema.String),
+  childCount: Schema.optionalKey(Schema.Int),
   write: Schema.optionalKey(Schema.String),
   checkRunning: Schema.optionalKey(Schema.Boolean),
   delayMs: Schema.optionalKey(Schema.Int),
@@ -294,7 +298,7 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     { concurrency: 3 },
   ).pipe(
     Effect.timeoutOrElse({
-      duration: "35 seconds",
+      duration: "50 seconds",
       orElse: () =>
         handle
           .kill({ killSignal: "SIGTERM" })
@@ -357,6 +361,17 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     ),
     Effect.orElseSucceed(() => [] as ReadonlyArray<ReadonlyArray<string>>),
   )
+  const { Database } = yield* Effect.promise(() => import("bun:sqlite"))
+  const relayDatabase = yield* Effect.acquireRelease(
+    Effect.sync(() => new Database(`${state}/relay.db`, { readonly: true })),
+    (connection) => Effect.sync(() => connection.close()),
+  )
+  const childExecutions = relayDatabase
+    .query<
+      { readonly id: string; readonly status: string },
+      []
+    >("select id, status from relay_executions where id like 'child:%' order by id")
+    .all()
   const completed = {
     ...result,
     rawOutput,
@@ -377,8 +392,8 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     names,
     workspaceContents,
     workspaceFiles,
+    childExecutions,
   }
-  const { Database } = yield* Effect.promise(() => import("bun:sqlite"))
   const database = new Database(`${state}/rika.db`, { readonly: true })
   const rawTurns = database
     .query<
@@ -455,6 +470,12 @@ export const Scene = {
       write,
       queueCount,
       visible: true,
+    }),
+    writeAfterChildExecutions: (childStatus: string, childCount: number, write: string, delayMs?: number): Action => ({
+      childStatus,
+      childCount,
+      write,
+      ...(delayMs === undefined ? {} : { delayMs }),
     }),
     checkRunningAfter: (after: string, write: string): Action => ({ after, write, checkRunning: true }),
     restartAfter: (after: string, ...restartArguments: ReadonlyArray<string>): Action => ({

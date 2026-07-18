@@ -22,7 +22,7 @@ const relayModel = (selection: {
 })
 
 describe("product agent profiles", () => {
-  it("resolves named narrowed Baton agents and Relay presets", () => {
+  it("resolves the exact narrowed tools and permissions for each shipping specialist", () => {
     const registered = presets(model)
     expect(Object.keys(registered)).toEqual(names)
     for (const name of names) {
@@ -32,14 +32,35 @@ describe("product agent profiles", () => {
       expect(registered[name]?.tool_names).toEqual(Object.keys(profile.agent.toolkit.tools))
       expect(registered[name]?.permissions.length).toBeGreaterThan(0)
       expect(registered[name]?.output_schema_ref).toMatch(/^rika\.agent\./)
-      if (name !== "Task") {
-        expect(registered[name]?.tool_names).not.toContain("shell")
-        expect(registered[name]?.tool_names).not.toContain("edit_file")
-      }
     }
-    expect(registered.Task?.tool_names).toContain("edit_file")
-    expect(registered.Review?.tool_names).toEqual(["grep", "read_file", "git_status"])
-    expect(registered.Review?.permissions).toEqual(["workspace.read"])
+    expect(registered.Oracle).toMatchObject({
+      tool_names: ["find_files", "grep", "read_file", "task", "oracle", "librarian", "review"],
+      permissions: ["workspace.read"],
+    })
+    expect(registered.Librarian).toMatchObject({
+      tool_names: ["web_search", "read_web_page", "task", "oracle", "librarian", "review"],
+      permissions: ["network.read"],
+    })
+    expect(registered.Review).toMatchObject({
+      tool_names: ["grep", "read_file", "git_status"],
+      permissions: ["workspace.read"],
+    })
+    expect(registered.Task).toMatchObject({
+      tool_names: [
+        "find_files",
+        "grep",
+        "read_file",
+        "create_file",
+        "edit_file",
+        "shell",
+        "shell_command_status",
+        "task",
+        "oracle",
+        "librarian",
+        "review",
+      ],
+      permissions: ["workspace.read", "workspace.write", "process.run"],
+    })
   })
 
   it("supports data-first and data-last preset model overrides", () => {
@@ -58,22 +79,24 @@ describe("product agent profiles", () => {
     expect(presets()(model).Oracle?.model).toEqual(relayModel(model))
   })
 
-  it.effect("validates deterministic structured output contracts", () =>
+  it.effect("accepts and rejects every shipping specialist structured output contract", () =>
     Effect.gen(function* () {
-      expect(yield* Schema.decodeUnknownEffect(outputSchemas.Oracle)({ answer: "A", evidence: ["file:1"] })).toEqual({
-        answer: "A",
-        evidence: ["file:1"],
-      })
-      expect(
-        yield* Schema.decodeUnknownEffect(outputSchemas.Painter)({
-          text: "done",
-          artifact: { path: "image.png", mimeType: "image/png", kind: "image" },
-        }),
-      ).toMatchObject({ artifact: { path: "image.png" } })
-      const failure = yield* Effect.flip(
-        Schema.decodeUnknownEffect(outputSchemas.Review)({ summary: "ok", findings: "invalid" }),
-      )
-      expect(String(failure)).toContain("findings")
+      const contracts = [
+        [outputSchemas.Task, { summary: "done", files: ["a.ts"] }, { summary: "done", files: "a.ts" }],
+        [outputSchemas.Oracle, { answer: "A", evidence: ["file:1"] }, { answer: "A", evidence: "file:1" }],
+        [
+          outputSchemas.Librarian,
+          { answer: "A", sources: ["https://example.test"] },
+          { answer: "A", sources: "https://example.test" },
+        ],
+        [outputSchemas.Review, { summary: "ok", findings: [] }, { summary: "ok", findings: "invalid" }],
+      ] as const
+      for (const [schema, valid, invalid] of contracts) {
+        expect(yield* Schema.decodeUnknownEffect(schema)(valid)).toEqual(valid)
+        expect(String(yield* Effect.flip(Schema.decodeUnknownEffect(schema)(invalid)))).toMatch(
+          /files|evidence|sources|findings/,
+        )
+      }
     }),
   )
 

@@ -186,7 +186,10 @@ test("three Task calls in one model turn run as overlapping durable children", (
           expect(requests.slice(1, 4).every((request) => request.operation === "streamText")).toBe(true)
           expect(
             settled.events
-              .filter((event) => event.type === "model.output.delta")
+              .filter(
+                (event) =>
+                  event.type === "model.output.delta" && event.cursor.startsWith("execution:turn-parallel-spawn:"),
+              )
               .map((event) => event.text)
               .join(""),
           ).toBe("All three explorations finished.")
@@ -527,7 +530,10 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           ).toBe(true)
           expect(
             settled.events
-              .filter((event) => event.type === "model.output.delta")
+              .filter(
+                (event) =>
+                  event.type === "model.output.delta" && event.cursor.startsWith("execution:turn-nested-spawn:"),
+              )
               .map((event) => event.text)
               .join(""),
           ).toBe("Root received the nested result.")
