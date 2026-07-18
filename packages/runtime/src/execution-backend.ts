@@ -944,17 +944,14 @@ const followExecution = (
                       )
                   : Effect.succeed(false)
               return Effect.gen(function* () {
-                if (root || spawnedChild !== undefined) {
-                  yield* Queue.offer(updates, {
-                    _tag: "event",
-                    event: mapped,
-                    actionable: false,
-                    ...(terminal === undefined ? {} : { terminal }),
-                  })
-                }
-                if (spawnedChild !== undefined) yield* launch(Ids.ExecutionId.make(spawnedChild), false)
                 const actionable = yield* inspectActionable
-                if (actionable && !root) yield* Queue.offer(updates, { _tag: "event", event: mapped, actionable: true })
+                yield* Queue.offer(updates, {
+                  _tag: "event",
+                  event: mapped,
+                  actionable: actionable && !root,
+                  ...(root && terminal !== undefined ? { terminal } : {}),
+                })
+                if (spawnedChild !== undefined) yield* launch(Ids.ExecutionId.make(spawnedChild), false)
                 if (actionable && root)
                   yield* Queue.offer(updates, { _tag: "stopped", status: "waiting", actionable: true })
                 return terminal === undefined && !actionable

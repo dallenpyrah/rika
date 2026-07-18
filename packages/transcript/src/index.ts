@@ -435,7 +435,8 @@ const applyChild = (projection: Projection, turnId: string, event: SourceEvent):
         (encodedToolId === undefined ? undefined : toolAt(projection, eventId(turnId, encodedToolId))))
   if (linkedTool !== undefined) {
     const id = linkedTool.id
-    const status = childStatus(event, value)
+    const childState = childStatus(event, value)
+    const status = linkedTool.status === "failed" || linkedTool.status === "cancelled" ? linkedTool.status : childState
     const profile = string(value.profile ?? value.preset_name ?? value.name).toLowerCase()
     const presentation =
       profile.length === 0

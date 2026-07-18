@@ -427,16 +427,26 @@ export const reconcile = Effect.fn("Operation.reconcilePublic")(function* (
   )
 })
 
-const transcriptPatch = (turn: Turn.Turn, event: ExecutionBackend.Event): InteractiveEvent => ({
-  _tag: "TranscriptPatched",
-  selectionEpoch: 0,
-  threadId: turn.threadId,
-  turnId: turn.id,
-  event,
-  revision: event.sequence,
-})
-
 const normalizeChildExecutionId = (executionId: string): string => executionId.replace(/^execution:/, "")
+
+const transcriptPatch = (turn: Turn.Turn, event: ExecutionBackend.Event): InteractiveEvent => {
+  const executionId = event.data?.execution_id
+  const turnId =
+    typeof executionId === "string" && executionId.length > 0
+      ? Turn.TurnId.make(normalizeChildExecutionId(executionId))
+      : turn.id
+  return {
+    _tag: "TranscriptPatched",
+    selectionEpoch: 0,
+    threadId: turn.threadId,
+    turnId,
+    ...(turnId === turn.id || (event.type !== "model.usage.reported" && event.type !== "child_run.spawned")
+      ? {}
+      : { rootTurnId: turn.id }),
+    event,
+    revision: event.sequence,
+  }
+}
 
 const sourceProjection = (projection: TranscriptRepository.Projection): Transcript.Projection => ({
   units: projection.units,
@@ -583,7 +593,7 @@ const childExecutionId = (event: ExecutionBackend.Event): string | undefined => 
   const nested =
     member !== null && typeof member === "object" ? (member as Readonly<Record<string, unknown>>) : undefined
   const value = nested?.child_execution_id ?? event.data?.child_execution_id
-  return typeof value === "string" && value.length > 0 ? normalizeChildExecutionId(value) : undefined
+  return typeof value === "string" && value.length > 0 ? value : undefined
 }
 
 const childTranscriptPatch = (
@@ -595,7 +605,7 @@ const childTranscriptPatch = (
   _tag: "TranscriptPatched",
   selectionEpoch: 0,
   threadId,
-  turnId: Turn.TurnId.make(executionId),
+  turnId: Turn.TurnId.make(normalizeChildExecutionId(executionId)),
   ...(event.type === "model.usage.reported" || event.type === "child_run.spawned" ? { rootTurnId } : {}),
   event,
   revision: event.sequence,
@@ -1301,7 +1311,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           selection.executions.add(normalizedExecutionId)
           if (
             !Queue.offerUnsafe(childFollowerJobs, {
-              executionId: normalizedExecutionId,
+              executionId,
               threadId,
               rootTurnId,
               selection,
@@ -2522,9 +2532,15 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 turn.status === "accepted"
                   ? []
                   : yield* activeDescendantExecutionIds(backend, turn.id).pipe(Effect.orElseSucceed(() => []))
+              const result =
+                turn.status === "accepted"
+                  ? { turnId: turn.id, status: "cancelled" as const, events: [] }
+                  : yield* backend.cancel(turn.id, cancelledAt)
               const cancellationOrder = childIds.toReversed()
-              const childOutcomes = yield* Effect.forEach(cancellationOrder, (childId) =>
-                Effect.result(backend.cancel(childId, cancelledAt, ExecutionBackend.executionReference)),
+              const childOutcomes = yield* Effect.forEach(
+                cancellationOrder,
+                (childId) => Effect.result(backend.cancel(childId, cancelledAt, ExecutionBackend.executionReference)),
+                { concurrency: "unbounded" },
               )
               for (const [index, outcome] of childOutcomes.entries()) {
                 const childId = cancellationOrder[index]!
@@ -2539,10 +2555,6 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     }),
                   )
               }
-              const result =
-                turn.status === "accepted"
-                  ? { turnId: turn.id, status: "cancelled" as const, events: [] }
-                  : yield* backend.cancel(turn.id, cancelledAt)
               yield* setTurnStatus(
                 turn.id,
                 result.status,

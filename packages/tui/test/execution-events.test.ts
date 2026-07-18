@@ -311,6 +311,38 @@ describe("ExecutionEvents.projectUnits", () => {
     expect(rendered).toContain("Child completed the boundary.")
   })
 
+  it("keeps a failed subagent tool failed when its child lifecycle completes later", () => {
+    const childId = "execution:child:turn:task"
+    const projection = Transcript.project("turn", "prompt", [
+      event("agent", 0, "tool.call.requested", {
+        data: {
+          tool_call_id: "agent",
+          tool_name: "task",
+          input: { prompt: "Use an unavailable model", model: "gpt-5.6-luna" },
+        },
+      }),
+      event("agent-spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent", child_execution_id: childId },
+      }),
+      event("agent-failed", 2, "tool.result.received", {
+        data: { tool_call_id: "agent", error: "AgentToolError: Model gpt-5.6-luna is not available" },
+      }),
+      event("child-completed", 3, "child_run.completed", {
+        data: { child_execution_id: childId, profile: "task" },
+      }),
+    ])
+
+    const model = ExecutionEvents.projectUnits(ViewState.initial("/work"), projection.units)
+
+    expect(model.blocks).toEqual([
+      expect.objectContaining({
+        _tag: "ToolCall",
+        status: "failed",
+        output: "AgentToolError: Model gpt-5.6-luna is not available",
+      }),
+    ])
+  })
+
   it("merges Relay child ids that encode the uncorrelated tool call", () => {
     const turnId = "turn"
     const toolCallId = "rika:execution%3Aturn:cancel-agent"

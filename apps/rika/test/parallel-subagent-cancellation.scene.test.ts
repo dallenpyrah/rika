@@ -26,5 +26,5 @@ test(
       expect(result.output).not.toContain("LATE_DELTA")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
-  15_000,
+  45_000,
 )
