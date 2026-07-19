@@ -569,6 +569,40 @@ describe("ExecutionEvents.projectUnits", () => {
     },
   )
 
+  it("replays a child with an internal tool error and completed final response as finished", () => {
+    const parent = Transcript.project("turn", "delegate", [
+      event("agent", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent", tool_name: "oracle", input: { prompt: "Review" } },
+      }),
+      event("spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent", child_execution_id: "execution:child", profile: "oracle" },
+      }),
+    ])
+    const child = Transcript.project("child", "", [
+      event("inner", 0, "tool.call.requested", {
+        data: { tool_call_id: "inner", tool_name: "read_file", input: { path: "missing.ts" } },
+      }),
+      event("inner-error", 1, "tool.result.received", {
+        data: { tool_call_id: "inner", error: "File not found" },
+      }),
+      event("answer", 2, "model.output.completed", { text: "Usable Oracle response" }),
+      event("failed", 3, "execution.failed", { text: "internal tool failed" }),
+    ])
+
+    const projected = ExecutionEvents.projectUnits(
+      ViewState.initial("/work"),
+      Transcript.withNestedProjections(parent, [{ parentId: "turn:agent", projection: child }]).units,
+    )
+    const rendered = renderTranscriptStyled({ ...projected, expandedRowKeys: ["tool:turn:agent"] })
+      .chunks.map((chunk) => chunk.text)
+      .join("")
+
+    expect(projected.blocks[0]).toMatchObject({ _tag: "ToolCall", status: "complete" })
+    expect(rendered).toContain("Oracle has spoken")
+    expect(rendered).toContain("Usable Oracle response")
+    expect(rendered).not.toContain("Oracle failed")
+  })
+
   it("projects cancelled root and child tools as terminal without a duplicate notice", () => {
     const childId = "turn:child:task"
     const parent = Transcript.project("turn", "delegate", [

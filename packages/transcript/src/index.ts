@@ -382,29 +382,37 @@ const applyAssistant = (projection: Projection, turnId: string, event: SourceEve
   const index = projection.units.findIndex((candidate) => candidate.key === key)
   const current = index < 0 ? undefined : projection.units[index]
   const text = assistantText(event)
+  const finish = (next: Projection) =>
+    complete && text.trim().length > 0 ? { ...next, usableCompletionSequence: event.sequence } : next
   const aggregateCompletion = complete && typeof sourcePayload(event).model_output === "string"
   if (aggregateCompletion) {
     const hasAssistant = projection.units.some(
       (candidate) => candidate.content._tag === "Entry" && candidate.content.role === "assistant",
     )
     if (hasAssistant)
-      return current?.content._tag === "Entry" && current.content.role === "assistant"
-        ? replaceUnit(projection, index, { ...current, revision: event.sequence })
-        : projection
+      return finish(
+        current?.content._tag === "Entry" && current.content.role === "assistant"
+          ? replaceUnit(projection, index, { ...current, revision: event.sequence })
+          : projection,
+      )
   }
   if (current?.content._tag === "Entry" && current.content.role === "assistant")
-    return replaceUnit(projection, index, {
-      ...current,
-      revision: event.sequence,
-      content: {
-        ...current.content,
-        text: complete && text.length > 0 ? text : current.content.text + text,
-      },
-    })
+    return finish(
+      replaceUnit(projection, index, {
+        ...current,
+        revision: event.sequence,
+        content: {
+          ...current.content,
+          text: complete && text.length > 0 ? text : current.content.text + text,
+        },
+      }),
+    )
   if (text.length === 0) return projection
-  return upsertUnit(
-    projection,
-    unit(key, turnId, event.sequence, 0, event.sequence, { _tag: "Entry", role: "assistant", text }),
+  return finish(
+    upsertUnit(
+      projection,
+      unit(key, turnId, event.sequence, 0, event.sequence, { _tag: "Entry", role: "assistant", text }),
+    ),
   )
 }
 
@@ -710,6 +718,17 @@ const advanceModelPhase = (projection: Projection, turnId: string): Projection =
   return hasOutput ? { ...projection, modelPhase: phase + 1 } : projection
 }
 
+const hasUsableFinalResponse = (projection: Projection, turnId: string) => {
+  const latestToolRevision = projection.units.reduce(
+    (latest, candidate) =>
+      candidate.turnId === turnId && candidate.content._tag === "Block" && candidate.content.block._tag === "ToolCall"
+        ? Math.max(latest, candidate.revision)
+        : latest,
+    -1,
+  )
+  return projection.usableCompletionSequence !== undefined && projection.usableCompletionSequence > latestToolRevision
+}
+
 const applyKnownEvent = (projection: Projection, turnId: string, event: SourceEvent): Projection => {
   if (event.type === "model.input.prepared") {
     if (projection.modelPhase < 0) {
@@ -732,6 +751,8 @@ const applyKnownEvent = (projection: Projection, turnId: string, event: SourceEv
   if (event.type === "execution.completed")
     return applyExecutionOutcome(projection, turnId, event.sequence, { status: "complete" })
   if (event.type === "execution.failed") {
+    if (hasUsableFinalResponse(projection, turnId))
+      return applyExecutionOutcome(projection, turnId, event.sequence, { status: "complete" })
     const reason = event.text ?? string(sourcePayload(event).message, "Execution failed")
     const block: Block = {
       _tag: "Error",

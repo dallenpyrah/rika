@@ -167,6 +167,7 @@ export const Projection = Schema.Struct({
   units: Schema.Array(Unit),
   revision: Schema.Finite,
   modelPhase: Schema.Finite,
+  usableCompletionSequence: Schema.optionalKey(Schema.Finite),
   oldestCursor: Schema.optionalKey(Schema.String),
   checkpointCursor: Schema.optionalKey(Schema.String),
   costUsd: Schema.optionalKey(Schema.Finite),

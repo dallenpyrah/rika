@@ -411,6 +411,101 @@ describe("Transcript projection", () => {
     }
   })
 
+  it("treats a completed final assistant response as the child outcome despite a later execution failure", () => {
+    const events: ReadonlyArray<SourceEvent> = [
+      {
+        cursor: "tool",
+        sequence: 1,
+        type: "tool.call.requested",
+        createdAt: 1,
+        data: { tool_call_id: "read", tool_name: "read_file" },
+      },
+      {
+        cursor: "tool-error",
+        sequence: 2,
+        type: "tool.result.received",
+        createdAt: 2,
+        data: { tool_call_id: "read", error: "file missing" },
+      },
+      { cursor: "answer", sequence: 3, type: "model.output.completed", createdAt: 3, text: "Usable final response" },
+      { cursor: "failed", sequence: 4, type: "execution.failed", createdAt: 4, text: "internal tool failed" },
+    ]
+
+    for (const projection of [
+      project("child", "delegate", events),
+      events.reduce((current, event) => applyEvent(current, event), empty("child", "delegate")),
+    ]) {
+      expect(projection.units.find((unit) => unit.executionOutcome !== undefined)?.executionOutcome).toEqual({
+        status: "complete",
+      })
+      expect(projection.units).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            content: expect.objectContaining({ block: expect.objectContaining({ _tag: "Error" }) }),
+          }),
+        ]),
+      )
+      expect(projection.units).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            content: expect.objectContaining({
+              block: expect.objectContaining({ _tag: "ToolCall", status: "failed" }),
+            }),
+          }),
+        ]),
+      )
+    }
+  })
+
+  it.each([
+    [
+      "partial output without completion",
+      [{ cursor: "partial", sequence: 3, type: "model.output.delta", createdAt: 3, text: "Partial response" }],
+    ],
+    [
+      "an empty completion after partial output",
+      [
+        { cursor: "partial", sequence: 3, type: "model.output.delta", createdAt: 3, text: "Partial response" },
+        { cursor: "empty", sequence: 4, type: "model.output.completed", createdAt: 4, text: "" },
+      ],
+    ],
+    [
+      "a completed response before later tool activity",
+      [
+        { cursor: "answer", sequence: 1, type: "model.output.completed", createdAt: 1, text: "Stale response" },
+        {
+          cursor: "tool",
+          sequence: 2,
+          type: "tool.call.requested",
+          createdAt: 2,
+          data: { tool_call_id: "read", tool_name: "read_file" },
+        },
+        {
+          cursor: "tool-error",
+          sequence: 3,
+          type: "tool.result.received",
+          createdAt: 3,
+          data: { tool_call_id: "read", error: "file missing" },
+        },
+      ],
+    ],
+  ] as const)("keeps execution failure after %s", (_name, precedingEvents) => {
+    const events: ReadonlyArray<SourceEvent> = [
+      ...precedingEvents,
+      { cursor: "failed", sequence: 5, type: "execution.failed", createdAt: 5, text: "internal tool failed" },
+    ]
+
+    for (const projection of [
+      project("child", "delegate", events),
+      events.reduce((current, event) => applyEvent(current, event), empty("child", "delegate")),
+    ]) {
+      expect(projection.units.find((unit) => unit.executionOutcome !== undefined)?.executionOutcome).toEqual({
+        status: "failed",
+        reason: "internal tool failed",
+      })
+    }
+  })
+
   it("keeps the ToolError message as the output of a failed tool result", () => {
     const projection = project("turn-a", "prompt", [
       {

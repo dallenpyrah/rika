@@ -444,6 +444,38 @@ const routeForSelection = (pin: ExecutionRoutePin, selection: ModelRegistry.Mode
       route.model === selection.model &&
       route.registrationKey === selection.registrationKey,
   )
+export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEvent>) => {
+  const terminal = events.findLast(
+    (executionEvent) =>
+      executionEvent.type === "execution.completed" ||
+      executionEvent.type === "execution.failed" ||
+      executionEvent.type === "execution.cancelled",
+  )
+  const lastToolSequence =
+    events.findLast(
+      (executionEvent) =>
+        executionEvent.type === "tool.call.requested" || executionEvent.type === "tool.result.received",
+    )?.sequence ?? -1
+  const finalResponse = events.findLast(
+    (executionEvent) =>
+      executionEvent.type === "model.output.completed" &&
+      executionEvent.sequence > lastToolSequence &&
+      executionEvent.content?.some((part) => part.type === "text" && part.text.trim().length > 0) === true,
+  )
+  const recovered = terminal?.type === "execution.failed" && finalResponse !== undefined
+  return {
+    status:
+      terminal?.type === "execution.completed" || recovered
+        ? ("completed" as const)
+        : terminal?.type === "execution.cancelled"
+          ? ("cancelled" as const)
+          : ("failed" as const),
+    output:
+      recovered || terminal?.content === undefined || terminal.content.length === 0
+        ? (finalResponse?.content ?? [])
+        : terminal.content,
+  }
+}
 const awaitChildResult = (client: Client.Interface, childId: string) => {
   const childExecutionId = Ids.ExecutionId.make(childId)
   return client.streamExecution({ execution_id: childExecutionId }).pipe(
@@ -452,27 +484,7 @@ const awaitChildResult = (client: Client.Interface, childId: string) => {
         item.type === "execution.completed" || item.type === "execution.failed" || item.type === "execution.cancelled",
     ),
     Stream.runCollect,
-    Effect.map((events) => {
-      const terminal = events.findLast(
-        (executionEvent) =>
-          executionEvent.type === "execution.completed" ||
-          executionEvent.type === "execution.failed" ||
-          executionEvent.type === "execution.cancelled",
-      )
-      const modelOutput = events.findLast((executionEvent) => executionEvent.type === "model.output.completed")
-      return {
-        status:
-          terminal?.type === "execution.completed"
-            ? ("completed" as const)
-            : terminal?.type === "execution.cancelled"
-              ? ("cancelled" as const)
-              : ("failed" as const),
-        output:
-          terminal?.content === undefined || terminal.content.length === 0
-            ? (modelOutput?.content ?? [])
-            : terminal.content,
-      }
-    }),
+    Effect.map((events) => resolveChildResult([...events])),
   )
 }
 const workflowExecutionId = (runId: string, ownerTurnId?: string) =>

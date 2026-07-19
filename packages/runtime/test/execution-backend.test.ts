@@ -329,6 +329,55 @@ const provideBackendWithThreadTools = (implementation: Client.Interface) => {
 }
 
 describe("ExecutionBackend Relay client adapter", () => {
+  it("returns a completed final child response despite an internal tool failure terminal", () => {
+    const events = [
+      relayEvent("tool.call.requested", 1),
+      relayEvent("tool.result.received", 2),
+      relayEvent("model.output.completed", 3, [Content.text("Usable final response")]),
+      relayEvent("execution.failed", 4, [], { message: "internal tool failed" }),
+    ]
+
+    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({
+      status: "completed",
+      output: [Content.text("Usable final response")],
+    })
+  })
+
+  it("does not recover a stale final response before later tool activity", () => {
+    const events = [
+      relayEvent("model.output.completed", 1, [Content.text("Stale response")]),
+      relayEvent("tool.call.requested", 2),
+      relayEvent("tool.result.received", 3),
+      relayEvent("execution.failed", 4, [], { message: "internal tool failed" }),
+    ]
+
+    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({ status: "failed", output: [] })
+  })
+
+  it("keeps cancellation authoritative after a completed final response", () => {
+    const events = [
+      relayEvent("model.output.completed", 1, [Content.text("Completed response")]),
+      relayEvent("execution.cancelled", 2, [], { message: "cancelled" }),
+    ]
+
+    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({
+      status: "cancelled",
+      output: [Content.text("Completed response")],
+    })
+  })
+
+  it.each([
+    ["execution.failed", "failed"],
+    ["execution.cancelled", "cancelled"],
+  ] as const)("preserves %s when a child has no completed final response", (terminal, status) => {
+    const events = [
+      relayEvent("model.output.delta", 1, [Content.text("partial")]),
+      relayEvent(terminal, 2, [], { message: "terminal reason" }),
+    ]
+
+    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({ status, output: [] })
+  })
+
   it("keeps preset inheritance separate from explicit child-run overrides", () => {
     const base = {
       child_execution_id: Ids.ChildExecutionId.make("child:one"),
