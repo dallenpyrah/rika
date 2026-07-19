@@ -311,7 +311,7 @@ describe("ExecutionEvents.projectUnits", () => {
     expect(rendered).toContain("Child completed the boundary.")
   })
 
-  it("keeps a failed subagent tool failed when its child lifecycle completes later", () => {
+  it("keeps a durable child completion authoritative over the resumed spawn result", () => {
     const childId = "execution:child:turn:task"
     const projection = Transcript.project("turn", "prompt", [
       event("agent", 0, "tool.call.requested", {
@@ -324,11 +324,11 @@ describe("ExecutionEvents.projectUnits", () => {
       event("agent-spawned", 1, "child_run.spawned", {
         data: { tool_call_id: "agent", child_execution_id: childId },
       }),
-      event("agent-failed", 2, "tool.result.received", {
-        data: { tool_call_id: "agent", error: "AgentToolError: Model gpt-5.6-luna is not available" },
+      event("child-completed", 2, "child_run.event", {
+        data: { child_execution_id: childId, status: "completed" },
       }),
-      event("child-completed", 3, "child_run.completed", {
-        data: { child_execution_id: childId, profile: "task" },
+      event("agent-failed", 3, "tool.result.received", {
+        data: { tool_call_id: "agent", error: "an intermediate tool call failed" },
       }),
     ])
 
@@ -337,10 +337,59 @@ describe("ExecutionEvents.projectUnits", () => {
     expect(model.blocks).toEqual([
       expect.objectContaining({
         _tag: "ToolCall",
-        status: "failed",
-        output: "AgentToolError: Model gpt-5.6-luna is not available",
+        status: "complete",
       }),
     ])
+  })
+
+  it("does not let stale running child metadata revive a failed or cancelled subagent", () => {
+    for (const status of ["failed", "cancelled"] as const) {
+      const childId = "execution:child:turn:agent"
+      const tool = Transcript.project("turn", "prompt", [
+        event(`agent-${status}`, 0, "tool.call.requested", {
+          data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Attempt the work" } },
+        }),
+        event(`result-${status}`, 2, "tool.result.received", {
+          data: { tool_call_id: "agent", output: { childExecutionId: childId, status, output: [] } },
+        }),
+      ])
+      const child = Transcript.project("turn", "", [
+        event(`spawned-${status}`, 1, "child_run.spawned", {
+          data: { child_execution_id: childId, profile: "task" },
+        }),
+      ])
+      const units = [...tool.units, ...child.units.filter((unit) => unit.content._tag === "Block")]
+      const model = ExecutionEvents.projectUnits(ViewState.initial("/work"), units)
+
+      expect(model.blocks).toEqual([expect.objectContaining({ _tag: "ToolCall", childId, status })])
+    }
+  })
+
+  it("uses each standalone terminal child outcome when reconciling a contradictory tool status", () => {
+    for (const [childStatus, toolStatus, expected] of [
+      ["completed", "failed", "complete"],
+      ["failed", "completed", "failed"],
+      ["cancelled", "completed", "cancelled"],
+    ] as const) {
+      const childId = "execution:child:turn:agent"
+      const tool = Transcript.project("turn", "prompt", [
+        event(`agent-${childStatus}`, 0, "tool.call.requested", {
+          data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Attempt the work" } },
+        }),
+        event(`result-${childStatus}`, 2, "tool.result.received", {
+          data: { tool_call_id: "agent", output: { childExecutionId: childId, status: toolStatus, output: [] } },
+        }),
+      ])
+      const child = Transcript.project("turn", "", [
+        event(`terminal-${childStatus}`, 1, "child_run.event", {
+          data: { child_execution_id: childId, profile: "task", status: childStatus },
+        }),
+      ])
+      const units = [...tool.units, ...child.units.filter((unit) => unit.content._tag === "Block")]
+      const model = ExecutionEvents.projectUnits(ViewState.initial("/work"), units)
+
+      expect(model.blocks).toEqual([expect.objectContaining({ _tag: "ToolCall", childId, status: expected })])
+    }
   })
 
   it("merges Relay child ids that encode the uncorrelated tool call", () => {

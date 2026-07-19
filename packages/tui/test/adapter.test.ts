@@ -871,6 +871,46 @@ describe("Surface", () => {
     expect(text).not.toContain("Subagent finished Fix packaging integration tests")
   })
 
+  test("keeps a completed Explore group successful while showing its failed tool row", () => {
+    const presentation = {
+      family: "explore" as const,
+      action: "read",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "file" as const,
+    }
+    const text = renderedText({
+      blocks: [
+        {
+          _tag: "ToolCall",
+          id: "read-good",
+          name: "read_file",
+          input: JSON.stringify({ path: "src/good.ts" }),
+          output: "contents",
+          status: "complete",
+          presentation,
+          detail: "src/good.ts",
+          files: [],
+        },
+        {
+          _tag: "ToolCall",
+          id: "read-bad",
+          name: "read_file",
+          input: JSON.stringify({ path: "." }),
+          output: "ToolError: PlatformError: BadResource",
+          status: "failed",
+          presentation,
+          detail: ".",
+          files: [],
+        },
+      ],
+      expandedRowKeys: ["tool:read-good"],
+    })
+
+    expect(text).toContain("✓ Explored 2 files")
+    expect(text).toContain("✕ Read . ToolError: PlatformError: BadResource")
+  })
+
   test("matches Amp cancelled subagent and shell treatment", () => {
     const state = model({
       blocks: [

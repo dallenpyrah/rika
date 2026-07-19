@@ -53,10 +53,13 @@ test(
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Try unsafe and invalid reads.\r"),
-        Scene.action.writeAfter("FILE_ERRORS_COMPLETE", "\u0003", 1_000),
+        Scene.action.writeAfter("FILE_ERRORS_COMPLETE", "\t", 100),
+        Scene.action.writeAfter("Explored 3 files, 1 search ▸", "\r"),
+        Scene.action.writeAfterDelay("\u0003\u0003", 500),
       ],
     }).then((result) => {
-      expect(result.output).toContain("✕ Explored 3 files, 1 search")
+      expect(result.output).toContain("✓ Explored 3 files, 1 search")
+      expect(result.output).toContain("✕ Read missing.txt")
       expect(result.output).not.toContain("OUTSIDE_SECRET")
       expect(result.clientLogs).toContain("read-symlink")
       expect(result.clientLogs).toContain("invalid-regex")

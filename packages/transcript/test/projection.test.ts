@@ -396,6 +396,50 @@ describe("Transcript projection", () => {
     }
   })
 
+  it("preserves every durable child terminal outcome through a contradictory spawn result", () => {
+    for (const [durable, result, expected] of [
+      ["completed", "failed", "complete"],
+      ["failed", "completed", "failed"],
+      ["cancelled", "completed", "cancelled"],
+    ] as const) {
+      const childId = "execution:turn-a:child:agent"
+      const projection = project("turn-a", "delegate", [
+        {
+          cursor: `call-${durable}`,
+          sequence: 1,
+          type: "tool.call.requested",
+          createdAt: 1,
+          data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Inspect the projection" } },
+        },
+        {
+          cursor: `spawned-${durable}`,
+          sequence: 2,
+          type: "child_run.spawned",
+          createdAt: 2,
+          data: { child_execution_id: childId },
+        },
+        {
+          cursor: `terminal-${durable}`,
+          sequence: 3,
+          type: "child_run.event",
+          createdAt: 3,
+          data: { child_execution_id: childId, status: durable },
+        },
+        {
+          cursor: `result-${durable}`,
+          sequence: 4,
+          type: "tool.result.received",
+          createdAt: 4,
+          data: { tool_call_id: "agent", output: { child_execution_id: childId, status: result, output: [] } },
+        },
+      ])
+
+      expect(projection.units[1]).toMatchObject({
+        content: { _tag: "Block", block: { _tag: "ToolCall", childId, status: expected } },
+      })
+    }
+  })
+
   it("keeps the ToolError message as the output of a failed tool result", () => {
     const projection = project("turn-a", "prompt", [
       {

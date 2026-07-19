@@ -115,6 +115,9 @@ test(
         Scene.action.writeAfter("Child inspection", "\u0003", 500),
       ],
     }).then((result) => {
+      expect(result.output).toContain("Subagent finished")
+      expect(result.output).not.toContain("Subagent failed")
+      expect(result.output).toContain("✕ Read missing-child-file.ts")
       expect(result.output).toContain("Inspect one child file.")
       expect(result.output).toContain("missing-child-file.ts")
       expect(result.output).toContain("Child inspection")

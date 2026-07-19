@@ -143,9 +143,7 @@ const mergeChildAgent = (tool: Unit, child: Unit): Unit => {
   )
     return tool
   const status =
-    tool.content.block.status === "failed" ||
-    tool.content.block.status === "cancelled" ||
-    child.revision < tool.revision
+    child.content.block.status === "running" && tool.content.block.status !== "running"
       ? tool.content.block.status
       : child.content.block.status
   return {

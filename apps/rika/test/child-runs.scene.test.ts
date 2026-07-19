@@ -53,6 +53,42 @@ test(
 )
 
 test(
+  "shows a recovered child as finished while preserving its failed tool call",
+  () =>
+    Scene.run({
+      script: [
+        Scene.model.turn([
+          Scene.model.toolCall("task", { prompt: "Recover from a failed command." }, "recovery-child"),
+        ]),
+        Scene.model.turn([
+          Scene.model.toolCall(
+            "shell",
+            { command: "sh", args: ["-c", "printf CHILD_TOOL_FAILED; exit 7"] },
+            "failed-child-tool",
+          ),
+        ]),
+        Scene.model.text("CHILD_RECOVERED_WITH_VALID_ANSWER"),
+        Scene.model.object({ summary: "Child recovered successfully.", files: [] }),
+        Scene.model.text("PARENT_RECEIVED_RECOVERED_CHILD"),
+      ],
+      actions: [
+        Scene.action.writeAfter("Welcome to Rika", "Delegate recoverable work.\r"),
+        Scene.action.writeAfter("PARENT_RECEIVED_RECOVERED_CHILD", "\t", 100),
+        Scene.action.writeAfter("Subagent finished ▸", "\r"),
+        Scene.action.writeAfter("CHILD_RECOVERED_WITH_VALID_ANSWER", "\u0003", 500),
+      ],
+    }).then((result) => {
+      expect(result.output).toContain("Subagent finished")
+      expect(result.output).not.toContain("Subagent failed")
+      expect(result.output).toContain("✕ $ sh -c printf CHILD_TOOL_FAILED; exit 7")
+      expect(result.output).toContain("CHILD_RECOVERED_WITH_VALID_ANSWER")
+      expect(result.output).toContain("PARENT_RECEIVED_RECOVERED_CHILD")
+      expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
+    }),
+  45_000,
+)
+
+test(
   "preserves the specialist identity and response of an Oracle child run",
   () =>
     Scene.run({
