@@ -56,11 +56,27 @@ const replaceUnit = (projection: Projection, index: number, next: Unit): Project
   return { ...projection, units }
 }
 
-const applyExecutionOutcome = (projection: Projection, outcome: NonNullable<Unit["executionOutcome"]>): Projection => {
-  const index = projection.units.length - 1
-  return index < 0
-    ? projection
-    : replaceUnit(projection, index, { ...projection.units[index]!, executionOutcome: outcome })
+const applyExecutionOutcome = (
+  projection: Projection,
+  turnId: string,
+  outcome: NonNullable<Unit["executionOutcome"]>,
+): Projection => {
+  const index = projection.units.findIndex(
+    (candidate) =>
+      candidate.turnId === turnId &&
+      candidate.parentId === undefined &&
+      candidate.content._tag === "Entry" &&
+      candidate.content.role === "user",
+  )
+  if (index >= 0) return replaceUnit(projection, index, { ...projection.units[index]!, executionOutcome: outcome })
+  return upsertUnit(projection, {
+    ...unit(`execution:${turnId}:outcome`, turnId, Number.MAX_SAFE_INTEGER, 0, projection.revision, {
+      _tag: "Entry",
+      role: "notice",
+      text: "",
+    }),
+    executionOutcome: outcome,
+  })
 }
 
 const upsertUnit = (projection: Projection, incoming: Unit): Projection => {
@@ -347,13 +363,8 @@ const nonNegativeFinite = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
 
 const usageCost = (value: Record<string, unknown>): number | undefined => {
-  for (const key of ["cost_usd", "costUsd", "total_cost_usd", "cost", "usd"]) {
+  for (const key of ["cost_usd", "costUsd"]) {
     const candidate = nonNegativeFinite(value[key])
-    if (candidate !== undefined) return candidate
-  }
-  const usage = record(value.usage)
-  for (const key of ["cost_usd", "costUsd", "cost"]) {
-    const candidate = nonNegativeFinite(usage[key])
     if (candidate !== undefined) return candidate
   }
   return undefined
@@ -716,7 +727,7 @@ const applyKnownEvent = (projection: Projection, turnId: string, event: SourceEv
     const cost = usageCost(sourcePayload(event))
     return cost === undefined ? projection : { ...projection, costUsd: (projection.costUsd ?? 0) + cost }
   }
-  if (event.type === "execution.completed") return applyExecutionOutcome(projection, { status: "complete" })
+  if (event.type === "execution.completed") return applyExecutionOutcome(projection, turnId, { status: "complete" })
   if (event.type === "execution.failed") {
     const reason = event.text ?? string(sourcePayload(event).message, "Execution failed")
     const block: Block = {

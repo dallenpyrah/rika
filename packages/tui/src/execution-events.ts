@@ -21,8 +21,10 @@ const isCancellationNotice = (unit: Unit): boolean =>
   unit.key.startsWith("execution:") &&
   unit.key.endsWith(":cancelled") &&
   unit.content._tag === "Entry" &&
-  unit.content.role === "notice" &&
-  unit.content.text === "cancelled"
+  unit.content.role === "notice"
+
+const isInternalOutcome = (unit: Unit): boolean =>
+  unit.key.startsWith("execution:") && unit.key.endsWith(":outcome") && unit.executionOutcome !== undefined
 
 const cancelledUnit = (unit: Unit): Unit => {
   if (unit.content._tag !== "Block") return unit
@@ -290,6 +292,7 @@ const projectUnitsImpl = (model: Model, units: ReadonlyArray<Unit>, parentId?: s
   const items = [...projectedModel.items] as Array<TranscriptItem>
   const known = new Map(items.flatMap((item, index) => (item.id === undefined ? [] : [[item.id, index] as const])))
   for (const unit of reconciled.units) {
+    if (isInternalOutcome(unit)) continue
     const nestedParentId = parentId ?? unit.parentId
     if (
       nestedParentId !== undefined &&

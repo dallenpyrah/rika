@@ -606,6 +606,34 @@ describe("ExecutionEvents.projectUnits", () => {
     }
   })
 
+  it("uses reasoned root and nested cancellation markers without rendering their reasons as notices", () => {
+    const parent = Transcript.project("turn", "delegate", [
+      event("agent", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "work" } },
+      }),
+    ])
+    const child = Transcript.project("child", "", [
+      event("shell", 0, "tool.call.requested", {
+        data: { tool_call_id: "shell", tool_name: "shell", input: { command: "sleep 60" } },
+      }),
+      event("child-cancelled", 1, "execution.cancelled", { text: "parent stopped this child" }),
+    ])
+    const root = Transcript.applyEvent(
+      parent,
+      event("root-cancelled", 2, "execution.cancelled", { text: "cancelled by operator" }),
+    )
+    const model = ExecutionEvents.projectUnits(
+      ViewState.initial("/work"),
+      Transcript.withNestedProjections(root, [{ parentId: "turn:agent", projection: child }]).units,
+    )
+
+    expect(model.blocks).toEqual([
+      expect.objectContaining({ _tag: "ToolCall", id: "turn:agent", status: "cancelled" }),
+      expect.objectContaining({ _tag: "ToolCall", id: "child:shell", status: "cancelled" }),
+    ])
+    expect(model.entries.filter((entry) => entry.role === "notice")).toEqual([])
+  })
+
   it("projects one durable cancellation marker when no parent row can carry it", () => {
     const projection = Transcript.project("turn", "wait", [event("cancelled", 0, "execution.cancelled")])
     const once = ExecutionEvents.projectUnits(ViewState.initial("/work"), projection.units)

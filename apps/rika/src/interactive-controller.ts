@@ -119,6 +119,7 @@ const cleared = (model: ViewState.Model): ViewState.Model => ({
   items: [],
   seenEventIds: [],
   seenExecutionEventKeys: [],
+  childExecutionOutcomes: {},
   eventCursor: undefined,
 })
 

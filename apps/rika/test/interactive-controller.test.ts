@@ -146,6 +146,41 @@ it("clears queue edit mode when a selection loads a thread", () => {
   expect(loaded.state.model.editReturn).toBeUndefined()
 })
 
+it("forgets live child outcomes when SelectionLoaded replaces the transcript", () => {
+  const remembered = {
+    ...initialState(),
+    model: {
+      ...ViewState.initial("/work", "medium"),
+      childExecutionOutcomes: { "turn:agent": { status: "complete" } },
+    },
+  }
+  const loaded = InteractiveController.update(remembered, {
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
+    thread,
+    entries: entries("turn", 1, [
+      {
+        cursor: "agent",
+        sequence: 0,
+        type: "tool.call.requested",
+        createdAt: 1,
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "work" } },
+      },
+      { cursor: "failed", sequence: 1, type: "execution.failed", createdAt: 2, text: "replacement failed" },
+    ]),
+    hasOlder: false,
+    threadCostUsd: 0,
+  })
+
+  expect(loaded.state.model.childExecutionOutcomes).toEqual({})
+  expect(loaded.state.model.blocks).toContainEqual(
+    expect.objectContaining({ _tag: "Error", detail: "replacement failed" }),
+  )
+})
+
 it("maps the new-thread palette action to a command and resets the transcript from the fresh selection", () => {
   const populated = InteractiveController.update(initialState(), {
     _tag: "SelectionLoaded",

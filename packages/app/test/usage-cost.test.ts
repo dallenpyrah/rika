@@ -71,6 +71,20 @@ describe("UsageCost", () => {
     expect(UsageCost.eventCostUsd(usage("negative", -10))).toBeUndefined()
   })
 
+  it("accepts only explicit event-local USD aliases", () => {
+    expect(UsageCost.eventCostUsd(usage("snake", 1.25))).toBe(1.25)
+    expect(UsageCost.eventCostUsd({ ...usage("camel", 0), data: { costUsd: 2.5 } })).toBe(2.5)
+  })
+
+  it.each([
+    ["generic cost", { cost: 1 }],
+    ["generic usd", { usd: 1 }],
+    ["nested usage cost", { usage: { cost: 1 } }],
+    ["cumulative total", { total_cost_usd: 1 }],
+  ])("rejects %s as event-local monetary usage", (_, data) => {
+    expect(UsageCost.eventCostUsd({ ...usage("rejected", 0), data })).toBeUndefined()
+  })
+
   it("counts a durable usage cursor only once across replay and live recovery", () => {
     const event = usage("durable-usage", 2.5)
     const replayed = UsageCost.observe(UsageCost.empty, { threadId: "thread", turnId: "turn", event })

@@ -50,7 +50,9 @@ describe("Transcript projection", () => {
     ])
 
     expect(projection.units.map((unit) => unit.content._tag)).toEqual(["Entry", "Entry", "Block", "Entry"])
-    expect(projection.units.at(-1)).toMatchObject({ executionOutcome: { status: "complete" } })
+    expect(projection.units.find((unit) => unit.key === "turn:turn-a:user")).toMatchObject({
+      executionOutcome: { status: "complete" },
+    })
     expect(projection.units[2]).toMatchObject({
       key: "tool:turn-a:call",
       revision: 4,
@@ -794,5 +796,44 @@ describe("Transcript projection", () => {
       { key: "turn:child:user", revision: 0, parentId: "root:child", order: { sequence: 2, part: 0 } },
       { key: "assistant:child:0", revision: 7, parentId: "root:child", order: { sequence: 3, part: 0 } },
     ])
+  })
+
+  it("keeps a recovered root completion on the root execution instead of its failed nested child", () => {
+    const root = empty("root", "delegate")
+    const failedChild = project("child", "", [
+      { cursor: "failed", sequence: 0, type: "execution.failed", createdAt: 1, text: "child failed" },
+    ])
+    const flattened = withNestedProjections(root, [{ parentId: "root:agent", projection: failedChild }])
+    const completed = applyEvent(flattened, {
+      cursor: "root-done",
+      sequence: 1,
+      type: "execution.completed",
+      createdAt: 2,
+    })
+    const reloaded = withNestedProjections(completed, [{ parentId: "root:agent", projection: failedChild }])
+
+    expect(reloaded.units.find((unit) => unit.key === "turn:root:user")?.executionOutcome).toEqual({
+      status: "complete",
+    })
+    expect(
+      reloaded.units.find((unit) => unit.turnId === "child" && unit.executionOutcome !== undefined)?.executionOutcome,
+    ).toEqual({
+      status: "failed",
+      reason: "child failed",
+    })
+  })
+
+  it("persists a hidden execution outcome when an execution has no root user unit", () => {
+    const root = project("root", "prompt", [
+      { cursor: "answer", sequence: 0, type: "model.output.completed", createdAt: 1, text: "answer" },
+    ])
+    const projection = applyEvent(
+      { ...root, units: root.units.filter((unit) => unit.content._tag !== "Entry" || unit.content.role !== "user") },
+      { cursor: "done", sequence: 1, type: "execution.completed", createdAt: 2 },
+    )
+
+    expect(projection.units).toContainEqual(
+      expect.objectContaining({ key: "execution:root:outcome", executionOutcome: { status: "complete" } }),
+    )
   })
 })
