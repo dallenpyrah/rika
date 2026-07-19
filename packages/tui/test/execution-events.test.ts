@@ -606,32 +606,46 @@ describe("ExecutionEvents.projectUnits", () => {
     }
   })
 
-  it("uses reasoned root and nested cancellation markers without rendering their reasons as notices", () => {
+  it("lets a reasoned nested cancellation override a stale failed parent in live and flattened replay", () => {
     const parent = Transcript.project("turn", "delegate", [
       event("agent", 0, "tool.call.requested", {
         data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "work" } },
       }),
+      event("stale-failure", 1, "tool.result.received", {
+        data: { tool_call_id: "agent", error: "stale parent failure" },
+      }),
     ])
     const child = Transcript.project("child", "", [
-      event("shell", 0, "tool.call.requested", {
+      event("shell", 2, "tool.call.requested", {
         data: { tool_call_id: "shell", tool_name: "shell", input: { command: "sleep 60" } },
       }),
-      event("child-cancelled", 1, "execution.cancelled", { text: "parent stopped this child" }),
+      event("child-cancelled", 3, "execution.cancelled", { text: "parent stopped this child" }),
     ])
-    const root = Transcript.applyEvent(
-      parent,
-      event("root-cancelled", 2, "execution.cancelled", { text: "cancelled by operator" }),
-    )
-    const model = ExecutionEvents.projectUnits(
+    let live = ExecutionEvents.projectUnits(ViewState.initial("/work"), parent.units)
+    live = ExecutionEvents.projectChildUnits(live, "turn:agent", child.units)
+    const replay = ExecutionEvents.projectUnits(
       ViewState.initial("/work"),
-      Transcript.withNestedProjections(root, [{ parentId: "turn:agent", projection: child }]).units,
+      Transcript.withNestedProjections(parent, [{ parentId: "turn:agent", projection: child }]).units,
     )
 
-    expect(model.blocks).toEqual([
-      expect.objectContaining({ _tag: "ToolCall", id: "turn:agent", status: "cancelled" }),
-      expect.objectContaining({ _tag: "ToolCall", id: "child:shell", status: "cancelled" }),
-    ])
-    expect(model.entries.filter((entry) => entry.role === "notice")).toEqual([])
+    for (const projected of [live, replay]) {
+      const model = { ...projected, expandedRowKeys: ["tool:turn:agent"] }
+      const rendered = renderTranscriptStyled(model)
+        .chunks.map((chunk) => chunk.text)
+        .join("")
+      expect(model.blocks).toEqual([
+        expect.objectContaining({
+          _tag: "ToolCall",
+          id: "turn:agent",
+          status: "cancelled",
+          output: "parent stopped this child",
+        }),
+        expect.objectContaining({ _tag: "ToolCall", id: "child:shell", status: "cancelled" }),
+      ])
+      expect(model.entries.filter((entry) => entry.role === "notice")).toEqual([])
+      expect(rendered).toContain("parent stopped this child")
+      expect(rendered).not.toContain("stale parent failure")
+    }
   })
 
   it("projects one durable cancellation marker when no parent row can carry it", () => {

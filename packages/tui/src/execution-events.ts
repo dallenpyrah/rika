@@ -331,7 +331,7 @@ const projectUnitsImpl = (model: Model, units: ReadonlyArray<Unit>, parentId?: s
     }
     known.set(unit.key, items.length - 1)
   }
-  return rememberExecutionOutcomes({ ...projectedModel, entries, blocks, items }, cancellation.units, parentId)
+  return rememberExecutionOutcomes({ ...projectedModel, entries, blocks, items }, units, parentId)
 }
 
 export const projectUnits: {

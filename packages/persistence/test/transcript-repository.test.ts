@@ -337,6 +337,63 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
   )
 })
 
+it.effect("persists an execution outcome appended after the initial projection", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-transcript-outcome-" })
+      const filename = `${directory}/rika.db`
+      const threadId = Thread.ThreadId.make("thread-durable-outcome")
+      const targetId = Turn.TurnId.make("turn-durable-outcome")
+      const database = Database.layer(filename)
+      const layer = Layer.mergeAll(
+        database,
+        ThreadRepository.layer.pipe(Layer.provide(database)),
+        TurnRepository.layer.pipe(Layer.provide(database)),
+        TranscriptRepository.layer.pipe(Layer.provide(database)),
+      )
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const threads = yield* ThreadRepository.Service
+          const turns = yield* TurnRepository.Service
+          const transcripts = yield* TranscriptRepository.Service
+          yield* threads.create({ id: threadId, workspace: "/work/outcome", title: "Outcome", now: 1 })
+          yield* turns.createForSubmission({
+            id: targetId,
+            threadId,
+            prompt: "persist completion",
+            executionRoute: Turn.testExecutionRoute(),
+            queueCapacity: 128,
+            now: 2,
+          })
+          yield* turns.setStatus(targetId, "completed", undefined, 3)
+          const target = yield* turns.get(targetId)
+          if (target === undefined) return yield* Effect.die("turn was not stored")
+          yield* transcripts.replace(target, Transcript.empty(target.id, target.prompt))
+          yield* transcripts.append(target, {
+            cursor: "completed",
+            sequence: 7,
+            type: "execution.completed",
+            createdAt: 4,
+          })
+        }).pipe(provideLayer(layer)),
+      )
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const transcripts = yield* TranscriptRepository.Service
+          const reloaded = yield* transcripts.get(targetId)
+          expect(reloaded?.units.find((unit) => unit.key === `turn:${targetId}:user`)).toMatchObject({
+            revision: 7,
+            executionOutcome: { status: "complete" },
+          })
+        }).pipe(provideLayer(layer)),
+      )
+    }),
+  ).pipe(provideLayer(BunServices.layer)),
+)
+
 it.effect("returns a typed repository error for a malformed durable unit after reopen", () =>
   Effect.scoped(
     Effect.gen(function* () {

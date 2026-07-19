@@ -833,7 +833,11 @@ describe("Transcript projection", () => {
     )
 
     expect(projection.units).toContainEqual(
-      expect.objectContaining({ key: "execution:root:outcome", executionOutcome: { status: "complete" } }),
+      expect.objectContaining({
+        key: "execution:root:outcome",
+        revision: 1,
+        executionOutcome: { status: "complete" },
+      }),
     )
   })
 })

@@ -59,6 +59,7 @@ const replaceUnit = (projection: Projection, index: number, next: Unit): Project
 const applyExecutionOutcome = (
   projection: Projection,
   turnId: string,
+  revision: number,
   outcome: NonNullable<Unit["executionOutcome"]>,
 ): Projection => {
   const index = projection.units.findIndex(
@@ -68,9 +69,10 @@ const applyExecutionOutcome = (
       candidate.content._tag === "Entry" &&
       candidate.content.role === "user",
   )
-  if (index >= 0) return replaceUnit(projection, index, { ...projection.units[index]!, executionOutcome: outcome })
+  if (index >= 0)
+    return replaceUnit(projection, index, { ...projection.units[index]!, revision, executionOutcome: outcome })
   return upsertUnit(projection, {
-    ...unit(`execution:${turnId}:outcome`, turnId, Number.MAX_SAFE_INTEGER, 0, projection.revision, {
+    ...unit(`execution:${turnId}:outcome`, turnId, Number.MAX_SAFE_INTEGER, 0, revision, {
       _tag: "Entry",
       role: "notice",
       text: "",
@@ -727,7 +729,8 @@ const applyKnownEvent = (projection: Projection, turnId: string, event: SourceEv
     const cost = usageCost(sourcePayload(event))
     return cost === undefined ? projection : { ...projection, costUsd: (projection.costUsd ?? 0) + cost }
   }
-  if (event.type === "execution.completed") return applyExecutionOutcome(projection, turnId, { status: "complete" })
+  if (event.type === "execution.completed")
+    return applyExecutionOutcome(projection, turnId, event.sequence, { status: "complete" })
   if (event.type === "execution.failed") {
     const reason = event.text ?? string(sourcePayload(event).message, "Execution failed")
     const block: Block = {
