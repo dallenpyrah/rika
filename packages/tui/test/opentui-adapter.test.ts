@@ -1527,6 +1527,22 @@ test("renders a subagent tool tree and expands each child independently", () =>
           },
           {
             _tag: "ToolCall",
+            id: "child-agent",
+            name: "task",
+            input: '{"prompt":"Explore packages"}',
+            status: "complete",
+            presentation: {
+              family: "agent",
+              action: "task",
+              activeLabel: "Subagent working",
+              completeLabel: "Subagent finished",
+            },
+            detail:
+              "Read-only explore packages/config, extensions, and tools. Report concise public responsibilities with source-file evidence.",
+            files: [],
+          },
+          {
+            _tag: "ToolCall",
             id: "child-shell",
             name: "shell",
             input: '{"command":"bun test"}',
@@ -1540,7 +1556,8 @@ test("renders a subagent tool tree and expands each child independently", () =>
         items: [
           { _tag: "Block", index: 0, id: "tool:oracle-parent", turnId: "turn" },
           { _tag: "Block", index: 1, id: "tool:child-read", turnId: "child:oracle", parentId: "oracle-parent" },
-          { _tag: "Block", index: 2, id: "tool:child-shell", turnId: "child:oracle", parentId: "oracle-parent" },
+          { _tag: "Block", index: 2, id: "tool:child-agent", turnId: "child:oracle", parentId: "oracle-parent" },
+          { _tag: "Block", index: 3, id: "tool:child-shell", turnId: "child:oracle", parentId: "oracle-parent" },
           {
             _tag: "Entry",
             index: 0,
@@ -1566,7 +1583,13 @@ test("renders a subagent tool tree and expands each child independently", () =>
           surface as unknown as {
             readonly transcriptRecords: ReadonlyMap<
               string,
-              { readonly renderable: { readonly screenX: number; readonly screenY: number } }
+              {
+                readonly renderable: {
+                  readonly content: { readonly chunks: ReadonlyArray<{ readonly text: string }> }
+                  readonly screenX: number
+                  readonly screenY: number
+                }
+              }
             >
           }
         ).transcriptRecords
@@ -1577,6 +1600,7 @@ test("renders a subagent tool tree and expands each child independently", () =>
         expect(collapsed).toContain("Oracle has spoken ▾")
         expect(collapsed).toContain("Review the code")
         expect(collapsed).toContain("├ ✓ Read src/a.ts L2-4 ▸")
+        expect(collapsed).toContain("├ ✓ Subagent finished Read-only explore")
         expect(collapsed).toContain("└ ✓ $ bun test ▸")
         expect(collapsed).toContain("Review complete")
         expect(collapsed).toContain("No defects found.")
@@ -1584,6 +1608,17 @@ test("renders a subagent tool tree and expands each child independently", () =>
         expect(collapsed).not.toContain("**")
         expect(collapsed).not.toContain("read child output")
         expect(collapsed).not.toContain("shell child output")
+
+        const agent = records().get("tool:child-agent:header")!.renderable
+        const agentLines = styledTextValue(agent.content).split("\n")
+        expect(agentLines.length).toBeGreaterThan(1)
+        expect(agentLines.slice(1).every((line) => line.startsWith("  │   "))).toBe(true)
+        const markerLine = agentLines.at(-1)!
+        yield* openTui(() =>
+          setup.mockMouse.click(agent.screenX + markerLine.indexOf("▸"), agent.screenY + agentLines.length - 1),
+        )
+        yield* openTui(() => setup.flush())
+        expect(model.expandedRowKeys).toContain("tool:child-agent")
 
         const read = records().get("tool:child-read:header")!.renderable
         yield* openTui(() => setup.mockMouse.click(read.screenX + 4, read.screenY))

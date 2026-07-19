@@ -309,6 +309,35 @@ const truncateToWidth = (text: string, width: number): string => {
   return truncated
 }
 
+const wrapTextToWidth = (text: string, width: number): ReadonlyArray<string> => {
+  const lines: Array<string> = []
+  for (const hardLine of text.split("\n")) {
+    let rest = hardLine
+    while (stringWidth(rest) > width) {
+      let end = 0
+      let breakAt = 0
+      let used = 0
+      for (const { segment, index } of graphemeSegmenter.segment(rest)) {
+        const cells = stringWidth(segment)
+        if (used + cells > width) break
+        used += cells
+        end = index + segment.length
+        if (/\s/u.test(segment)) breakAt = end
+      }
+      const split =
+        breakAt > 0
+          ? breakAt
+          : end > 0
+            ? end
+            : (graphemeSegmenter.segment(rest)[Symbol.iterator]().next().value?.segment.length ?? rest.length)
+      lines.push(rest.slice(0, split).trimEnd())
+      rest = rest.slice(split).trimStart()
+    }
+    lines.push(rest)
+  }
+  return lines
+}
+
 const escapeChangedPathSegment = (text: string): string =>
   [...text]
     .map((character) => {
@@ -527,6 +556,7 @@ const failedAgentLabel = (activeLabel: string): string => `${activeLabel.split("
 export interface UnitLineRange {
   readonly start: number
   readonly end: number
+  readonly headerEnd?: number
   readonly unit: string
   readonly expandable: boolean
   readonly animated?: boolean
@@ -1033,8 +1063,12 @@ export const buildTranscript: {
         unit.response !== undefined ||
         (block.presentation.family === "agent" && block.detail.length > 0) ||
         (output !== undefined && output.length > 0)
+      const rowWidth = markdownWidthForColumn(model.width)
+      const visiblePrefix = truncateToWidth(prefix, Math.max(0, rowWidth - 8))
+      const branchPrefix = `${visiblePrefix}${last ? "└" : "├"} `
+      const continuationPrefix = `${visiblePrefix}${last ? " " : "│"}   `
       append(fg(colors.text)("\n"))
-      append(dim(fg(colors.subtle)(`${prefix}${last ? "└" : "├"} `)))
+      append(dim(fg(colors.subtle)(branchPrefix)))
       const start = line
       if (cancelled && block.presentation.family === "shell") {
         const command = detail.label.startsWith("$ ") ? detail.label.slice(2) : detail.label
@@ -1043,19 +1077,31 @@ export const buildTranscript: {
         append(italic(fg(colors.amber)(" (cancelled)")))
       } else {
         append(statusIcon(failed, running, cancelled))
-        append(fg(colors.text)(` ${detail.label}`))
+        const labelLines = wrapTextToWidth(
+          detail.label,
+          rowWidth - stringWidth(continuationPrefix) - (expandable ? 2 : 0),
+        )
+        for (const [labelIndex, labelLine] of labelLines.entries()) {
+          if (labelIndex > 0) {
+            append(fg(colors.text)("\n"))
+            append(dim(fg(colors.subtle)(continuationPrefix)))
+          } else append(fg(colors.text)(" "))
+          append(fg(colors.text)(labelLine))
+        }
       }
       if (expandable) append(marker(expanded))
+      const headerEnd = line
       const rangeIndex = nestedRanges.length
       nestedRanges.push({
         start,
         end: start,
+        headerEnd,
         unit: id,
         expandable,
         animated: running,
         ...(detail.target === undefined ? {} : { targets: [detail.target] }),
       })
-      const bodyPrefix = `${prefix}${last ? "  " : "│ "}`
+      const bodyPrefix = `${visiblePrefix}${last ? "  " : "│ "}`
       if (expanded && block.presentation.family === "agent" && block.detail.length > 0) {
         append(fg(colors.text)("\n"))
         append(dim(fg(colors.subtle)(`${bodyPrefix}  `)))
@@ -2431,7 +2477,14 @@ export class Surface {
               revision: "gap",
               content: new StyledText([fg(colors.text)(" ")]),
             })
-          const headerContent = new StyledText(styledLines[range.start] ?? [])
+          const headerEnd = range.headerEnd ?? range.start
+          const header: Array<TextChunk> = []
+          const headerLines = styledLines.slice(range.start, headerEnd + 1)
+          for (const [index, current] of headerLines.entries()) {
+            header.push(...current)
+            if (index < headerLines.length - 1) header.push(fg(colors.text)("\n"))
+          }
+          const headerContent = new StyledText(header)
           const spinnerChunk =
             range.animated === true ? headerContent.chunks.findIndex((chunk) => chunk.text === toolSpinnerGlyph) : -1
           descriptors.push({
@@ -2452,7 +2505,7 @@ export class Surface {
               : {}),
           })
           const body: Array<TextChunk> = []
-          const bodyLines = styledLines.slice(range.start + 1, range.end + 1)
+          const bodyLines = styledLines.slice(headerEnd + 1, range.end + 1)
           for (const [index, line] of bodyLines.entries()) {
             body.push(...line)
             if (index < bodyLines.length - 1) body.push(fg(colors.text)("\n"))

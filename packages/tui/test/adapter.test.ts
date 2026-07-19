@@ -1110,6 +1110,71 @@ describe("Surface", () => {
     expect(lines.every((line) => !line.startsWith("│"))).toBe(true)
   })
 
+  test("wraps a nested agent label beneath its text while preserving the connector", () => {
+    const state = model({
+      width: 48,
+      blocks: [
+        { ...subagentToolBlock, id: "parent", detail: "Explore the project" },
+        {
+          ...subagentToolBlock,
+          id: "child",
+          detail: "Read-only explore packages/config, extensions, and tools with concise source-file evidence.",
+        },
+        shell("following", "git status", "clean"),
+      ],
+      items: [
+        { _tag: "Block", index: 0, id: "tool:parent", turnId: "turn" },
+        { _tag: "Block", index: 1, id: "tool:child", turnId: "child:parent", parentId: "parent" },
+        { _tag: "Block", index: 2, id: "tool:following", turnId: "child:parent", parentId: "parent" },
+      ],
+      expandedRowKeys: ["tool:parent"],
+    })
+    const lines = buildTranscript(state)
+      .styled.chunks.map((chunk) => chunk.text)
+      .join("")
+      .split("\n")
+
+    expect(lines.some((line) => line.startsWith("  ├ ✓ Subagent finished Read-only explore"))).toBe(true)
+    expect(lines.some((line) => line.startsWith("  │   packages/config"))).toBe(true)
+    expect(lines.every((line) => stringWidth(line) <= 44)).toBe(true)
+  })
+
+  test("keeps deep nested agent headers within a narrow terminal with wide text", () => {
+    const blocks = Array.from({ length: 6 }, (_, index) => ({
+      ...subagentToolBlock,
+      id: `agent-${index}`,
+      detail: `界界界 inspect nested package ${index} with source evidence`,
+    }))
+    const items = blocks.map((block, index) => ({
+      _tag: "Block" as const,
+      index,
+      id: `tool:${block.id}`,
+      turnId: index === 0 ? "turn" : `child:agent-${index - 1}`,
+      ...(index === 0 ? {} : { parentId: `agent-${index - 1}` }),
+    }))
+    const built = buildTranscript(
+      model({
+        width: 20,
+        blocks,
+        items,
+        expandedRowKeys: blocks.map((block) => `tool:${block.id}`),
+      }),
+    )
+    const lines = built.styled.chunks
+      .map((chunk) => chunk.text)
+      .join("")
+      .split("\n")
+    const nestedRanges = built.ranges.filter(
+      (range) => range.unit.startsWith("tool:agent-") && range.headerEnd !== undefined,
+    )
+    const headers = nestedRanges.flatMap((range) => lines.slice(range.start, range.headerEnd! + 1))
+
+    expect(headers.length).toBeGreaterThan(blocks.length)
+    expect(headers.some((line) => line.includes("界"))).toBe(true)
+    expect(headers.every((line) => stringWidth(line) <= 16)).toBe(true)
+    expect(nestedRanges.every((range) => lines[range.headerEnd!]!.endsWith("▾"))).toBe(true)
+  })
+
   test("labels a new-file patch Create and an existing-file patch Edit", () => {
     const createBlock = {
       ...editToolBlock,
