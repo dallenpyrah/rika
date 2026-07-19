@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { TurnPolicy } from "@batonfx/core"
 import { Effect, Schema } from "effect"
 import {
   childRunSpawnPermission,
@@ -28,6 +29,7 @@ describe("product agent profiles", () => {
     for (const name of names) {
       const profile = resolve(name, model)
       expect(profile.agent.name).toBe(`rika-${name.toLowerCase()}`)
+      expect(profile.agent.policy).toBe(TurnPolicy.forever)
       expect(registered[name]?.model).toEqual(relayModel(model))
       expect(registered[name]?.tool_names).toEqual(Object.keys(profile.agent.toolkit.tools))
       expect(registered[name]?.permissions.length).toBeGreaterThan(0)

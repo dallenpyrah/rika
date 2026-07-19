@@ -8,6 +8,7 @@ import select
 import signal
 import sqlite3
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -53,15 +54,21 @@ def restart(arguments):
 
 def children(parent):
     matches = []
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
+    processes = subprocess.run(
+        ["ps", "-axo", "pid=,ppid="],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    for entry in processes.stdout.splitlines():
+        fields = entry.split()
+        if len(fields) != 2:
             continue
         try:
-            with open(f"/proc/{entry}/stat") as stat:
-                fields = stat.read().split()
-            if int(fields[3]) == parent:
-                matches.append(int(entry))
-        except (FileNotFoundError, ProcessLookupError, ValueError):
+            child, child_parent = map(int, fields)
+            if child_parent == parent:
+                matches.append(child)
+        except ValueError:
             pass
     return matches
 

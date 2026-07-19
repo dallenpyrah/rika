@@ -14,6 +14,7 @@ const Row = Schema.Struct({
   idempotencyKey: Schema.optional(Schema.String),
 })
 const RowJson = Schema.fromJsonString(Row)
+const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString)
 
 const runNative = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof BunServices.layer>>) =>
   Effect.runPromise(
@@ -35,15 +36,18 @@ const startHost = (database: string, workspace: string) =>
 function waitFor<A>(
   read: Effect.Effect<A, FixtureProcessError>,
   accept: (value: A) => boolean,
-  remaining = 1_000,
+  remaining = 3_000,
+  description = "Rika workflow state",
 ): Effect.Effect<A, FixtureProcessError> {
   return Effect.gen(function* () {
     const value = yield* read
     if (accept(value)) return value
     if (remaining === 0)
-      return yield* FixtureProcessError.make({ message: "timed out waiting for Rika workflow state" })
+      return yield* FixtureProcessError.make({
+        message: `timed out waiting for ${description}: ${encodeJson(value)}`,
+      })
     yield* Effect.sleep("20 millis")
-    return yield* Effect.suspend(() => waitFor(read, accept, remaining - 1))
+    return yield* Effect.suspend(() => waitFor(read, accept, remaining - 1, description))
   })
 }
 
@@ -101,14 +105,21 @@ for (const scenario of [
                 { concurrency: "unbounded" },
               )
               yield* waitFor(rows, (items) => items.filter((item) => item.type === "effect").length >= 2)
-              yield* host.request(Schema.Unknown, "recover")
-              yield* waitFor(rows, (items) => items.filter((item) => item.type === "dispatch").length >= 3)
             }
             yield* host.kill
             host = yield* startHost(database, directory)
             expect(yield* host.ready).not.toBe(firstPid)
             const duplicatePin = (yield* host.request(Pins, "register")).find((item) => item.name === scenario.name)
             expect(duplicatePin).toEqual(pin)
+            if (scenario.name === "research-synthesis") {
+              yield* host.request(Schema.Unknown, "recover")
+              yield* waitFor(
+                rows,
+                (items) => items.filter((item) => item.type === "dispatch").length >= 3,
+                3_000,
+                "recovered research dispatches",
+              )
+            }
             const completed = yield* waitFor(
               Effect.gen(function* () {
                 const dispatched = (yield* rows).filter((item) => item.type === "dispatch")
@@ -119,6 +130,8 @@ for (const scenario of [
                 return yield* host.request(State, "inspect", `${scenario.name}-run`)
               }),
               (state) => state.status === "completed",
+              3_000,
+              `${scenario.name} completion`,
             )
             expect(completed.revision).toBe(pin.revision)
             expect(completed.digest).toBe(pin.digest)

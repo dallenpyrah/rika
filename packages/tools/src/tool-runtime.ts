@@ -386,10 +386,10 @@ export const layer = (workspace: string) =>
                 if (visited.has(canonical.value)) continue
                 visited.add(canonical.value)
                 yield* visit(canonical.value)
-              } else if (info.type === "File") found.push(path.relative(workspace, absolute))
+              } else if (info.type === "File") found.push(path.relative(canonicalWorkspace, canonical.value))
             }
           })
-        yield* visit(workspace)
+        yield* visit(canonicalWorkspace)
         return found.toSorted()
       })
       const runGitStatus = Effect.fn("ToolRuntime.runGitStatus")(function* () {

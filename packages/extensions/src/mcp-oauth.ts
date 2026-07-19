@@ -1,6 +1,19 @@
 import * as BunHttpServer from "@effect/platform-bun/BunHttpServer"
 import { OAuth } from "@batonfx/mcp"
-import { Context, Deferred, Effect, FileSystem, Function, Layer, Option, Path, Redacted, Schema, Scope } from "effect"
+import {
+  Context,
+  Crypto,
+  Deferred,
+  Effect,
+  FileSystem,
+  Function,
+  Layer,
+  Option,
+  Path,
+  Redacted,
+  Schema,
+  Scope,
+} from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
@@ -256,10 +269,11 @@ export const layerWithClient = (
   oauth: (server: string, url: string) => Effect.Effect<OAuthClient>,
 ): Layer.Layer<Service, never, Host | OAuth.TokenStore> => Layer.effect(Service, service(oauth))
 
-export const layer: Layer.Layer<Service, never, Host | OAuth.TokenStore> = Layer.effect(
+export const layer: Layer.Layer<Service, never, Crypto.Crypto | Host | OAuth.TokenStore> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const store = yield* OAuth.TokenStore
+    const crypto = yield* Crypto.Crypto
     const oauth = (_server: string, url: string) =>
       Effect.scoped(
         Layer.build(
@@ -273,12 +287,13 @@ export const layer: Layer.Layer<Service, never, Host | OAuth.TokenStore> = Layer
         Effect.map((context) => {
           const client = Context.get(context, OAuth.OAuth)
           return {
-            authorize: client.authorize(),
+            authorize: client.authorize,
             callback: client.callback,
             clear: client.clear,
           }
         }),
         Effect.provideService(OAuth.TokenStore, store),
+        Effect.provideService(Crypto.Crypto, crypto),
       )
     return yield* service(oauth)
   }),

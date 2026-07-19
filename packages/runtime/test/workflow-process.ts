@@ -1,16 +1,9 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { TestModel } from "@batonfx/test"
-import {
-  ChildFanOutRuntime,
-  Client,
-  LanguageModelService,
-  RunnerRuntime,
-  SQLite,
-  ToolRuntime,
-  WorkflowDefinitionRuntime,
-} from "@relayfx/sdk/sqlite"
-import { Config, Context, Effect, FileSystem, Layer, Logger, Schema, Semaphore, Stdio, Stream } from "effect"
+import { ChildFanOutHost, ModelHub, Runtime, ToolRuntime, WorkflowDefinitionHost } from "@relayfx/sdk"
+import { SQLite } from "@relayfx/sdk/sqlite"
+import { Config, Effect, FileSystem, Layer, Logger, Schema, Semaphore, Stdio, Stream } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
@@ -34,15 +27,14 @@ const Message = Schema.Union([
 const decodeMessage = Schema.decodeEffect(Schema.fromJsonString(Message))
 const encodeLine = Schema.encodeEffect(Schema.UnknownFromJsonString)
 const fixtureError = (error: unknown) => FixtureError.make({ message: String(error) })
-const workflowError = (error: unknown) =>
-  WorkflowDefinitionRuntime.WorkflowRuntimeError.make({ message: String(error) })
+const workflowError = (error: unknown) => WorkflowDefinitionHost.HandlerError.make({ message: String(error) })
 const main = Effect.gen(function* () {
   const database = yield* Config.string("RIKA_WORKFLOW_DATABASE").pipe(Config.withDefault("missing.sqlite"))
   const control = yield* Config.string("RIKA_WORKFLOW_WORKSPACE").pipe(Config.withDefault("."))
   const fileSystem = yield* FileSystem.FileSystem
   const stdio = yield* Stdio.Stdio
   const stdoutLock = yield* Semaphore.make(1)
-  yield* Effect.scoped(Layer.build(Layer.orDie(SQLite.layer({ filename: database }))))
+  const effectLock = yield* Semaphore.make(1)
   const send = Effect.fn("WorkflowProcess.send")(function* (value: unknown) {
     const encoded = yield* encodeLine(value).pipe(Effect.mapError(fixtureError))
     yield* stdoutLock.withPermit(Stream.run(Stream.make(`${encoded}\n`), stdio.stdout({ endOnDone: false })))
@@ -55,71 +47,51 @@ const main = Effect.gen(function* () {
     yield* append({ type: "dispatch", childId, idempotencyKey })
     const release = `${control}/${childId.replaceAll(":", "-")}.release`
     yield* Effect.repeat(Effect.sleep("10 millis"), { until: () => fileSystem.exists(release) })
-    yield* append({ type: "effect", childId, idempotencyKey })
+    yield* effectLock.withPermit(
+      Effect.gen(function* () {
+        const visible = yield* fileSystem
+          .readFileString(`${control}/workflow-visible.ndjson`)
+          .pipe(Effect.orElseSucceed(() => ""))
+        if (!visible.includes(`"type":"effect","childId":"${childId}","idempotencyKey":"${idempotencyKey}"`))
+          yield* append({ type: "effect", childId, idempotencyKey })
+      }),
+    )
     return [{ type: "text" as const, text: childId }]
   })
-  const fanOutHandlers = ChildFanOutRuntime.testHandlersLayer({
+  const fanOutHandlers = ChildFanOutHost.layer({
     execute: (child, _fanOut, idempotencyKey) =>
       execute(String(child.child_execution_id), idempotencyKey).pipe(
         Effect.map((output) => ({ status: "completed" as const, output })),
+        Effect.mapError((error) => ChildFanOutHost.HandlerError.make({ message: String(error) })),
       ),
     cancel: () => Effect.void,
   })
-  const fanOutContext = yield* Layer.build(SQLite.childFanOutLayer({ filename: database }, fanOutHandlers)).pipe(
-    Effect.provide(Context.empty()),
-    Effect.mapError(fixtureError),
-    Effect.orDie,
-  )
-  const fanOutLayer = Layer.succeed(ChildFanOutRuntime.Service, Context.get(fanOutContext, ChildFanOutRuntime.Service))
-  const workflowHandlers = Layer.effect(
-    WorkflowDefinitionRuntime.HandlerService,
-    ChildFanOutRuntime.Service.pipe(
-      Effect.map((fanOut) =>
-        WorkflowDefinitionRuntime.HandlerService.of({
-          child: (executionId, operation, context) =>
-            execute(`child:${executionId}:${operation.id}`, context.idempotency_key).pipe(
-              Effect.mapError(workflowError),
-            ),
-          approval: (_executionId, operation) => Effect.succeed({ approved: true, prompt: operation.prompt }),
-          timer: (_executionId, operation) => Effect.sleep(`${operation.duration_ms} millis`),
-          branch: () => Effect.succeed(true),
-          structuredCompletion: (_schema, value) => Effect.succeed(value ?? null),
-          createChildFanOut: (definition) => fanOut.create(definition).pipe(Effect.mapError(workflowError)),
-          admitChildFanOut: () => Effect.void,
-          inspectChildFanOut: (fanOutId) => fanOut.inspect(fanOutId).pipe(Effect.mapError(workflowError)),
-        }),
-      ),
-    ),
-  ).pipe(Layer.provide(fanOutLayer))
-  const workflowContext = yield* Layer.build(SQLite.workflowLayer({ filename: database }, workflowHandlers)).pipe(
-    Effect.provide(Context.empty()),
-    Effect.mapError(fixtureError),
-    Effect.orDie,
-  )
-  const workflowLayer = Layer.succeed(
-    WorkflowDefinitionRuntime.Service,
-    Context.get(workflowContext, WorkflowDefinitionRuntime.Service),
-  )
-  const fixture = yield* TestModel.make(Array.from({ length: 20 }, () => TestModel.text("unused")))
-  const runnerLayer = RunnerRuntime.layerWithServices({
-    databaseLayer: SQLite.layer({ filename: database }),
-    languageModelLayer: LanguageModelService.layer([fixture.registration]),
-    toolRuntimeLayer: ToolRuntime.layerFromToolkit(Toolkit.make()).pipe(Layer.provide(Layer.empty)),
+  const workflowHandlers = WorkflowDefinitionHost.layer({
+    child: (executionId, operation, context) =>
+      execute(`child:${executionId}:${operation.id}`, context.idempotency_key).pipe(Effect.mapError(workflowError)),
+    approval: (_executionId, operation) => Effect.succeed({ approved: true, prompt: operation.prompt }),
+    timer: (_executionId, operation) => Effect.sleep(`${operation.duration_ms} millis`),
+    branch: () => Effect.succeed(true),
+    structuredCompletion: (_schema, value) => Effect.succeed(value ?? null),
   })
-  const relayLayer = workflowLayer.pipe(Layer.provideMerge(fanOutLayer), Layer.provideMerge(runnerLayer))
-  const clientLayer = Client.layerFromRuntime.pipe(Layer.provideMerge(relayLayer), Layer.orDie)
+  const fixture = yield* TestModel.make(Array.from({ length: 20 }, () => TestModel.text("unused")))
+  const relayLayer = Runtime.layerEmbedded({
+    database: SQLite.database({ filename: database }),
+    languageModelLayer: ModelHub.layer([fixture.registration]),
+    toolRuntimeLayer: ToolRuntime.layerFromToolkit(Toolkit.make()).pipe(Layer.provide(Layer.empty)),
+    childFanOutHostLayer: fanOutHandlers,
+    workflowDefinitionHostLayer: workflowHandlers,
+  })
   const backendLayer = RelayExecutionBackend.layerFromClient({
     selection: { provider: "test", model: "workflow" },
-  }).pipe(Layer.provide(clientLayer))
-  const services: Context.Context<ExecutionBackend.Service | WorkflowDefinitionRuntime.Service> = yield* Layer.build(
-    Layer.merge(backendLayer, workflowLayer),
-  ).pipe(Effect.mapError(fixtureError))
+  }).pipe(Layer.provide(relayLayer))
+  const services = yield* Layer.build(Layer.merge(backendLayer, relayLayer)).pipe(Effect.mapError(fixtureError))
   const handle = Effect.fn("WorkflowProcess.handle")(function* (message: typeof Message.Type) {
     const value = yield* Effect.gen(function* () {
       const backend = yield* ExecutionBackend.Service
       if (message.type === "recover") {
-        const workflows = yield* WorkflowDefinitionRuntime.Service
-        return yield* workflows.recover.pipe(Effect.mapError(fixtureError), Effect.orDie)
+        const runtime = yield* Runtime.Service
+        return yield* runtime.readiness.pipe(Effect.mapError(fixtureError))
       }
       if (message.type === "register") return yield* backend.registerWorkflows()
       if (message.type === "start")

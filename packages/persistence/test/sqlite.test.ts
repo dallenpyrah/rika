@@ -290,7 +290,7 @@ test("migrates a pre-branch database without losing product or queue data", () =
           expect(added).toMatchObject({ status: "queued", queue: { revision: 3, queuedCount: 2 } })
           expect(yield* turns.dequeue(added.id)).toMatchObject({ revision: 4, queuedCount: 1 })
           const migrationRows = yield* sql`SELECT migration_id, name FROM rika_migrations ORDER BY migration_id`
-          expect(migrationRows.at(-1)).toEqual({ migration_id: 13, name: "provider_execution_routes" })
+          expect(migrationRows.at(-1)).toEqual({ migration_id: 14, name: "durable_queue_claims" })
           expect(yield* sql`SELECT COUNT(*) AS count FROM rika_transcript_entries`).toEqual([{ count: 1 }])
         }).pipe(provideLayer(layer)),
       )
@@ -313,7 +313,7 @@ test("migrates a pre-branch database without losing product or queue data", () =
           expect(yield* transcripts.get(Turn.TurnId.make("completed-turn"))).toMatchObject({
             units: [{ content: { _tag: "Entry", text: "completed prompt" } }],
           })
-          expect(yield* sql`SELECT COUNT(*) AS count FROM rika_migrations`).toEqual([{ count: 13 }])
+          expect(yield* sql`SELECT COUNT(*) AS count FROM rika_migrations`).toEqual([{ count: 14 }])
         }).pipe(provideLayer(reopened)),
       )
     }),
@@ -719,7 +719,7 @@ test("rejects partial and future schemas without changing them", () => {
       yield* Effect.sync(() => {
         const database = new NativeDatabase(extra)
         database.exec(`
-          INSERT INTO rika_migrations (migration_id, name) VALUES (14, 'future_schema');
+          INSERT INTO rika_migrations (migration_id, name) VALUES (15, 'future_schema');
           CREATE TABLE future_product_state (id TEXT PRIMARY KEY);
         `)
         database.close()
@@ -779,6 +779,37 @@ test("finishes current bootstrap after an empty SQLite file survives startup", (
       expect(names).toContain("rika_threads")
       expect(names).toContain("rika_transcript_units")
       expect(names).toContain("rika_migrations")
+    }),
+  )
+  return Effect.runPromise(Effect.scoped(program.pipe(provideLayer(BunServices.layer))))
+})
+
+test("rejects structurally fresh database files with SQLite sidecars without changing them", () => {
+  const program = Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-empty-sidecars-" })
+      for (const [name, initialize, suffix] of [
+        ["zero-wal", false, "-wal"],
+        ["zero-shm", false, "-shm"],
+        ["header-wal", true, "-wal"],
+      ] as const) {
+        const filename = `${directory}/${name}/rika.db`
+        yield* fileSystem.makeDirectory(`${directory}/${name}`, { recursive: true })
+        if (initialize)
+          yield* Effect.sync(() => {
+            const database = new NativeDatabase(filename)
+            database.close()
+          })
+        else yield* fileSystem.writeFile(filename, new Uint8Array())
+        yield* fileSystem.writeFileString(`${filename}${suffix}`, "recovery-state")
+        const before = yield* Effect.all([fileSystem.readFile(filename), fileSystem.readFile(`${filename}${suffix}`)])
+        const result = yield* Effect.result(Effect.scoped(Layer.build(Database.layer(filename))))
+        expect(result._tag).toBe("Failure")
+        if (result._tag === "Failure") expect(String(result.failure)).toContain("Use a fresh Rika data root")
+        const after = yield* Effect.all([fileSystem.readFile(filename), fileSystem.readFile(`${filename}${suffix}`)])
+        expect(after.map((bytes) => Array.from(bytes))).toEqual(before.map((bytes) => Array.from(bytes)))
+      }
     }),
   )
   return Effect.runPromise(Effect.scoped(program.pipe(provideLayer(BunServices.layer))))

@@ -13,25 +13,6 @@ export const TaskInput = Schema.Struct({
 })
 export type TaskInput = typeof TaskInput.Type
 
-export const BatchCall = Schema.Struct({
-  callId: Schema.String,
-  prompt: Schema.String,
-  model: Schema.optionalKey(Model),
-})
-export type BatchCall = typeof BatchCall.Type
-
-export const TaskBatch = Schema.Struct({
-  fanOutId: Schema.String,
-  calls: Schema.Array(BatchCall),
-})
-export type TaskBatch = typeof TaskBatch.Type
-
-export const RuntimeTaskInput = Schema.Struct({
-  ...TaskInput.fields,
-  _batch: Schema.optionalKey(TaskBatch),
-})
-export type RuntimeTaskInput = typeof RuntimeTaskInput.Type
-
 export const Result = Schema.Struct({
   childExecutionId: Schema.String,
   status: Schema.Literals(["completed", "failed", "cancelled"]),
@@ -55,14 +36,6 @@ export const taskDescription = `Spawn a durable Task subagent and wait for its r
 export const taskTool = Tool.make("task", {
   description: taskDescription,
   parameters: TaskInput,
-  success: Result,
-  failure: Failure,
-  failureMode: "return",
-})
-
-export const runtimeTaskTool = Tool.make("task", {
-  description: taskDescription,
-  parameters: RuntimeTaskInput,
   success: Result,
   failure: Failure,
   failureMode: "return",
@@ -96,4 +69,3 @@ export const isDelegationToolName = (name: string): name is DelegationToolName =
   delegationToolNames.includes(name as DelegationToolName)
 
 export const modelToolkit = Toolkit.make(taskTool, oracleTool, librarianTool, reviewTool)
-export const runtimeToolkit = Toolkit.make(runtimeTaskTool, oracleTool, librarianTool, reviewTool)

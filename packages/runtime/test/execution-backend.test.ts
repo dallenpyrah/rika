@@ -1,10 +1,9 @@
 import { describe, expect, it } from "@effect/vitest"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { vi } from "vitest"
-import { ModelResilience } from "@batonfx/core"
+import { ModelResilience, TurnPolicy } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
-import { Client, Content, Execution, Ids } from "@relayfx/sdk"
-import type { ChildFanOutRuntime, WorkflowDefinitionRuntime } from "@relayfx/sdk/sqlite"
+import { ChildFanOutHost, Client, Content, Execution, Ids, WorkflowDefinitionHost } from "@relayfx/sdk"
 import { ThreadTools } from "@rika/tools"
 import { Deferred, Effect, Exit, Fiber, Layer, Logger, Redacted, Ref, Schedule, Schema, Stream, Tracer } from "effect"
 import { TestClock } from "effect/testing"
@@ -17,7 +16,6 @@ const MockEffect = vi.hoisted(() => (require("effect") as typeof import("effect"
 
 const native = vi.hoisted(() => ({
   client: undefined as Client.Interface | undefined,
-  results: [] as Array<unknown>,
   databaseAcquisitions: 0,
   runtimeGraphs: 0,
 }))
@@ -44,30 +42,21 @@ vi.mock("@relayfx/sdk", (importOriginal) =>
     MockEffect.gen(function* () {
       const actual = yield* MockEffect.tryPromise(() => importOriginal<typeof import("@relayfx/sdk")>())
       const { Layer: EffectLayer } = yield* MockEffect.tryPromise(() => import("effect"))
-      const sqlite = yield* MockEffect.tryPromise(() => import("@relayfx/sdk/sqlite"))
       return {
         ...actual,
         Client: {
           ...actual.Client,
-          layerFromRuntime: EffectLayer.suspend(() => actual.Client.testLayer(native.client!)),
+          layerFromRuntime: EffectLayer.suspend(() => EffectLayer.succeed(actual.Client.Service, native.client!)),
         },
         Runtime: {
           ...actual.Runtime,
           layerEmbedded: (options: {
-            readonly childFanOutHandlersLayer: Layer.Layer<ChildFanOutRuntime.HandlerService>
-            readonly workflowDefinitionHandlersLayer: Layer.Layer<WorkflowDefinitionRuntime.HandlerService>
+            readonly childFanOutHostLayer: Layer.Layer<ChildFanOutHost.Service>
+            readonly workflowDefinitionHostLayer: Layer.Layer<WorkflowDefinitionHost.Service>
           }) => {
             native.runtimeGraphs += 1
-            const childFanOut = sqlite.SQLite.childFanOutLayer(
-              { filename: ":memory:" },
-              options.childFanOutHandlersLayer,
-            ).pipe(EffectLayer.orDie)
-            const workflow = sqlite.SQLite.workflowLayer(
-              { filename: ":memory:" },
-              options.workflowDefinitionHandlersLayer,
-            ).pipe(EffectLayer.orDie, EffectLayer.provideMerge(childFanOut))
-            return EffectLayer.merge(childFanOut, workflow).pipe(
-              EffectLayer.provideMerge(actual.Client.testLayer(native.client!)),
+            return EffectLayer.merge(options.childFanOutHostLayer, options.workflowDefinitionHostLayer).pipe(
+              EffectLayer.provideMerge(EffectLayer.succeed(actual.Client.Service, native.client!)),
             )
           },
         },
@@ -76,116 +65,14 @@ vi.mock("@relayfx/sdk", (importOriginal) =>
   ),
 )
 
-vi.mock("@relayfx/sdk/sqlite", () =>
-  MockEffect.runPromise(
-    MockEffect.gen(function* () {
-      const {
-        Context: EffectContext,
-        Effect: NativeEffect,
-        Layer: NativeLayer,
-      } = yield* MockEffect.tryPromise(() => import("effect"))
-      class FanOutRuntimeService extends EffectContext.Service<FanOutRuntimeService, any>()(
-        "@rika/runtime/test/execution-backend.test/FanOutRuntimeService",
-      ) {}
-      class FanOutHandlerService extends EffectContext.Service<FanOutHandlerService, any>()(
-        "@rika/runtime/test/execution-backend.test/FanOutHandlerService",
-      ) {}
-      class WorkflowHandlerService extends EffectContext.Service<WorkflowHandlerService, any>()(
-        "@rika/runtime/test/execution-backend.test/WorkflowHandlerService",
-      ) {}
-      const ChildFanOutRuntimeMock = { Service: FanOutRuntimeService, HandlerService: FanOutHandlerService }
-      const WorkflowDefinitionRuntimeMock = { HandlerService: WorkflowHandlerService }
-      const fanOutService = FanOutRuntimeService.of({
-        create: (definition: unknown) => (
-          native.results.push(["create", definition]),
-          NativeEffect.succeed(definition)
-        ),
-        inspect: (id: unknown) => (native.results.push(["inspect", id]), NativeEffect.void),
-        cancel: (id: unknown) => (native.results.push(["cancelFan", id]), NativeEffect.void),
-      } as never)
-      return {
-        ChildFanOutRuntime: ChildFanOutRuntimeMock,
-        WorkflowDefinitionRuntime: WorkflowDefinitionRuntimeMock,
-        LanguageModelService: {
-          layer: () => NativeLayer.empty,
-          layerFromRegistrationEffects: () => NativeLayer.empty,
-        },
-        RunnerRuntime: { layerWithServices: () => NativeLayer.empty },
-        SchemaRegistry: { layer: () => NativeLayer.empty },
-        ToolRuntime: { layerFromToolkit: () => NativeLayer.empty },
-        SQLite: {
-          runtimeDatabaseLayer: () => {
-            native.databaseAcquisitions += 1
-            return NativeLayer.empty
-          },
-          layer: () => NativeLayer.empty,
-          childFanOutLayer: (_options: unknown, handlers: Layer.Layer<unknown>) =>
-            Layer.succeed(FanOutRuntimeService, fanOutService).pipe(
-              Layer.tap(() =>
-                Layer.build(handlers).pipe(
-                  Effect.flatMap((context) => {
-                    const handler = EffectContext.get(context, FanOutHandlerService) as unknown as {
-                      execute: (...args: Array<unknown>) => Effect.Effect<unknown>
-                      cancel: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    }
-                    const child = {
-                      child_execution_id: "child:native",
-                      address_id: "address:rika",
-                      input: [{ type: "text" as const, text: "work" }],
-                      metadata: { source: "test" },
-                    }
-                    return Effect.all([
-                      handler.execute(child as never, { fan_out_id: "fan:native" } as never, "key"),
-                      handler.cancel("child:native" as never),
-                    ]).pipe(Effect.tap((values) => Effect.sync(() => native.results.push(...values))))
-                  }),
-                  Effect.scoped,
-                ),
-              ),
-            ),
-          workflowLayer: (_options: unknown, handlers: Layer.Layer<unknown>) =>
-            Layer.effectDiscard(
-              Layer.build(handlers).pipe(
-                Effect.flatMap((context) => {
-                  const handler = EffectContext.get(context, WorkflowHandlerService) as unknown as {
-                    child: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    approval: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    timer: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    branch: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    structuredCompletion: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    createChildFanOut: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    admitChildFanOut: (...args: Array<unknown>) => Effect.Effect<unknown>
-                    inspectChildFanOut: (...args: Array<unknown>) => Effect.Effect<unknown>
-                  }
-                  return Effect.all([
-                    handler.child(
-                      "execution:parent" as never,
-                      { id: "grounded", address_id: "address:other", preset_name: "Task", input: { a: 1 } } as never,
-                      { idempotency_key: "workflow-grounded" } as never,
-                    ),
-                    handler.child(
-                      "execution:parent" as never,
-                      { id: "default", input: undefined } as never,
-                      { idempotency_key: "workflow-default" } as never,
-                    ),
-                    handler.approval("execution:parent" as never, { prompt: "approve" } as never),
-                    handler.timer("execution:parent" as never, { duration_ms: 0 } as never),
-                    handler.branch(),
-                    handler.structuredCompletion({} as never, undefined),
-                    handler.structuredCompletion({} as never, { ok: true }),
-                    handler.createChildFanOut({ fan_out_id: "fan:workflow" } as never),
-                    handler.admitChildFanOut({} as never),
-                    handler.inspectChildFanOut("fan:workflow" as never),
-                  ]).pipe(Effect.tap((values) => Effect.sync(() => native.results.push(...values))))
-                }),
-                Effect.scoped,
-              ),
-            ),
-        },
-      }
-    }),
-  ),
-)
+vi.mock("@relayfx/sdk/sqlite", () => ({
+  SQLite: {
+    database: () => {
+      native.databaseAcquisitions += 1
+      return {}
+    },
+  },
+}))
 
 const selection = { provider: "test", model: "model" }
 const unused = () => Effect.die("unused client method")
@@ -218,7 +105,17 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   readonly unavailableLookups?: number
   readonly fail?: "register" | "start" | "lookup" | "replay" | "cancel"
 }) {
-  const registrations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["registerAgent"]>[0]>>([])
+  const registrations = yield* Ref.make<
+    ReadonlyArray<{
+      readonly id?: unknown
+      readonly address?: unknown
+      readonly agent?: unknown
+      readonly metadata?: Readonly<Record<string, unknown>>
+      readonly permissions?: unknown
+      readonly handoff_targets?: unknown
+      readonly max_wait_turns?: unknown
+    }>
+  >([])
   const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["startExecutionByAgentDefinition"]>[0]>>([])
   const lookups = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["getExecution"]>[0]>>([])
   const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["replayExecution"]>[0]>>([])
@@ -226,7 +123,9 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
   const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["cancelExecution"]>[0]>>([])
   const nextRevision = yield* Ref.make(40)
   const implementation: Client.Interface = {
-    registerAgent: (input) =>
+    registerAgent: <Tools extends Record<string, import("effect/unstable/ai").Tool.Any>, Requirements>(
+      input: Client.RegisterAgentInput<Tools, Requirements>,
+    ) =>
       Ref.update(registrations, (values) => [...values, input]).pipe(
         Effect.andThen(Ref.getAndUpdate(nextRevision, (revision) => revision + 1)),
         Effect.flatMap((revision) =>
@@ -405,7 +304,7 @@ const provideConfiguredBackend = (
   additionalLayer: Layer.Layer<never> = Layer.empty,
 ) => {
   const contextLayer = Layer.merge(
-    RelayExecutionBackend.layerFromClient(options).pipe(Layer.provide(Client.testLayer(implementation))),
+    RelayExecutionBackend.layerFromClient(options).pipe(Layer.provide(Layer.succeed(Client.Service, implementation))),
     additionalLayer,
   )
   return <A, E>(effect: Effect.Effect<A, E, ExecutionBackend.Service>) =>
@@ -421,7 +320,7 @@ const provideBackendWithThreadTools = (implementation: Client.Interface) => {
   const contextLayer = RelayExecutionBackend.layerFromClient({
     selection,
     additionalToolkit: ThreadTools.toolkit,
-  }).pipe(Layer.provide(Client.testLayer(implementation)))
+  }).pipe(Layer.provide(Layer.succeed(Client.Service, implementation)))
   return <A, E>(effect: Effect.Effect<A, E, ExecutionBackend.Service>) =>
     Effect.gen(function* () {
       const context = yield* Layer.build(contextLayer)
@@ -491,26 +390,10 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect((starts[0] as { agent_revision?: number }).agent_revision).toBe(40)
       const registration = registrations[0]
       if (registration === undefined || !("agent" in registration)) return yield* Effect.die("Missing Baton agent")
-      expect(Object.keys(registration.agent.toolkit.tools)).toEqual([
-        "find_files",
-        "grep",
-        "read_file",
-        "create_file",
-        "edit_file",
-        "apply_patch",
-        "shell",
-        "shell_command_status",
-        "git_status",
-        "web_search",
-        "read_web_page",
-        "view_media",
-        "task",
-        "oracle",
-        "librarian",
-        "review",
-        "find_thread",
-        "read_thread",
-      ])
+      expect(registration.agent).toMatchObject({
+        policy: TurnPolicy.forever,
+        toolExecution: { concurrency: 4 },
+      })
       expect(registration.metadata).toMatchObject({ rika_agent_depth: 0 })
       expect(registration.metadata?.multi_agent_enabled).toBeUndefined()
       expect(registration.permissions).not.toContainEqual({ name: "relay.child_run.spawn", value: true })
@@ -1782,9 +1665,9 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect(registrations[0]?.id).toBe("agent:rika-thread-host")
       const registration = registrations[0]
       if (registration === undefined || !("agent" in registration)) return yield* Effect.die("Missing host agent")
+      expect(registration.agent).toMatchObject({ policy: TurnPolicy.forever })
       expect(registration.max_wait_turns).toBe(1_000_000)
       expect(registration.metadata?.steering_enabled).toBe(false)
-      expect(Object.keys(registration.agent.toolkit.tools)).toEqual(["promote_turn"])
       expect(kinds).toEqual([
         {
           kind: "rika-thread",
@@ -1895,13 +1778,10 @@ describe("ExecutionBackend Relay client adapter", () => {
         Object.assign(fixture.implementation, {
           getExecution: () => Effect.succeed({ status: "completed" }),
           spawnChildRun: () => Effect.succeed({}),
-          createChildFanOut: (definition: unknown) =>
-            Effect.sync(() => (native.results.push(["create", definition]), definition)),
-          inspectChildFanOut: (input: unknown) =>
-            Effect.sync(() => (native.results.push(["inspect", input]), { fan_out: null })),
+          createChildFanOut: (definition: unknown) => Effect.succeed(definition),
+          inspectChildFanOut: () => Effect.succeed({ fan_out: null }),
         })
         native.client = fixture.implementation
-        native.results.length = 0
         native.databaseAcquisitions = 0
         native.runtimeGraphs = 0
         const result = yield* RelayExecutionBackend.layer({
@@ -1915,14 +1795,10 @@ describe("ExecutionBackend Relay client adapter", () => {
         expect(result._tag).toBe("Success")
         expect(native.databaseAcquisitions).toBe(1)
         expect(native.runtimeGraphs).toBe(1)
-        expect(native.results).toContainEqual({ status: "completed", output: [Content.text("done")] })
-        expect(native.results).toContainEqual({ approved: true, prompt: "approve" })
-        expect(native.results).toContainEqual(null)
-        expect(native.results).toContainEqual({ ok: true })
       }),
   )
 
-  it.effect("forwards every fan-out registration revision without model-facing subagent tools", () =>
+  it.effect("does not start fan-out children while assembling the runtime", () =>
     Effect.gen(function* () {
       const model = yield* TestModel.make([])
       const fixture = yield* makeClient({
@@ -1942,7 +1818,6 @@ describe("ExecutionBackend Relay client adapter", () => {
         inspectChildFanOut: () => Effect.succeed({ fan_out: null }),
       })
       native.client = fixture.implementation
-      native.results.length = 0
       yield* RelayExecutionBackend.layer({
         filename: ":memory:",
         workspace: "/tmp",
@@ -1951,19 +1826,8 @@ describe("ExecutionBackend Relay client adapter", () => {
       }).pipe(Layer.provide(BunServices.layer), Layer.build)
       const registrations = yield* Ref.get(fixture.registrations)
       const starts = yield* Ref.get(fixture.starts)
-      expect(registrations.length).toBeGreaterThan(0)
-      expect(starts).toHaveLength(registrations.length)
-      expect(starts.map((entry) => (entry as { agent_revision?: number }).agent_revision)).toEqual(
-        registrations.map((_, index) => 40 + index),
-      )
-      for (const entry of starts) {
-        expect(entry.session_id).toBe(`session:child:${String(entry.execution_id)}`)
-      }
-      for (const registration of registrations) {
-        const typed = registration as { metadata?: Record<string, unknown>; handoff_targets?: unknown }
-        expect(typed.metadata?.multi_agent_enabled).not.toBe(true)
-        expect(typed.handoff_targets).toBeUndefined()
-      }
+      expect(registrations).toEqual([])
+      expect(starts).toEqual([])
     }),
   )
 })

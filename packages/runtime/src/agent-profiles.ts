@@ -1,4 +1,4 @@
-import { Agent, type ModelRegistry } from "@batonfx/core"
+import { Agent, type ModelRegistry, TurnPolicy } from "@batonfx/core"
 import { AgentTools, Runtime as Tools, ThreadTools } from "@rika/tools"
 import { Effect, Function, Schema } from "effect"
 import { Toolkit } from "effect/unstable/ai"
@@ -81,7 +81,7 @@ const resolveImpl = (name: Name, model: ModelRegistry.ModelSelection) => {
   const definition = definitions[name]
   const toolkit = Toolkit.make(
     ...definition.tools,
-    ...(name === "Review" ? [] : Object.values(AgentTools.runtimeToolkit.tools)),
+    ...(name === "Review" ? [] : Object.values(AgentTools.modelToolkit.tools)),
   )
   const relayModel = {
     provider: model.provider,
@@ -90,7 +90,12 @@ const resolveImpl = (name: Name, model: ModelRegistry.ModelSelection) => {
   }
   return {
     name,
-    agent: Agent.make(`rika-${name.toLowerCase()}`, { instructions: definition.instructions, model, toolkit }),
+    agent: Agent.make(`rika-${name.toLowerCase()}`, {
+      instructions: definition.instructions,
+      model,
+      toolkit,
+      policy: TurnPolicy.forever,
+    }),
     preset: {
       instructions: definition.instructions,
       model: relayModel,

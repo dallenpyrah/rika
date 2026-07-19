@@ -90,7 +90,7 @@ const reconnectFailureLimit = 8
 const reconnectStableMilliseconds = 30_000
 const reconnectSchedule = Schedule.exponential("25 millis").pipe(
   Schedule.jittered,
-  Schedule.modifyDelay((_, delay) => Effect.succeed(Duration.min(delay, Duration.seconds(1)))),
+  Schedule.modifyDelay(({ duration }) => Effect.succeed(Duration.min(duration, Duration.seconds(1)))),
 )
 type InteractiveFeedFrame = Extract<
   ResidentService.ServerMessage,

@@ -127,8 +127,9 @@ export const spawnFixtureProcess: (
         Effect.mapError((cause) => FixtureProcessError.make({ message: String(cause) })),
       )
     })
-    const kill = handle
-      .kill({ killSignal: "SIGKILL" })
-      .pipe(Effect.mapError((cause) => FixtureProcessError.make({ message: String(cause) })))
+    const kill = handle.kill({ killSignal: "SIGKILL" }).pipe(
+      Effect.mapError((cause) => FixtureProcessError.make({ message: String(cause) })),
+      Effect.andThen(handle.exitCode.pipe(Effect.ignore)),
+    )
     return { ready: Deferred.await(ready), request, kill } satisfies FixtureProcess
   })

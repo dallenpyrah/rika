@@ -246,10 +246,10 @@ describe("resident server message frames", () => {
   })
 
   it("terminates oversized resync degradation with a bounded decodable marker", () => {
-    const events = Array.from({ length: 18_000 }, (_, index) => ({
+    const events = Array.from({ length: 18 }, (_, index) => ({
       _tag: "TranscriptResyncRequired",
       selectionEpoch: 1,
-      threadId: `thread-${index}-${"x".repeat(900)}`,
+      threadId: `thread-${index}-${"x".repeat(950_000)}`,
       reason: "reload",
     }))
     const message = Schema.decodeUnknownSync(ResidentService.ServerMessage)({

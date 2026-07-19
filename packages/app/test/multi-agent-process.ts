@@ -1,9 +1,13 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { ChildFanOutRuntime, Client, Ids, SQLite } from "@relayfx/sdk/sqlite"
+import { Agent, TurnPolicy } from "@batonfx/core"
+import { TestModel } from "@batonfx/test"
+import { ChildFanOutHost, Client, Content, Ids, ModelHub, Runtime, ToolRuntime } from "@relayfx/sdk"
+import { SQLite } from "@relayfx/sdk/sqlite"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
 import * as ExecutionBackend from "@rika/runtime/contract"
-import { Config, Context, Effect, FileSystem, Layer, Logger, Schedule, Schema, Semaphore, Stdio, Stream } from "effect"
+import { Config, Effect, FileSystem, Layer, Logger, Schedule, Schema, Semaphore, Stdio, Stream } from "effect"
+import { Toolkit } from "effect/unstable/ai"
 import { ProductAgent } from "../src/index"
 
 class FixtureError extends Schema.TaggedErrorClass<FixtureError>()("MultiAgentProcessFixtureError", {
@@ -71,9 +75,6 @@ const decodeMessage = Schema.decodeEffect(Schema.fromJsonString(Message))
 const decodeChildResult = Schema.decodeEffect(Schema.UnknownFromJsonString)
 const encodeLine = Schema.encodeEffect(Schema.UnknownFromJsonString)
 const fixtureError = (error: unknown) => FixtureError.make({ message: String(error) })
-const clientError = (error: unknown) => Client.ClientError.make({ message: String(error) })
-const unused = () => Effect.die("unused client method")
-const unusedStream = () => Stream.die("unused client method")
 const main = Effect.gen(function* () {
   const database = yield* Config.string("RIKA_MULTI_AGENT_DATABASE").pipe(Config.withDefault("missing.sqlite"))
   const control = yield* Config.string("RIKA_MULTI_AGENT_WORKSPACE").pipe(Config.withDefault("."))
@@ -88,7 +89,7 @@ const main = Effect.gen(function* () {
     const encoded = yield* encodeLine(value).pipe(Effect.mapError(fixtureError))
     yield* fileSystem.writeFileString(`${control}/visible.ndjson`, `${encoded}\n`, { flag: "a" })
   })
-  const handlers = ChildFanOutRuntime.testHandlersLayer({
+  const handlers = ChildFanOutHost.layer({
     execute: (child, fanOut, idempotencyKey) =>
       Effect.gen(function* () {
         yield* append({
@@ -117,124 +118,67 @@ const main = Effect.gen(function* () {
           status: decoded.status,
           output: decoded.output.map((part) => ({ type: part._tag, text: part.text })),
           ...(decoded.error === undefined ? {} : { error: decoded.error }),
-          ...(decoded.completedAt === undefined ? {} : { completedAt: decoded.completedAt }),
+          ...(decoded.completedAt === undefined ? {} : { completed_at: decoded.completedAt }),
         }
-      }),
-    cancel: (childId, reason) => append({ type: "cancel", childId, reason }),
+      }).pipe(Effect.mapError((error) => ChildFanOutHost.HandlerError.make({ message: String(error) }))),
+    cancel: (childId, reason) =>
+      append({ type: "cancel", childId, reason }).pipe(
+        Effect.mapError((error) => ChildFanOutHost.HandlerError.make({ message: String(error) })),
+      ),
   })
-  const fanOutContext = yield* Layer.build(SQLite.childFanOutLayer({ filename: database }, handlers)).pipe(
-    Effect.provide(Context.empty()),
-    Effect.mapError(fixtureError),
-    Effect.orDie,
+  const fixture = yield* TestModel.make(
+    Array.from({ length: 20 }, () => TestModel.text("fixture parent")),
+    {
+      provider: "test",
+      model: "deterministic",
+      registrationKey: "test",
+    },
   )
-  const fanOutLayer = Layer.succeed(ChildFanOutRuntime.Service, Context.get(fanOutContext, ChildFanOutRuntime.Service))
-  const clientLayer = Layer.effect(
-    Client.Service,
-    ChildFanOutRuntime.Service.pipe(
-      Effect.map((host) => {
-        const implementation: Client.Interface = {
-          registerEntityKind: unused,
-          getOrCreateEntity: unused,
-          getEntity: unused,
-          destroyEntity: unused,
-          listEntities: unused,
-          registerWorkflowDefinition: unused,
-          getWorkflowDefinitionRevision: unused,
-          listWorkflowDefinitionRevisions: unused,
-          startWorkflowRun: unused,
-          inspectWorkflowRun: unused,
-          replayWorkflowRun: unused,
-          cancelWorkflowRun: unused,
-          registerAgent: unused,
-          registerAgentDefinition: unused,
-          getAgentDefinition: unused,
-          listAgentDefinitions: unused,
-          listAgentDefinitionRevisions: unused,
-          getSkillDefinition: unused,
-          listSkillDefinitions: unused,
-          listSkillDefinitionRevisions: unused,
-          registerAddressBookRoute: unused,
-          getAddressBookRoute: unused,
-          listAddressBookRoutes: unused,
-          startExecution: unused,
-          startExecutionByAddress: unused,
-          startExecutionByAgentDefinition: unused,
-          cancelExecution: unused,
-          steer: unused,
-          getExecution: unused,
-          inspectExecution: unused,
-          listExecutions: unused,
-          listInboxMessages: unused,
-          subscribeTopic: unused,
-          unsubscribeTopic: unused,
-          publishTopic: unused,
-          listTopicSubscriptions: unused,
-          listSessions: unused,
-          getSession: unused,
-          listWaits: unused,
-          replayExecution: unused,
-          pageExecutionEvents: unused,
-          listRunners: unused,
-          routeExecution: unused,
-          send: unused,
-          askEntity: unused,
-          awaitWait: unused,
-          streamExecution: unusedStream,
-          followExecution: unusedStream,
-          streamSession: unusedStream,
-          watchExecutions: unusedStream,
-          getEntityState: unused,
-          putEntityState: unused,
-          deleteEntityState: unused,
-          listEntityState: unused,
-          getPresence: unused,
-          watchPresence: unusedStream,
-          wake: unused,
-          listPendingApprovals: unused,
-          resolveToolApproval: unused,
-          resolvePermission: unused,
-          listPendingToolCalls: unused,
-          fulfillToolCall: unused,
-          claimToolWork: unused,
-          completeToolWork: unused,
-          releaseToolWork: unused,
-          listToolAttempts: unused,
-          submitInboundEnvelope: unused,
-          spawnChildRun: unused,
-          createChildFanOut: (input) => host.create(input).pipe(Effect.mapError(clientError)),
-          inspectChildFanOut: (input) =>
-            host.inspect(Ids.ChildFanOutId.make(input.fan_out_id)).pipe(
-              Effect.map((fan_out) => ({ fan_out: fan_out ?? null })),
-              Effect.mapError(clientError),
-            ),
-          cancelChildFanOut: (input) =>
-            host.cancel(Ids.ChildFanOutId.make(input.fan_out_id), input.cancelled_at, input.reason ?? "cancelled").pipe(
-              Effect.flatMap((fan_out) =>
-                fan_out === undefined ? Effect.fail(clientError("fan-out not found")) : Effect.succeed({ fan_out }),
-              ),
-              Effect.mapError(clientError),
-            ),
-          claimEnvelopeReady: unused,
-          ackEnvelopeReady: unused,
-          releaseEnvelopeReady: unused,
-          createSchedule: unused,
-          cancelSchedule: unused,
-          listSchedules: unused,
-        }
-        return Client.Service.of(implementation)
-      }),
-    ),
-  ).pipe(Layer.provide(fanOutLayer))
+  const relayLayer = Runtime.layerEmbedded({
+    database: SQLite.database({ filename: database }),
+    languageModelLayer: ModelHub.layer([fixture.registration]),
+    toolRuntimeLayer: ToolRuntime.layer(),
+    childFanOutHostLayer: handlers,
+  })
   const backendLayer = RelayExecutionBackend.layerFromClient({
     selection: { provider: "test", model: "deterministic" },
-  }).pipe(Layer.provide(clientLayer))
-  const services = yield* Layer.build(ProductAgent.layer.pipe(Layer.provide(backendLayer))).pipe(
-    Effect.mapError(fixtureError),
-  )
+  }).pipe(Layer.provide(relayLayer))
+  const services = yield* Layer.build(
+    Layer.merge(ProductAgent.layer.pipe(Layer.provide(backendLayer)), relayLayer),
+  ).pipe(Effect.mapError(fixtureError))
   const handle = Effect.fn("MultiAgentProcess.handle")(function* (message: typeof Message.Type) {
     const value = yield* Effect.gen(function* () {
       const agent = yield* ProductAgent.Service
       if (message.type === "run") {
+        const client = yield* Client.Service
+        const parentExecutionId = Ids.ExecutionId.make(`execution:${message.value.parentTurnId}`)
+        const parent = yield* client.getExecution(parentExecutionId)
+        if (parent === undefined) {
+          const parentAgentId = Ids.AgentId.make(`agent:fixture:${message.value.parentTurnId}`)
+          const address = Ids.AddressId.make("address:rika")
+          const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(executionRoute)
+          const registered = yield* client.registerAgent({
+            id: parentAgentId,
+            address,
+            agent: Agent.make(`fixture-${message.value.parentTurnId}`, {
+              model: fixture.selection,
+              toolkit: Toolkit.make(),
+              policy: TurnPolicy.forever,
+            }),
+            metadata: { rika_execution_route: durableRoute },
+          })
+          yield* client.startExecutionByAgentDefinition({
+            root_address_id: address,
+            session_id: Ids.SessionId.make(`session:fixture:${message.value.parentTurnId}`),
+            agent_id: parentAgentId,
+            agent_revision: registered.record.current_revision,
+            input: [Content.text("fixture parent")],
+            idempotency_key: `fixture:${message.value.parentTurnId}`,
+            execution_id: parentExecutionId,
+            started_at: message.value.createdAt,
+            completed_at: message.value.createdAt,
+          })
+        }
         return yield* agent.runParallel({
           parentTurnId: message.value.parentTurnId,
           fanOutId: message.value.fanOutId,

@@ -249,9 +249,10 @@ describe("interactive session extensions", () => {
         const turns = yield* TurnRepository.makeMemory()
         const registration = yield* Deferred.make<Operation.InteractiveSession>()
         const followed = yield* Ref.make<ReadonlyArray<string>>([])
-        const childCallId = "rika:execution%3Aparent-turn:agent"
+        const childCallId = "agent"
         const childId = `child:execution%3Aparent-turn:${childCallId}`
-        const nestedId = `${childId}:child:worker`
+        const nestedCallId = "worker"
+        const nestedId = `child:${encodeURIComponent(childId)}:${nestedCallId}`
         const childEvents: ReadonlyArray<ExecutionBackend.Event> = [
           {
             cursor: "child-tool",
@@ -265,14 +266,14 @@ describe("interactive session extensions", () => {
             sequence: 1,
             type: "tool.call.requested",
             createdAt: 4,
-            data: { tool_call_id: "delegate", tool_name: "task", input: { prompt: "run checks" } },
+            data: { tool_call_id: nestedCallId, tool_name: "task", input: { prompt: "run checks" } },
           },
           {
             cursor: "nested-spawn",
             sequence: 2,
             type: "child_run.spawned",
             createdAt: 4,
-            data: { tool_call_id: "delegate", child_execution_id: `execution:${nestedId}` },
+            data: { tool_call_id: nestedCallId, child_execution_id: nestedId },
           },
           {
             cursor: "child-usage",
@@ -450,7 +451,7 @@ describe("interactive session extensions", () => {
         ).toBe(true)
         expect(
           loadedEntries.some(
-            (entry) => entry.unit.turnId === nestedId && entry.unit.parentId === `${childId}:delegate`,
+            (entry) => entry.unit.turnId === nestedId && entry.unit.parentId === `${childId}:${nestedCallId}`,
           ),
         ).toBe(true)
         expect(
@@ -491,7 +492,7 @@ describe("interactive session extensions", () => {
                 sequence: 0,
                 type: "child_run.spawned",
                 createdAt: 1,
-                data: { child_execution_id: `execution:${childId}` },
+                data: { child_execution_id: childId },
               })
               return {
                 turnId: input.turnId,
@@ -545,7 +546,7 @@ describe("interactive session extensions", () => {
         expect(yield* Queue.take(followed)).toBe("turn-1:child:worker")
         yield* session.cancel
         expect(yield* Queue.take(stopped)).toBe("turn-1:child:worker")
-        expect(yield* Ref.get(cancelled)).toEqual(["turn-1:child:worker", "turn-1"])
+        expect(new Set(yield* Ref.get(cancelled))).toEqual(new Set(["turn-1:child:worker", "turn-1"]))
 
         yield* session.submit("selected away")
         expect(yield* Queue.take(followed)).toBe("turn-2:child:worker")

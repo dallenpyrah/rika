@@ -138,7 +138,10 @@ describe("McpOAuth", () => {
       open: () => Effect.fail(McpOAuth.Error.make({ server: "browser", operation: "open-browser", message: "denied" })),
       callback: () => Effect.succeed(Effect.succeed("unused")),
     })
-    const serviceLayer = Layer.merge(McpOAuth.layer.pipe(Layer.provide(host), Layer.provide(store)), store)
+    const serviceLayer = Layer.merge(
+      McpOAuth.layer.pipe(Layer.provide(host), Layer.provide(store), Layer.provide(BunServices.layer)),
+      store,
+    )
     return Effect.gen(function* () {
       const context = yield* Layer.build(serviceLayer)
       yield* Effect.gen(function* () {
@@ -167,6 +170,7 @@ describe("McpOAuth", () => {
     const serviceLayer = McpOAuth.layer.pipe(
       Layer.provide(McpOAuth.hostTestLayer({ open: () => Effect.void, callback: () => Effect.never })),
       Layer.provide(store),
+      Layer.provide(BunServices.layer),
     )
     return Effect.gen(function* () {
       const context = yield* Layer.build(serviceLayer)

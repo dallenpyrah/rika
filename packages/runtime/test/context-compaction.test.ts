@@ -203,10 +203,11 @@ describe("ContextCompaction", () => {
     }),
   )
 
-  it.effect("fails without replacing the checkpoint when tool-output spill fails", () =>
+  it.effect("bounds tool output inline without replacing the checkpoint when optional spill fails", () =>
     Effect.gen(function* () {
       const fixture = yield* TestModel.make([])
       const current = ContextCompaction.checkpoint("6", "existing", "0")
+      const large = "abcdef".repeat(100)
       const result = yield* Effect.exit(
         ContextCompaction.compact(
           { contextWindow: 10, reserveTokens: 0, keepRecentTokens: 1, toolOutputMaxBytes: 12 },
@@ -215,7 +216,7 @@ describe("ContextCompaction", () => {
             sessionId: "session",
             turn: 7,
             history: Prompt.empty,
-            prompt: Prompt.fromMessages([toolResult("abcdef".repeat(100))]),
+            prompt: Prompt.fromMessages([toolResult(large)]),
             path: [],
             contextTokens: 100,
             checkpoint: current,
@@ -233,7 +234,12 @@ describe("ContextCompaction", () => {
           ),
         ),
       )
-      expect(result._tag).toBe("Failure")
+      expect(result._tag).toBe("Success")
+      if (result._tag === "Failure") return
+      expect(result.value.checkpoint).toEqual(current)
+      const encoded = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(result.value.prompt.content)
+      expect(encoded).not.toContain(large)
+      expect(encoded).toContain('"outputPaths":[]')
       expect(current).toEqual(ContextCompaction.checkpoint("6", "existing", "0"))
       expect(yield* fixture.requests).toHaveLength(0)
     }),

@@ -166,7 +166,7 @@ it.effect("inspects and exports malformed crash evidence without dispatching an 
             Effect.provideService(ConfigProvider.ConfigProvider, provider),
           )
           const output = yield* TestConsole.logLines
-          expect(output).toContain(diagnostics)
+          expect(output).toContain(yield* fileSystem.realPath(diagnostics))
           expect(output).toContain("1 log file, 11 bytes")
           expect(yield* fileSystem.readFileString(path.join(destination, "resident-crash.open.jsonl"))).toBe(
             '{"partial":',

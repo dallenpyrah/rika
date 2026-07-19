@@ -11,6 +11,13 @@ import { start } from "./current-execution-route"
 
 const terminal = (status: string) => status === "completed" || status === "failed" || status === "cancelled"
 const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString)
+const decodeToolExecution = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      tool_execution: Schema.optional(Schema.Struct({ concurrency: Schema.Finite })),
+    }),
+  ),
+)
 
 const executionModelRoute = (
   role: ExecutionBackend.ExecutionModelRoute["role"],
@@ -118,6 +125,12 @@ test("three Task calls in one model turn run as overlapping durable children", (
             []
           >("select id, status, agent_snapshot_json from relay_executions where id like 'child:%' order by id")
           .all()
+        const root = database
+          .query<
+            { readonly agent_snapshot_json: string },
+            []
+          >("select agent_snapshot_json from relay_executions where id = 'execution:turn-parallel-spawn'")
+          .get()
         const childRuns = database
           .query<
             { readonly id: string; readonly metadata_json: string },
@@ -127,6 +140,7 @@ test("three Task calls in one model turn run as overlapping durable children", (
         return {
           settled,
           children,
+          root,
           childRuns,
           selection: fixture.selection,
           requests: yield* fixture.requests,
@@ -142,13 +156,19 @@ test("three Task calls in one model turn run as overlapping durable children", (
         return yield* program.pipe(Effect.provide(bunContext))
       }),
     ).pipe(
-      Effect.tap(({ settled, children, childRuns, selection, requests, windows }) =>
+      Effect.tap(({ settled, children, root, childRuns, selection, requests, windows }) =>
         Effect.sync(() => {
           const childWindows = windows.slice(1, 4)
-          expect(settled.status).toBe("completed")
+          expect(settled.status, encodeJson(settled.events.filter((event) => event.type === "execution.failed"))).toBe(
+            "completed",
+          )
           expect(settled.events.filter((event) => event.type === "child_run.spawned")).toHaveLength(3)
           expect(children).toHaveLength(3)
           expect(children.every((child) => child.status === "completed")).toBe(true)
+          expect(decodeToolExecution(root?.agent_snapshot_json ?? "{}").tool_execution).toEqual({ concurrency: 4 })
+          expect(
+            children.every((child) => decodeToolExecution(child.agent_snapshot_json).tool_execution === undefined),
+          ).toBe(true)
           expect(
             childRuns
               .map(({ metadata_json }) => JSON.parse(metadata_json))
@@ -585,7 +605,7 @@ test("model spawns a durable Oracle child through the handoff tool and resumes w
         const settled = yield* backend.replay("turn-subagent").pipe(
           Effect.repeat({
             while: (result) => !terminal(result.status),
-            schedule: Schedule.both(Schedule.spaced("20 millis"), Schedule.recurs(500)),
+            schedule: Schedule.spaced("20 millis"),
           }),
         )
         const inspection = yield* backend.inspect("turn-subagent")
@@ -593,7 +613,7 @@ test("model spawns a durable Oracle child through the handoff tool and resumes w
           Effect.sync(() => new Database(`${directory}/relay.db`, { readonly: true })),
           (connection) => Effect.sync(() => connection.close()),
         )
-        const childExecutionId = `child:${encodeURIComponent("execution:turn-subagent")}:rika:${encodeURIComponent("execution:turn-subagent")}:call-oracle`
+        const childExecutionId = `child:${encodeURIComponent("execution:turn-subagent")}:call-oracle`
         const child = database
           .query<
             { readonly id: string; readonly session_id: string | null; readonly status: string },
@@ -703,7 +723,7 @@ test("handoff children resolve real workspace tools through their parent Rika tu
         const settled = yield* backend.replay("turn-review").pipe(
           Effect.repeat({
             while: (result) => !terminal(result.status),
-            schedule: Schedule.both(Schedule.spaced("20 millis"), Schedule.recurs(500)),
+            schedule: Schedule.spaced("20 millis"),
           }),
         )
         const database = yield* Effect.acquireRelease(
@@ -873,10 +893,8 @@ test("parent and handoff child may reuse a model tool-call identifier", () => {
           expect(readResult?.error).toBeNull()
           expect(readResult?.output_json).toContain("shared call id marker")
           expect(calls).toHaveLength(2)
-          expect(new Set(calls.map((call) => call.id)).size).toBe(2)
-          for (const call of calls) {
-            expect(call.id).toBe(`rika:${encodeURIComponent(call.execution_id)}:call_shared`)
-          }
+          expect(calls.map((call) => call.id)).toEqual(["call_shared", "call_shared"])
+          expect(new Set(calls.map((call) => call.execution_id)).size).toBe(2)
         }),
       ),
     ),

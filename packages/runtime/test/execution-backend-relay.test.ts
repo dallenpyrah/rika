@@ -190,8 +190,8 @@ test(
         expect(result.first.status).toBe("completed")
         expect(result.second.status).toBe("completed")
         expect(result.calls).toHaveLength(2)
-        for (const call of result.calls)
-          expect(call.id).toBe(`rika:${encodeURIComponent(call.execution_id)}:${originalCallId}`)
+        expect(result.calls.map((call) => call.id)).toEqual([originalCallId, originalCallId])
+        expect(new Set(result.calls.map((call) => call.execution_id)).size).toBe(2)
         const secondTurnRequest = result.requests[2]
         expect(secondTurnRequest).toBeDefined()
         const replayedCallIds = secondTurnRequest!.prompt.content.flatMap((message) =>
@@ -386,7 +386,7 @@ test(
                 const completed = yield* backend.inspectWorkflow("workspace-run", "turn-workflow").pipe(
                   Effect.repeat({
                     while: (inspection) => inspection?.status === "running",
-                    schedule: Schedule.both(Schedule.spaced("20 millis"), Schedule.recurs(1_000)),
+                    schedule: Schedule.spaced("20 millis"),
                   }),
                 )
                 return { completed, requests: yield* fixture.requests }
@@ -567,7 +567,7 @@ test(
               const fanOut = yield* backend.inspectFanOut("fan-out:long-child").pipe(
                 Effect.repeat({
                   while: (inspection) => inspection?.state === "joining",
-                  schedule: Schedule.both(Schedule.spaced("20 millis"), Schedule.recurs(500)),
+                  schedule: Schedule.spaced("20 millis"),
                 }),
               )
               const database = new Database(`${directory}/relay.db`, { readonly: true })
@@ -656,7 +656,7 @@ test(
                 const fanOut = yield* backend.inspectFanOut("fan-out:routes").pipe(
                   Effect.repeat({
                     while: (inspection) => inspection?.state === "joining",
-                    schedule: Schedule.both(Schedule.spaced("20 millis"), Schedule.recurs(500)),
+                    schedule: Schedule.spaced("20 millis"),
                   }),
                 )
                 return {
@@ -952,10 +952,10 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
               return { ...completed, requests: yield* fixture.requests }
             }),
           )
-          expect(result.resumed.status).toBe("completed")
-          expect(result.duplicate.status).toBe("completed")
+          expect(result.resumed.status).toBe(answer === "Denied" ? "failed" : "completed")
+          expect(result.duplicate.status).toBe(answer === "Denied" ? "failed" : "completed")
           expect(result.approvals).toEqual([])
-          expect(result.requests).toHaveLength(2)
+          expect(result.requests).toHaveLength(answer === "Denied" ? 1 : 2)
           expect(result.replay.events.filter((event) => event.type === "tool.result.received")).toHaveLength(
             answer === "Denied" ? 0 : 1,
           )

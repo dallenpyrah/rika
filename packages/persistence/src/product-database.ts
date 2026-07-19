@@ -408,12 +408,42 @@ const inspectExisting = (filename: string) =>
     return outcome.value
   })
 
+const sqliteHeader = new TextEncoder().encode("SQLite format 3\u0000")
+const isFreshDatabaseFile = Effect.fn("ProductDatabase.isFreshDatabaseFile")(function* (filename: string) {
+  const fileSystem = yield* FileSystem.FileSystem
+  const bytes = yield* fileSystem
+    .readFile(filename)
+    .pipe(Effect.mapError((error) => fail(`Could not inspect the Rika product database file: ${String(error)}`)))
+  const structurallyFresh = (() => {
+    if (bytes.length === 0) return true
+    if (bytes.length < 105 || sqliteHeader.some((byte, index) => bytes[index] !== byte)) return false
+    const pageCount = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(28)
+    const cellCount = ((bytes[103] ?? 0) << 8) | (bytes[104] ?? 0)
+    return pageCount === 1 && bytes[100] === 13 && cellCount === 0
+  })()
+  if (!structurallyFresh) return false
+  const [walExists, shmExists] = yield* Effect.all([
+    fileSystem.exists(`${filename}-wal`),
+    fileSystem.exists(`${filename}-shm`),
+  ]).pipe(Effect.mapError((error) => fail(`Could not inspect the Rika product database files: ${String(error)}`)))
+  if (!walExists && !shmExists) return true
+  if (bytes.length === 0 || !walExists) return yield* fail(incompatible)
+  const wal = yield* fileSystem
+    .readFile(`${filename}-wal`)
+    .pipe(Effect.mapError((error) => fail(`Could not inspect the Rika product database WAL: ${String(error)}`)))
+  if (wal.length < 32) return yield* fail(incompatible)
+  const walMagic = new DataView(wal.buffer, wal.byteOffset, wal.byteLength).getUint32(0)
+  if (walMagic !== 0x377f0682 && walMagic !== 0x377f0683) return yield* fail(incompatible)
+  return false
+})
+
 const preflight = Effect.fn("ProductDatabase.preflight")(function* (filename: string) {
   const fileSystem = yield* FileSystem.FileSystem
   const exists = yield* fileSystem
     .exists(filename)
     .pipe(Effect.mapError((error) => fail(`Could not inspect the Rika product database path: ${String(error)}`)))
   if (!exists) return "fresh" as const
+  if (yield* isFreshDatabaseFile(filename)) return "fresh" as const
   return yield* validateKnown(yield* inspectExisting(filename))
 })
 

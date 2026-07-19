@@ -1,5 +1,5 @@
 import { McpToolSource, OAuth } from "@batonfx/mcp"
-import { Context, Effect, Layer, Schema, Scope } from "effect"
+import { Context, Crypto, Effect, Layer, Schema, Scope } from "effect"
 import type { Server } from "./mcp-config"
 
 export class Diagnostic extends Schema.TaggedErrorClass<Diagnostic>()("@rika/extensions/McpDiagnostic", {
@@ -18,6 +18,7 @@ export const layerWithStore = Layer.effect(
   Service,
   Effect.gen(function* () {
     const store = yield* OAuth.TokenStore
+    const crypto = yield* Crypto.Crypto
     return Service.of({
       connect: Effect.fn("McpRuntime.connect")(function* (server: Server) {
         const oauth =
@@ -31,6 +32,7 @@ export const layerWithStore = Layer.effect(
               ).pipe(
                 Effect.map((context) => Context.get(context, OAuth.OAuth)),
                 Effect.provideService(OAuth.TokenStore, store),
+                Effect.provideService(Crypto.Crypto, crypto),
               )
             : undefined
         return yield* Layer.build(
