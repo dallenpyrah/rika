@@ -525,7 +525,7 @@ test("isolates a stale persisted route while healthy routes keep starting", () =
     ),
   ))
 
-test("builds the configured backend when one persisted route cannot be registered", () =>
+test("builds the configured backend with duplicate persisted routes and one unavailable route", () =>
   Effect.runPromise(
     withBunServices(
       Effect.scoped(
@@ -553,6 +553,11 @@ test("builds the configured backend when one persisted route cannot be registere
           }
           const pinned = executionRoutePin(settings, "medium")
           const { providerRuntime: _, ...oldMain } = pinned.main
+          const restored = {
+            ...oldMain,
+            registrationKey: "restored-startup",
+            requestVariant: "restored-startup",
+          }
           const stale = {
             ...oldMain,
             alias: "retired-startup",
@@ -578,7 +583,7 @@ test("builds the configured backend when one persisted route cannot be registere
               repositoryLayer,
               turnRepositoryLayer,
               settings,
-              persistedModelRoutes: [stale],
+              persistedModelRoutes: [restored, restored, stale],
             }).pipe(Layer.provide(providerLayer)),
             yield* Effect.scope,
           )

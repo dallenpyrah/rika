@@ -1095,8 +1095,12 @@ export const configuredBackendLayer = ({
           .prepare(configuredRoutes)
           .pipe(Effect.mapError((error) => ModelConfigurationError.make({ message: error.message })))
         const configuredKeys = new Set(prepared.registrations.map(registrationTuple))
+        const persistedRoutesToRestore = persistedModelRoutes.filter((candidate, index, all) => {
+          const tuple = registrationTuple(candidate)
+          return !configuredKeys.has(tuple) && all.findIndex((other) => registrationTuple(other) === tuple) === index
+        })
         const restored = yield* Effect.forEach(
-          persistedModelRoutes.filter((candidate) => !configuredKeys.has(registrationTuple(candidate))),
+          persistedRoutesToRestore,
           (persistedRoute) =>
             runtime.restoreOne(persistedRoute).pipe(
               Effect.matchCauseEffect({
