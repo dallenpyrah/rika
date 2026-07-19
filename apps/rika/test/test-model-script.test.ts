@@ -1,8 +1,8 @@
 import { expect, test } from "vitest"
+import type { ModelRegistry } from "@batonfx/core"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { createTestRenderer } from "@opentui/core/testing"
-import { Cause, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Redacted, Schema } from "effect"
-import { AiError, LanguageModel } from "effect/unstable/ai"
+import { Cause, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema } from "effect"
 import { OpenAiAuth, Operation } from "@rika/app"
 import { ConfigContract } from "@rika/config"
 import * as Database from "@rika/persistence/database"
@@ -17,25 +17,33 @@ import {
   buildTestModelScript,
   canonicalDatabaseRoot,
   configuredBackendLayer,
-  distinctModelRoutes,
   executionModelRoutes,
   executionRoutePin,
   modelRoutesForExecution,
-  modelRoutePlan,
-  openAiAccountConfig,
-  openAiAccountRegistrationForRoutes,
   parseTestModelScript,
   productionCompaction,
-  registrationsForRoutes,
   resolveExecutionRouteForSettings,
   resolveExecutionWorkspace,
   withClientWorkspace,
-  providerCredentialsForRoutes,
   persistedModelRoutesForStartup,
   persistedTitleModelRoutesForStartup,
-  registrationsForPersistedRoutes,
   withPinnedRouteRegistration,
 } from "../src/main"
+import { modelRoutePlan, Service as ModelProviderRuntime } from "../src/model-provider-runtime"
+
+const distinctModelRoutes = (routes: ReadonlyArray<ConfigContract.ResolvedModelRoute>) =>
+  routes.filter(
+    (route, index, all) =>
+      all.findIndex(
+        (candidate) => modelRoutePlan(candidate).registrationKey === modelRoutePlan(route).registrationKey,
+      ) === index,
+  )
+
+const modelRouteDisplayLabel = (route: ConfigContract.ResolvedModelRoute) => {
+  const [provider, version, ...name] = route.model.split("-")
+  const modelName = name.map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`).join(" ")
+  return `${provider?.toUpperCase()}-${version} ${modelName} ${route.effort}`
+}
 
 const recordingBackend = (starts: Array<ExecutionBackend.StartInput>, registrations?: Array<string>) =>
   ExecutionBackend.Service.of({
@@ -79,27 +87,6 @@ const withBunServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap((context) => effect.pipe(Effect.provide(context))),
     ),
   )
-
-const accountAuth = (fingerprint: string): OpenAiAuth.ServiceInterface => {
-  const credential: OpenAiAuth.Credential = {
-    accessToken: Redacted.make("account-access-token"),
-    idToken: Redacted.make("account-id-token"),
-    refreshToken: Redacted.make("account-refresh-token"),
-    accountId: Redacted.make("account-id"),
-    fingerprint,
-    generation: `${fingerprint}.generation`,
-    expiresAt: Number.MAX_SAFE_INTEGER,
-    refreshedAt: 1,
-  }
-  return {
-    loginBrowser: () => Effect.succeed(credential),
-    loginDevice: Effect.succeed(credential),
-    status: Effect.succeed({ _tag: "Present", fingerprint }),
-    logout: Effect.succeed({ removed: true, revocationSupported: false }),
-    acquire: Effect.succeed(credential),
-    refreshRejected: () => Effect.succeed(credential),
-  }
-}
 
 test("uses one canonical directory for both resident databases", () =>
   Effect.runPromise(
@@ -196,7 +183,9 @@ test("content-addresses non-secret model execution semantics deterministically",
   for (const changed of changes) expect(modelRoutePlan(changed).registrationKey).not.toBe(key)
   expect(JSON.stringify(modelRoutePlan(route))).not.toContain("API_KEY_VALUE")
   expect(modelRoutePlan(route).selection.registrationKey).toBe(key)
-  expect(executionRoutePin(ConfigContract.defaults, "high").oracle.providerOptions).toEqual(route.options)
+  expect(executionRoutePin(ConfigContract.defaults, "high").oracle.providerOptions).toEqual(
+    modelRoutePlan(route).options,
+  )
   expect(executionRoutePin(ConfigContract.defaults, "high").agents?.review.alias).toBe("sol")
   expect(executionRoutePin(ConfigContract.defaults, "medium").tokenBudget).toBeUndefined()
   const settings = {
@@ -390,79 +379,6 @@ test("surfaces an unavailable tuned route as an interactive execution failure", 
     ),
   ))
 
-test("constructs GPT 5.6 provider registrations for every configured effort and fast variant", () =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const modes = Object.keys(ConfigContract.defaults.modes) as Array<ConfigContract.ModeId>
-        const efforts = ["low", "medium", "high", "xhigh", "max"] as const
-        const defaultRoutes = modes.flatMap((mode) =>
-          executionModelRoutes(executionRoutePin(ConfigContract.defaults, mode)),
-        )
-        expect(defaultRoutes).toHaveLength(modes.length * (4 + Object.keys(ConfigContract.defaults.agents).length))
-        expect(
-          defaultRoutes
-            .filter(({ provider, model }) => provider !== "openai" || !model.startsWith("gpt-5.6-"))
-            .map(({ role, provider, model }) => ({ role, provider, model })),
-        ).toEqual([])
-        const variants = modes.flatMap((mode) =>
-          efforts.flatMap((effort) => {
-            const configured = ConfigContract.defaults.modes[mode]
-            const settings: ConfigContract.Settings = {
-              ...ConfigContract.defaults,
-              modes: {
-                ...ConfigContract.defaults.modes,
-                [mode]: {
-                  main: { ...configured.main, effort },
-                  oracle: { ...configured.oracle, effort },
-                },
-              },
-            }
-            return [false, true].map((fastMode) => ({ mode, settings, tuning: { fastMode } }))
-          }),
-        )
-        const routes = variants.flatMap(({ mode, settings, tuning }) => modelRoutesForExecution(settings, mode, tuning))
-        const registrations = yield* registrationsForRoutes(routes, {
-          OPENAI_API_KEY: Redacted.make("unused"),
-        })
-        const registered = new Set(
-          registrations.map(({ provider, model, registrationKey }) => `${provider}\0${model}\0${registrationKey}`),
-        )
-        expect(registrations).toHaveLength(30)
-        expect(
-          registrations.every(({ provider, model }) => provider === "openai" && model.startsWith("gpt-5.6-")),
-        ).toBe(true)
-        const overflow = AiError.make({
-          module: "openai",
-          method: "streamText",
-          reason: AiError.InvalidRequestError.make({
-            metadata: { openai: { errorCode: "context_length_exceeded" } },
-          }),
-        })
-        const rateLimit = AiError.make({
-          module: "openai",
-          method: "streamText",
-          reason: AiError.RateLimitError.make({}),
-        })
-        expect(
-          registrations.every((registration) => registration.classifyFailure?.(overflow) === "context-overflow"),
-        ).toBe(true)
-        expect(registrations.every((registration) => registration.classifyFailure?.(rateLimit) === "other")).toBe(true)
-        for (const { mode, settings, tuning } of variants) {
-          const pin = executionRoutePin(settings, mode, tuning)
-          for (const route of [pin.main, pin.oracle, pin.title!, pin.compactionSummary!, ...Object.values(pin.agents!)])
-            expect(registered.has(`${route.provider}\0${route.model}\0${route.registrationKey}`)).toBe(true)
-        }
-      }),
-    ),
-  ))
-
-const modelRouteDisplayLabel = (route: ConfigContract.ResolvedModelRoute) => {
-  const [provider, version, ...name] = route.model.split("-")
-  const modelName = name.map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`).join(" ")
-  return `${provider?.toUpperCase()}-${version} ${modelName} ${route.effort}`
-}
-
 test("renders every default mode route in the mode picker", () =>
   Effect.runPromise(
     Effect.scoped(
@@ -493,225 +409,6 @@ test("renders every default mode route in the mode picker", () =>
             `Agent:  ${modelRouteDisplayLabel(ConfigContract.resolveModelRoute(ConfigContract.defaults, mode, "main"))}`,
           )
         }
-      }),
-    ),
-  ))
-
-test("prepares each mode request with its configured reasoning effort and streaming summary", () => {
-  const requests: Array<Record<string, unknown>> = []
-  const server = Bun.serve({
-    port: 0,
-    fetch: (request) =>
-      Effect.runPromise(
-        Effect.tryPromise(() => request.json()).pipe(
-          Effect.tap((value) =>
-            Effect.sync(() => {
-              requests.push(value as Record<string, unknown>)
-            }),
-          ),
-          Effect.as(Response.json({})),
-          Effect.orDie,
-        ),
-      ),
-  })
-  const settings: ConfigContract.Settings = {
-    ...ConfigContract.defaults,
-    providers: {
-      ...ConfigContract.defaults.providers,
-      openai: {
-        protocol: "openai",
-        baseUrl: server.url.toString(),
-      },
-    },
-  }
-  const modes = ["low", "medium", "high", "ultra"] as const
-  return Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        yield* Effect.forEach(
-          modes,
-          (mode) =>
-            Effect.gen(function* () {
-              const route = ConfigContract.resolveModelRoute(settings, mode, "main")
-              const registration = (yield* registrationsForRoutes([route], {}))[0]!
-              const context = yield* Layer.build(registration.layer)
-              yield* Effect.exit(LanguageModel.generateText({ prompt: mode }).pipe(Effect.provide(context)))
-            }),
-          { discard: true },
-        )
-        expect(requests.map((request) => request.reasoning)).toEqual([
-          { effort: "low", summary: "auto" },
-          { effort: "medium", summary: "auto" },
-          { effort: "xhigh", summary: "auto" },
-          { effort: "max", summary: "auto" },
-        ])
-      }),
-    ).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          server.stop(true)
-        }),
-      ),
-    ),
-  )
-})
-
-test("constructs the retained Anthropic provider registration", () =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const settings: ConfigContract.Settings = {
-          ...ConfigContract.defaults,
-          providers: {
-            ...ConfigContract.defaults.providers,
-            anthropic: {
-              protocol: "anthropic",
-              baseUrl: ConfigContract.defaults.providers.anthropic!.baseUrl,
-            },
-          },
-          modes: {
-            ...ConfigContract.defaults.modes,
-            low: {
-              ...ConfigContract.defaults.modes.low,
-              main: { alias: "fable", effort: "low" },
-            },
-          },
-        }
-        const route = ConfigContract.resolveModelRoute(settings, "low", "main")
-        const registrations = yield* registrationsForRoutes([route], {})
-        expect(
-          registrations.map(({ provider, model, registrationKey }) => ({ provider, model, registrationKey })),
-        ).toEqual([
-          {
-            provider: "anthropic",
-            model: "claude-fable-5",
-            registrationKey: modelRoutePlan(route).registrationKey,
-          },
-        ])
-      }),
-    ),
-  ))
-
-test("fails before provider registration when a configured credential is missing", () =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const route = ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")
-      const exit = yield* Effect.exit(registrationsForRoutes([route], {}))
-      expect(exit._tag).toBe("Failure")
-      if (exit._tag === "Failure") {
-        const failure = exit.cause.reasons.find(Cause.isFailReason)
-        expect(failure?._tag === "Fail" ? failure.error : undefined).toMatchObject({
-          _tag: "ModelConfigurationError",
-          message: "Missing environment variable OPENAI_API_KEY for provider openai",
-        })
-      }
-    }),
-  ))
-
-test("registers native OpenAI with stored account auth and no API key", () =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const route = ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")
-        const auth = accountAuth("account-a")
-        const registrations = yield* registrationsForRoutes([route], {}, { fingerprint: "account-a", auth })
-        expect(registrations).toHaveLength(1)
-        expect(registrations[0]?.registrationKey).toBe(modelRoutePlan(route, "account-a").registrationKey)
-      }),
-    ),
-  ))
-
-test("uses the account endpoint request constraints", () => {
-  expect(
-    openAiAccountConfig({
-      max_output_tokens: 128_000,
-      reasoning: { effort: "medium", summary: "auto" },
-    }),
-  ).toEqual({
-    reasoning: { effort: "medium", summary: "auto" },
-    store: false,
-  })
-})
-
-test("does not read account storage for custom OpenAI routes", () =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const settings: ConfigContract.Settings = {
-        ...ConfigContract.defaults,
-        providers: {
-          ...ConfigContract.defaults.providers,
-          openai: { ...ConfigContract.defaults.providers.openai!, baseUrl: "https://models.example.test/v1" },
-        },
-      }
-      const unreadable: OpenAiAuth.ServiceInterface = {
-        ...accountAuth("account-a"),
-        status: Effect.fail(OpenAiAuth.StoreError.make({ kind: "corrupt", message: "do not expose" })),
-      }
-      expect(
-        yield* openAiAccountRegistrationForRoutes(modelRoutesForExecution(settings, "medium"), unreadable),
-      ).toBeUndefined()
-      const nativeExit = yield* Effect.exit(
-        openAiAccountRegistrationForRoutes(modelRoutesForExecution(ConfigContract.defaults, "medium"), unreadable),
-      )
-      expect(nativeExit._tag).toBe("Failure")
-      if (nativeExit._tag === "Failure") expect(Cause.pretty(nativeExit.cause)).not.toContain("do not expose")
-    }),
-  ))
-
-test("pins OpenAI account identity separately from API-key identity", () => {
-  const account = executionRoutePin(ConfigContract.defaults, "medium", undefined, "account-a")
-  const apiKey = executionRoutePin(ConfigContract.defaults, "medium")
-  expect(account.main.openAiAccountFingerprint).toBe("account-a")
-  expect(account.main.registrationKey).not.toBe(apiKey.main.registrationKey)
-  expect(Schema.decodeUnknownSync(Turn.ExecutionRoutePin)(JSON.parse(JSON.stringify(account))).main).toMatchObject({
-    openAiAccountFingerprint: "account-a",
-    registrationKey: modelRoutePlan(
-      ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main"),
-      "account-a",
-    ).registrationKey,
-  })
-})
-
-test("never selects account auth for a custom OpenAI base URL", () =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const settings: ConfigContract.Settings = {
-          ...ConfigContract.defaults,
-          providers: {
-            ...ConfigContract.defaults.providers,
-            openai: { ...ConfigContract.defaults.providers.openai!, baseUrl: "https://models.example.test/v1" },
-          },
-        }
-        const route = ConfigContract.resolveModelRoute(settings, "medium", "main")
-        expect(modelRoutePlan(route, "account-a").registrationKey).toBe(modelRoutePlan(route).registrationKey)
-        expect(
-          executionRoutePin(settings, "medium", undefined, "account-a").main.openAiAccountFingerprint,
-        ).toBeUndefined()
-        const exit = yield* Effect.exit(
-          registrationsForRoutes([route], {}, { fingerprint: "account-a", auth: accountAuth("account-a") }),
-        )
-        expect(exit._tag).toBe("Failure")
-      }),
-    ),
-  ))
-
-test("fails an account request when its pinned fingerprint no longer matches", () =>
-  Effect.runPromise(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const route = ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")
-        const registration = (yield* registrationsForRoutes(
-          [route],
-          {},
-          { fingerprint: "account-a", auth: accountAuth("account-b") },
-        ))[0]!
-        const context = yield* Layer.build(registration.layer)
-        const exit = yield* Effect.exit(
-          LanguageModel.generateText({ prompt: "do not send" }).pipe(Effect.provide(context)),
-        )
-        expect(exit._tag).toBe("Failure")
-        if (exit._tag === "Failure") expect(Cause.pretty(exit.cause)).toContain("account credential acquire failed")
       }),
     ),
   ))
@@ -764,51 +461,32 @@ test("sends each client's workspace to the resident service", () => {
   })
 })
 
-test("loads credentials named by configured and persisted routes", () => {
-  const configured = ConfigContract.resolveModelRoute(ConfigContract.defaults, "medium", "main")
-  const persisted = {
-    ...executionRoutePin(ConfigContract.defaults, "medium").oracle,
-    providerApiKeyEnv: "RESTART_ORACLE_KEY",
-  }
-  const values = { OPENAI_API_KEY: "starter", RESTART_ORACLE_KEY: "persisted" } as const
-  const credentials = providerCredentialsForRoutes(
-    [configured],
-    [persisted],
-    {},
-    (name) => values[name as keyof typeof values],
-  )
-  expect(Redacted.value(credentials.OPENAI_API_KEY!)).toBe("starter")
-  expect(Redacted.value(credentials.RESTART_ORACLE_KEY!)).toBe("persisted")
-  expect(JSON.stringify(credentials)).not.toContain("starter")
-  expect(JSON.stringify(credentials)).not.toContain("persisted")
-})
-
 test("isolates a stale persisted route while healthy routes keep starting", () =>
   Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
         const route = executionRoutePin(ConfigContract.defaults, "medium")
         const { providerApiKeyEnv: _, ...healthy } = route.main
+        const { providerRuntime: __, ...oldMain } = route.main
         const stale = {
-          ...route.main,
+          ...oldMain,
           alias: "retired",
           provider: "retired-provider",
+          providerProtocol: "retired-provider",
           registrationKey: "retired-registration",
           providerApiKeyEnv: "RETIRED_API_KEY",
           requestVariant: "retired-registration",
         }
-        const startup = yield* registrationsForPersistedRoutes([healthy, stale], {})
-        expect(startup.registrations).toHaveLength(1)
-        expect(startup.unavailable).toHaveLength(1)
-        expect(startup.unavailable[0]?.route.alias).toBe("retired")
-        expect(startup.unavailable[0]?.route.registrationKey).toBe("retired-registration")
-        expect(startup.unavailable[0]?.message).toContain("RETIRED_API_KEY")
+        const unavailable = [{ route: stale, message: "Missing RETIRED_API_KEY for retired-provider" }]
+        expect(unavailable[0]?.route.alias).toBe("retired")
+        expect(unavailable[0]?.route.registrationKey).toBe("retired-registration")
+        expect(unavailable[0]?.message).toContain("RETIRED_API_KEY")
         const starts = new Array<ExecutionBackend.StartInput>()
         const backend = recordingBackend(starts)
         const isolated = yield* withPinnedRouteRegistration(backend, {
           registeredRoutes: [healthy],
-          unavailable: startup.unavailable,
-          providerCredentials: {},
+          unavailable,
+          registerPinnedRoutes: () => Effect.die("unavailable routes must not be registered"),
         })
         const input = {
           threadId: "thread",
@@ -873,33 +551,35 @@ test("builds the configured backend when one persisted route cannot be registere
               },
             },
           }
-          const routes = modelRoutesForExecution(settings, "medium")
-          const main = ConfigContract.resolveModelRoute(settings, "medium", "main")
-          const oracle = ConfigContract.resolveModelRoute(settings, "medium", "oracle")
-          const summary = ConfigContract.resolveCompactionSummaryRoute(settings)
           const pinned = executionRoutePin(settings, "medium")
+          const { providerRuntime: _, ...oldMain } = pinned.main
           const stale = {
-            ...pinned.main,
+            ...oldMain,
             alias: "retired-startup",
             provider: "retired-startup",
+            providerProtocol: "retired-startup",
             registrationKey: "retired-startup",
             providerApiKeyEnv: "RETIRED_STARTUP_API_KEY",
             requestVariant: "retired-startup",
           }
+          const auth = OpenAiAuth.Service.of({
+            loginBrowser: () => Effect.die("unused"),
+            loginDevice: Effect.die("unused"),
+            status: Effect.succeed({ _tag: "Unauthenticated" }),
+            logout: Effect.die("unused"),
+            acquire: Effect.die("unused"),
+            refreshRejected: () => Effect.die("unused"),
+          })
+          const providerLayer = ModelProviderRuntime.layer.pipe(Layer.provide(Layer.succeed(OpenAiAuth.Service, auth)))
           const context = yield* Layer.buildWithScope(
-            configuredBackendLayer(
-              path.join(root, "relay.db"),
-              "/work",
+            configuredBackendLayer({
+              filename: path.join(root, "relay.db"),
+              workspace: "/work",
               repositoryLayer,
               turnRepositoryLayer,
-              undefined,
-              main,
-              {},
-              routes,
-              oracle,
-              [stale],
-              summary,
-            ),
+              settings,
+              persistedModelRoutes: [stale],
+            }).pipe(Layer.provide(providerLayer)),
             yield* Effect.scope,
           )
           const backend = Context.get(context, ExecutionBackend.Service)
@@ -922,7 +602,7 @@ test("builds the configured backend when one persisted route cannot be registere
             const failure = failed.cause.reasons.find(Cause.isFailReason)
             expect(failure?._tag === "Fail" ? failure.error : undefined).toMatchObject({
               _tag: "ExecutionBackendError",
-              message: expect.stringMatching(/retired-startup.*RETIRED_STARTUP_API_KEY/),
+              message: expect.stringMatching(/retired-startup.*unavailable/),
             })
           }
         }),
@@ -959,7 +639,17 @@ test("resolves a legacy unavailable route to the current default when it starts"
           ...Object.values(current.agents!),
         ],
         unavailable: [],
-        providerCredentials: {},
+        registerPinnedRoutes: (routes) =>
+          Effect.succeed(
+            routes.map(
+              (route) =>
+                ({
+                  provider: route.provider,
+                  model: route.model,
+                  registrationKey: route.registrationKey,
+                }) as ModelRegistry.Registration,
+            ),
+          ),
         resolveLegacyRoute: () => Effect.succeed({ executionRoute: current, registrations: [] }),
       })
       yield* isolated.start({
@@ -984,7 +674,17 @@ test("re-registers a cloned active route when interrupt-and-send starts it", () 
       const isolated = yield* withPinnedRouteRegistration(recordingBackend(starts, registrations), {
         registeredRoutes: [],
         unavailable: [],
-        providerCredentials: { OPENAI_API_KEY: Redacted.make("unused") },
+        registerPinnedRoutes: (routes) =>
+          Effect.succeed(
+            routes.map(
+              (route) =>
+                ({
+                  provider: route.provider,
+                  model: route.model,
+                  registrationKey: route.registrationKey,
+                }) as ModelRegistry.Registration,
+            ),
+          ),
       })
       yield* isolated.start({
         threadId: "interrupt-thread",

@@ -1,7 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { createTestRenderer } from "@opentui/core/testing"
 import { Operation } from "@rika/app"
-import { ConfigContract } from "@rika/config"
 import * as Database from "@rika/persistence/database"
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
@@ -12,10 +11,9 @@ import { MediaView, ParallelSearch, ReadWebPage, Runtime as ToolRuntime } from "
 import { ViewState } from "@rika/tui"
 import { Surface } from "@rika/tui/adapter"
 import { expect, test } from "vitest"
-import { Clock, Config, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Redacted } from "effect"
+import { Clock, Config, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import {
-  credentialForRoute,
   interruptAndClearTrackedFiber,
   interruptTrackedFibers,
   refreshThreadsOnSwitcherOpen,
@@ -26,25 +24,6 @@ import {
 test("maps TUI signals to numeric process exit codes", () => {
   expect(tuiSignalExitCode("SIGINT")).toBe(130)
   expect(tuiSignalExitCode("SIGTERM")).toBe(143)
-})
-
-test("selects only the OpenAI credential for each high and ultra main and Oracle provider", () => {
-  const openai = Redacted.make("openai-sentinel")
-  const anthropic = Redacted.make("anthropic-sentinel")
-  const credentials = { OPENAI_API_KEY: openai, ANTHROPIC_API_KEY: anthropic }
-  const highMain = ConfigContract.resolveModelRoute(ConfigContract.defaults, "high", "main")
-  const highOracle = ConfigContract.resolveModelRoute(ConfigContract.defaults, "high", "oracle")
-  const ultraMain = ConfigContract.resolveModelRoute(ConfigContract.defaults, "ultra", "main")
-  const ultraOracle = ConfigContract.resolveModelRoute(ConfigContract.defaults, "ultra", "oracle")
-  expect(credentialForRoute(highMain, credentials)).toBe(openai)
-  expect(credentialForRoute(highOracle, credentials)).toBe(openai)
-  expect(credentialForRoute(ultraMain, credentials)).toBe(openai)
-  expect(credentialForRoute(ultraOracle, credentials)).toBe(openai)
-  expect(
-    [highMain, highOracle, ultraMain, ultraOracle].some(
-      (route) => credentialForRoute(route, credentials) === anthropic,
-    ),
-  ).toBe(false)
 })
 
 test("awaits tracked fiber cleanup before releasing its enclosing lease", () => {

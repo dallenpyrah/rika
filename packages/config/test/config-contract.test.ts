@@ -26,7 +26,7 @@ describe("ConfigContract", () => {
       alias: "terra",
       providerId: "openai",
       model: "gpt-5.6-terra",
-      options: { reasoning: { effort: "medium" }, max_output_tokens: 128_000 },
+      options: { reasoning: { effort: "medium" } },
       compaction: { contextWindow: 1_050_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
     })
     expect(ConfigContract.resolveCompactionSummaryRoute(ConfigContract.defaults)).toMatchObject({

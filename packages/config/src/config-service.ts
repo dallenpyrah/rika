@@ -27,7 +27,9 @@ const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Setting
     }
   }
   return {
-    providers: { openai: provider("openai"), anthropic: provider("anthropic") },
+    providers: Object.fromEntries(
+      (Object.keys(defaults.providers) as Array<ProviderId>).map((id) => [id, provider(id)]),
+    ) as Readonly<Record<ProviderId, Settings["providers"][ProviderId]>>,
     models: defaults.models,
     modes: defaults.modes,
     agents: defaults.agents,

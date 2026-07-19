@@ -8,9 +8,22 @@ export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
 export type PermissionDecision = "allow" | "ask" | "deny"
 export type LogLevel = "debug" | "info" | "warning" | "error"
 
-export type ProviderId = "openai" | "anthropic"
+export const providerDefaults = {
+  openai: {
+    protocol: "openai",
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyEnv: "OPENAI_API_KEY",
+  },
+  anthropic: {
+    protocol: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+  },
+} as const
+
+export type ProviderId = keyof typeof providerDefaults
 export interface ProviderConnection {
-  readonly protocol: ProviderId
+  readonly protocol: string
   readonly baseUrl: string
   readonly apiKeyEnv?: string | undefined
 }
@@ -127,6 +140,7 @@ export interface ResolvedModelRoute {
     readonly reserveTokens: number
     readonly keepRecentTokens: number
   }
+  readonly maxOutputTokens: number
   readonly options: Readonly<Record<string, unknown>>
 }
 
@@ -194,10 +208,8 @@ const resolveRoute = (settings: Settings, route: RoleRoute, owner: string): Reso
       reserveTokens: alias.limits.maxOutputTokens,
       keepRecentTokens: alias.limits.keepRecentTokens,
     },
-    options: {
-      ...variant.options,
-      [providerConnection.protocol === "openai" ? "max_output_tokens" : "max_tokens"]: alias.limits.maxOutputTokens,
-    },
+    maxOutputTokens: alias.limits.maxOutputTokens,
+    options: variant.options,
   }
 }
 
@@ -239,7 +251,7 @@ export const decodeSettingsInput: {
   ])
   if (value.providers !== undefined && !object(value.providers))
     throw ConfigFileError.make({ path, message: "Providers must be an object" })
-  exactKeys(path, "Providers", (value.providers ?? {}) as Record<string, unknown>, ["openai", "anthropic"])
+  exactKeys(path, "Providers", (value.providers ?? {}) as Record<string, unknown>, Object.keys(providerDefaults))
   for (const [name, providerConnection] of Object.entries((value.providers ?? {}) as Record<string, unknown>)) {
     if (!object(providerConnection)) throw ConfigFileError.make({ path, message: `Provider ${name} must be an object` })
     exactKeys(path, `Provider ${name}`, providerConnection, ["baseUrl", "apiKeyEnv"])
@@ -333,18 +345,7 @@ export const decodeSettingsInput: {
 })
 
 export const defaults: Settings = {
-  providers: {
-    openai: {
-      protocol: "openai",
-      baseUrl: "https://api.openai.com/v1",
-      apiKeyEnv: "OPENAI_API_KEY",
-    },
-    anthropic: {
-      protocol: "anthropic",
-      baseUrl: "https://api.anthropic.com",
-      apiKeyEnv: "ANTHROPIC_API_KEY",
-    },
-  },
+  providers: providerDefaults,
   models: modelDefaults,
   modes: {
     low: { main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
