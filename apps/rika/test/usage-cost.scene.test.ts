@@ -2,7 +2,7 @@ import { expect, test } from "vitest"
 import { Scene } from "./scene"
 
 test(
-  "shows scripted Relay usage in the real TUI without duplicate inflation",
+  "does not price token-only Relay usage in the real TUI",
   () =>
     Scene.run({
       script: [
@@ -16,31 +16,46 @@ test(
         Scene.action.writeAfter("Usage converted.", "\u0003", 500),
       ],
     }).then((result) => {
-      expect(result.output).toContain("$11.25")
-      expect(result.output).not.toContain("$22.50")
+      expect(result.output).toContain("0.00")
+      expect(result.output).not.toContain("$11.25")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,
 )
 
 test(
-  "processes scripted child usage through the real TUI",
+  "keeps several child token reports at zero across durable replay",
   () =>
     Scene.run({
       script: [
-        Scene.model.turn([Scene.model.toolCall("task", { prompt: "Measure child usage." }, "usage-child")]),
-        Scene.model.text("Child usage complete.", undefined, { outputTokens: 1_000_000 }),
-        Scene.model.object({ summary: "Child usage complete", files: [] }),
-        Scene.model.text("Parent usage complete.", 1_000),
+        Scene.model.turn(
+          ["alpha", "beta", "gamma"].map((name) =>
+            Scene.model.toolCall("task", { prompt: `Measure ${name}.` }, `usage-${name}`),
+          ),
+          undefined,
+          { inputTokens: 500_000, outputTokens: 100_000 },
+        ),
+        ...["Alpha", "Beta", "Gamma"].map((name) =>
+          Scene.model.text(`${name} usage complete.`, undefined, { inputTokens: 500_000, outputTokens: 500_000 }),
+        ),
+        ...["Alpha", "Beta", "Gamma"].map((name) =>
+          Scene.model.object({ summary: `${name} usage complete`, files: [] }),
+        ),
+        Scene.model.text("Parent usage complete.", 1_000, { inputTokens: 500_000, outputTokens: 500_000 }),
       ],
       actions: [
-        Scene.action.writeAfter("Welcome to Rika", "Delegate usage measurement.\r"),
+        Scene.action.writeAfter("Welcome to Rika", "Delegate three usage measurements.\r"),
+        Scene.action.restartAfter("Parent usage complete.", "threads", "continue", "--last"),
         Scene.action.writeAfter("Parent usage complete.", "\u0003", 500),
       ],
     }).then((result) => {
       expect(result.output).toContain("Parent usage complete.")
       expect(result.diagnostics).toContain('"rika.event.type":"model.usage.reported"')
-      expect(result.diagnostics).toContain("usage-child")
+      expect(result.childExecutions).toHaveLength(3)
+      expect(result.output).toContain("$0.00")
+      expect(result.output).not.toMatch(/\$[1-9][0-9]*\.[0-9]{2}/)
+      expect(result.diagnostics.match(/resident\.connection\.accepted/g)?.length ?? 0).toBe(2)
+      expect(result.diagnostics).toContain("usage-alpha")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,

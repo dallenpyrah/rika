@@ -57,10 +57,13 @@ const reader = (
 })
 
 describe("UsageCost", () => {
-  it("converts Relay token reports without pricing Haiku as full-size Claude", () => {
-    expect(UsageCost.eventCostUsd(reportedTokens("haiku", "claude-3-5-haiku-latest", 1_000_000, 1_000_000))).toBe(4.8)
-    expect(UsageCost.eventCostUsd(reportedTokens("opus", "claude-opus-4-1", 1_000_000, 1_000_000))).toBe(30)
-    expect(UsageCost.eventCostUsd(reportedTokens("partial", "gpt-5-mini", null, 1_000_000))).toBe(4)
+  it("does not invent money from reported tokens or a model name", () => {
+    expect(
+      UsageCost.eventCostUsd(reportedTokens("haiku", "claude-3-5-haiku-latest", 1_000_000, 1_000_000)),
+    ).toBeUndefined()
+    expect(UsageCost.eventCostUsd(reportedTokens("opus", "claude-opus-4-1", 1_000_000, 1_000_000))).toBeUndefined()
+    expect(UsageCost.eventCostUsd(reportedTokens("partial", "gpt-5-mini", null, 1_000_000))).toBeUndefined()
+    expect(UsageCost.eventCostUsd(reportedTokens("early-budget", "gpt-5", 500_000, 0))).toBeUndefined()
   })
 
   it("leaves missing and malformed reports unpriced", () => {

@@ -336,13 +336,6 @@ const processResult = (output: unknown): ToolProcess | undefined => {
   return Object.keys(process).length === 0 ? undefined : process
 }
 
-const tokenPricing = (model: string): readonly [number, number] =>
-  model.includes("haiku") || model.includes("mini") || model.includes("flash")
-    ? [0.8, 4]
-    : model.includes("claude") || model.includes("fable") || model.includes("opus")
-      ? [5, 25]
-      : [1.25, 10]
-
 const nonNegativeFinite = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
 
@@ -356,11 +349,7 @@ const usageCost = (value: Record<string, unknown>): number | undefined => {
     const candidate = nonNegativeFinite(usage[key])
     if (candidate !== undefined) return candidate
   }
-  const inputTokens = nonNegativeFinite(value.input_tokens ?? usage.input_tokens)
-  const outputTokens = nonNegativeFinite(value.output_tokens ?? usage.output_tokens)
-  if (inputTokens === undefined && outputTokens === undefined) return undefined
-  const [inputPrice, outputPrice] = tokenPricing(string(value.model).toLowerCase())
-  return ((inputTokens ?? 0) * inputPrice) / 1_000_000 + ((outputTokens ?? 0) * outputPrice) / 1_000_000
+  return undefined
 }
 
 const assistantKey = (turnId: string, phase: number): string => `assistant:${turnId}:${Math.max(0, phase)}`
