@@ -2,7 +2,7 @@ import { expect, test } from "vitest"
 import { Scene } from "./scene"
 
 test(
-  "shows a failed child run as failed",
+  "expands a failed child run to its durable failure reason",
   () =>
     Scene.run({
       script: [
@@ -11,10 +11,13 @@ test(
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Delegate work that may fail.\r"),
-        Scene.action.writeAfter("Subagent failed", "\u0003", 100),
+        Scene.action.writeAfter("Subagent failed", "\t", 100),
+        Scene.action.writeAfter("Subagent failed ▸", "\r"),
+        Scene.action.writeAfter("deterministic child failure", "\u0003", 100),
       ],
     }).then((result) => {
       expect(result.output).toContain("Subagent failed")
+      expect(result.output).toContain("deterministic child failure")
       expect(result.output).not.toContain("Subagent finished")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
@@ -22,12 +25,15 @@ test(
 )
 
 test(
-  "shows nested child runs and their completed responses",
+  "expands, collapses, and re-expands nested child responses deterministically",
   () =>
     Scene.run({
       script: [
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Coordinate nested work." }, "depth-one")]),
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Complete the nested check." }, "depth-two")]),
+        Scene.model.turn([
+          Scene.model.toolCall("read_file", { path: "nested-evidence.ts", offset: 0, limit: 20 }, "nested-read"),
+        ]),
         Scene.model.text("Depth two verified the boundary."),
         Scene.model.object({ summary: "Depth two complete", files: [] }),
         Scene.model.text("Depth one synthesized the nested result."),
@@ -40,12 +46,15 @@ test(
         Scene.action.writeAfterDelay("\r", 100),
         Scene.action.writeAfter("Depth one synthesized", "\t", 100),
         Scene.action.writeAfterDelay("\r", 100),
+        Scene.action.writeAfter("Depth two verified", "\r", 100),
+        Scene.action.writeAfterDelay("\r", 100),
         Scene.action.writeAfter("Depth two verified", "\u0003", 100),
       ],
     }).then((result) => {
       expect(result.output.match(/Subagent finished/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
       expect(result.output).toContain("Depth one synthesized the nested result.")
       expect(result.output).toContain("Depth two verified the boundary.")
+      expect(result.output).toContain("nested-evidence.ts")
       expect(result.output).toContain("Parent received the nested result.")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),

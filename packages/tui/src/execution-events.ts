@@ -97,6 +97,27 @@ const cancelParentRows = (model: Model, parentIds: ReadonlySet<string>): Model =
   return changed ? { ...model, blocks } : model
 }
 
+const applyExecutionFailure = (model: Model, parentId: string | undefined, units: ReadonlyArray<Unit>): Model => {
+  if (parentId === undefined) return model
+  const failure = units.find(
+    (unit) =>
+      unit.key.startsWith("execution:") &&
+      unit.key.endsWith(":failed") &&
+      unit.content._tag === "Block" &&
+      unit.content.block._tag === "Error",
+  )
+  if (failure?.content._tag !== "Block" || failure.content.block._tag !== "Error") return model
+  const detail = failure.content.block.detail
+  const blocks = [...(model.blocks as ReadonlyArray<Block>)]
+  const index = blocks.findIndex(
+    (block) => block._tag === "ToolCall" && block.id === parentId && block.presentation.family === "agent",
+  )
+  const block = blocks[index]
+  if (block?._tag !== "ToolCall") return model
+  blocks[index] = { ...block, status: "failed", output: detail }
+  return { ...model, blocks }
+}
+
 const childLabels = (name: string, presentation: ToolCall["presentation"]): ToolCall["presentation"] => {
   const normalized = name.replace(/^rika-/, "").trim()
   const lower = normalized.toLowerCase()
@@ -256,7 +277,11 @@ const projectUnitsImpl = (model: Model, units: ReadonlyArray<Unit>, parentId?: s
   const cancellation = normalizeCancellation(parentCancelled ? units.map(cancelledUnit) : units, parentId)
   const reconciled =
     parentId === undefined ? reconcileSubagentUnits(model, cancellation.units) : { model, units: cancellation.units }
-  const projectedModel = cancelParentRows(reconciled.model, cancellation.parentIds)
+  const projectedModel = applyExecutionFailure(
+    cancelParentRows(reconciled.model, cancellation.parentIds),
+    parentId,
+    cancellation.units,
+  )
   const entries = [...projectedModel.entries]
   const blocks = [...projectedModel.blocks] as Array<Block>
   const items = [...projectedModel.items] as Array<TranscriptItem>
@@ -300,7 +325,15 @@ const projectUnitsImpl = (model: Model, units: ReadonlyArray<Unit>, parentId?: s
     }
     known.set(unit.key, items.length - 1)
   }
-  return { ...projectedModel, entries, blocks, items }
+  let projected: Model = { ...projectedModel, entries, blocks, items }
+  if (parentId === undefined)
+    for (const nestedParentId of new Set(reconciled.units.flatMap((unit) => unit.parentId ?? [])))
+      projected = applyExecutionFailure(
+        projected,
+        nestedParentId,
+        reconciled.units.filter((unit) => unit.parentId === nestedParentId),
+      )
+  return projected
 }
 
 export const projectUnits: {

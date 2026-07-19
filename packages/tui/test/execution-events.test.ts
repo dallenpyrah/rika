@@ -281,6 +281,50 @@ describe("ExecutionEvents.projectUnits", () => {
     expect(rendered).not.toContain("Subagent finished")
   })
 
+  it("shows the durable execution failure on a nested subagent instead of a failed child tool", () => {
+    const parent = Transcript.project("turn", "delegate", [
+      event("agent", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "Coordinate the work" } },
+      }),
+      event("spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent", child_execution_id: "child:turn:agent" },
+      }),
+    ])
+    const child = Transcript.project("child:turn:agent", "", [
+      event("nested", 0, "tool.call.requested", {
+        data: { tool_call_id: "nested", tool_name: "task", input: { prompt: "Run the nested check" } },
+      }),
+      event("nested-result", 1, "tool.result.received", {
+        data: { tool_call_id: "nested", error: "AgentToolError: unrelated wrapper failure" },
+      }),
+      event("failed", 2, "execution.failed", {
+        data: { message: "Model route luna-low was not registered" },
+      }),
+    ])
+    let live = ExecutionEvents.projectUnits(ViewState.initial("/work"), parent.units)
+    live = ExecutionEvents.projectChildUnits(live, "turn:agent", child.units)
+    const durable = ExecutionEvents.projectUnits(
+      ViewState.initial("/work"),
+      Transcript.withNestedProjections(parent, [{ parentId: "turn:agent", projection: child }]).units,
+    )
+
+    for (const projected of [live, durable]) {
+      const model = { ...projected, expandedRowKeys: ["tool:turn:agent"] }
+      const rendered = renderTranscriptStyled(model)
+        .chunks.map((chunk) => chunk.text)
+        .join("")
+      expect(model.blocks[0]).toMatchObject({
+        _tag: "ToolCall",
+        id: "turn:agent",
+        status: "failed",
+        output: "Model route luna-low was not registered",
+      })
+      expect(rendered).toContain("Subagent failed")
+      expect(rendered).toContain("Model route luna-low was not registered")
+      expect(rendered).not.toContain("AgentToolError: unrelated wrapper failure")
+    }
+  })
+
   it("renders a completed child response from its parent result when child events are unavailable", () => {
     const childId = "execution:child:turn:complete"
     const projection = Transcript.project("turn", "prompt", [
