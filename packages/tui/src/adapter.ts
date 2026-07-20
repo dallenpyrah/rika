@@ -28,7 +28,6 @@ import cliSpinners from "cli-spinners"
 import * as Transcript from "@rika/transcript"
 import { Clock, Effect, Fiber, Function, Option, Schedule, Schema } from "effect"
 import stringWidth from "string-width"
-import { cursorBlink } from "./cursor-blink"
 import { fromOpenTui, type Key } from "./keys"
 import {
   composerHeight,
@@ -1345,7 +1344,7 @@ interface TranscriptRenderInput {
 }
 
 const mouseSequencePattern = new RegExp(`^(?:${String.fromCharCode(27)}?\\[)?<?\\d+(?:;\\d+)*[Mm]?$`)
-const typingCursorStyle = { style: "block", blinking: false } as const
+const typingCursorStyle = { style: "block", blinking: true } as const
 
 const visibleAgentOutput = (output: string | undefined): string | undefined => {
   if (output === undefined) return undefined
@@ -1497,8 +1496,6 @@ export class Surface {
   private scrollGeneration = 0
   private destroyed = false
   private focusedEditor: ProjectedEditorRenderable | undefined
-  private cursorTimer: Fiber.Fiber<void> | undefined
-  private cursorGeneration = 0
 
   constructor(
     private readonly renderer: CliRenderer,
@@ -1805,7 +1802,6 @@ export class Surface {
   private readonly onKey = (key: KeyEvent) => {
     const mapped = fromOpenTui(key)
     if (this.suppressMouseJunk(mapped)) return
-    this.wakeCursor()
     if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "pageup") {
       this.userScrollDetached = true
       this.transcriptScroll.stickyScroll = false
@@ -2061,14 +2057,12 @@ export class Surface {
     const mediaType = event.metadata?.mimeType?.toLowerCase()
     if (event.metadata?.kind === "binary" || mediaType?.startsWith("image/") === true) {
       if (event.bytes.length > 0) {
-        this.wakeCursor()
         this.handlers.pasteImage?.(mediaType === undefined ? { bytes: event.bytes } : { bytes: event.bytes, mediaType })
       }
       return
     }
     const text = stripAnsiSequences(decodePasteBytes(event.bytes))
     if (text.length === 0) return
-    this.wakeCursor()
     const now = Effect.runSync(Clock.currentTimeMillis)
     const attachment = this.model?.pastedText.findLast(
       (candidate) => candidate.type === "text" && candidate.value === text,
@@ -2841,43 +2835,15 @@ export class Surface {
 
   private focusEditor(editor: ProjectedEditorRenderable | undefined): void {
     if (editor === this.focusedEditor) return
-    this.stopCursorBlink()
     this.focusedEditor?.blur()
     this.focusedEditor = editor
     this.focusedEditor?.focus()
-    if (this.focusedEditor !== undefined) this.startCursorBlink(this.focusedEditor)
-  }
-
-  private stopCursorBlink(): void {
-    this.cursorGeneration += 1
-    this.cancelTimer(this.cursorTimer)
-    this.cursorTimer = undefined
-  }
-
-  private startCursorBlink(editor: ProjectedEditorRenderable): void {
-    editor.showCursor = true
-    if (this.destroyed || this.options.animate === false) return
-    const generation = this.cursorGeneration
-    this.cursorTimer = Effect.runFork(
-      cursorBlink(
-        Effect.sync(() => {
-          if (this.destroyed || this.cursorGeneration !== generation || this.focusedEditor !== editor) return
-          editor.showCursor = !editor.showCursor
-        }),
-      ),
-    )
-  }
-
-  wakeCursor(): void {
-    const editor = this.focusedEditor
-    this.stopCursorBlink()
-    if (editor !== undefined) this.startCursorBlink(editor)
+    if (this.focusedEditor !== undefined) this.focusedEditor.showCursor = true
   }
 
   destroy(): void {
     this.destroyed = true
     this.scrollGeneration += 1
-    this.stopCursorBlink()
     if (this.transcriptAnchorFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.transcriptAnchorFrame)
     this.transcriptAnchorFrame = undefined
     if (this.sidebarLayoutFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.sidebarLayoutFrame)
@@ -3724,7 +3690,6 @@ export const create = (handlers: Handlers) =>
             if (released) return
             try {
               renderer.resume()
-              surface?.wakeCursor()
             } catch (cause) {
               releaseTerminal()
               throw cause

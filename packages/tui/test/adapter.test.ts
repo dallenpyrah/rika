@@ -1539,30 +1539,13 @@ describe("Surface", () => {
     ),
   )
 
-  it.effect("uses a steady block cursor and wakes it on key and paste input", () =>
+  it.effect("uses the terminal's native blinking block cursor on the composer", () =>
     Effect.gen(function* () {
       const callbacks = { key: vi.fn(), paste: vi.fn(), resize: vi.fn() }
       const { surface } = yield* createScoped(callbacks)
       surface.update(model({ input: "draft", cursor: 5 }))
 
-      expect(surface.composerEditor.cursorStyle).toEqual({ style: "block", blinking: false })
-      expect(surface.composerEditor.showCursor).toBe(true)
-
-      surface.composerEditor.showCursor = false
-      for (const listener of opentui.keyHandlers)
-        listener({
-          name: "x",
-          ctrl: false,
-          option: false,
-          super: false,
-          shift: false,
-          sequence: "x",
-          eventType: "press",
-        })
-      expect(surface.composerEditor.showCursor).toBe(true)
-
-      surface.composerEditor.showCursor = false
-      for (const listener of opentui.pasteHandlers) listener({ bytes: new TextEncoder().encode("pasted text") })
+      expect(surface.composerEditor.cursorStyle).toEqual({ style: "block", blinking: true })
       expect(surface.composerEditor.showCursor).toBe(true)
     }),
   )
@@ -1939,18 +1922,6 @@ it.effect("releases terminal modes once before other cleanup and prevents editor
     expect(opentui.renderer.suspend).toHaveBeenCalledTimes(1)
     expect(opentui.renderer.resume).not.toHaveBeenCalled()
     expect(opentui.renderer.destroy).toHaveBeenCalledTimes(1)
-  }),
-)
-
-it.effect("wakes the typing cursor after the terminal resumes", () =>
-  Effect.gen(function* () {
-    const created = yield* createScoped(handlers())
-    created.surface.update(model({ input: "draft", cursor: 5 }))
-    created.surface.composerEditor.showCursor = false
-
-    created.resumeTerminal()
-
-    expect(created.surface.composerEditor.showCursor).toBe(true)
   }),
 )
 

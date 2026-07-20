@@ -249,7 +249,7 @@ test("converges the model to the physical terminal size when a resize event repo
     }),
   ))
 
-test("uses OpenTUI's native cursor position with a steady block style", () =>
+test("uses OpenTUI's native cursor position with a blinking block style", () =>
   Effect.runPromise(
     Effect.gen(function* () {
       const setup = yield* openTui(() => createTestRenderer({ width: 100, height: 30 }))
@@ -259,7 +259,7 @@ test("uses OpenTUI's native cursor position with a steady block style", () =>
         surface.update(base)
         yield* openTui(() => setup.flush())
         const composerCursor = setup.renderer.getCursorState()
-        expect(composerCursor).toMatchObject({ visible: true, style: "block", blinking: false })
+        expect(composerCursor).toMatchObject({ visible: true, style: "block", blinking: true })
 
         surface.update({
           ...base,
@@ -268,7 +268,7 @@ test("uses OpenTUI's native cursor position with a steady block style", () =>
         })
         yield* openTui(() => setup.flush())
         const paletteCursor = setup.renderer.getCursorState()
-        expect(paletteCursor).toMatchObject({ visible: true, style: "block", blinking: false })
+        expect(paletteCursor).toMatchObject({ visible: true, style: "block", blinking: true })
         expect(paletteCursor.y).not.toBe(composerCursor.y)
 
         surface.update({
@@ -276,14 +276,14 @@ test("uses OpenTUI's native cursor position with a steady block style", () =>
           threadSwitcher: { ...base.threadSwitcher, open: true, query: "cursor" },
         })
         yield* openTui(() => setup.flush())
-        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "block", blinking: false })
+        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "block", blinking: true })
 
         surface.update({
           ...base,
           filePicker: { ...base.filePicker, open: true, query: "src", items: ready(["src/main.ts"]) },
         })
         yield* openTui(() => setup.flush())
-        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "block", blinking: false })
+        expect(setup.renderer.getCursorState()).toMatchObject({ visible: true, style: "block", blinking: true })
 
         surface.update({ ...base, modePicker: { open: true, selected: 0 } })
         yield* openTui(() => setup.flush())
