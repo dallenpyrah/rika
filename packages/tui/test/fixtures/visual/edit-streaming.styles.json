@@ -602,7 +602,7 @@
           "width": 1
         },
         {
-          "text": "- old",
+          "text": "  - old",
           "fg": {
             "buffer": {
               "0": 384,
@@ -620,10 +620,10 @@
             }
           },
           "attributes": 0,
-          "width": 5
+          "width": 7
         },
         {
-          "text": "                                                                          ",
+          "text": "                                                                        ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -641,7 +641,7 @@
             }
           },
           "attributes": 0,
-          "width": 74
+          "width": 72
         }
       ]
     },
@@ -669,7 +669,7 @@
           "width": 1
         },
         {
-          "text": "+ new",
+          "text": "  + new",
           "fg": {
             "buffer": {
               "0": 512,
@@ -687,10 +687,10 @@
             }
           },
           "attributes": 0,
-          "width": 5
+          "width": 7
         },
         {
-          "text": "                                                                          ",
+          "text": "                                                                        ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -708,7 +708,7 @@
             }
           },
           "attributes": 0,
-          "width": 74
+          "width": 72
         }
       ]
     },

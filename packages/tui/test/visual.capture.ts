@@ -175,6 +175,20 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
       24,
     ],
     [
+      "diff-highlighted",
+      {
+        ...block({
+          _tag: "Diff",
+          path: "src/agent.ts",
+          patch:
+            '--- a/src/agent.ts\n+++ b/src/agent.ts\n@@ -224,5 +224,5 @@\n   {\n     name: "oracle",\n-    description: "Delegate a focused technical investigation",\n+    description: "Delegate planning, review, and debugging",\n     permission: "allow",\n',
+        }),
+        expandedRowKeys: ["block:Diff:0"],
+      },
+      80,
+      24,
+    ],
+    [
       "edit-streaming",
       block({
         _tag: "ToolCall",

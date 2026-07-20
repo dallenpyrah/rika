@@ -12,6 +12,7 @@ import "prismjs/components/prism-sql.js"
 import "prismjs/components/prism-yaml.js"
 import "prismjs/components/prism-diff.js"
 import "prismjs/components/prism-toml.js"
+import "prismjs/components/prism-markdown.js"
 import { fg, type TextChunk } from "@opentui/core"
 import { colors } from "./theme"
 
@@ -75,6 +76,37 @@ const flatten = (tokens: ReadonlyArray<string | Prism.Token>, parent: Role, out:
 
 const grammarFor = (lang: string | undefined): Prism.Grammar | undefined =>
   lang === undefined || lang.length === 0 ? undefined : Prism.languages[lang.toLowerCase()]
+
+const extensionLanguages: Record<string, string> = {
+  ts: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  tsx: "tsx",
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "jsx",
+  json: "json",
+  jsonc: "json",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  py: "python",
+  rs: "rust",
+  go: "go",
+  sql: "sql",
+  yml: "yaml",
+  yaml: "yaml",
+  toml: "toml",
+  md: "markdown",
+  html: "markup",
+  css: "css",
+}
+
+export const languageForPath = (path: string): string | undefined => {
+  const extension = /\.([^./\\]+)$/.exec(path)?.[1]?.toLowerCase()
+  return extension === undefined ? undefined : extensionLanguages[extension]
+}
 
 export const highlightLines: {
   (lang: string | undefined): (code: string) => ReadonlyArray<ReadonlyArray<TextChunk>>

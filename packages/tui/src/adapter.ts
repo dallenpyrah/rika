@@ -870,9 +870,9 @@ export const buildTranscript: {
           if (file.patch.length > 0) {
             append(fg(colors.text)("\n"))
             appendAll(
-              renderPierreDiff(file.patch, model.width) ??
-                (file.preview ? renderPartialDiffStyled(file.patch, model.width) : undefined) ??
-                renderDiffStyled(file.patch, model.width),
+              renderPierreDiff(file.patch, { width: model.width }) ??
+                (file.preview ? renderPartialDiffStyled(file.patch, { width: model.width }) : undefined) ??
+                renderDiffStyled(file.patch, { width: model.width }),
             )
           }
         } else {
@@ -890,9 +890,9 @@ export const buildTranscript: {
             if (childExpanded && file.patch.length > 0) {
               append(fg(colors.text)("\n"))
               appendAll(
-                renderPierreDiff(file.patch, model.width) ??
-                  (file.preview ? renderPartialDiffStyled(file.patch, model.width) : undefined) ??
-                  renderDiffStyled(file.patch, model.width),
+                renderPierreDiff(file.patch, { width: model.width, indent: 4 }) ??
+                  (file.preview ? renderPartialDiffStyled(file.patch, { width: model.width, indent: 4 }) : undefined) ??
+                  renderDiffStyled(file.patch, { width: model.width, indent: 4 }),
               )
             }
             nestedRanges.push({
@@ -909,7 +909,10 @@ export const buildTranscript: {
           const diff = model.blocks[diffIndex] as Extract<TranscriptBlock, { _tag: "Diff" }>
           append(fg(colors.text)("\n"))
           const start = line
-          appendAll(renderPierreDiff(diff.patch, model.width) ?? renderDiffStyled(diff.patch, model.width))
+          appendAll(
+            renderPierreDiff(diff.patch, { width: model.width }) ??
+              renderDiffStyled(diff.patch, { width: model.width }),
+          )
           nestedRanges.push({
             start,
             end: line,
@@ -1163,7 +1166,10 @@ export const buildTranscript: {
       const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "Diff" }>
       if (expanded) {
         append(bold(fg(selected ? colors.blue : colors.muted)(`Δ ${block.path} ▾\n`)))
-        appendAll(renderPierreDiff(block.patch, model.width) ?? renderDiffStyled(block.patch, model.width))
+        appendAll(
+          renderPierreDiff(block.patch, { width: model.width }) ??
+            renderDiffStyled(block.patch, { width: model.width }),
+        )
         return
       }
       const [added, removed] = diffCounts(block.patch)

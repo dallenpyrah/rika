@@ -1,10 +1,8 @@
 import { StyledText, fg, type TextChunk } from "@opentui/core"
 import { parsePatchFiles } from "@pierre/diffs"
 import { Function } from "effect"
+import { highlightLines, languageForPath } from "./syntax-highlight"
 import { colors } from "./theme"
-
-const clip = (text: string, width: number): string =>
-  text.length <= width ? text : width <= 1 ? "…" : `${text.slice(0, width - 1)}…`
 
 const strip = (line: string | undefined): string => (line ?? "").replace(/\r?\n$/, "")
 
@@ -13,14 +11,46 @@ const hunkStarts = (spec: string): { readonly oldStart: number; readonly newStar
   return { oldStart: Number(match?.[1] ?? 1), newStart: Number(match?.[2] ?? 1) }
 }
 
+export type DiffRenderOptions = { readonly width: number; readonly indent?: number }
+
 type Row =
   | { readonly ellipsis: true }
-  | { readonly number: number; readonly marker: " " | "+" | "-"; readonly content: string }
+  | {
+      readonly number: number
+      readonly marker: " " | "+" | "-"
+      readonly content: string
+      readonly lang: string | undefined
+    }
+
+const clipLine = (chunks: ReadonlyArray<TextChunk>, width: number): ReadonlyArray<TextChunk> => {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0)
+  if (total <= width) return chunks
+  const budget = Math.max(0, width - 1)
+  const clipped: Array<TextChunk> = []
+  let used = 0
+  for (const chunk of chunks) {
+    if (used >= budget) break
+    const take = Math.min(chunk.text.length, budget - used)
+    clipped.push(take === chunk.text.length ? chunk : { ...chunk, text: chunk.text.slice(0, take) })
+    used += take
+  }
+  clipped.push(fg(colors.muted)("…"))
+  return clipped
+}
+
+const contentChunks = (row: Extract<Row, { number: number }>): ReadonlyArray<TextChunk> => {
+  if (row.content.length === 0) return []
+  if (row.marker === "-") return [fg(colors.red)(row.content)]
+  if (row.lang === undefined) return [fg(row.marker === "+" ? colors.green : colors.muted)(row.content)]
+  return highlightLines(row.content, row.lang)[0] ?? []
+}
 
 export const renderPierreDiff: {
-  (width: number): (patch: string) => StyledText | undefined
-  (patch: string, width: number): StyledText | undefined
-} = Function.dual(2, (patch: string, width: number): StyledText | undefined => {
+  (options: DiffRenderOptions): (patch: string) => StyledText | undefined
+  (patch: string, options: DiffRenderOptions): StyledText | undefined
+} = Function.dual(2, (patch: string, options: DiffRenderOptions): StyledText | undefined => {
+  const { width } = options
+  const indent = " ".repeat(options.indent ?? 2)
   let parsed: ReturnType<typeof parsePatchFiles>
   try {
     parsed = parsePatchFiles(patch)
@@ -34,6 +64,7 @@ export const renderPierreDiff: {
     for (const file of result.files ?? []) {
       const additions: ReadonlyArray<string> = file.additionLines ?? []
       const deletions: ReadonlyArray<string> = file.deletionLines ?? []
+      const lang = languageForPath(String(file.name ?? ""))
       for (const hunk of (file.hunks ?? []) as ReadonlyArray<Record<string, any>>) {
         const { oldStart, newStart } = hunkStarts(String(hunk.hunkSpecs ?? ""))
         if (newStart > 1 || rows.length > 0) rows.push({ ellipsis: true })
@@ -44,6 +75,7 @@ export const renderPierreDiff: {
                 number: newStart + Number(group.additionLineIndex ?? 0) + index,
                 marker: " ",
                 content: strip(additions[Number(group.additionLineIndex ?? 0) + index]),
+                lang,
               })
               hasContent = true
             }
@@ -53,6 +85,7 @@ export const renderPierreDiff: {
                 number: oldStart + Number(group.deletionLineIndex ?? 0) + index,
                 marker: "-",
                 content: strip(deletions[Number(group.deletionLineIndex ?? 0) + index]),
+                lang,
               })
               hasContent = true
             }
@@ -61,6 +94,7 @@ export const renderPierreDiff: {
                 number: newStart + Number(group.additionLineIndex ?? 0) + index,
                 marker: "+",
                 content: strip(additions[Number(group.additionLineIndex ?? 0) + index]),
+                lang,
               })
               hasContent = true
             }
@@ -74,12 +108,13 @@ export const renderPierreDiff: {
   rows.forEach((row, index) => {
     if (index > 0) chunks.push(fg(colors.text)("\n"))
     if ("ellipsis" in row) {
-      chunks.push(fg(colors.muted)(`${" ".repeat(numberWidth - 1)}...`))
+      chunks.push(fg(colors.muted)(`${indent}${".".repeat(Math.min(3, numberWidth)).padStart(numberWidth)}`))
       return
     }
-    const prefix = `${String(row.number).padStart(numberWidth)} ${row.marker} `
-    const color = row.marker === "+" ? colors.green : row.marker === "-" ? colors.red : colors.muted
-    chunks.push(fg(color)(`${prefix}${clip(row.content, Math.max(1, width - prefix.length))}`))
+    const gutter = `${indent}${String(row.number).padStart(numberWidth)} ${row.marker} `
+    const gutterColor = row.marker === "+" ? colors.green : row.marker === "-" ? colors.red : colors.muted
+    chunks.push(fg(gutterColor)(gutter))
+    for (const chunk of clipLine(contentChunks(row), Math.max(1, width - gutter.length))) chunks.push(chunk)
   })
   return new StyledText(chunks)
 })

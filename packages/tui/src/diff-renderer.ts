@@ -38,24 +38,28 @@ export const renderDiff: {
   return rendered.length === 0 ? "(empty diff)" : rendered.join("\n")
 })
 
+export type DiffStyleOptions = { readonly width: number; readonly indent?: number }
+
 export const renderDiffStyled: {
-  (width: number): (patch: string) => StyledText
-  (patch: string, width: number): StyledText
-} = Function.dual(2, (patch: string, width: number): StyledText => {
-  const lines = renderDiff(patch, width).split("\n")
+  (options: DiffStyleOptions): (patch: string) => StyledText
+  (patch: string, options: DiffStyleOptions): StyledText
+} = Function.dual(2, (patch: string, options: DiffStyleOptions): StyledText => {
+  const indent = " ".repeat(options.indent ?? 2)
+  const lines = renderDiff(patch, Math.max(1, options.width - indent.length)).split("\n")
   const chunks: Array<TextChunk> = []
   lines.forEach((line, index) => {
     const color = /^\s*\d*\s+\+/.test(line) ? colors.green : /^\s*\d+\s+\s*-/.test(line) ? colors.red : colors.muted
-    chunks.push(line.startsWith("@@") ? bold(fg(colors.blue)(line)) : fg(color)(line))
+    chunks.push(line.startsWith("@@") ? bold(fg(colors.blue)(`${indent}${line}`)) : fg(color)(`${indent}${line}`))
     if (index < lines.length - 1) chunks.push(fg(colors.text)("\n"))
   })
   return new StyledText(chunks)
 })
 
 export const renderPartialDiffStyled: {
-  (width: number): (patch: string) => StyledText | undefined
-  (patch: string, width: number): StyledText | undefined
-} = Function.dual(2, (patch: string, width: number): StyledText | undefined => {
+  (options: DiffStyleOptions): (patch: string) => StyledText | undefined
+  (patch: string, options: DiffStyleOptions): StyledText | undefined
+} = Function.dual(2, (patch: string, options: DiffStyleOptions): StyledText | undefined => {
+  const indent = " ".repeat(options.indent ?? 2)
   const lines = patch
     .split("\n")
     .filter(
@@ -66,7 +70,11 @@ export const renderPartialDiffStyled: {
   const chunks: Array<TextChunk> = []
   lines.forEach((line, index) => {
     const marker = line[0]!
-    chunks.push(fg(marker === "+" ? colors.green : colors.red)(clip(`${marker} ${line.slice(1)}`, width)))
+    chunks.push(
+      fg(marker === "+" ? colors.green : colors.red)(
+        `${indent}${clip(`${marker} ${line.slice(1)}`, Math.max(1, options.width - indent.length))}`,
+      ),
+    )
     if (index < lines.length - 1) chunks.push(fg(colors.text)("\n"))
   })
   return new StyledText(chunks)
