@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Fiber, FileSystem, Layer, Option, Path, PlatformError, Ref, Schema, Sink, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { MediaView, ParallelSearch, ProcessRegistry, ReadWebPage, Runtime } from "../src"
+import { MediaView, ProcessRegistry, ReadWebPage, Runtime, WebSearch } from "../src"
 import { provide } from "./test-layer"
 
 const workspace = "/workspace"
@@ -58,8 +58,13 @@ const processHandle = ({ stdout, stderr, exitCode }: ProcessResult, onKill: () =
 
 const testEnvironment = (
   git: "success" | "nonzero" | "missing" | "timeout" | "large" = "success",
-  search: ParallelSearch.Interface["search"] = () =>
-    Effect.succeed([{ url: "https://example.com", title: "Example", publishDate: null, excerpts: ["result"] }]),
+  search: WebSearch.Interface["search"] = () =>
+    Effect.succeed([
+      {
+        provider: "fixture",
+        results: [{ url: "https://example.com", title: "Example", publishedAt: null, excerpts: ["result"] }],
+      },
+    ]),
   read: ReadWebPage.Interface["read"] = () => Effect.succeed("page"),
   realPaths: ReadonlyMap<string, string> = new Map(),
 ) => {
@@ -134,7 +139,7 @@ const testEnvironment = (
   const dependencies = Layer.mergeAll(fileSystem, Path.layer, spawner)
   const runtime = Runtime.layer(workspace).pipe(
     Layer.provide(dependencies),
-    Layer.provide(Layer.merge(ParallelSearch.testLayer(search), ReadWebPage.testLayer(read))),
+    Layer.provide(Layer.merge(WebSearch.testLayer(search), ReadWebPage.testLayer(read))),
     Layer.provide(MediaView.analyzerTestLayer(() => Effect.succeed("analysis"))),
   )
   return { files, directories, commands, killed, runtime }
@@ -249,9 +254,7 @@ describe("Runtime", () => {
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
       const created = yield* runtime.run({ _tag: "Write", path: "new/file.txt", content: "old" })
-      const existing = yield* Effect.flip(
-        runtime.run({ _tag: "Write", path: "new/file.txt", content: "duplicate" }),
-      )
+      const existing = yield* Effect.flip(runtime.run({ _tag: "Write", path: "new/file.txt", content: "duplicate" }))
       const edited = yield* runtime.run({ _tag: "Edit", path: "new/file.txt", oldText: "old", newText: "new" })
       const stale = yield* Effect.flip(
         runtime.run({ _tag: "Edit", path: "new/file.txt", oldText: "old", newText: "x" }),
@@ -432,7 +435,7 @@ describe("Runtime", () => {
     }).pipe(provide(environment.runtime))
   })
 
-  it.effect("returns bounded Parallel web search results", () => {
+  it.effect("returns bounded provider-neutral web search outcomes", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
@@ -442,7 +445,10 @@ describe("Runtime", () => {
         searchQueries: ["current documentation"],
       })
       expect(yield* Schema.decodeEffect(Schema.UnknownFromJsonString)(result.text)).toEqual([
-        { url: "https://example.com", title: "Example", publishDate: null, excerpts: ["result"] },
+        {
+          provider: "fixture",
+          results: [{ url: "https://example.com", title: "Example", publishedAt: null, excerpts: ["result"] }],
+        },
       ])
       expect(result.truncated).toBe(false)
     }).pipe(provide(environment.runtime))
@@ -453,7 +459,10 @@ describe("Runtime", () => {
       "success",
       () =>
         Effect.succeed([
-          { url: "https://example.com", title: null, publishDate: null, excerpts: ["s".repeat(40_001)] },
+          {
+            provider: "fixture",
+            results: [{ url: "https://example.com", title: null, publishedAt: null, excerpts: ["s".repeat(40_001)] }],
+          },
         ]),
       () => Effect.succeed("p".repeat(40_001)),
     )

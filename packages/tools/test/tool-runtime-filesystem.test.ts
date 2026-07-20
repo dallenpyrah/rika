@@ -1,7 +1,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, test } from "vitest"
 import { Effect, FileSystem, Layer, Schema } from "effect"
-import { MediaView, ParallelSearch, ProcessRegistry, ReadWebPage, Runtime } from "../src"
+import { MediaView, ProcessRegistry, ReadWebPage, Runtime, WebSearch } from "../src"
 import { provide } from "./test-layer"
 
 test("runs filesystem, shell, and git tools against a bounded workspace", () => {
@@ -82,7 +82,7 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
             Layer.provide(MediaView.analyzerTestLayer(() => Effect.succeed("analysis"))),
             Layer.provide(
               Layer.merge(
-                ParallelSearch.testLayer(() => Effect.succeed([])),
+                WebSearch.testLayer(() => Effect.succeed([])),
                 ReadWebPage.testLayer(() => Effect.succeed("page")),
               ),
             ),
@@ -172,7 +172,7 @@ test("bounds grep results to one thousand matches", () =>
               Layer.provide(MediaView.analyzerTestLayer(() => Effect.succeed("analysis"))),
               Layer.provide(
                 Layer.merge(
-                  ParallelSearch.testLayer(() => Effect.succeed([])),
+                  WebSearch.testLayer(() => Effect.succeed([])),
                   ReadWebPage.testLayer(() => Effect.succeed("page")),
                 ),
               ),
@@ -212,7 +212,7 @@ test("views image metadata and routes documents through the injected analyzer", 
           ),
           Layer.provide(
             Layer.merge(
-              ParallelSearch.testLayer(() => Effect.succeed([])),
+              WebSearch.testLayer(() => Effect.succeed([])),
               ReadWebPage.testLayer(() => Effect.succeed("page")),
             ),
           ),

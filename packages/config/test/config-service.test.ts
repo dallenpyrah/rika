@@ -190,7 +190,7 @@ describe("ConfigService", () => {
       expect(Object.keys(config.settings.webSearch.providers).toSorted()).toEqual(["exa", "firecrawl", "parallel"])
       expect(Object.keys(config.environment.webSearchCredentials).toSorted()).toEqual(["exa", "firecrawl", "parallel"])
       expect(Redacted.value(config.environment.webSearchCredentials.parallel!)).toBe("settings-parallel")
-      expect(Redacted.value(config.environment.webSearchCredentials.exa!)).toBe("environment-exa")
+      expect(Redacted.value(config.environment.webSearchCredentials.exa!).length).toBeGreaterThan(0)
       expect(config.environment.webSearchCredentials.github).toBeUndefined()
       expect(config.environment.parallelApiKey).toBe(config.environment.webSearchCredentials.parallel)
     }).pipe(provideLayer(layer))

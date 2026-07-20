@@ -36,7 +36,7 @@ describe("product agent profiles", () => {
       expect(registered[name]).not.toHaveProperty("output_schema_ref")
     }
     expect(registered.Oracle).toMatchObject({
-      tool_names: ["find_files", "grep", "read"],
+      tool_names: ["find_files", "grep", "read", "web_search"],
       permissions: ["workspace.read"],
     })
     expect(registered.Oracle?.instructions).toContain("planning, reviewing, understanding code, and debugging")
@@ -50,7 +50,7 @@ describe("product agent profiles", () => {
       permissions: ["network.read"],
     })
     expect(registered.Review).toMatchObject({
-      tool_names: ["grep", "read", "git_status"],
+      tool_names: ["grep", "read", "git_status", "web_search"],
       permissions: ["workspace.read"],
     })
     expect(registered.Oracle?.tool_names).not.toContain("task")
@@ -63,6 +63,7 @@ describe("product agent profiles", () => {
         "edit",
         "bash",
         "shell_command_status",
+        "web_search",
         "task",
         "oracle",
         "librarian",

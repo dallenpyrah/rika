@@ -3,9 +3,9 @@ import {
   AgentTools,
   Catalog as ToolCatalog,
   MediaView,
-  ParallelSearch,
   ReadWebPage,
   Runtime as RikaToolRuntime,
+  WebSearch,
 } from "@rika/tools"
 import {
   ChildFanOutHost,
@@ -74,8 +74,8 @@ type ToolRuntimeRequirements =
 type SuppliedToolRuntimeRequirements =
   | MediaView.MediaAnalyzer
   | ModelRegistry.Service
-  | ParallelSearch.Service
   | ReadWebPage.Service
+  | WebSearch.Service
 type ExternalToolRuntimeRequirements<R> = Exclude<ToolRuntimeRequirements | R, SuppliedToolRuntimeRequirements>
 
 const failureKind = (cause: Cause.Cause<unknown>) => {
@@ -129,6 +129,7 @@ export interface CompactionPolicy {
 export interface LayerOptions<AdditionalTools extends Record<string, Tool.Any> = {}, RuntimeRequirements = never> {
   readonly filename: string
   readonly workspace: string
+  readonly webSearchCredentials?: Readonly<Record<string, Redacted.Redacted<string>>>
   readonly parallelApiKey?: Redacted.Redacted<string>
   readonly registration: ModelRegistry.Registration
   readonly additionalRegistrations?: ReadonlyArray<ModelRegistry.Registration>
@@ -327,19 +328,21 @@ const pinnedSelection = (route: ExecutionRoutePin["main"]): ModelRegistry.ModelS
   registrationKey: route.registrationKey,
 })
 
-const toolkitFor = <AdditionalTools extends Record<string, Tool.Any>>(
-  options: Pick<LayerOptions<AdditionalTools>, "additionalToolkit">,
+export const toolkitFor = <AdditionalTools extends Record<string, Tool.Any>>(
+  options: Pick<LayerOptions<AdditionalTools>, "additionalToolkit" | "webSearchCredentials" | "parallelApiKey">,
 ) =>
-  options.additionalToolkit === undefined
-    ? Toolkit.make(...Object.values(RikaToolRuntime.toolkit.tools), ...Object.values(AgentTools.modelToolkit.tools))
-    : Toolkit.make(
-        ...Object.values(RikaToolRuntime.toolkit.tools),
-        ...Object.values(AgentTools.modelToolkit.tools),
-        ...Object.values(options.additionalToolkit.tools),
-      )
+  Toolkit.make(
+    ...Object.values(RikaToolRuntime.toolkit.tools).filter(
+      (tool) =>
+        (tool.name !== "web_search" || webSearchCredentials(options).length > 0) &&
+        (tool.name !== "read_web_page" || parallelCredential(options) !== undefined),
+    ),
+    ...Object.values(AgentTools.modelToolkit.tools),
+    ...Object.values(options.additionalToolkit?.tools ?? {}),
+  )
 
 const availableTools = <AdditionalTools extends Record<string, Tool.Any>>(
-  options: Pick<LayerOptions<AdditionalTools>, "additionalToolkit">,
+  options: Pick<LayerOptions<AdditionalTools>, "additionalToolkit" | "webSearchCredentials" | "parallelApiKey">,
   names: ReadonlyArray<string>,
 ) => {
   const available = toolkitFor(options).tools
@@ -348,6 +351,30 @@ const availableTools = <AdditionalTools extends Record<string, Tool.Any>>(
 
 export const remoteToolOptions = (parallelApiKey: Redacted.Redacted<string> | undefined) =>
   parallelApiKey === undefined ? {} : { apiKey: parallelApiKey }
+
+const parallelCredential = (options: Pick<LayerOptions, "webSearchCredentials" | "parallelApiKey">) =>
+  options.webSearchCredentials?.parallel ?? options.parallelApiKey
+
+const webSearchCredentials = (options: Pick<LayerOptions, "webSearchCredentials" | "parallelApiKey">) =>
+  Object.entries({
+    ...(options.webSearchCredentials ?? {}),
+    ...(parallelCredential(options) === undefined ? {} : { parallel: parallelCredential(options)! }),
+  })
+
+export const webSearchFactories = (
+  credentials: Readonly<Record<string, Redacted.Redacted<string>>>,
+): { readonly factories: ReadonlyArray<WebSearch.ProviderFactory>; readonly unsupportedIds: ReadonlyArray<string> } => {
+  const factories: Array<WebSearch.ProviderFactory> = []
+  const unsupportedIds: Array<string> = []
+  for (const [id, apiKey] of Object.entries(credentials)) {
+    if (id === "parallel") factories.push(WebSearch.parallel({ apiKey }))
+    else if (id === "exa") factories.push(WebSearch.exa({ apiKey }), WebSearch.exaCode({ apiKey }))
+    else if (id === "firecrawl") factories.push(WebSearch.firecrawl({ apiKey }))
+    else if (id === "github") factories.push(WebSearch.github({ apiKey }))
+    else unsupportedIds.push(id)
+  }
+  return { factories, unsupportedIds }
+}
 
 export const modelVariantKey: {
   (fast: boolean): (effort: string) => string
@@ -1795,6 +1822,12 @@ export const layer = <
                     : options.resolveWorkspace!(durableExecutionId),
                 )
               : (options.toolRuntimeLayer ?? RikaToolRuntime.layer(options.workspace))
+          const credentials = Object.fromEntries(webSearchCredentials(options))
+          const search = webSearchFactories(credentials)
+          if (search.unsupportedIds.length > 0)
+            yield* Effect.logWarning("web_search.unsupported_provider").pipe(
+              Effect.annotateLogs("rika.web_search.provider_ids", search.unsupportedIds.join(",")),
+            )
           const toolRuntimeLayer = RelayToolRuntime.layerFromToolkit(runnerToolkit, (tool) => ({
             needsApproval:
               tool.name === ThreadHost.promoteTurnTool.name
@@ -1808,8 +1841,8 @@ export const layer = <
                 Layer.provide(sharedModelRegistryLayer),
                 Layer.provide(
                   Layer.mergeAll(
-                    ParallelSearch.layer(remoteToolOptions(options.parallelApiKey)),
-                    ReadWebPage.layer(remoteToolOptions(options.parallelApiKey)),
+                    WebSearch.factoryLayer(search.factories),
+                    ReadWebPage.layer(remoteToolOptions(parallelCredential(options))),
                   ).pipe(Layer.provide(FetchHttpClient.layer)),
                 ),
               ),

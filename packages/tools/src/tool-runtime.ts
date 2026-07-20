@@ -1,7 +1,7 @@
 import { Context, Data, Effect, FileSystem, Layer, Option, Path, PlatformError, Schema } from "effect"
 import { Tool, Toolkit } from "effect/unstable/ai"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import * as ParallelSearch from "./parallel-search"
+import * as WebSearchService from "./web-search"
 import { Service as ReadWebPageService } from "./read-web-page"
 import * as ProcessRegistry from "./process-registry"
 import * as MediaView from "./media-view"
@@ -47,8 +47,12 @@ export const ShellCommandStatus = Schema.Struct({
 export const GitStatus = Schema.Struct({ _tag: Schema.tag("GitStatus") })
 export const WebSearch = Schema.Struct({
   _tag: Schema.tag("WebSearch"),
-  objective: ParallelSearch.Objective,
-  searchQueries: ParallelSearch.SearchQueries,
+  objective: WebSearchService.Objective,
+  searchQueries: WebSearchService.SearchQueries,
+  kind: Schema.optionalKey(WebSearchService.Capability),
+  strategy: Schema.optionalKey(WebSearchService.Strategy),
+  providers: Schema.optionalKey(Schema.Array(Schema.String)),
+  githubSearchType: Schema.optionalKey(WebSearchService.GithubSearchType),
 })
 export const ReadWebPage = Schema.Struct({
   _tag: Schema.tag("ReadWebPage"),
@@ -130,15 +134,11 @@ export const writeTool = tool("write", "Create a new UTF-8 file without overwrit
   path: Schema.String,
   content: Schema.String,
 })
-export const editTool = tool(
-  "edit",
-  "Replace one exact text occurrence and reject stale or ambiguous anchors",
-  {
-    path: Schema.String,
-    oldText: Schema.String,
-    newText: Schema.String,
-  },
-)
+export const editTool = tool("edit", "Replace one exact text occurrence and reject stale or ambiguous anchors", {
+  path: Schema.String,
+  oldText: Schema.String,
+  newText: Schema.String,
+})
 export const bashTool = tool(
   "bash",
   "Run one command in the workspace and return a process id if it outlives the wait",
@@ -162,10 +162,14 @@ export const gitStatusTool = tool("git_status", "Inspect concise Git working-tre
 })
 export const webSearchTool = tool(
   "web_search",
-  "Search the current web with Parallel. Provide a self-contained objective and 2-3 concise keyword queries.",
+  "Search the current web across configured providers, including semantic code search and exact GitHub REST search.",
   {
-    objective: ParallelSearch.Objective,
-    searchQueries: ParallelSearch.SearchQueries,
+    objective: WebSearchService.Objective,
+    searchQueries: WebSearchService.SearchQueries,
+    kind: Schema.optionalKey(WebSearchService.Capability),
+    strategy: Schema.optionalKey(WebSearchService.Strategy),
+    providers: Schema.optionalKey(Schema.Array(Schema.String)),
+    githubSearchType: Schema.optionalKey(WebSearchService.GithubSearchType),
   },
 )
 export const readWebPageTool = tool(
@@ -228,7 +232,16 @@ export const handlerLayer = toolkit.toLayer(
       shell_command_status: ({ processId, waitMillis }) =>
         runtime.run({ _tag: "ShellCommandStatus", processId, ...(waitMillis == null ? {} : { waitMillis }) }),
       git_status: () => runtime.run({ _tag: "GitStatus" }),
-      web_search: ({ objective, searchQueries }) => runtime.run({ _tag: "WebSearch", objective, searchQueries }),
+      web_search: ({ objective, searchQueries, kind, strategy, providers, githubSearchType }) =>
+        runtime.run({
+          _tag: "WebSearch",
+          objective,
+          searchQueries,
+          ...(kind === undefined ? {} : { kind }),
+          ...(strategy === undefined ? {} : { strategy }),
+          ...(providers === undefined ? {} : { providers }),
+          ...(githubSearchType === undefined ? {} : { githubSearchType }),
+        }),
       read_web_page: ({ url, objective, fullContent, forceRefetch }) =>
         runtime.run({
           _tag: "ReadWebPage",
@@ -309,7 +322,7 @@ export const layer = (workspace: string) =>
       const fileSystem = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-      const parallelSearch = yield* ParallelSearch.Service
+      const webSearch = yield* WebSearchService.Service
       const readWebPage = yield* ReadWebPageService
       const processes = yield* ProcessRegistry.Service
       const mediaView = yield* MediaView.Service
@@ -519,9 +532,13 @@ export const layer = (workspace: string) =>
               case "GitStatus":
                 return yield* runGitStatus()
               case "WebSearch": {
-                const results = yield* parallelSearch.search({
+                const results = yield* webSearch.search({
                   objective: request.objective,
                   searchQueries: request.searchQueries,
+                  ...(request.kind === undefined ? {} : { kind: request.kind }),
+                  ...(request.strategy === undefined ? {} : { strategy: request.strategy }),
+                  ...(request.providers === undefined ? {} : { providers: request.providers }),
+                  ...(request.githubSearchType === undefined ? {} : { githubSearchType: request.githubSearchType }),
                 })
                 return bounded(yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(results))
               }

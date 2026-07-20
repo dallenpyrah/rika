@@ -18,11 +18,12 @@ const definitions = {
   Oracle: {
     instructions:
       "Act as a read-only, high-reasoning technical advisor for planning, reviewing, understanding code, and debugging. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
-    tools: [Tools.findFilesTool, Tools.grepTool, Tools.readTool],
+    tools: [Tools.findFilesTool, Tools.grepTool, Tools.readTool, Tools.webSearchTool],
     permissions: ["workspace.read"],
   },
   Librarian: {
-    instructions: "Research current authoritative sources and return cited findings. Do not modify files.",
+    instructions:
+      "Research current authoritative sources and return cited findings. Use auto search for normal research. Compare providers for disputed, recent, safety-critical, or high-impact claims, but do not query every provider every time. Use Exa Code for semantic implementation examples and GitHub for exact code, repositories, issues, pull requests, and commits. Fetch authoritative pages when snippets are insufficient. Cite URLs and identify disagreement between sources. Do not modify files.",
     tools: [Tools.webSearchTool, Tools.readWebPageTool],
     permissions: ["network.read"],
   },
@@ -34,7 +35,7 @@ const definitions = {
   },
   Review: {
     instructions: "Review workspace changes for correctness, regressions, and missing tests. Do not modify files.",
-    tools: [Tools.grepTool, Tools.readTool, Tools.gitStatusTool],
+    tools: [Tools.grepTool, Tools.readTool, Tools.gitStatusTool, Tools.webSearchTool],
     permissions: ["workspace.read"],
   },
   ReadThread: {
@@ -53,6 +54,7 @@ const definitions = {
       Tools.editTool,
       Tools.bashTool,
       Tools.shellCommandStatusTool,
+      Tools.webSearchTool,
     ],
     permissions: ["workspace.read", "workspace.write", "process.run"],
   },

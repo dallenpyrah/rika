@@ -27,7 +27,7 @@ import * as Turn from "@rika/persistence/turn"
 import * as Transcript from "@rika/transcript"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
-import { MediaView, ParallelSearch, ReadWebPage, Runtime as ToolRuntime, ThreadTools } from "@rika/tools"
+import { MediaView, ReadWebPage, Runtime as ToolRuntime, ThreadTools, WebSearch } from "@rika/tools"
 import { Palette, Session, ViewState } from "@rika/tui"
 import { create as createTui } from "@rika/tui/adapter"
 import type { PathTarget } from "@rika/tui"
@@ -1009,7 +1009,7 @@ export interface ConfiguredBackendOptions {
   readonly turnRepositoryLayer: Layer.Layer<TurnRepository.Service, TurnRepository.RepositoryError, never>
   readonly settings?: ConfigContract.Settings
   readonly persistedModelRoutes?: ReadonlyArray<Turn.ExecutionModelRoute>
-  readonly parallelApiKey?: Redacted.Redacted<string>
+  readonly webSearchCredentials?: Readonly<Record<string, Redacted.Redacted<string>>>
   readonly resolveLegacyRoute?: (input: ExecutionBackend.StartInput) => Effect.Effect<
     {
       readonly executionRoute: Turn.ExecutionRoutePin
@@ -1028,7 +1028,7 @@ export const configuredBackendLayer = ({
   turnRepositoryLayer,
   settings = ConfigContract.defaults,
   persistedModelRoutes = [],
-  parallelApiKey,
+  webSearchCredentials = {},
   resolveLegacyRoute,
   shellPermission,
   globalSettings = {},
@@ -1199,8 +1199,10 @@ export const configuredBackendLayer = ({
               ),
               Layer.provide(
                 Layer.merge(
-                  ParallelSearch.layer(parallelApiKey === undefined ? {} : { apiKey: parallelApiKey }),
-                  ReadWebPage.layer(parallelApiKey === undefined ? {} : { apiKey: parallelApiKey }),
+                  WebSearch.factoryLayer(RelayExecutionBackend.webSearchFactories(webSearchCredentials).factories),
+                  ReadWebPage.layer(
+                    webSearchCredentials.parallel === undefined ? {} : { apiKey: webSearchCredentials.parallel },
+                  ),
                 ).pipe(Layer.provide(FetchHttpClient.layer)),
               ),
               Layer.provide(BunServices.layer),
@@ -1237,7 +1239,7 @@ export const configuredBackendLayer = ({
           ...(testApprovalTools._tag === "Some" && (testScript._tag === "Some" || testResponse._tag === "Some")
             ? { toolNeedsApproval: (name: string) => testApprovalTools.value.split(",").includes(name) }
             : {}),
-          ...(parallelApiKey === undefined ? {} : { parallelApiKey }),
+          webSearchCredentials,
         },
         repositoryLayer,
         turnRepositoryLayer,
@@ -2578,7 +2580,7 @@ if (import.meta.main) {
             }
             return resolvedRoute.executionRoute
           })
-        const parallelApiKey = effectiveConfig.environment.parallelApiKey
+        const webSearchCredentials = effectiveConfig.environment.webSearchCredentials
         const repositories = Layer.succeedContext(
           yield* Layer.build(
             Layer.mergeAll(
@@ -2622,7 +2624,7 @@ if (import.meta.main) {
           turnRepositoryLayer: repositories,
           settings: effectiveConfig.settings,
           persistedModelRoutes,
-          ...(parallelApiKey === undefined ? {} : { parallelApiKey }),
+          webSearchCredentials,
           resolveLegacyRoute,
           ...(effectiveConfig.settings.permissions.shell === undefined
             ? {}
@@ -2696,8 +2698,10 @@ if (import.meta.main) {
               ),
               Layer.provide(
                 Layer.merge(
-                  ParallelSearch.layer(parallelApiKey === undefined ? {} : { apiKey: parallelApiKey }),
-                  ReadWebPage.layer(parallelApiKey === undefined ? {} : { apiKey: parallelApiKey }),
+                  WebSearch.factoryLayer(RelayExecutionBackend.webSearchFactories(webSearchCredentials).factories),
+                  ReadWebPage.layer(
+                    webSearchCredentials.parallel === undefined ? {} : { apiKey: webSearchCredentials.parallel },
+                  ),
                 ).pipe(Layer.provide(FetchHttpClient.layer)),
               ),
               Layer.provide(BunServices.layer),
