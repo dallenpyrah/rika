@@ -3,6 +3,7 @@ import {
   advanceWindow,
   anchorOf,
   atBottom,
+  atBottomWithin,
   atWindowBottom,
   atWindowTop,
   clampScrollTop,
@@ -85,6 +86,18 @@ describe("transcript viewport bottom detection", () => {
     expect(atBottom(metrics(70, 100, 30))).toBe(true)
     expect(atBottom(metrics(69, 100, 30))).toBe(false)
     expect(atBottom(metrics(71, 100, 30))).toBe(true)
+  })
+
+  test("bottom detection shares one viewport-height input across strict and near checks", () => {
+    // maxScrollTop derives the single bottom target from the same metrics the
+    // near-bottom re-follow fuzz uses, so a followed viewport and a one-row-parked
+    // viewport agree on where the bottom is.
+    const followed = metrics(70, 100, 30)
+    expect(maxScrollTop(followed)).toBe(70)
+    expect(atBottomWithin(followed, 0)).toBe(true)
+    expect(atBottomWithin(metrics(69, 100, 30), 0)).toBe(false)
+    expect(atBottomWithin(metrics(69, 100, 30), 1)).toBe(true)
+    expect(atBottom(followed)).toBe(atBottomWithin(followed, 0))
   })
 
   test("settle re-follows only at the true bottom", () => {

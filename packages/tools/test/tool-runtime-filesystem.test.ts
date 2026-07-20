@@ -21,12 +21,10 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
       yield* fileSystem.symlink(outside, `${workspace}/link`)
       const result = yield* Effect.gen(function* () {
         const runtime = yield* Runtime.Service
-        const found = yield* runtime.run({ _tag: "FindFiles", query: ".ts" })
         const literal = yield* runtime.run({ _tag: "Grep", pattern: "beta", regex: false })
         const regex = yield* runtime.run({ _tag: "Grep", pattern: "(?<=b)eta", regex: true })
         const read = yield* runtime.run({ _tag: "Read", path: "src/a.ts", readRange: [2, 2] })
         const escapedRead = yield* Effect.result(runtime.run({ _tag: "Read", path: "link/target.txt" }))
-        const escapedFind = yield* runtime.run({ _tag: "FindFiles", query: "link" })
         const escapedGrep = yield* runtime.run({ _tag: "Grep", pattern: "outside", regex: false })
         const created = yield* runtime.run({ _tag: "Write", path: "new/file.txt", content: "old" })
         const overwritten = yield* runtime.run({ _tag: "Write", path: "new/file.txt", content: "old" })
@@ -54,14 +52,12 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
         yield* runtime.run({ _tag: "Write", path: "staged.txt", content: "staged" })
         yield* runtime.run({ _tag: "Bash", command: "git add staged.txt" })
         yield* runtime.run({ _tag: "Write", path: "untracked.txt", content: "untracked" })
-        const git = yield* runtime.run({ _tag: "GitStatus" })
+        const git = yield* runtime.run({ _tag: "Bash", command: "git --no-optional-locks status --short --branch" })
         return {
-          found,
           literal,
           regex,
           read,
           escapedRead,
-          escapedFind,
           escapedGrep,
           created,
           overwritten,
@@ -94,12 +90,10 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
     Effect.scoped(provide(program, BunServices.layer)).pipe(
       Effect.tap((result) =>
         Effect.sync(() => {
-          expect(result.found.text).toBe(".hidden/a.ts\nsrc/a.ts")
           expect(result.literal.text).toContain("src/a.ts:2:beta")
           expect(result.regex.text).toContain("src/a.ts:2:beta")
           expect(result.read.text).toBe("2: beta")
           expect(result.escapedRead._tag).toBe("Failure")
-          expect(result.escapedFind.text).toBe("")
           expect(result.escapedGrep.text).toBe("")
           expect(result.created.text).toBe("Successfully wrote 3 bytes to new/file.txt")
           expect(result.edited.text).toBe("Successfully replaced text in new/file.txt")

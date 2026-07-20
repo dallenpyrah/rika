@@ -1,10 +1,12 @@
 import { Catalog } from "@rika/tools"
 import { Function, Option, Schema } from "effect"
 import { pricingVersion, usageCostUsd } from "./model-cost"
+import { partialInputRecord } from "./partial-input"
 import type { Block, Content, Presentation, Projection, SourceEvent, ToolFile, ToolProcess, Unit } from "./schema"
 
 export * from "./schema"
 export { pricingVersion } from "./model-cost"
+export { partialInputRecord } from "./partial-input"
 
 const record = (value: unknown): Record<string, unknown> =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
@@ -132,7 +134,7 @@ const unifiedFiles = (callId: string, diff: string, failed: boolean): ReadonlyAr
 
 const inputRecord = (input: string): Record<string, unknown> => {
   const decoded = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(input)
-  if (Option.isNone(decoded)) return {}
+  if (Option.isNone(decoded)) return partialInputRecord(input)
   return typeof decoded.value === "string" ? { path: decoded.value, command: decoded.value } : record(decoded.value)
 }
 
@@ -166,8 +168,6 @@ const detailFor = (name: string, inputText: string): string => {
   }
   if (normalizedName === "grep")
     return `${path === undefined ? "" : `${path} `}"${inputString(input, ["pattern"]) ?? ""}"`.trim()
-  if (normalizedName === "find_files") return `"${inputString(input, ["query"]) ?? ""}"`
-  if (normalizedName === "git_status") return "git status"
   if (normalizedName === "bash") {
     const command = inputString(input, ["command", "cmd", "script"]) ?? ""
     const args = Array.isArray(input.args)

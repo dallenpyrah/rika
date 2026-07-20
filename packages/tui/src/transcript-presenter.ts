@@ -28,6 +28,7 @@ export {
   expandableRowIds,
   expandableUnits,
   isExpandableUnit,
+  isToolOutputDisplayed,
   orderedTranscriptItems,
   toolDetail,
   toolDetails,

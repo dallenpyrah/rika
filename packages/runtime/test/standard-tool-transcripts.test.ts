@@ -8,14 +8,12 @@ import * as RelayExecutionBackend from "../src/execution-backend"
 import { start } from "./current-execution-route"
 
 const cases = [
-  ["find_files", { query: "fixture" }, "query"],
   ["grep", { pattern: "needle", regex: false }, "pattern"],
   ["read", { path: "fixture.txt", read_range: [1, 1] }, "path"],
   ["write", { path: "created.txt", content: "value" }, "path"],
   ["edit", { path: "fixture.txt", old_str: "old", new_str: "new" }, "path"],
   ["bash", { command: "printf safe" }, "command"],
   ["shell_command_status", { processId: "process-1", waitMillis: 0 }, "processId"],
-  ["git_status", {}, "refresh"],
   ["web_search", { objective: "deterministic research", searchQueries: ["fixture"] }, "objective"],
   ["read_web_page", { url: "https://example.test/page", fullContent: true }, "url"],
   ["view_media", { path: "fixture.png" }, "path"],
@@ -124,7 +122,7 @@ for (const [name, parameters, malformedField] of cases) {
               Effect.gen(function* () {
                 const fileSystem = yield* FileSystem.FileSystem
                 const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-malformed-" })
-                const malformedInput = name === "git_status" ? { refresh: 42 } : { malformed: 42 }
+                const malformedInput = { malformed: 42 }
                 const fixture = yield* TestModel.make(
                   Array.from({ length: 3 }, (_, index) =>
                     TestModel.toolCall(name, malformedInput, { id: `bad-${name}-${index + 1}` }),

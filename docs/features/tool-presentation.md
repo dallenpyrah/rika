@@ -6,9 +6,7 @@ The transcript names tools by what the user sees, never by transport method or i
 | ------------------------------------ | -------------------------------- | ------------------------------- | ---------------------- |
 | `read`                               | `Exploring`                      | `Explored`                      | `Read <path>`          |
 | `view_media`                         | `Exploring`                      | `Explored`                      | `Viewed <path>`        |
-| `git_status`                         | `Exploring`                      | `Explored`                      | `Checked <detail>`     |
 | `grep`                               | `Exploring`                      | `Explored`                      | `Grep <query>`         |
-| `find_files`                         | `Exploring`                      | `Explored`                      | `Searched <query>`     |
 | `find_thread`                        | `Exploring`                      | `Explored`                      | `Searched <query>`     |
 | `skill`                              | `Exploring`                      | `Explored`                      | the skill name         |
 | `write`                              | `Creating <path>`                | `Created <path>`                | the live or final diff |
@@ -21,8 +19,8 @@ The transcript names tools by what the user sees, never by transport method or i
 | other `transfer_to_*`                | `Subagent (<name>) working`      | `Subagent (<name>) finished`    | delegated task         |
 | `finder`, codebase search            | `Searching codebase`             | `Searched codebase`             | delegated task         |
 | review agents                        | `Reviewing code`                 | `Reviewed code`                 | delegated task         |
-| `web_search`                         | `Web Search <query>`             | `Web Search <query>`            | bounded result         |
-| `read_web_page`                      | `Read <url>`                     | `Read <url>`                    | bounded result         |
+| `web_search`                         | `Web Search <query>`             | `Web Search <query>`            | none                   |
+| `read_web_page`                      | `Read <url>`                     | `Read <url>`                    | none                   |
 | `read_thread`                        | `Reading Thread <thread>`        | `Read Thread <thread>`          | bounded result         |
 | `painter`                            | `Painter <detail>`               | `Painter <detail>`              | bounded result         |
 | `list_agent_modes`                   | `Checking available agent modes` | `Checked available agent modes` | bounded result         |
@@ -36,4 +34,4 @@ The transcript names tools by what the user sees, never by transport method or i
 
 Adjacent reads and searches collapse into `Explored <counts>`. Adjacent edits collapse into `Edited <count> files +<added> -<removed>`. Adjacent shell calls collapse into `Ran <count> commands[, <failed> failed]`. A failed single command appends `(exit code: <code>)`.
 
-Every group expands and collapses. Multi-file edits and multi-command shell groups add independently expandable child rows. Read and search children keep clickable file targets. Running edits open automatically and turn argument deltas into per-file diffs; the final tool result replaces that preview on the same row.
+Groups expand and collapse when they have displayable detail. Web search and web-page reads keep their own results in the transcript but show only the inline call status; attached child-tool detail remains expandable. Multi-file edits and multi-command shell groups add independently expandable child rows. Read and search children keep clickable file targets. Running edits open automatically and turn argument deltas into per-file diffs; the final tool result replaces that preview on the same row.

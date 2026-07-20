@@ -67,7 +67,7 @@ import {
 } from "./transcript-presenter"
 import { filter, type Command } from "./palette"
 import { colors, spacing } from "./theme"
-import { clampScrollTop } from "./transcript-viewport"
+import { atBottomWithin, clampScrollTop, maxScrollTop, type ViewportMetrics } from "./transcript-viewport"
 import { renderMarkdown, renderMarkdownLines, renderMarkdownStyled } from "./markdown-renderer"
 import { renderDiff, renderDiffStyled, renderPartialDiffStyled } from "./diff-renderer"
 import { renderPierreDiff } from "./pierre-diff"
@@ -75,6 +75,7 @@ import { renderTool } from "./tool-renderer"
 import {
   escapePathTarget,
   isExpandableUnit,
+  isToolOutputDisplayed,
   orderedTranscriptItems,
   toolDetail,
   toolKind,
@@ -201,7 +202,11 @@ export const renderBlock: {
       case "Reasoning":
         return `◇ Reasoning\n  ${block.text}`
       case "ToolCall": {
-        return renderTool(block, width)
+        if (isToolOutputDisplayed(block)) return renderTool(block, width)
+        const running = block.status === "running"
+        const icon = running ? "⠿" : block.status === "complete" ? "✓" : block.status === "cancelled" ? "⊘" : "✗"
+        const label = running ? block.presentation.activeLabel : block.presentation.completeLabel
+        return `${icon} ${label}${block.detail.length === 0 ? "" : ` ${block.detail}`}`
       }
       case "ToolResult":
         return `${block.failed ? "✕" : "✓"} Result\n  ${block.output}`
@@ -535,7 +540,8 @@ const diffCounts = (patch: string): readonly [number, number] => {
 
 const shellCommandText = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): string => {
   const value = toolInputValue(block.input)
-  return block.detail || inputString(value, ["command", "cmd", "script"]) || block.input
+  const command = block.detail || inputString(value, ["command", "cmd", "script"]) || ""
+  return command || (block.input.trimStart().startsWith("{") ? "" : block.input)
 }
 
 const shellExitCode = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): number | undefined =>
@@ -947,7 +953,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
           append(dim(fg(colors.text)(label.slice(verbEnd))))
         }
         const output =
-          unit.block.status === "failed" ? unit.block.output?.split("\n").find((value) => value.length > 0) : undefined
+          unit.block.status === "failed" && isToolOutputDisplayed(unit.block)
+            ? unit.block.output?.split("\n").find((value) => value.length > 0)
+            : undefined
         if (output !== undefined) append(dim(fg(colors.text)(` ${output}`)))
         const detail = toolDetails(model, { kind: "tool", group: "explore", blocks: [unit.index], diffs: [] })[0]
         nestedRanges.push({
@@ -974,7 +982,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         units.flatMap((unit) =>
           unit.block.files.length > 0
             ? unit.block.files.map((file) => file.path)
-            : [inputString(toolInputValue(unit.block.input), ["path", "file_path", "file"]) ?? unit.block.name],
+            : [inputString(toolInputValue(unit.block.input), ["path", "file_path", "file"]) ?? ""],
         ),
       ),
     ]
@@ -1082,7 +1090,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     const running = unit.block.status === "running"
     const cancelled = unit.block.status === "cancelled"
     const lines = command.split("\n")
-    const expandable = unit.block.output !== undefined && unit.block.output.length > 0
+    const output = isToolOutputDisplayed(unit.block) ? unit.block.output : undefined
+    const expandable = output !== undefined && output.length > 0
     const exitCode = shellExitCode(unit.block)
     if (selected) {
       const exit = failed ? ` (exit code: ${exitCode ?? 1})` : ""
@@ -1106,9 +1115,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       if (cancelled) append(italic(fg(colors.amber)(" (cancelled)")))
       if (expandable) append(marker(expanded))
     }
-    if (expanded && unit.block.output !== undefined) {
+    if (expanded && output !== undefined) {
       append(fg(colors.text)("\n"))
-      append(dim(fg(colors.text)(unit.block.output.split("\n").slice(0, 12).join("\n"))))
+      append(dim(fg(colors.text)(output.split("\n").slice(0, 12).join("\n"))))
     }
   }
   const renderShellBody = (units: ReadonlyArray<ToolUnit>, selected: boolean, expanded: boolean) => {
@@ -1137,7 +1146,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         const start = line
         const childId = `tool-child:${unit.block.id}`
         const childExpanded = rowExpanded(childId)
-        const expandable = unit.block.output !== undefined && unit.block.output.length > 0
+        const output = isToolOutputDisplayed(unit.block) ? unit.block.output : undefined
+        const expandable = output !== undefined && output.length > 0
         const cancelled = unit.block.status === "cancelled"
         if (cancelled) {
           append(bold(fg(colors.amber)("$ ")))
@@ -1148,7 +1158,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         if (expandable) append(marker(childExpanded))
         if (expandable && childExpanded) {
           append(fg(colors.text)("\n   "))
-          append(dim(fg(colors.text)(unit.block.output!.split("\n").slice(0, 12).join("\n   "))))
+          append(dim(fg(colors.text)(output!.split("\n").slice(0, 12).join("\n   "))))
         }
         nestedRanges.push({ start, end: line, unit: childId, expandable })
       }
@@ -1172,11 +1182,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
           : unit.block.presentation.completeLabel
     const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
     const agent = unit.block.presentation.family === "agent"
-    const output = agent ? undefined : unit.block.output
+    const output = agent || !isToolOutputDisplayed(unit.block) ? undefined : unit.block.output
     const expandable =
-      hasChildren ||
-      hasTerminal ||
-      (agent ? unit.block.detail.length > 0 : unit.block.output !== undefined && unit.block.output.length > 0)
+      hasChildren || hasTerminal || (agent ? unit.block.detail.length > 0 : output !== undefined && output.length > 0)
     if (selected)
       highlight(
         `${iconChar(failed, running, spinnerFrame, cancelled)} ${label}${agent ? "" : detail}${expandable ? markerText(expanded) : ""}`,
@@ -1206,7 +1214,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     const detail = toolDetail(index, block)
     const children = unit.children ?? []
     const agent = block.presentation.family === "agent"
-    const output = agent ? undefined : block.output
+    const output = agent || !isToolOutputDisplayed(block) ? undefined : block.output
     const expandable =
       children.length > 0 ||
       unit.terminal !== undefined ||
@@ -1347,7 +1355,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     chunks = []
     line = 0
     nestedRanges = []
-    const expandable = isExpandableUnit(unit)
+    const expandable = isExpandableUnit(model, unit)
     const id = transcriptUnitId(model, unit)
     const expanded =
       rowExpanded(id) ||
@@ -1708,8 +1716,8 @@ export class Surface {
         if (!this.atTranscriptBottom() && this.model?.scrollFollow === true) {
           this.userScrollDetached = true
           this.transcriptScroll.stickyScroll = false
-          this.handlers.scroll?.(position)
-        } else this.queueTranscriptScroll(() => this.reportTranscriptScroll())
+        }
+        this.queueTranscriptScroll(() => this.reportTranscriptScroll())
       },
     })
     this.queueBox = new BoxRenderable(renderer, {
@@ -1991,20 +1999,20 @@ export class Surface {
     } else if (mapped.ctrl && mapped.name === "v" && this.handlers.pasteImage !== undefined) this.handlers.pasteImage()
     else this.handlers.key(mapped)
   }
-  private readonly atMountedTranscriptBottom = (): boolean =>
-    this.transcriptScroll.scrollTop >=
-    Math.max(0, this.transcriptScroll.scrollHeight - this.transcriptScroll.viewport.height) - 1
+  private transcriptMetrics(): ViewportMetrics {
+    return {
+      scrollTop: this.transcriptScroll.scrollTop,
+      scrollHeight: this.transcriptScroll.scrollHeight,
+      viewportHeight: this.transcriptScroll.viewport.height,
+    }
+  }
+  private readonly atMountedTranscriptBottom = (): boolean => atBottomWithin(this.transcriptMetrics(), 1)
   private readonly atTranscriptBottom = (near = false): boolean =>
-    this.transcriptScroll.scrollTop >=
-      Math.max(0, this.transcriptScroll.scrollHeight - this.transcriptScroll.viewport.height) - (near ? 1 : 0) &&
+    atBottomWithin(this.transcriptMetrics(), near ? 1 : 0) &&
     this.transcriptWindowEnd >= (this.model?.items.length ?? 0) &&
     (this.transcriptRowWindow.end === 0 || this.transcriptRowWindow.end >= this.transcriptRowTotal)
   private clampTranscriptScrollTop(scrollTop: number): number {
-    return clampScrollTop(scrollTop, {
-      scrollTop,
-      scrollHeight: this.transcriptScroll.scrollHeight,
-      viewportHeight: this.transcriptScroll.viewport.height,
-    })
+    return clampScrollTop(scrollTop, { ...this.transcriptMetrics(), scrollTop })
   }
   private captureTranscriptAnchor(): TranscriptAnchor | undefined {
     const viewportTop = this.transcriptScroll.screenY
@@ -2133,9 +2141,7 @@ export class Surface {
       this.scrollFramePending = false
       if (this.model?.scrollFollow !== true || this.userScrollDetached) return
       this.scrollProgrammatic = true
-      this.transcriptScroll.scrollTo(
-        Math.max(0, this.transcriptScroll.scrollHeight - this.transcriptScroll.viewport.height),
-      )
+      this.transcriptScroll.scrollTo(maxScrollTop(this.transcriptMetrics()))
       this.scrollProgrammatic = false
       this.syncTranscriptScrollbar()
       this.renderer.requestRender()
@@ -2669,7 +2675,11 @@ export class Surface {
     else if (scrollFollow || this.transcriptWindowEnd === 0) {
       this.transcriptWindowEnd = model.items.length
       this.transcriptRowWindow = pinnedRowWindow
-    } else this.transcriptWindowEnd = Math.min(this.transcriptWindowEnd, model.items.length)
+    } else
+      this.transcriptWindowEnd =
+        model.items.length <= maxMountedTranscriptEntries
+          ? model.items.length
+          : Math.min(this.transcriptWindowEnd, model.items.length)
     this.model = model
     this.queueHint.bg = cutoutBackground(this.renderer)
     this.modeLabel.bg = cutoutBackground(this.renderer)

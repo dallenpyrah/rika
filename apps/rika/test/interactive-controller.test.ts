@@ -1004,8 +1004,8 @@ it("keeps one of five status labels from submit until the turn completes", () =>
   expectStatus("Running tools")
   patch(5, "tool.call.requested", undefined, {
     tool_call_id: "status",
-    tool_name: "git_status",
-    input: {},
+    tool_name: "bash",
+    input: { command: "git --no-optional-locks status --short --branch" },
   })
   expectStatus("Running tools")
   patch(6, "tool.result.received", undefined, { tool_call_id: "read", output: "contents" })

@@ -1,6 +1,5 @@
 import { Context, Data, Effect, FileSystem, Layer, Option, Path, PlatformError, Schema } from "effect"
-import { Tool, Toolkit } from "effect/unstable/ai"
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { Toolkit } from "effect/unstable/ai"
 import * as WebSearchService from "./web-search"
 import { Service as ReadWebPageService } from "./read-web-page"
 import * as ProcessRegistry from "./process-registry"
@@ -8,68 +7,26 @@ import * as MediaView from "./media-view"
 import * as ToolPolicy from "./tool-policy"
 import { unifiedDiff } from "./unified-diff"
 
-const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+import * as ToolDefinitions from "./tools"
 
-const boundedDiff = (patch: string | undefined): { readonly diff?: string } =>
-  patch === undefined ? {} : { diff: patch }
-
-export const FindFiles = Schema.Struct({ _tag: Schema.tag("FindFiles"), query: Schema.String })
-export const Grep = Schema.Struct({ _tag: Schema.tag("Grep"), pattern: Schema.String, regex: Schema.Boolean })
-export const Read = Schema.Struct({
-  _tag: Schema.tag("Read"),
-  path: Schema.String,
-  readRange: Schema.optionalKey(Schema.Array(Schema.Finite).check(Schema.isLengthBetween(2, 2))),
-})
-export const Write = Schema.Struct({
-  _tag: Schema.tag("Write"),
-  path: Schema.String,
-  content: Schema.String,
-})
-export const Edit = Schema.Struct({
-  _tag: Schema.tag("Edit"),
-  path: Schema.String,
-  oldStr: Schema.String,
-  newStr: Schema.String,
-  replaceAll: Schema.optionalKey(Schema.Boolean),
-})
-export const Bash = Schema.Struct({
-  _tag: Schema.tag("Bash"),
-  command: Schema.String,
-  workdir: Schema.optionalKey(Schema.String),
-  timeoutMillis: Schema.optionalKey(NonNegativeInt),
-})
+export const Grep = ToolDefinitions.Grep.Request
+export const Read = ToolDefinitions.Read.Request
+export const Write = ToolDefinitions.Write.Request
+export const Edit = ToolDefinitions.Edit.Request
+export const Bash = ToolDefinitions.Bash.Request
+export const ShellCommandStatus = ToolDefinitions.ShellCommandStatus.Request
+export const WebSearch = ToolDefinitions.WebSearch.Request
+export const ReadWebPage = ToolDefinitions.ReadWebPage.Request
+export const ViewMedia = ToolDefinitions.ViewMedia.Request
 export const Shell = Schema.Struct({
   _tag: Schema.tag("Shell"),
   command: Schema.String,
   args: Schema.Array(Schema.String),
   cwd: Schema.optionalKey(Schema.String),
-  waitMillis: Schema.optionalKey(NonNegativeInt),
+  waitMillis: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 })
-export const ShellCommandStatus = Schema.Struct({
-  _tag: Schema.tag("ShellCommandStatus"),
-  processId: Schema.String,
-  waitMillis: Schema.optionalKey(NonNegativeInt),
-})
-export const GitStatus = Schema.Struct({ _tag: Schema.tag("GitStatus") })
-export const WebSearch = Schema.Struct({
-  _tag: Schema.tag("WebSearch"),
-  objective: WebSearchService.Objective,
-  searchQueries: WebSearchService.SearchQueries,
-  kind: Schema.optionalKey(WebSearchService.Capability),
-  strategy: Schema.optionalKey(WebSearchService.Strategy),
-  githubSearchType: Schema.optionalKey(WebSearchService.GithubSearchType),
-})
-export const ReadWebPage = Schema.Struct({
-  _tag: Schema.tag("ReadWebPage"),
-  url: Schema.String,
-  objective: Schema.optionalKey(Schema.String),
-  fullContent: Schema.optionalKey(Schema.Boolean),
-  forceRefetch: Schema.optionalKey(Schema.Boolean),
-})
-export const ViewMedia = Schema.Struct({ _tag: Schema.tag("ViewMedia"), path: Schema.String })
 
 export const Request = Schema.Union([
-  FindFiles,
   Grep,
   Read,
   Write,
@@ -77,23 +34,15 @@ export const Request = Schema.Union([
   Bash,
   Shell,
   ShellCommandStatus,
-  GitStatus,
   WebSearch,
   ReadWebPage,
   ViewMedia,
 ])
 export type Request = typeof Request.Type
-export const Result = Schema.Struct({
-  text: Schema.String,
-  truncated: Schema.Boolean,
-  running: Schema.optionalKey(Schema.Boolean),
-  processId: Schema.optionalKey(Schema.String),
-  exitCode: Schema.optionalKey(Schema.Finite),
-  stdout: Schema.optionalKey(Schema.String),
-  stderr: Schema.optionalKey(Schema.String),
-  diff: Schema.optionalKey(Schema.String),
-  artifact: Schema.optionalKey(MediaView.Artifact),
-})
+const boundedDiff = (patch: string | undefined): { readonly diff?: string } =>
+  patch === undefined ? {} : { diff: patch }
+
+export const Result = ToolDefinitions.Result.Result
 export type Result = typeof Result.Type
 
 export class ToolError extends Schema.TaggedErrorClass<ToolError>()("ToolError", {
@@ -103,125 +52,51 @@ export class ToolError extends Schema.TaggedErrorClass<ToolError>()("ToolError",
   outcome: Schema.Literals(["known", "unknown"]),
 }) {}
 
-const ToolFailure = Schema.Struct({
-  _tag: Schema.tag("ToolError"),
-  tool: Schema.String,
-  message: Schema.String,
-  kind: Schema.Literals(["operation", "timeout"]),
-  outcome: Schema.Literals(["known", "unknown"]),
-})
+export const grepTool = ToolDefinitions.Grep.tool
+export const readTool = ToolDefinitions.Read.tool
+export const writeTool = ToolDefinitions.Write.tool
+export const editTool = ToolDefinitions.Edit.tool
+export const bashTool = ToolDefinitions.Bash.tool
+export const shellCommandStatusTool = ToolDefinitions.ShellCommandStatus.tool
+export const webSearchTool = ToolDefinitions.WebSearch.tool
+export const readWebPageTool = ToolDefinitions.ReadWebPage.tool
+export const viewMediaTool = ToolDefinitions.ViewMedia.tool
 
-const tool = <const Name extends string, Parameters extends Schema.Struct.Fields>(
-  name: Name,
-  description: string,
-  parameters: Parameters,
-) =>
-  Tool.make(name, {
-    description,
-    parameters: Schema.Struct(parameters),
-    success: Result,
-    failure: ToolFailure,
-    failureMode: "return",
-  })
-
-export const findFilesTool = tool("find_files", "List workspace files whose paths contain a query", {
-  query: Schema.String,
-})
-export const grepTool = tool("grep", "Search UTF-8 workspace files for text or a regular expression", {
-  pattern: Schema.String,
-  regex: Schema.Boolean,
-})
-export const readTool = tool("read", "Read a file with stable line numbers, optionally selecting an inclusive range", {
-  path: Schema.String,
-  read_range: Schema.optionalKey(Schema.Array(Schema.Finite).check(Schema.isLengthBetween(2, 2))),
-})
-export const writeTool = tool("write", "Create or overwrite a UTF-8 file, creating parent directories as needed", {
-  path: Schema.String,
-  content: Schema.String,
-})
-export const editTool = tool("edit", "Replace exact text in an existing file and return a diff", {
-  path: Schema.String,
-  old_str: Schema.String,
-  new_str: Schema.String,
-  replace_all: Schema.optionalKey(Schema.Boolean),
-})
-export const bashTool = tool(
-  "bash",
-  "Run a shell command in the workspace and return a process id if it outlives the wait",
-  {
-    command: Schema.String,
-    workdir: Schema.optionalKey(Schema.String),
-    timeout_ms: Schema.optionalKey(NonNegativeInt),
-  },
-)
-export const shellCommandStatusTool = tool(
-  "shell_command_status",
-  "Return only new output from a running command without restarting it",
-  {
-    processId: Schema.String,
-    waitMillis: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
-  },
-)
-export const gitStatusTool = tool("git_status", "Inspect concise Git working-tree status", {
-  refresh: Schema.optionalKey(Schema.Boolean),
-})
-export const webSearchTool = tool(
-  "web_search",
-  "Search across configured sources. Use code for semantic examples and github for exact GitHub search.",
-  {
-    objective: WebSearchService.Objective,
-    searchQueries: WebSearchService.SearchQueries,
-    kind: Schema.optionalKey(WebSearchService.Capability),
-    strategy: Schema.optionalKey(WebSearchService.Strategy),
-    githubSearchType: Schema.optionalKey(WebSearchService.GithubSearchType),
-  },
-)
-export const readWebPageTool = tool(
-  "read_web_page",
-  "Read a public HTTP(S) page as readable Markdown, optionally selecting objective-relevant excerpts",
-  {
-    url: Schema.String,
-    objective: Schema.optionalKey(Schema.String),
-    fullContent: Schema.optionalKey(Schema.Boolean),
-    forceRefetch: Schema.optionalKey(Schema.Boolean),
-  },
-)
-export const viewMediaTool = tool("view_media", "Inspect a workspace image or analyze a PDF, audio, or video file", {
-  path: Schema.String,
-})
+export const registrations: ReadonlyArray<ToolPolicy.Registration> = [
+  ToolDefinitions.Grep.registration,
+  ToolDefinitions.Read.registration,
+  ToolDefinitions.Write.registration,
+  ToolDefinitions.Edit.registration,
+  ToolDefinitions.Bash.registration,
+  ToolDefinitions.ShellCommandStatus.registration,
+  ToolDefinitions.WebSearch.registration,
+  ToolDefinitions.ReadWebPage.registration,
+  ToolDefinitions.ViewMedia.registration,
+]
 
 export const toolkit = Toolkit.make(
-  findFilesTool,
   grepTool,
   readTool,
   writeTool,
   editTool,
   bashTool,
   shellCommandStatusTool,
-  gitStatusTool,
   webSearchTool,
   readWebPageTool,
   viewMediaTool,
 )
 
-export interface Interface {
-  readonly run: (request: Request) => Effect.Effect<Result, ToolError>
-}
-
-export class Service extends Context.Service<Service, Interface>()("@rika/tools/tool-runtime/Service") {}
+const policyForName = (name: string) => registrations.find((registration) => registration.tool.name === name)?.policy
+const toolName = (request: Request) => request._tag.replaceAll(/([a-z])([A-Z])/g, "$1_$2").toLowerCase()
+const contract = (request: Request) => policyForName(request._tag === "Shell" ? "bash" : toolName(request))!
 
 export const handlerLayer = toolkit.toLayer(
   Effect.gen(function* () {
     const runtime = yield* Service
     return {
-      find_files: ({ query }) => runtime.run({ _tag: "FindFiles", query }),
       grep: ({ pattern, regex }) => runtime.run({ _tag: "Grep", pattern, regex }),
       read: ({ path, read_range }) =>
-        runtime.run({
-          _tag: "Read",
-          path,
-          ...(read_range === undefined ? {} : { readRange: read_range }),
-        }),
+        runtime.run({ _tag: "Read", path, ...(read_range === undefined ? {} : { readRange: read_range }) }),
       write: ({ path, content }) => runtime.run({ _tag: "Write", path, content }),
       edit: ({ path, old_str, new_str, replace_all }) =>
         runtime.run({
@@ -240,7 +115,6 @@ export const handlerLayer = toolkit.toLayer(
         }),
       shell_command_status: ({ processId, waitMillis }) =>
         runtime.run({ _tag: "ShellCommandStatus", processId, ...(waitMillis == null ? {} : { waitMillis }) }),
-      git_status: () => runtime.run({ _tag: "GitStatus" }),
       web_search: ({ objective, searchQueries, kind, strategy, githubSearchType }) =>
         runtime.run({
           _tag: "WebSearch",
@@ -263,6 +137,12 @@ export const handlerLayer = toolkit.toLayer(
   }),
 )
 
+export interface Interface {
+  readonly run: (request: Request) => Effect.Effect<Result, ToolError>
+}
+
+export class Service extends Context.Service<Service, Interface>()("@rika/tools/tool-runtime/Service") {}
+
 const maxOutput = 40_000
 const boundedPrefix = (text: string, limit: number) => {
   const prefix = text.slice(0, limit)
@@ -273,12 +153,6 @@ const bounded = (text: string, limit = maxOutput): Result => ({
   text: boundedPrefix(text, limit),
   truncated: text.length > limit,
 })
-const gitStatusOutputLimit = 20_000
-
-const toolName = (request: Request) => request._tag.replaceAll(/([a-z])([A-Z])/g, "$1_$2").toLowerCase()
-
-const contract = (request: Request) => ToolPolicy.get(toolName(request))!
-
 const boundResult = (request: Request, result: Result): Result => {
   const limit = contract(request).outputLimit
   let remaining = limit
@@ -329,7 +203,6 @@ export const layerWithProcessRegistry = (workspace: string) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
       const path = yield* Path.Path
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
       const webSearch = yield* WebSearchService.Service
       const readWebPage = yield* ReadWebPageService
       const processes = yield* ProcessRegistry.Service
@@ -412,49 +285,10 @@ export const layerWithProcessRegistry = (workspace: string) =>
         yield* visit(canonicalWorkspace)
         return found.toSorted()
       })
-      const runGitStatus = Effect.fn("ToolRuntime.runGitStatus")(function* () {
-        return yield* Effect.scoped(
-          Effect.gen(function* () {
-            const handle = yield* spawner.spawn(
-              ChildProcess.make("git", ["--no-optional-locks", "status", "--short", "--branch"], { cwd: workspace }),
-            )
-            const [stdout, stderr, exitCode] = yield* Effect.all(
-              [
-                ProcessRegistry.collectBoundedText(handle.stdout, gitStatusOutputLimit),
-                ProcessRegistry.collectBoundedText(handle.stderr, gitStatusOutputLimit),
-                handle.exitCode,
-              ],
-              { concurrency: 3 },
-            )
-            if (exitCode !== 0)
-              return yield* new RuntimeOperationError({
-                message: `${stdout.text}${stderr.text}`.trim() || `Git status exited with code ${exitCode}`,
-              })
-            const text = `${stdout.text}${stderr.text}`.trim()
-            const result = {
-              text: text.slice(0, gitStatusOutputLimit),
-              truncated: text.length > gitStatusOutputLimit,
-            }
-            return { ...result, truncated: result.truncated || stdout.truncated || stderr.truncated }
-          }),
-        ).pipe(
-          Effect.timeoutOrElse({
-            duration: "10 seconds",
-            orElse: () => new RuntimeOperationError({ message: "Git status timed out after 10 seconds" }),
-          }),
-        )
-      })
       return Service.of({
         run: Effect.fn("ToolRuntime.run")(function* (request) {
           const operation = Effect.gen(function* () {
             switch (request._tag) {
-              case "FindFiles":
-                return bounded(
-                  (yield* listFiles())
-                    .filter((file) => file.includes(request.query))
-                    .slice(0, 1_000)
-                    .join("\n"),
-                )
               case "Grep": {
                 if (request.regex) yield* Effect.try({ try: () => new RegExp(request.pattern), catch: operationError })
                 const expression = request.regex ? new RegExp(request.pattern) : undefined
@@ -553,8 +387,6 @@ export const layerWithProcessRegistry = (workspace: string) =>
                 )
                 return { ...output, text: `${output.stdout}${output.stderr}` }
               }
-              case "GitStatus":
-                return yield* runGitStatus()
               case "WebSearch": {
                 const results = yield* webSearch.search({
                   objective: request.objective,

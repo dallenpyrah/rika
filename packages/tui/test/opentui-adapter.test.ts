@@ -1031,6 +1031,109 @@ test("keeps a detached transcript window stable when live entries arrive", () =>
     }),
   ))
 
+test("defers the scrollbar detach report instead of reporting inside onChange", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const scrolls = new Array<number>()
+      const entries = Array.from({ length: 300 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const items = entries.map((_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      }))
+      let model: Model = { ...initial("/work", "high"), entries, items }
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        resize: () => undefined,
+        scroll: (offset) => {
+          scrolls.push(offset)
+          model = update(model, { _tag: "ScrollMoved", offset })
+          surface.update(model)
+        },
+        scrollFollow: () => {
+          model = update(model, { _tag: "ScrollFollowed" })
+          surface.update(model)
+        },
+      })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        // A user drag away from the bottom fires the scrollbar onChange. The report
+        // must be queued, not run synchronously inside onChange (no re-entrant update).
+        surface.transcriptScrollbar.scrollPosition = 3
+        expect(scrolls).toEqual([])
+        yield* openTui(() => setup.flush())
+        expect(scrolls.length).toBeGreaterThan(0)
+        expect(model.scrollFollow).toBe(false)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("mounts entries appended below a detached transcript that fits the mount budget", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const entries = Array.from({ length: 40 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const items = entries.map((_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const base: Model = { ...initial("/work", "high"), entries, items, scrollFollow: false }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      const state = surface as unknown as { readonly transcriptWindowEnd: number }
+      try {
+        surface.update(base)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScroll.scrollTo(0)
+        setup.renderer.requestRender()
+        yield* openTui(() => setup.flush())
+        const firstBefore = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
+        const heightBefore = surface.transcriptScroll.scrollHeight
+
+        const grownEntries = [
+          ...entries,
+          ...Array.from({ length: 20 }, (_, index) => ({
+            role: "assistant" as const,
+            text: `answer ${40 + index}`,
+            turnId: `turn-${40 + index}`,
+          })),
+        ]
+        const grownItems = grownEntries.map((_, index) => ({
+          _tag: "Entry" as const,
+          index,
+          id: `answer-${index}`,
+          turnId: `turn-${index}`,
+        }))
+        surface.update({ ...base, entries: grownEntries, items: grownItems })
+        yield* openTui(() => setup.flush())
+
+        // The appended entries mount below the viewport: the window tracks the tail
+        // and the content grows, while the detached reading position stays put.
+        expect(state.transcriptWindowEnd).toBe(60)
+        expect(surface.transcriptScroll.scrollHeight).toBeGreaterThan(heightBefore)
+        expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(firstBefore)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
 test("reports prepend anchor geometry without requesting another page", () =>
   Effect.runPromise(
     Effect.gen(function* () {

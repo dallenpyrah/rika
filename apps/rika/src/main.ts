@@ -81,6 +81,15 @@ const relativePathFrom = pathService.relative
 const resolve = pathService.resolve
 const ignoreSelectionResync = (_threadId: string, _selectionEpoch: number) => {}
 
+const terminalTitleText = (value: string) =>
+  value
+    .replace(/\p{C}+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+export const terminalTitleSequence = (title: string, workspace: string) =>
+  `\u001b]0;${terminalTitleText(title)} - rika - ${terminalTitleText(workspace.replace(/^\/Users\/[^/]+/, "~"))}\u0007`
+
 const tuiTraceEventTypes = new Set([
   "model.reasoning.delta",
   "model.output.delta",
@@ -1225,6 +1234,7 @@ export const configuredBackendLayer = ({
               }),
           compaction: providerPlans?.routePlan.compaction ?? productionCompaction(route),
           oracleCompaction: providerPlans?.oracleRoutePlan.compaction ?? productionCompaction(resolvedOracleRoute),
+          ...(providerPlans === undefined ? {} : { modelResilience: RelayExecutionBackend.defaultModelResilience }),
           webSearchCredentialsForWorkspace: (runtimeWorkspace) =>
             effectiveConfigForWorkspace(runtimeWorkspace).pipe(
               Effect.flatMap((config) =>
@@ -1758,6 +1768,8 @@ if (import.meta.main) {
             event._tag === "TranscriptPatched" ||
             event._tag === "TranscriptResyncRequired"
           ) {
+            const previousThreadId = model.currentThreadId
+            const previousThreadTitle = model.currentThreadTitle
             const controlled = InteractiveController.update(
               {
                 model,
@@ -1777,6 +1789,12 @@ if (import.meta.main) {
             projectionRevisions = new Map(controlled.state.revisions)
             transcriptProjections = new Map(controlled.state.projections)
             threadCostUsd = controlled.state.threadCostUsd
+            if (
+              event._tag === "SelectionLoaded" &&
+              model.currentThreadId === event.thread.id &&
+              (model.currentThreadId !== previousThreadId || model.currentThreadTitle !== previousThreadTitle)
+            )
+              process.stdout.write(terminalTitleSequence(event.thread.title, model.workspace))
             if (event._tag === "TranscriptPatched") fork(traceTuiModelEvent(appliedDeltas, event))
             if (event._tag === "TranscriptResyncRequired" && model.currentThreadId !== undefined)
               requestSelectionResync(model.currentThreadId, event.selectionEpoch)
@@ -1904,21 +1922,21 @@ if (import.meta.main) {
               model = { ...model, costUsd: event.threadCostUsd }
             }
           } else if (event._tag === "ThreadTitled") {
-            if (model.currentThreadId === event.threadId) {
-              const workspaceLabel = model.workspace.replace(/^\/Users\/[^/]+/, "~")
-              process.stdout.write(`]0;${event.title} - rika - ${workspaceLabel}`)
-            }
             model = ViewState.update(model, {
               _tag: "ThreadTitleChanged",
               threadId: event.threadId,
               title: event.title,
             })
+            if (model.currentThreadId === event.threadId)
+              process.stdout.write(terminalTitleSequence(event.title, model.workspace))
           } else if (event._tag === "ThreadActivated") {
             model = ViewState.update(model, {
               _tag: "ThreadActivated",
               threadId: event.threadId,
               title: event.title,
             })
+            if (model.currentThreadId === event.threadId)
+              process.stdout.write(terminalTitleSequence(event.title, model.workspace))
           } else if (event._tag === "ThreadPreviewLoaded") {
             if (model.threadSwitcher.open && ViewState.selectedThreadMetadata(model)?.id === event.threadId)
               model = ViewState.update(model, {

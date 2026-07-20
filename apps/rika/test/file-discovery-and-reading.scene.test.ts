@@ -13,7 +13,7 @@ test(
       ],
       script: [
         Scene.model.turn([Scene.model.toolCall("read", { path: "src/alpha.ts", read_range: [2, 3] }, "read-range")]),
-        Scene.model.turn([Scene.model.toolCall("find_files", { query: ".txt" }, "find-hidden")]),
+        Scene.model.turn([Scene.model.toolCall("grep", { pattern: "needle", regex: false }, "find-hidden")]),
         Scene.model.turn([
           Scene.model.toolCall("grep", { pattern: "^(needle|hidden).*café?$", regex: true }, "grep-regex"),
         ]),

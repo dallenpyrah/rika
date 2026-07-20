@@ -33,7 +33,15 @@ export const anchorOf = (state: ViewportState): ViewportAnchor | undefined =>
 export const maxScrollTop = (metrics: ViewportMetrics): number =>
   Math.max(0, metrics.scrollHeight - metrics.viewportHeight)
 
-export const atBottom = (metrics: ViewportMetrics): boolean => metrics.scrollTop >= maxScrollTop(metrics)
+export const atBottomWithin: {
+  (tolerance: number): (metrics: ViewportMetrics) => boolean
+  (metrics: ViewportMetrics, tolerance: number): boolean
+} = Function.dual(
+  2,
+  (metrics: ViewportMetrics, tolerance: number): boolean => metrics.scrollTop >= maxScrollTop(metrics) - tolerance,
+)
+
+export const atBottom = (metrics: ViewportMetrics): boolean => atBottomWithin(metrics, 0)
 
 export const clampScrollTop: {
   (metrics: ViewportMetrics): (scrollTop: number) => number

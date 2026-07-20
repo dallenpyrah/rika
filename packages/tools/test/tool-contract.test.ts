@@ -66,27 +66,23 @@ describe("tool contracts", () => {
     )
   })
 
-  it("rejects duplicated tools and incomplete tool-policy registration", () => {
-    const policy = Catalog.get("read")!
-    const metadata = {
-      permission: policy.permission,
-      idempotency: policy.idempotency,
-      timeoutMillis: policy.timeoutMillis,
-      outputLimit: policy.outputLimit,
-      presentation: policy.presentation,
-    }
+  it("rejects duplicated tools and incomplete registration", () => {
+    const registration = Runtime.registrations.find(({ tool }) => tool.name === "read")!
     expect(() =>
       Catalog.makeDefinitions(
         [
           { name: "read", description: "one" },
           { name: "read", description: "two" },
         ],
-        { read: metadata },
+        [registration],
       ),
     ).toThrow("duplicate tools: read")
-    expect(() => Catalog.makeDefinitions([{ name: "read", description: "read" }], { write: metadata })).toThrow(
-      "tools without policy: read; policies without tool: write",
-    )
+    expect(() =>
+      Catalog.makeDefinitions(
+        [{ name: "read", description: "read" }],
+        [{ ...registration, tool: { name: "write", description: "write" } }],
+      ),
+    ).toThrow("tools without registration: read; registrations without tool: write")
   })
 
   it.effect("rejects invalid bounds while preserving file ranges for typed runtime failures", () =>
@@ -131,6 +127,16 @@ describe("tool contracts", () => {
     expect(Catalog.get("edit")?.presentation).toMatchObject({ family: "edit" })
     expect(Catalog.get("read")?.presentation).toMatchObject({ family: "explore", action: "read" })
     expect(Catalog.get("shell_command_status")?.presentation).toMatchObject({ family: "direct", action: "status" })
+    expect(Catalog.get("web_search")?.presentation).toMatchObject({
+      family: "direct",
+      action: "web-search",
+      outputDisplay: "hidden",
+    })
+    expect(Catalog.get("read_web_page")?.presentation).toMatchObject({
+      family: "direct",
+      action: "read-web-page",
+      outputDisplay: "hidden",
+    })
     expect(Catalog.get("find_thread")?.presentation).toMatchObject({
       family: "explore",
       activeLabel: "Exploring",
@@ -212,7 +218,7 @@ describe("tool contracts", () => {
   it.effect("substitutes the runtime through its test layer", () =>
     Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const result = yield* runtime.run({ _tag: "GitStatus" })
+      const result = yield* runtime.run({ _tag: "Bash", command: "fixture" })
       expect(result).toEqual({ text: "fixture", truncated: false })
     }).pipe(provide(Runtime.testLayer(() => Effect.succeed({ text: "fixture", truncated: false })))),
   )

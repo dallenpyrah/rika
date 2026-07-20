@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { Tool, Toolkit } from "effect/unstable/ai"
+import * as Policy from "./tool-policy"
 
 export const modelGuidance =
   "Use Luna for cheap, fast, easy-to-check work: simple searches, file listing, extraction, classification, summaries, and mechanical edits. Avoid it for deep reasoning or large-context synthesis. Use Terra as the balanced default for normal subagent work: repository exploration, multi-step research, document analysis, and moderate coding. Escalate to Sol when mistakes are costly or the task needs the strongest reasoning and coding: architecture analysis, complex debugging, long-horizon implementation, security work, or adversarial review. Relative token cost: Luna 1x, Terra 2.5x, Sol 5x."
@@ -69,3 +70,43 @@ export const isDelegationToolName = (name: string): name is DelegationToolName =
   delegationToolNames.includes(name as DelegationToolName)
 
 export const modelToolkit = Toolkit.make(taskTool, oracleTool, librarianTool, reviewTool)
+
+export const registrations: ReadonlyArray<Policy.Registration> = [
+  Policy.register(
+    taskTool,
+    Policy.allow("unsafe", 120_000, 40_000, {
+      family: "agent",
+      action: "task",
+      activeLabel: "Subagent working",
+      completeLabel: "Subagent finished",
+    }),
+  ),
+  Policy.register(
+    oracleTool,
+    Policy.allow("unsafe", 120_000, 40_000, {
+      family: "agent",
+      action: "oracle",
+      activeLabel: "Oracle exploring",
+      completeLabel: "Oracle has spoken",
+    }),
+  ),
+  Policy.register(
+    librarianTool,
+    Policy.allow("unsafe", 120_000, 40_000, {
+      family: "agent",
+      action: "librarian",
+      activeLabel: "Librarian researching",
+      completeLabel: "Librarian researched",
+    }),
+  ),
+  Policy.register(
+    reviewTool,
+    Policy.allow("unsafe", 120_000, 40_000, {
+      family: "agent",
+      action: "review",
+      activeLabel: "Reviewing code",
+      completeLabel: "Reviewed code",
+      counter: "review",
+    }),
+  ),
+]

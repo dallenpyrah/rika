@@ -13,7 +13,7 @@ test(
         Scene.model.turn([
           Scene.model.toolCall("read", { path: "alpha.txt", read_range: [1, 1] }, "read-alpha"),
           Scene.model.toolCall("grep", { pattern: "alpha", regex: false }, "grep-alpha"),
-          Scene.model.toolCall("find_files", { query: "beta" }, "find-beta"),
+          Scene.model.toolCall("grep", { pattern: "beta", regex: false }, "find-beta"),
         ]),
         Scene.model.turn([
           Scene.model.toolCall("edit", { path: "alpha.txt", old_str: "alpha", new_str: "ALPHA" }, "edit-alpha"),
@@ -35,7 +35,7 @@ test(
       expect(output).toContain("Explored 1 file, 2 searches")
       expect(output).toContain("2 files +2 -1")
       expect(output).toContain("Ran 2 commands, 1 failed")
-      expect(output).not.toMatch(/write|read|find_files|edit/)
+      expect(output).not.toMatch(/write|read|edit/)
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,

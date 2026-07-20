@@ -311,9 +311,7 @@ export const configuredProviderFactories = (credentials: Readonly<Record<string,
   return { factories, unsupportedIds }
 }
 
-export const configuredReadPageCredential = (
-  credentials: Readonly<Record<string, Redacted.Redacted<string>>>,
-) => {
+export const configuredReadPageCredential = (credentials: Readonly<Record<string, Redacted.Redacted<string>>>) => {
   const descriptor = providerRegistry.find((provider) => provider.readPage && credentials[provider.id] !== undefined)
   return descriptor === undefined ? undefined : credentials[descriptor.id]
 }

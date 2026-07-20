@@ -153,9 +153,9 @@ test(
         const originalCallId = `call_${"a".repeat(59)}`
         const program = withBackend(
           [
-            TestModel.toolCall("find_files", { query: "fixture" }, { id: originalCallId }),
+            TestModel.toolCall("grep", { pattern: "fixture", regex: false }, { id: originalCallId }),
             TestModel.text("first tool turn complete"),
-            TestModel.toolCall("find_files", { query: "fixture" }, { id: originalCallId }),
+            TestModel.toolCall("grep", { pattern: "fixture", regex: false }, { id: originalCallId }),
             TestModel.text("second tool turn complete"),
           ],
           (fixture, directory) =>

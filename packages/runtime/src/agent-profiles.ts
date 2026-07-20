@@ -27,7 +27,7 @@ const definitions = {
   Oracle: {
     instructions:
       "Act as a read-only, high-reasoning technical advisor for planning, reviewing, understanding code, and debugging. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
-    tools: [Tools.findFilesTool, Tools.grepTool, Tools.readTool, Tools.webSearchTool],
+    tools: [Tools.grepTool, Tools.readTool, Tools.webSearchTool],
     permissions: ["workspace.read", "network.read"],
   },
   Librarian: {
@@ -43,7 +43,7 @@ const definitions = {
   },
   Review: {
     instructions: "Review workspace changes for correctness, regressions, and missing tests. Do not modify files.",
-    tools: [Tools.grepTool, Tools.readTool, Tools.gitStatusTool, Tools.webSearchTool],
+    tools: [Tools.grepTool, Tools.readTool, Tools.webSearchTool],
     permissions: ["workspace.read", "network.read"],
   },
   ReadThread: {
@@ -55,7 +55,6 @@ const definitions = {
     instructions:
       "Complete the assigned implementation task in the workspace and report changed files and verification.",
     tools: [
-      Tools.findFilesTool,
       Tools.grepTool,
       Tools.readTool,
       Tools.writeTool,

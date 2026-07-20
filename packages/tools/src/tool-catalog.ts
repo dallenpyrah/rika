@@ -17,42 +17,59 @@ export const Definition = Schema.Struct({
 })
 export type Definition = typeof Definition.Type
 
-const tools: ReadonlyArray<{ readonly name: string; readonly description?: string | undefined }> = [
+const tools: ReadonlyArray<ToolPolicy.RegisteredTool> = [
   ...Object.values(Runtime.toolkit.tools),
   ...Object.values(AgentTools.modelToolkit.tools),
   ...Object.values(ThreadTools.toolkit.tools),
 ]
+
+const registrations: ReadonlyArray<ToolPolicy.Registration> = [
+  ...Runtime.registrations,
+  ...AgentTools.registrations,
+  ...ThreadTools.registrations,
+]
+
 export const makeDefinitions = (
-  registeredTools: ReadonlyArray<{ readonly name: string; readonly description?: string | undefined }>,
-  policies: Readonly<Record<string, ToolPolicy.Policy>>,
+  registeredTools: ReadonlyArray<ToolPolicy.RegisteredTool>,
+  registered: ReadonlyArray<ToolPolicy.Registration>,
 ): ReadonlyArray<Definition> => {
   const names = registeredTools.map(({ name }) => name)
+  const registrationNames = registered.map(({ tool }) => tool.name)
   const duplicateNames = names.filter((name, index) => names.indexOf(name) !== index)
+  const duplicateRegistrations = registrationNames.filter((name, index) => registrationNames.indexOf(name) !== index)
   const missingDescriptions = registeredTools
     .filter(({ description }) => description === undefined)
     .map(({ name }) => name)
-  const missingPolicies = names.filter((name) => policies[name] === undefined)
-  const missingTools = Object.keys(policies).filter((name) => !names.includes(name))
+  const missingRegistrations = names.filter((name) => !registrationNames.includes(name))
+  const missingTools = registrationNames.filter((name) => !names.includes(name))
   if (
     duplicateNames.length === 0 &&
+    duplicateRegistrations.length === 0 &&
     missingDescriptions.length === 0 &&
-    missingPolicies.length === 0 &&
+    missingRegistrations.length === 0 &&
     missingTools.length === 0
   )
-    return registeredTools.map(({ name, description }) => ({ name, description: description!, ...policies[name]! }))
+    return registeredTools.map(({ name, description }) => ({
+      name,
+      description: description!,
+      ...registered.find((registration) => registration.tool.name === name)!.policy,
+    }))
   throw new Error(
     [
       duplicateNames.length === 0 ? undefined : `duplicate tools: ${[...new Set(duplicateNames)].join(", ")}`,
+      duplicateRegistrations.length === 0
+        ? undefined
+        : `duplicate registrations: ${[...new Set(duplicateRegistrations)].join(", ")}`,
       missingDescriptions.length === 0 ? undefined : `tools without description: ${missingDescriptions.join(", ")}`,
-      missingPolicies.length === 0 ? undefined : `tools without policy: ${missingPolicies.join(", ")}`,
-      missingTools.length === 0 ? undefined : `policies without tool: ${missingTools.join(", ")}`,
+      missingRegistrations.length === 0 ? undefined : `tools without registration: ${missingRegistrations.join(", ")}`,
+      missingTools.length === 0 ? undefined : `registrations without tool: ${missingTools.join(", ")}`,
     ]
       .filter((message) => message !== undefined)
       .join("; "),
   )
 }
 
-export const definitions = makeDefinitions(tools, ToolPolicy.policies)
+export const definitions = makeDefinitions(tools, registrations)
 
 export const get = (name: string) => definitions.find((definition) => definition.name === name)
 

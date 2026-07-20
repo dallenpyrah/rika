@@ -16,6 +16,7 @@ export const Presentation = Schema.Struct({
   action: Schema.String,
   activeLabel: Schema.String,
   completeLabel: Schema.String,
+  outputDisplay: Schema.optionalKey(Schema.Literals(["hidden", "expandable"])),
   counter: Schema.optionalKey(
     Schema.Literals([
       "file",

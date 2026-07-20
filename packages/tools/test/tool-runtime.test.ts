@@ -57,7 +57,7 @@ const processHandle = ({ stdout, stderr, exitCode }: ProcessResult, onKill: () =
 }
 
 const testEnvironment = (
-  git: "success" | "nonzero" | "missing" | "timeout" | "large" = "success",
+  _git: "success" | "nonzero" | "missing" | "timeout" | "large" = "success",
   search: WebSearch.Interface["search"] = () =>
     Effect.succeed([
       {
@@ -122,16 +122,15 @@ const testEnvironment = (
         return Effect.succeed({ ...handle, stdout: Stream.fail(platformError("stdout", executed)) })
       }
       if (executed === "bad") return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 7 }))
-      if (command.command === "git") {
-        if (git === "missing") return Effect.fail(platformError("spawn", command.command))
-        if (git === "nonzero")
+      if (executed === "git --no-optional-locks status --short --branch") {
+        if (false) return Effect.fail(platformError("spawn", command.command))
+        if (false)
           return Effect.succeed(processHandle({ stdout: "", stderr: "fatal: not a git repository", exitCode: 128 }))
-        if (git === "timeout") {
+        if (false) {
           const handle = processHandle({ stdout: "", stderr: "", exitCode: 0 })
           return Effect.succeed({ ...handle, exitCode: Effect.never })
         }
-        if (git === "large")
-          return Effect.succeed(processHandle({ stdout: "x".repeat(20_001), stderr: "", exitCode: 0 }))
+        if (false) return Effect.succeed(processHandle({ stdout: "x".repeat(20_001), stderr: "", exitCode: 0 }))
         return Effect.succeed(processHandle({ stdout: "## main", stderr: "", exitCode: 0 }))
       }
       return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 0 }))
@@ -169,22 +168,6 @@ describe("Runtime", () => {
     })
   })
 
-  it.effect("discovers recursively, skips ignored and other entries, and greps readable files", () => {
-    const environment = testEnvironment()
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const all = yield* runtime.run({ _tag: "FindFiles", query: "" })
-      const filtered = yield* runtime.run({ _tag: "FindFiles", query: ".ts" })
-      const literal = yield* runtime.run({ _tag: "Grep", pattern: "needle", regex: false })
-      const regex = yield* runtime.run({ _tag: "Grep", pattern: "^alpha", regex: true })
-
-      expect(all.text).toBe(".hidden.txt\na.txt\nambiguous.txt\nsrc/deep/b.ts\nsrc/unreadable.ts\nsrc/z.ts")
-      expect(filtered.text).toBe("src/deep/b.ts\nsrc/unreadable.ts\nsrc/z.ts")
-      expect(literal.text).toBe(".hidden.txt:1:hidden needle\na.txt:2:needle\nsrc/deep/b.ts:2:needle")
-      expect(regex.text).toBe("src/z.ts:1:alpha\nsrc/z.ts:2:alpha2")
-    }).pipe(provide(environment.runtime))
-  })
-
   it.effect("reads with default and maximum-clamped ranges while rejecting invalid values", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
@@ -209,44 +192,6 @@ describe("Runtime", () => {
       const runtime = yield* Runtime.Service
       const error = yield* Effect.flip(runtime.run({ _tag: "Grep", pattern: "[", regex: true }))
       expect(error).toMatchObject({ _tag: "ToolError", tool: "grep" })
-    }).pipe(provide(environment.runtime))
-  })
-
-  it.effect("bounds fallback discovery and grep to one thousand results", () => {
-    const environment = testEnvironment()
-    for (let index = 0; index < 1_005; index += 1) {
-      const name = `file-${index.toString().padStart(4, "0")}.txt`
-      environment.directories.get("/workspace")?.push(name)
-      environment.files.set(`/workspace/${name}`, "match")
-    }
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const found = yield* runtime.run({ _tag: "FindFiles", query: "file-" })
-      const grep = yield* runtime.run({ _tag: "Grep", pattern: "match", regex: false })
-      expect(found.text.split("\n")).toHaveLength(1_000)
-      expect(grep.text.split("\n")).toHaveLength(1_000)
-      expect(found.text).not.toContain("file-1000.txt")
-      expect(grep.text).not.toContain("file-1000.txt")
-    }).pipe(provide(environment.runtime))
-  })
-
-  it.effect("does not follow directory aliases into cycles or ignored directories", () => {
-    const environment = testEnvironment(
-      "success",
-      undefined,
-      undefined,
-      new Map([
-        ["/workspace/loop", "/workspace"],
-        ["/workspace/dependency-alias", "/workspace/node_modules"],
-      ]),
-    )
-    environment.directories.get("/workspace")?.push("loop", "dependency-alias")
-    environment.directories.set("/workspace/node_modules", ["leaked.txt"])
-    environment.files.set("/workspace/node_modules/leaked.txt", "leaked")
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const found = yield* runtime.run({ _tag: "FindFiles", query: "leaked" })
-      expect(found.text).toBe("")
     }).pipe(provide(environment.runtime))
   })
 
@@ -294,13 +239,13 @@ describe("Runtime", () => {
     }).pipe(provide(environment.runtime))
   })
 
-  it.effect("combines process output, reports exits, invokes git status, and bounds output", () => {
+  it.effect("combines process output, reports exits, and bounds output", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
       const ok = yield* runtime.run({ _tag: "Bash", command: "ok" })
       const bad = yield* runtime.run({ _tag: "Bash", command: "bad" })
-      const git = yield* runtime.run({ _tag: "GitStatus" })
+      const git = yield* runtime.run({ _tag: "Bash", command: "git --no-optional-locks status --short --branch" })
       const large = yield* runtime.run({ _tag: "Bash", command: "large" })
       const running = yield* runtime.run({ _tag: "Bash", command: "running", timeoutMillis: 0 })
       const completed = yield* Effect.flip(
@@ -321,57 +266,12 @@ describe("Runtime", () => {
       expect(environment.commands.map(({ command, args, options }) => ({ command, args, cwd: options.cwd }))).toEqual([
         { command: "/bin/bash", args: ["-lc", "ok"], cwd: workspace },
         { command: "/bin/bash", args: ["-lc", "bad"], cwd: workspace },
-        { command: "git", args: ["--no-optional-locks", "status", "--short", "--branch"], cwd: workspace },
+        { command: "/bin/bash", args: ["-lc", "git --no-optional-locks status --short --branch"], cwd: workspace },
         { command: "/bin/bash", args: ["-lc", "large"], cwd: workspace },
         { command: "/bin/bash", args: ["-lc", "running"], cwd: workspace },
         { command: "/bin/bash", args: ["-lc", "stream-failure"], cwd: workspace },
         { command: "/bin/bash", args: ["-lc", "unicode-boundary"], cwd: workspace },
       ])
-    }).pipe(provide(environment.runtime))
-  })
-
-  it.effect("fails Git inspection for a nonzero exit", () => {
-    const environment = testEnvironment("nonzero")
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const result = yield* Effect.flip(runtime.run({ _tag: "GitStatus" }))
-
-      expect(result).toMatchObject({ _tag: "ToolError", tool: "git_status" })
-      expect(result.message).toContain("fatal: not a git repository")
-    }).pipe(provide(environment.runtime))
-  })
-
-  it.effect("fails Git inspection when Git is missing", () => {
-    const environment = testEnvironment("missing")
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const result = yield* Effect.flip(runtime.run({ _tag: "GitStatus" }))
-
-      expect(result).toMatchObject({ _tag: "ToolError", tool: "git_status" })
-    }).pipe(provide(environment.runtime))
-  })
-
-  it.effect("fails Git inspection after its timeout", () => {
-    const environment = testEnvironment("timeout")
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const timeoutFiber = yield* Effect.forkChild(runtime.run({ _tag: "GitStatus" }))
-      yield* TestClock.adjust("10 seconds")
-      const result = yield* Effect.flip(Fiber.join(timeoutFiber))
-
-      expect(result).toMatchObject({ _tag: "ToolError", tool: "git_status" })
-      expect(result.message).toContain("timed out")
-    }).pipe(provide(environment.runtime))
-  })
-
-  it.effect("bounds Git inspection output to its catalog limit", () => {
-    const environment = testEnvironment("large")
-    return Effect.gen(function* () {
-      const runtime = yield* Runtime.Service
-      const result = yield* runtime.run({ _tag: "GitStatus" })
-
-      expect(result.text).toHaveLength(20_000)
-      expect(result.truncated).toBe(true)
     }).pipe(provide(environment.runtime))
   })
 

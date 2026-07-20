@@ -252,6 +252,10 @@ export const routedToolRuntimeLayer: {
     ),
 )
 
+export const defaultModelResilience: ModelResilience.Interface = ModelResilience.make({
+  retrySchedule: Schedule.exponential("500 millis", 2).pipe(Schedule.jittered, Schedule.upTo({ times: 3 })),
+})
+
 const withResilience = (
   registration: ModelRegistry.Registration,
   resilience: ModelResilience.Interface | undefined,

@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { Tool, Toolkit } from "effect/unstable/ai"
+import * as Policy from "./tool-policy"
 
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 
@@ -51,3 +52,26 @@ export const readThreadTool = Tool.make("read_thread", {
 })
 
 export const toolkit = Toolkit.make(findThreadTool, readThreadTool)
+
+export const registrations: ReadonlyArray<Policy.Registration> = [
+  Policy.register(
+    findThreadTool,
+    Policy.allow("safe", 10_000, 20_000, {
+      family: "explore",
+      action: "find-thread",
+      activeLabel: "Exploring",
+      completeLabel: "Explored",
+      counter: "thread",
+    }),
+  ),
+  Policy.register(
+    readThreadTool,
+    Policy.allow("safe", 10_000, 40_000, {
+      family: "direct",
+      action: "read-thread",
+      activeLabel: "Reading Thread",
+      completeLabel: "Read Thread",
+      counter: "thread",
+    }),
+  ),
+]

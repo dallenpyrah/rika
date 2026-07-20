@@ -1,3 +1,4 @@
+import { partialInputRecord } from "@rika/transcript"
 import { Function, Option, Schema } from "effect"
 import type { Model, TranscriptBlock, TranscriptItem } from "../view-state"
 
@@ -29,7 +30,7 @@ export type TranscriptUnit =
 export type TranscriptUnitId = string
 
 const readToolNames = new Set(["read", "view_file"])
-const searchToolNames = new Set(["grep", "find_files", "glob", "list_dir", "codebase_search"])
+const searchToolNames = new Set(["grep", "glob", "list_dir", "codebase_search"])
 const editToolNames = new Set(["edit", "write"])
 const shellToolNames = new Set(["bash", "run_command"])
 const ToolInputJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
@@ -63,7 +64,7 @@ export const escapePathTarget = (path: string): string =>
     .join("")
 
 const inputValue = (input: string): Record<string, unknown> =>
-  Option.getOrElse(Schema.decodeUnknownOption(ToolInputJson)(input), () => ({}))
+  Option.getOrElse(Schema.decodeUnknownOption(ToolInputJson)(input), () => partialInputRecord(input))
 
 const stringValue = (value: Record<string, unknown>, keys: ReadonlyArray<string>): string | undefined => {
   for (const key of keys) if (typeof value[key] === "string" && value[key].length > 0) return value[key]
@@ -90,8 +91,7 @@ export const toolDetail: {
         }
   const displayPath = path === undefined ? undefined : escapePathTarget(path)
   if (kind === "read") {
-    const verb =
-      call.presentation.action === "media" ? "Viewed" : call.presentation.action === "git-status" ? "Checked" : "Read"
+    const verb = call.presentation.action === "media" ? "Viewed" : "Read"
     const location = path === undefined ? undefined : call.detail.match(/\s+L\d+(?:-\d+)?$/)?.[0]
     const detail = path === undefined ? call.detail : `${displayPath}${location ?? ""}`
     return {
@@ -111,10 +111,13 @@ export const toolDetail: {
   if (kind === "edit")
     return {
       block,
-      label: `Edit ${displayPath ?? (call.detail || call.name)}`,
+      label: `Edit ${displayPath ?? call.detail}`.trimEnd(),
       ...(target === undefined ? {} : { target }),
     }
-  if (kind === "shell") return { block, label: `$ ${call.detail || call.input}` }
+  if (kind === "shell") {
+    const command = call.detail || stringValue(input, ["command", "cmd", "script"]) || ""
+    return { block, label: `$ ${command || (call.input.trimStart().startsWith("{") ? "" : call.input)}`.trimEnd() }
+  }
   return {
     block,
     label: `${call.status === "running" ? call.presentation.activeLabel : call.presentation.completeLabel}${call.detail.length === 0 ? "" : ` ${call.detail}`}`,
@@ -137,7 +140,7 @@ type ToolFamily = Extract<TranscriptBlock, { _tag: "ToolCall" }>["presentation"]
 const toolKindImpl = (rawName: string, family: ToolFamily | undefined): ToolKind => {
   const name = rawName.toLowerCase()
   return family === "explore"
-    ? readToolNames.has(name) || name === "view_media" || name === "git_status"
+    ? readToolNames.has(name) || name === "view_media"
       ? "read"
       : "search"
     : family === "edit"
@@ -228,7 +231,10 @@ const settledText = (
   children: ReadonlyArray<TranscriptItem>,
   fallback: string,
 ): string =>
-  childErrorDetail(model, children) ?? outcomeReason(model, block) ?? agentOutputText(block.output) ?? fallback
+  childErrorDetail(model, children) ??
+  outcomeReason(model, block) ??
+  (isToolOutputDisplayed(block) ? agentOutputText(block.output) : undefined) ??
+  fallback
 
 export const agentTerminal = (
   model: Model,
@@ -382,16 +388,31 @@ const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
   return units
 }
 
-export const isExpandableUnit = (unit: TranscriptUnit): boolean =>
-  unit.kind === "tool" || unit.kind === "reasoning" || unit.kind === "diff" || unit.kind === "childAgent"
+export const isToolOutputDisplayed = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): boolean =>
+  block.presentation.outputDisplay !== "hidden"
+
+export const isExpandableUnit = (model: Model, unit: TranscriptUnit): boolean => {
+  if (unit.kind !== "tool") return unit.kind === "reasoning" || unit.kind === "diff" || unit.kind === "childAgent"
+  if ((unit.children?.length ?? 0) > 0 || unit.terminal !== undefined) return true
+  if (unit.group === "explore" || unit.group === "edit" || (unit.group === "shell" && unit.blocks.length > 1))
+    return true
+  return unit.blocks.some((index) => {
+    const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
+    return (
+      (block.presentation.family === "agent" && block.detail.length > 0) ||
+      (isToolOutputDisplayed(block) && block.output !== undefined && block.output.length > 0)
+    )
+  })
+}
 
 export const expandableUnits = (model: Model): ReadonlyArray<TranscriptUnit> =>
-  transcriptUnits(model).filter(isExpandableUnit)
+  transcriptUnits(model).filter((unit) => isExpandableUnit(model, unit))
 
 export const expandableRowIds = (model: Model): ReadonlyArray<TranscriptUnitId> => {
   const ids: Array<TranscriptUnitId> = []
   const expanded = new Set(model.expandedRowKeys)
   const appendTool = (unit: ToolTranscriptUnit) => {
+    if (!isExpandableUnit(model, unit)) return
     const id = transcriptUnitId(model, unit)
     ids.push(id)
     if (!expanded.has(id)) return
@@ -407,7 +428,8 @@ export const expandableRowIds = (model: Model): ReadonlyArray<TranscriptUnitId> 
     if (unit.group === "shell" && unit.blocks.length > 1)
       for (const index of unit.blocks) {
         const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>
-        if (block.output !== undefined && block.output.length > 0) ids.push(`tool-child:${block.id}`)
+        if (isToolOutputDisplayed(block) && block.output !== undefined && block.output.length > 0)
+          ids.push(`tool-child:${block.id}`)
       }
   }
   for (const unit of expandableUnits(model)) {

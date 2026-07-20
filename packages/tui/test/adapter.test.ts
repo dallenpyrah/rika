@@ -793,6 +793,32 @@ describe("Surface", () => {
     expect(sidebar).toContain("   Two")
   })
 
+  test("renders hidden tool output as inline presentation status in plain transcripts", () => {
+    const block = {
+      _tag: "ToolCall" as const,
+      id: "web",
+      name: "web_search",
+      input: JSON.stringify({ objective: "Find current documentation" }),
+      output: "HIDDEN SEARCH RESULT",
+      status: "complete" as const,
+      presentation: {
+        family: "direct" as const,
+        action: "web-search",
+        activeLabel: "Web Search",
+        completeLabel: "Web Search",
+        outputDisplay: "hidden" as const,
+      },
+      detail: "Find current documentation",
+      files: [],
+    }
+    const state = model({ blocks: [block] })
+
+    expect(renderBlock(block)).toBe("✓ Web Search Find current documentation")
+    expect(renderTranscript(state)).toContain("✓ Web Search Find current documentation")
+    expect(renderTranscript(state)).not.toContain("HIDDEN SEARCH RESULT")
+    expect(renderTranscript(state)).not.toContain("▸")
+  })
+
   test("keeps tool cards generic without removed activity assumptions", () => {
     const rendered = renderBlock({
       _tag: "ToolCall",
@@ -1062,6 +1088,58 @@ describe("Surface", () => {
     expect(marker?.fg).toBe(colors.amber)
     expect(built.ranges.find((range) => range.unit === "tool:parent")?.animated).toBe(false)
     expect(built.ranges.find((range) => range.unit === "tool:child-shell")?.animated).toBe(false)
+  })
+
+  test("keeps hidden nested web output inline", () => {
+    const state = model({
+      blocks: [
+        {
+          _tag: "ToolCall",
+          id: "parent",
+          name: "task",
+          input: "{}",
+          status: "complete",
+          presentation: {
+            family: "agent",
+            action: "task",
+            activeLabel: "Subagent working",
+            completeLabel: "Subagent finished",
+          },
+          detail: "Research documentation",
+          childId: "child",
+          files: [],
+        },
+        {
+          _tag: "ToolCall",
+          id: "child-web",
+          name: "web_search",
+          input: JSON.stringify({ objective: "Find current documentation" }),
+          status: "complete",
+          presentation: {
+            family: "direct",
+            action: "web-search",
+            activeLabel: "Web Search",
+            completeLabel: "Web Search",
+            outputDisplay: "hidden",
+          },
+          detail: "Find current documentation",
+          output: "NESTED SEARCH RESULT BODY",
+          files: [],
+        },
+      ],
+      items: [
+        { _tag: "Block", index: 0, id: "tool:parent", turnId: "turn" },
+        { _tag: "Block", index: 1, id: "tool:child-web", turnId: "child", parentId: "parent" },
+      ],
+      expandedRowKeys: ["tool:parent", "tool:child-web"],
+    })
+
+    const built = buildTranscript(state)
+    const text = built.styled.chunks.map((chunk) => chunk.text).join("")
+
+    expect(text).toContain("Web Search Find current documentation")
+    expect(text).not.toContain("NESTED SEARCH RESULT BODY")
+    expect(built.ranges.find((range) => range.unit === "tool:child-web")?.expandable).toBe(false)
   })
 
   const editToolBlock = {
@@ -1504,25 +1582,20 @@ describe("Surface", () => {
     expect(text).not.toContain(serialized)
   })
 
-  test("presents successful and failed Git inspections with expandable output", () => {
-    const gitStatus = (status: "complete" | "failed", output: string) =>
+  test("presents successful and failed shell commands with expandable output", () => {
+    const command = (status: "complete" | "failed", output: string) =>
       buildTranscript(
         model({
           blocks: [
             {
               _tag: "ToolCall",
               id: "git-status",
-              name: "git_status",
-              input: "{}",
+              name: "bash",
+              input: '{"command":"git --no-optional-locks status --short --branch"}',
               output,
               status,
-              presentation: {
-                family: "direct",
-                action: "git-status",
-                activeLabel: "Inspecting",
-                completeLabel: "Inspected",
-              },
-              detail: "git status",
+              presentation: { family: "shell", action: "command", activeLabel: "Running", completeLabel: "Ran" },
+              detail: "git --no-optional-locks status --short --branch",
               files: [],
             },
           ],
@@ -1531,16 +1604,10 @@ describe("Surface", () => {
       )
         .styled.chunks.map((chunk) => chunk.text)
         .join("")
-
-    const successful = gitStatus("complete", "## inspection\nM  staged.ts\n M tracked.ts\n?? untracked.ts")
-    const failed = gitStatus("failed", "fatal: not a git repository")
-
-    expect(successful).toContain("✓ Inspected git status")
+    const successful = command("complete", "## inspection\nM  staged.ts")
+    const failed = command("failed", "fatal: not a git repository")
+    expect(successful).toContain("$ git --no-optional-locks status --short --branch")
     expect(successful).toContain("## inspection")
-    expect(successful).toContain("M  staged.ts")
-    expect(successful).toContain(" M tracked.ts")
-    expect(successful).toContain("?? untracked.ts")
-    expect(failed).toContain("✕ Inspected git status")
     expect(failed).toContain("fatal: not a git repository")
   })
 
