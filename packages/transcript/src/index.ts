@@ -297,7 +297,7 @@ const applyUsage = (projection: Projection, event: SourceEvent): Projection => {
     ...projection,
     costUsd: (projection.costUsd ?? 0) + cost,
     usageCursors: [...(projection.usageCursors ?? []), event.cursor],
-    pricingVersion,
+    ...(projection.costUsd === undefined || projection.pricingVersion === pricingVersion ? { pricingVersion } : {}),
   }
 }
 

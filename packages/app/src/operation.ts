@@ -904,6 +904,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     threadId: String(thread.id),
                     turnId: String(first.id),
                     executionId: titleExecutionId(first.id),
+                    optional: true,
                   })
                 return threadRoots
               }),

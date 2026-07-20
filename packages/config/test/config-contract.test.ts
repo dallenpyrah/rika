@@ -49,6 +49,21 @@ describe("ConfigContract", () => {
     ).toThrowError(/unknown key custom/)
   })
 
+  it("accepts arbitrary web search provider credentials and rejects malformed entries", () => {
+    const input = { webSearch: { providers: { custom: { apiKey: "secret" } } } } as const
+    expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)
+    for (const webSearch of [
+      [],
+      {},
+      { providers: [] },
+      { providers: { "": { apiKey: "secret" } } },
+      { providers: { exa: {} } },
+      { providers: { exa: { apiKey: "secret", extra: true } } },
+    ]) {
+      expect(() => ConfigContract.decodeSettingsInput("settings.json", { webSearch })).toThrowError()
+    }
+  })
+
   it.each(["gateways", "models", "modes", "agents", "compaction"])(
     "rejects user-owned internal configuration key %s",
     (key) =>

@@ -100,6 +100,9 @@ export interface Settings {
   readonly mcp: Readonly<Record<string, McpDefinition>>
   readonly notifications: { readonly enabled: boolean; readonly command?: string }
   readonly logging: { readonly level: LogLevel }
+  readonly webSearch: {
+    readonly providers: Readonly<Record<string, { readonly configured: true }>>
+  }
 }
 
 export interface SettingsInput {
@@ -110,10 +113,14 @@ export interface SettingsInput {
   readonly mcp?: Readonly<Record<string, McpDefinition>>
   readonly notifications?: Partial<Settings["notifications"]>
   readonly logging?: Partial<Settings["logging"]>
+  readonly webSearch?: {
+    readonly providers: Readonly<Record<string, { readonly apiKey: string }>>
+  }
 }
 
 export interface Environment {
   readonly providerCredentials: Readonly<Record<string, Redacted.Redacted>>
+  readonly webSearchCredentials: Readonly<Record<string, Redacted.Redacted>>
   readonly parallelApiKey?: Redacted.Redacted
 }
 
@@ -260,6 +267,7 @@ export const decodeSettingsInput: {
     "mcp",
     "notifications",
     "logging",
+    "webSearch",
   ])
   if (value.providers !== undefined && !object(value.providers))
     throw ConfigFileError.make({ path, message: "Providers must be an object" })
@@ -355,6 +363,21 @@ export const decodeSettingsInput: {
     )
       throw ConfigFileError.make({ path, message: "Logging level must be debug, info, warning, or error" })
   }
+  if (value.webSearch !== undefined) {
+    if (!object(value.webSearch)) throw ConfigFileError.make({ path, message: "Web search must be an object" })
+    exactKeys(path, "Web search", value.webSearch, ["providers"])
+    if (!object(value.webSearch.providers))
+      throw ConfigFileError.make({ path, message: "Web search providers must be an object" })
+    for (const [id, provider] of Object.entries(value.webSearch.providers)) {
+      if (id.length === 0)
+        throw ConfigFileError.make({ path, message: "Web search provider ID must be a non-empty string" })
+      if (!object(provider))
+        throw ConfigFileError.make({ path, message: `Web search provider ${id} must be an object` })
+      exactKeys(path, `Web search provider ${id}`, provider, ["apiKey"])
+      if (typeof provider.apiKey !== "string" || provider.apiKey.length === 0)
+        throw ConfigFileError.make({ path, message: `Web search provider ${id} apiKey must be a non-empty string` })
+    }
+  }
   return value as SettingsInput
 })
 
@@ -381,4 +404,5 @@ export const defaults: Settings = {
   mcp: {},
   notifications: { enabled: true },
   logging: { level: "info" },
+  webSearch: { providers: {} },
 }

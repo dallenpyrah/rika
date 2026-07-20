@@ -6,6 +6,7 @@ export interface RootExecution {
   readonly threadId: string
   readonly turnId: string
   readonly executionId?: string
+  readonly optional?: boolean
 }
 
 export interface ExecutionReader {
@@ -84,7 +85,7 @@ export const collect = Effect.fn("UsageCost.collect")(function* (
     seenExecutions.add(current.executionId)
     const inspection = yield* readExecution(reader.inspect(current.executionId), current.executionId)
     if (inspection === undefined) {
-      snapshot = { ...snapshot, complete: false }
+      if (!current.optional) snapshot = { ...snapshot, complete: false }
       continue
     }
     const replay = yield* readExecution(reader.replay(current.executionId), current.executionId)

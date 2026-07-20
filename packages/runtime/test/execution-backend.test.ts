@@ -1244,25 +1244,29 @@ describe("ExecutionBackend Relay client adapter", () => {
         created_at: 10,
         updated_at: 20,
       }
-      Object.assign(fixture.implementation, {
-        createChildFanOut: (input: unknown) => (calls.push(["createFanOut", input]), Effect.succeed(fanOut)),
-        inspectChildFanOut: (input: unknown) => (
+      Object.assign(fixture.implementation.childRuns, {
+        createFanOut: (input: unknown) => (calls.push(["createFanOut", input]), Effect.succeed(fanOut)),
+        inspectFanOut: (input: unknown) => (
           calls.push(["inspectFanOut", input]),
           Effect.succeed({ fan_out: fanOut })
         ),
-        cancelChildFanOut: (input: unknown) => (
+        cancelFanOut: (input: unknown) => (
           calls.push(["cancelFanOut", input]),
           Effect.succeed({ fan_out: fanOut })
         ),
-        registerWorkflowDefinition: (input: { definition: { name: string } }) =>
+        spawn: (input: unknown) => (calls.push(["child", input]), Effect.succeed({})),
+      })
+      Object.assign(fixture.implementation.workflows, {
+        registerDefinition: (input: { definition: { name: string } }) =>
           Effect.succeed({
             record: { definition: input.definition, revision: 1, digest: `digest-${input.definition.name}` },
           }),
-        startWorkflowRun: (input: unknown) => (calls.push(["startWorkflow", input]), Effect.succeed(workflow)),
-        inspectWorkflowRun: (input: unknown) => (calls.push(["inspectWorkflow", input]), Effect.succeed(workflow)),
-        cancelWorkflowRun: (input: unknown) => (calls.push(["cancelWorkflow", input]), Effect.succeed(workflow)),
-        spawnChildRun: (input: unknown) => (calls.push(["child", input]), Effect.succeed({})),
-        getExecution: () =>
+        startRun: (input: unknown) => (calls.push(["startWorkflow", input]), Effect.succeed(workflow)),
+        inspectRun: (input: unknown) => (calls.push(["inspectWorkflow", input]), Effect.succeed(workflow)),
+        cancelRun: (input: unknown) => (calls.push(["cancelWorkflow", input]), Effect.succeed(workflow)),
+      })
+      Object.assign(fixture.implementation.executions, {
+        get: () =>
           Effect.succeed({
             status: "waiting",
             agent_snapshot: {
@@ -1270,7 +1274,7 @@ describe("ExecutionBackend Relay client adapter", () => {
               metadata: { rika_execution_route: currentExecutionRoute() },
             },
           }),
-        inspectExecution: () =>
+        inspect: () =>
           Effect.succeed({
             status: "waiting",
             last_event_cursor: "last",
@@ -1281,11 +1285,13 @@ describe("ExecutionBackend Relay client adapter", () => {
             child_runs: [{ child_execution_id: "child:one", status: "completed" }],
           }),
         steer: (input: unknown) => (calls.push(["steer", input]), Effect.succeed({})),
+      })
+      Object.assign(fixture.implementation.tools, {
         listPendingApprovals: () =>
           Effect.succeed({
             approvals: [{ wait_id: "wait-1", tool_call_id: "call-1", tool_name: "bash", input: {}, requested_at: 3 }],
           }),
-        resolveToolApproval: (input: unknown) => (calls.push(["approval", input]), Effect.succeed({})),
+        resolveApproval: (input: unknown) => (calls.push(["approval", input]), Effect.succeed({})),
         resolvePermission: (input: unknown) => (calls.push(["permission", input]), Effect.succeed({})),
       })
       const result = yield* Effect.gen(function* () {
@@ -1340,9 +1346,9 @@ describe("ExecutionBackend Relay client adapter", () => {
     Effect.gen(function* () {
       const fixture = yield* makeClient()
       const calls: Array<unknown> = []
-      Object.assign(fixture.implementation, {
-        inspectChildFanOut: () => Effect.succeed({ fan_out: null }),
-        cancelChildFanOut: (input: unknown) => {
+      Object.assign(fixture.implementation.childRuns, {
+        inspectFanOut: () => Effect.succeed({ fan_out: null }),
+        cancelFanOut: (input: unknown) => {
           calls.push(input)
           return Effect.succeed({
             fan_out: {
@@ -1355,9 +1361,11 @@ describe("ExecutionBackend Relay client adapter", () => {
             },
           })
         },
-        inspectWorkflowRun: () => Effect.void,
-        cancelWorkflowRun: () => Effect.void,
-        startWorkflowRun: (input: unknown) => {
+      })
+      Object.assign(fixture.implementation.workflows, {
+        inspectRun: () => Effect.void,
+        cancelRun: () => Effect.void,
+        startRun: (input: unknown) => {
           calls.push(input)
           return Effect.succeed({
             execution_id: "workflow:r",
@@ -1371,8 +1379,10 @@ describe("ExecutionBackend Relay client adapter", () => {
             updated_at: 1,
           })
         },
-        getExecution: () => Effect.void,
-        resolveToolApproval: (input: unknown) => (calls.push(input), Effect.succeed({})),
+      })
+      Object.assign(fixture.implementation.executions, { get: () => Effect.void })
+      Object.assign(fixture.implementation.tools, {
+        resolveApproval: (input: unknown) => (calls.push(input), Effect.succeed({})),
         resolvePermission: (input: unknown) => (calls.push(input), Effect.succeed({})),
       })
       const values = yield* Effect.gen(function* () {
@@ -1405,8 +1415,8 @@ describe("ExecutionBackend Relay client adapter", () => {
         replayEvents: [relayEvent("model.output.delta", 1, [{ type: "text", text: "" }])],
       })
       const inputs: Array<unknown> = []
-      Object.assign(fixture.implementation, {
-        createChildFanOut: (input: unknown) => {
+      Object.assign(fixture.implementation.childRuns, {
+        createFanOut: (input: unknown) => {
           inputs.push(input)
           return Effect.succeed({
             fan_out_id: "fan",
@@ -1417,8 +1427,10 @@ describe("ExecutionBackend Relay client adapter", () => {
             members: [],
           })
         },
-        getExecution: () => Effect.succeed({ status: "running" }),
-        inspectExecution: () =>
+      })
+      Object.assign(fixture.implementation.executions, {
+        get: () => Effect.succeed({ status: "running" }),
+        inspect: () =>
           Effect.succeed({ status: "running", waiting_on: [], pending_tool_calls: [], child_runs: [] }),
       })
       const result = yield* Effect.gen(function* () {
@@ -1456,9 +1468,9 @@ describe("ExecutionBackend Relay client adapter", () => {
     Effect.gen(function* () {
       const fixture = yield* makeClient({ cancelStatus: "cancelled" })
       const childExecutionId = Ids.ChildExecutionId.make("execution:parent:child:Review:call-review")
-      Object.assign(fixture.implementation, {
-        getExecution: () => Effect.succeed({ status: "running" }),
-        inspectExecution: () =>
+      Object.assign(fixture.implementation.executions, {
+        get: () => Effect.succeed({ status: "running" }),
+        inspect: () =>
           Effect.succeed({
             status: "running",
             waiting_on: [],
@@ -1506,8 +1518,8 @@ describe("ExecutionBackend Relay client adapter", () => {
         }),
         execution_id: Ids.ExecutionId.make(childExecutionId),
       }
-      Object.assign(fixture.implementation, {
-        inspectExecution: (id: Ids.ExecutionId) =>
+      Object.assign(fixture.implementation.executions, {
+        inspect: (id: Ids.ExecutionId) =>
           Effect.succeed(
             id === rootExecutionId
               ? {
@@ -1532,13 +1544,15 @@ describe("ExecutionBackend Relay client adapter", () => {
                   child_runs: [],
                 },
           ),
-        followExecution: (input: { readonly execution_id: Ids.ExecutionId }) =>
+        follow: (input: { readonly execution_id: Ids.ExecutionId }) =>
           Stream.fromIterable(
             (input.execution_id === rootExecutionId ? [spawned] : [requested]).map((event) => ({
               _tag: "event" as const,
               event,
             })),
           ),
+      })
+      Object.assign(fixture.implementation.tools, {
         listPendingApprovals: (input: { readonly execution_id: Ids.ExecutionId }) =>
           Effect.succeed({
             approvals:
@@ -1587,8 +1601,8 @@ describe("ExecutionBackend Relay client adapter", () => {
     Effect.gen(function* () {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
       const fanOutInputs: Array<any> = []
-      Object.assign(fixture.implementation, {
-        createChildFanOut: (input: any) => {
+      Object.assign(fixture.implementation.childRuns, {
+        createFanOut: (input: any) => {
           fanOutInputs.push(input)
           return Effect.succeed({
             fan_out_id: input.fan_out_id,
@@ -1743,13 +1757,13 @@ describe("ExecutionBackend Relay client adapter", () => {
       const fixture = yield* makeClient()
       const kinds: Array<unknown> = []
       const sent: Array<Record<string, unknown>> = []
-      Object.assign(fixture.implementation, {
-        registerEntityKind: (input: unknown) =>
+      Object.assign(fixture.implementation.residents, {
+        registerKind: (input: unknown) =>
           Effect.sync(() => {
             kinds.push(input)
             return input
           }),
-        getOrCreateEntity: (input: { readonly key: string }) =>
+        spawn: (input: { readonly key: string }) =>
           Effect.succeed({
             kind: "rika-thread",
             key: input.key,
@@ -1759,7 +1773,7 @@ describe("ExecutionBackend Relay client adapter", () => {
             status: "active",
             created_at: 1,
           }),
-        getEntity: (input: { readonly key: string }) =>
+        get: (input: { readonly key: string }) =>
           Effect.succeed({
             kind: "rika-thread",
             key: input.key,
@@ -1769,7 +1783,9 @@ describe("ExecutionBackend Relay client adapter", () => {
             status: "active",
             created_at: 1,
           }),
-        inspectExecution: (executionId: string) =>
+      })
+      Object.assign(fixture.implementation.executions, {
+        inspect: (executionId: string) =>
           Effect.succeed({
             execution_id: executionId,
             status: "waiting",
@@ -1777,6 +1793,8 @@ describe("ExecutionBackend Relay client adapter", () => {
             pending_tool_calls: [],
             child_runs: [],
           }),
+      })
+      Object.assign(fixture.implementation.envelopes, {
         send: (input: Record<string, unknown>) =>
           Effect.sync(() => {
             sent.push(input)
@@ -1840,10 +1858,14 @@ describe("ExecutionBackend Relay client adapter", () => {
         created_at: 1,
       }
       const recreated = { ...failed, execution_id: "execution:entity:thread-stale:1", generation: 1 }
-      Object.assign(fixture.implementation, {
-        registerEntityKind: (input: unknown) => Effect.succeed(input),
-        getEntity: () => Effect.sync(() => (calls.push("get"), failed)),
-        inspectExecution: (executionId: string) =>
+      Object.assign(fixture.implementation.residents, {
+        registerKind: (input: unknown) => Effect.succeed(input),
+        get: () => Effect.sync(() => (calls.push("get"), failed)),
+        destroy: () => Effect.sync(() => (calls.push("destroy"), { ...failed, status: "destroyed" })),
+        spawn: () => Effect.sync(() => (calls.push("create"), recreated)),
+      })
+      Object.assign(fixture.implementation.executions, {
+        inspect: (executionId: string) =>
           Effect.sync(() => {
             calls.push("inspect")
             return {
@@ -1855,8 +1877,8 @@ describe("ExecutionBackend Relay client adapter", () => {
               child_runs: [],
             }
           }),
-        destroyEntity: () => Effect.sync(() => (calls.push("destroy"), { ...failed, status: "destroyed" })),
-        getOrCreateEntity: () => Effect.sync(() => (calls.push("create"), recreated)),
+      })
+      Object.assign(fixture.implementation.envelopes, {
         send: () => Effect.succeed({ envelope_id: "envelope:wake", execution_id: recreated.execution_id }),
       })
 
@@ -1903,11 +1925,11 @@ describe("ExecutionBackend Relay client adapter", () => {
             relayEvent("execution.completed", 2, [Content.text("done")]),
           ],
         })
-        Object.assign(fixture.implementation, {
-          getExecution: () => Effect.succeed({ status: "completed" }),
-          spawnChildRun: () => Effect.succeed({}),
-          createChildFanOut: (definition: unknown) => Effect.succeed(definition),
-          inspectChildFanOut: () => Effect.succeed({ fan_out: null }),
+        Object.assign(fixture.implementation.executions, { get: () => Effect.succeed({ status: "completed" }) })
+        Object.assign(fixture.implementation.childRuns, {
+          spawn: () => Effect.succeed({}),
+          createFanOut: (definition: unknown) => Effect.succeed(definition),
+          inspectFanOut: () => Effect.succeed({ fan_out: null }),
         })
         native.client = fixture.implementation
         native.databaseAcquisitions = 0
@@ -1939,11 +1961,11 @@ describe("ExecutionBackend Relay client adapter", () => {
           relayEvent("execution.completed", 2, [Content.text("done")]),
         ],
       })
-      Object.assign(fixture.implementation, {
-        getExecution: () => Effect.succeed({ status: "completed" }),
-        spawnChildRun: () => Effect.succeed({}),
-        createChildFanOut: (definition: unknown) => Effect.succeed(definition),
-        inspectChildFanOut: () => Effect.succeed({ fan_out: null }),
+      Object.assign(fixture.implementation.executions, { get: () => Effect.succeed({ status: "completed" }) })
+      Object.assign(fixture.implementation.childRuns, {
+        spawn: () => Effect.succeed({}),
+        createFanOut: (definition: unknown) => Effect.succeed(definition),
+        inspectFanOut: () => Effect.succeed({ fan_out: null }),
       })
       native.client = fixture.implementation
       yield* RelayExecutionBackend.layer({

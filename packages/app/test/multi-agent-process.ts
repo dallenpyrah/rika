@@ -152,22 +152,23 @@ const main = Effect.gen(function* () {
       if (message.type === "run") {
         const client = yield* Client.Service
         const parentExecutionId = Ids.ExecutionId.make(`execution:${message.value.parentTurnId}`)
-        const parent = yield* client.getExecution(parentExecutionId)
+        const parent = yield* client.executions.get(parentExecutionId)
         if (parent === undefined) {
           const parentAgentId = Ids.AgentId.make(`agent:fixture:${message.value.parentTurnId}`)
           const address = Ids.AddressId.make("address:rika")
           const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(executionRoute)
-          const registered = yield* client.registerAgent({
+          const registered = yield* client.agents.register({
             id: parentAgentId,
             address,
-            agent: Agent.make(`fixture-${message.value.parentTurnId}`, {
+            agent: Agent.make({
+              name: `fixture-${message.value.parentTurnId}`,
               model: fixture.selection,
               toolkit: Toolkit.make(),
               policy: TurnPolicy.forever,
             }),
             metadata: { rika_execution_route: durableRoute },
           })
-          yield* client.startExecutionByAgentDefinition({
+          yield* client.executions.startByAgentDefinition({
             root_address_id: address,
             session_id: Ids.SessionId.make(`session:fixture:${message.value.parentTurnId}`),
             agent_id: parentAgentId,

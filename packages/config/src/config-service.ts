@@ -17,6 +17,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@rika/config/config-service/Service") {}
 
 const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Settings => {
+  const webSearchProviders = { ...global.webSearch?.providers, ...workspace.webSearch?.providers }
   const provider = (id: ProviderId) => {
     const builtIn = defaults.providers[id]!
     const override = workspace.providers?.[id] ?? global.providers?.[id]
@@ -45,8 +46,18 @@ const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Setting
     mcp: { ...defaults.mcp, ...global.mcp, ...workspace.mcp },
     notifications: { ...defaults.notifications, ...global.notifications, ...workspace.notifications },
     logging: { ...defaults.logging, ...global.logging, ...workspace.logging },
+    webSearch: {
+      providers: Object.fromEntries(Object.keys(webSearchProviders).map((id) => [id, { configured: true as const }])),
+    },
   }
 }
+
+const withWebSearchProviders = (settings: Settings, credentials: Environment["webSearchCredentials"]): Settings => ({
+  ...settings,
+  webSearch: {
+    providers: Object.fromEntries(Object.keys(credentials).map((id) => [id, { configured: true as const }])),
+  },
+})
 
 const diagnostics = (
   global: SettingsInput,
@@ -61,6 +72,12 @@ const diagnostics = (
   record(workspace, "workspace")
   if (environment.parallelApiKey !== undefined)
     entries.push({ path: "parallelApiKey", source: "environment", message: "environment value applied (redacted)" })
+  for (const providerId of Object.keys(environment.webSearchCredentials).toSorted())
+    entries.push({
+      path: `webSearchCredentials.${providerId}`,
+      source: "environment",
+      message: "environment value applied (redacted)",
+    })
   for (const variable of Object.keys(environment.providerCredentials).toSorted())
     entries.push({
       path: `providerCredentials.${variable}`,
@@ -79,12 +96,23 @@ export const memoryLayer = (
 ) => {
   const global = options.global ?? {}
   const workspace = options.workspace ?? {}
-  const environment = options.environment ?? { providerCredentials: {} }
+  const configuredWebSearch = { ...global.webSearch?.providers, ...workspace.webSearch?.providers }
+  const suppliedEnvironment = options.environment ?? { providerCredentials: {}, webSearchCredentials: {} }
+  const webSearchCredentials = {
+    ...suppliedEnvironment.webSearchCredentials,
+    ...Object.fromEntries(Object.entries(configuredWebSearch).map(([id, provider]) => [id, Redacted.make(provider.apiKey)])),
+  }
+  const parallelApiKey = webSearchCredentials.parallel ?? suppliedEnvironment.parallelApiKey
+  const environment: Environment = {
+    ...suppliedEnvironment,
+    webSearchCredentials,
+    ...(parallelApiKey === undefined ? {} : { parallelApiKey }),
+  }
   return Layer.succeed(
     Service,
     Service.of({
       effective: Effect.succeed({
-        settings: mergeSettings(global, workspace),
+        settings: withWebSearchProviders(mergeSettings(global, workspace), webSearchCredentials),
         environment,
         diagnostics: diagnostics(global, workspace, environment),
       }),
@@ -110,14 +138,34 @@ export const liveEnvironmentLayer = (
         .filter((variable, index, all) => all.indexOf(variable) === index)
       const values = yield* Config.all({
         parallelApiKey: Config.option(Config.redacted("PARALLEL_API_KEY")),
+        exaApiKey: Config.option(Config.redacted("EXA_API_KEY")),
+        firecrawlApiKey: Config.option(Config.redacted("FIRECRAWL_API_KEY")),
+        githubApiKey: Config.option(Config.redacted("GITHUB_TOKEN")),
         providerCredentials: Config.all(
           Object.fromEntries(variables.map((variable) => [variable, Config.option(Config.redacted(variable))])),
         ),
       })
-      const environment: Environment =
-        values.parallelApiKey._tag === "Some"
-          ? { providerCredentials: {}, parallelApiKey: Redacted.make(Redacted.value(values.parallelApiKey.value)) }
-          : { providerCredentials: {} }
+      const configuredWebSearch = { ...global.webSearch?.providers, ...workspace.webSearch?.providers }
+      const fallbackCredentials = {
+        parallel: values.parallelApiKey,
+        exa: values.exaApiKey,
+        firecrawl: values.firecrawlApiKey,
+        github: values.githubApiKey,
+      }
+      const webSearchCredentials = Object.fromEntries(
+        new Set([...Object.keys(configuredWebSearch), ...Object.keys(fallbackCredentials)]).values().flatMap((id) => {
+          const configured = configuredWebSearch[id]?.apiKey
+          if (configured !== undefined) return [[id, Redacted.make(configured)]]
+          const fallback = fallbackCredentials[id as keyof typeof fallbackCredentials]
+          return fallback?._tag === "Some" ? [[id, Redacted.make(Redacted.value(fallback.value))]] : []
+        }),
+      )
+      const parallelApiKey = webSearchCredentials.parallel
+      const environment: Environment = {
+        providerCredentials: {},
+        webSearchCredentials,
+        ...(parallelApiKey === undefined ? {} : { parallelApiKey }),
+      }
       const completeEnvironment: Environment = {
         ...environment,
         providerCredentials: Object.fromEntries(
@@ -128,7 +176,7 @@ export const liveEnvironmentLayer = (
       }
       return Service.of({
         effective: Effect.succeed({
-          settings,
+          settings: withWebSearchProviders(settings, webSearchCredentials),
           environment: completeEnvironment,
           diagnostics: diagnostics(global, workspace, completeEnvironment),
         }),

@@ -24,6 +24,7 @@ describe("ConfigService", () => {
       expect(config.settings.agents).toBe(ConfigContract.defaults.agents)
       expect(config.settings.compaction).toBe(ConfigContract.defaults.compaction)
       expect(config.environment.providerCredentials).toEqual({})
+      expect(config.environment.webSearchCredentials).toEqual({})
     }).pipe(provideLayer(ConfigService.memoryLayer())),
   )
 
@@ -145,6 +146,56 @@ describe("ConfigService", () => {
     })
   })
 
+  it.effect("merges web search providers by ID and keeps credentials out of effective settings JSON", () => {
+    const globalSecret = "global-secret-must-not-leak"
+    const workspaceSecret = "workspace-secret-must-not-leak"
+    return Effect.gen(function* () {
+      const config = yield* ConfigService.effective()
+      expect(config.settings.webSearch.providers).toEqual({ exa: { configured: true }, custom: { configured: true } })
+      expect(Redacted.value(config.environment.webSearchCredentials.exa!)).toBe(workspaceSecret)
+      expect(Redacted.value(config.environment.webSearchCredentials.custom!)).toBe(globalSecret)
+      const encoded = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(config)
+      expect(encoded).not.toContain(globalSecret)
+      expect(encoded).not.toContain(workspaceSecret)
+    }).pipe(
+      provideLayer(
+        ConfigService.memoryLayer({
+          global: {
+            webSearch: { providers: { exa: { apiKey: globalSecret }, custom: { apiKey: globalSecret } } },
+          },
+          workspace: { webSearch: { providers: { exa: { apiKey: workspaceSecret } } } },
+        }),
+      ),
+    )
+  })
+
+  it.effect("uses common web search environment fallbacks without replacing explicit settings", () => {
+    const layer = ConfigService.liveEnvironmentLayer({
+      workspace: { webSearch: { providers: { parallel: { apiKey: "settings-parallel" } } } },
+    }).pipe(
+      Layer.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              PARALLEL_API_KEY: "environment-parallel",
+              EXA_API_KEY: "environment-exa",
+              FIRECRAWL_API_KEY: "environment-firecrawl",
+            },
+          }),
+        ),
+      ),
+    )
+    return Effect.gen(function* () {
+      const config = yield* ConfigService.effective()
+      expect(Object.keys(config.settings.webSearch.providers).toSorted()).toEqual(["exa", "firecrawl", "parallel"])
+      expect(Object.keys(config.environment.webSearchCredentials).toSorted()).toEqual(["exa", "firecrawl", "parallel"])
+      expect(Redacted.value(config.environment.webSearchCredentials.parallel!)).toBe("settings-parallel")
+      expect(Redacted.value(config.environment.webSearchCredentials.exa!)).toBe("environment-exa")
+      expect(config.environment.webSearchCredentials.github).toBeUndefined()
+      expect(config.environment.parallelApiKey).toBe(config.environment.webSearchCredentials.parallel)
+    }).pipe(provideLayer(layer))
+  })
+
   it.effect("merges intentionally configurable product settings and reports credential presence", () =>
     Effect.gen(function* () {
       const config = yield* ConfigService.effective()
@@ -169,6 +220,7 @@ describe("ConfigService", () => {
           environment: {
             parallelApiKey: Redacted.make("parallel-secret"),
             providerCredentials: { RIKA_MODEL_API_KEY: Redacted.make("model-secret") },
+            webSearchCredentials: {},
           },
         }),
       ),
