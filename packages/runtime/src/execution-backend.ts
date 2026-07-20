@@ -66,6 +66,8 @@ import {
 } from "./agent-depth"
 import { resolveSpawnModel } from "./agent-model"
 
+export { streamingOnlyLanguageModel, withStreamingOnlyModel } from "./streaming-only-model"
+
 export type ModelVariantPolicy = "registration-key" | "fixed-selection"
 
 type ToolRuntimeRequirements =
@@ -445,6 +447,38 @@ const routeForSelection = (pin: ExecutionRoutePin, selection: ModelRegistry.Mode
       route.model === selection.model &&
       route.registrationKey === selection.registrationKey,
   )
+const recoveredDeltaOutput = (events: ReadonlyArray<Execution.ExecutionEvent>) => {
+  const groups = new Map<string, { order: number; deltas: Array<{ index: number; delta: string }> }>()
+  for (const event of events) {
+    if (event.type !== "model.output.delta") continue
+    const delta = event.data?.delta
+    if (typeof delta !== "string" || delta.length === 0) continue
+    const partId = typeof event.data?.part_id === "string" ? event.data.part_id : ""
+    const group = groups.get(partId) ?? { order: groups.size, deltas: [] }
+    const index = typeof event.data?.delta_index === "number" ? event.data.delta_index : group.deltas.length
+    group.deltas.push({ index, delta })
+    groups.set(partId, group)
+  }
+  const text = [...groups.values()]
+    .toSorted((left, right) => left.order - right.order)
+    .map((group) =>
+      group.deltas
+        .toSorted((left, right) => left.index - right.index)
+        .map((entry) => entry.delta)
+        .join(""),
+    )
+    .join("\n\n")
+  return text.length === 0 ? [] : [{ type: "text", text }]
+}
+
+const childFailureText = (terminal: Execution.ExecutionEvent | undefined) => {
+  if (terminal?.type !== "execution.failed" && terminal?.type !== "execution.cancelled") return undefined
+  const message = terminal.data?.message
+  const outcome =
+    terminal.type === "execution.cancelled" ? "Subagent execution was cancelled" : "Subagent execution failed"
+  return typeof message === "string" && message.length > 0 ? `${outcome}: ${message}` : outcome
+}
+
 export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEvent>) => {
   const terminal = events.findLast(
     (executionEvent) =>
@@ -464,6 +498,14 @@ export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEven
       executionEvent.content?.some((part) => part.type === "text" && part.text.trim().length > 0) === true,
   )
   const recovered = terminal?.type === "execution.failed" && finalResponse !== undefined
+  const terminalContent =
+    terminal?.content === undefined || terminal.content.length === 0 ? undefined : terminal.content
+  const primary =
+    recovered || terminalContent === undefined
+      ? (finalResponse?.content ?? recoveredDeltaOutput(events))
+      : terminalContent
+  const failure =
+    recovered || terminalContent !== undefined || finalResponse !== undefined ? undefined : childFailureText(terminal)
   return {
     status:
       terminal?.type === "execution.completed" || recovered
@@ -471,10 +513,7 @@ export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEven
         : terminal?.type === "execution.cancelled"
           ? ("cancelled" as const)
           : ("failed" as const),
-    output:
-      recovered || terminal?.content === undefined || terminal.content.length === 0
-        ? (finalResponse?.content ?? [])
-        : terminal.content,
+    output: failure === undefined ? primary : [...primary, { type: "text", text: failure }],
   }
 }
 const awaitChildResult = (client: Client.Interface, childId: string) => {

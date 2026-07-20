@@ -1,5 +1,6 @@
 import { ConfigContract, Models } from "@rika/config"
 import type * as Turn from "@rika/persistence/turn"
+import { withStreamingOnlyModel } from "@rika/runtime/relay"
 import { Compaction, ModelRegistry } from "@batonfx/core"
 import { anthropic, anthropicClientLayerConfig } from "@batonfx/providers/anthropic"
 import {
@@ -164,6 +165,14 @@ const batonCredentials = (auth: OpenAiAuth.ServiceInterface, fingerprint: string
   }
 }
 
+const streamingOnlyRegistration =
+  (streamingOnly: boolean) =>
+  (registration: ModelRegistry.Registration): ModelRegistry.Registration =>
+    streamingOnly ? withStreamingOnlyModel(registration) : registration
+
+const routeStreamingOnly = (route: ConfigContract.ResolvedModelRoute): boolean =>
+  route.providerConnection.streamingOnly ?? ConfigContract.isStreamingOnlyBaseUrl(route.providerConnection.baseUrl)
+
 const registerOpenAi = (route: ConfigContract.ResolvedModelRoute, resolution: Resolution) =>
   credential(route.providerConnection.apiKeyEnv, route.providerId).pipe(
     Effect.flatMap((apiKey) =>
@@ -172,7 +181,10 @@ const registerOpenAi = (route: ConfigContract.ResolvedModelRoute, resolution: Re
           model: route.model,
           registrationKey: resolution.registrationKey,
           config: resolution.options as NonNullable<Parameters<typeof openAi>[0]["config"]>,
-        }).pipe(Effect.map((registration) => ({ ...registration, provider: route.providerId }))),
+        }).pipe(
+          Effect.map((registration) => ({ ...registration, provider: route.providerId })),
+          Effect.map(streamingOnlyRegistration(routeStreamingOnly(route))),
+        ),
         openAiClientLayerConfig({
           apiUrl: Config.succeed(route.providerConnection.baseUrl),
           apiKey: Config.succeed(apiKey),
@@ -192,7 +204,10 @@ const registerAnthropic = (route: ConfigContract.ResolvedModelRoute, resolution:
           model: route.model,
           registrationKey: resolution.registrationKey,
           config: resolution.options as NonNullable<Parameters<typeof anthropic>[0]["config"]>,
-        }).pipe(Effect.map((registration) => ({ ...registration, provider: route.providerId }))),
+        }).pipe(
+          Effect.map((registration) => ({ ...registration, provider: route.providerId })),
+          Effect.map(streamingOnlyRegistration(routeStreamingOnly(route))),
+        ),
         anthropicClientLayerConfig({
           apiUrl: Config.succeed(route.providerConnection.baseUrl),
           apiKey: Config.succeed(apiKey),
@@ -249,7 +264,10 @@ const adapters = (auth: OpenAiAuth.ServiceInterface): ReadonlyArray<Adapter> => 
           registrationKey: resolution.registrationKey,
           credentials: batonCredentials(account!.auth, account!.fingerprint),
           config: resolution.options as NonNullable<Parameters<typeof openAiAccount>[0]["config"]>,
-        }).pipe(Effect.map((registration) => ({ ...registration, provider: route.providerId }))),
+        }).pipe(
+          Effect.map((registration) => ({ ...registration, provider: route.providerId })),
+          Effect.map(withStreamingOnlyModel),
+        ),
         sanitizedFetchLayer,
       ).pipe(Effect.mapError((error) => RuntimeError.make({ message: String(error) }))),
     restore: (route, runtime) =>
@@ -269,7 +287,10 @@ const adapters = (auth: OpenAiAuth.ServiceInterface): ReadonlyArray<Adapter> => 
                 ),
                 store: false,
               } as NonNullable<Parameters<typeof openAiAccount>[0]["config"]>,
-            }).pipe(Effect.map((registration) => ({ ...registration, provider: route.provider }))),
+            }).pipe(
+              Effect.map((registration) => ({ ...registration, provider: route.provider })),
+              Effect.map(withStreamingOnlyModel),
+            ),
             sanitizedFetchLayer,
           ).pipe(Effect.mapError((error) => RuntimeError.make({ message: String(error) }))),
   },

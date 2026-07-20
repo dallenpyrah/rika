@@ -1218,8 +1218,8 @@ export const configuredBackendLayer = ({
                 repositoryLayer,
                 turnRepositoryLayer,
               )
-              const settings = yield* loadSettingsFile(`${executionWorkspace}/.rika/settings.json`)
-              const layer = ConfigService.liveEnvironmentLayer({ global: globalSettings, workspace: settings })
+              const workspaceSettings = yield* loadSettingsFile(`${executionWorkspace}/.rika/settings.json`)
+              const layer = ConfigService.liveEnvironmentLayer({ global: globalSettings, workspace: workspaceSettings })
               const config = yield* ConfigService.effective().pipe(provideLayerScoped(layer))
               return {
                 rules: [

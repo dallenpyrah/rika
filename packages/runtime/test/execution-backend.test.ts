@@ -351,7 +351,10 @@ describe("ExecutionBackend Relay client adapter", () => {
       relayEvent("execution.failed", 4, [], { message: "internal tool failed" }),
     ]
 
-    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({ status: "failed", output: [] })
+    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({
+      status: "failed",
+      output: [{ type: "text", text: "Subagent execution failed: internal tool failed" }],
+    })
   })
 
   it("keeps cancellation authoritative after a completed final response", () => {
@@ -367,15 +370,18 @@ describe("ExecutionBackend Relay client adapter", () => {
   })
 
   it.each([
-    ["execution.failed", "failed"],
-    ["execution.cancelled", "cancelled"],
-  ] as const)("preserves %s when a child has no completed final response", (terminal, status) => {
+    ["execution.failed", "failed", "Subagent execution failed: terminal reason"],
+    ["execution.cancelled", "cancelled", "Subagent execution was cancelled: terminal reason"],
+  ] as const)("preserves %s when a child has no completed final response", (terminal, status, failureText) => {
     const events = [
       relayEvent("model.output.delta", 1, [Content.text("partial")]),
       relayEvent(terminal, 2, [], { message: "terminal reason" }),
     ]
 
-    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({ status, output: [] })
+    expect(RelayExecutionBackend.resolveChildResult(events)).toEqual({
+      status,
+      output: [{ type: "text", text: failureText }],
+    })
   })
 
   it("keeps preset inheritance separate from explicit child-run overrides", () => {

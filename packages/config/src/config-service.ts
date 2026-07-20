@@ -4,6 +4,7 @@ import {
   type Diagnostic,
   type EffectiveConfig,
   type Environment,
+  isStreamingOnlyBaseUrl,
   type ProviderId,
   type Settings,
   type SettingsInput,
@@ -19,11 +20,15 @@ const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Setting
   const provider = (id: ProviderId) => {
     const builtIn = defaults.providers[id]!
     const override = workspace.providers?.[id] ?? global.providers?.[id]
-    if (override === undefined) return builtIn
+    const baseUrl = override?.baseUrl ?? builtIn.baseUrl
+    const streamingOnly =
+      override?.streamingOnly ?? builtIn.streamingOnly ?? (isStreamingOnlyBaseUrl(baseUrl) ? true : undefined)
+    if (override === undefined) return streamingOnly === undefined ? builtIn : { ...builtIn, streamingOnly }
     return {
       protocol: builtIn.protocol,
-      baseUrl: override.baseUrl ?? builtIn.baseUrl,
+      baseUrl,
       ...(override.apiKeyEnv === undefined ? {} : { apiKeyEnv: override.apiKeyEnv }),
+      ...(streamingOnly === undefined ? {} : { streamingOnly }),
     }
   }
   return {

@@ -26,10 +26,22 @@ export interface ProviderConnection {
   readonly protocol: string
   readonly baseUrl: string
   readonly apiKeyEnv?: string | undefined
+  readonly streamingOnly?: boolean | undefined
 }
 export interface ProviderOverride {
   readonly baseUrl?: string
   readonly apiKeyEnv?: string
+  readonly streamingOnly?: boolean
+}
+
+export const isStreamingOnlyBaseUrl = (baseUrl: string): boolean => {
+  let url: URL
+  try {
+    url = new URL(baseUrl)
+  } catch {
+    return false
+  }
+  return url.hostname === "chatgpt.com" || url.hostname.endsWith(".chatgpt.com")
 }
 
 export interface ModelVariant {
@@ -254,7 +266,9 @@ export const decodeSettingsInput: {
   exactKeys(path, "Providers", (value.providers ?? {}) as Record<string, unknown>, Object.keys(providerDefaults))
   for (const [name, providerConnection] of Object.entries((value.providers ?? {}) as Record<string, unknown>)) {
     if (!object(providerConnection)) throw ConfigFileError.make({ path, message: `Provider ${name} must be an object` })
-    exactKeys(path, `Provider ${name}`, providerConnection, ["baseUrl", "apiKeyEnv"])
+    exactKeys(path, `Provider ${name}`, providerConnection, ["baseUrl", "apiKeyEnv", "streamingOnly"])
+    if (providerConnection.streamingOnly !== undefined && typeof providerConnection.streamingOnly !== "boolean")
+      throw ConfigFileError.make({ path, message: `Provider ${name} streamingOnly must be a boolean` })
     if (
       providerConnection.apiKeyEnv !== undefined &&
       (typeof providerConnection.apiKeyEnv !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(providerConnection.apiKeyEnv))
