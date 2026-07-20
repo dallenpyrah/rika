@@ -17,6 +17,7 @@ export interface Projection {
   readonly checkpointCursor: string | undefined
   readonly costUsd: number | undefined
   readonly usageCursors: ReadonlyArray<string> | undefined
+  readonly pricingVersion: string | undefined
 }
 
 export interface PageOptions {
@@ -65,6 +66,7 @@ const CheckpointRow = Schema.Struct({
   checkpoint_cursor: Schema.NullOr(Schema.String),
   cost_usd: Schema.NullOr(Schema.Finite),
   usage_cursors_json: Schema.NullOr(Schema.String),
+  pricing_version: Schema.NullOr(Schema.String),
   created_at: Schema.Finite,
   updated_at: Schema.Finite,
 })
@@ -113,6 +115,7 @@ const stored = (turn: Turn, projection: Transcript.Projection): Projection => ({
   checkpointCursor: projection.checkpointCursor,
   costUsd: projection.costUsd,
   usageCursors: projection.usageCursors === undefined ? undefined : clone(projection.usageCursors),
+  pricingVersion: projection.pricingVersion,
 })
 
 const source = (projection: Projection): Transcript.Projection => ({
@@ -123,6 +126,7 @@ const source = (projection: Projection): Transcript.Projection => ({
   ...(projection.checkpointCursor === undefined ? {} : { checkpointCursor: projection.checkpointCursor }),
   ...(projection.costUsd === undefined ? {} : { costUsd: projection.costUsd }),
   ...(projection.usageCursors === undefined ? {} : { usageCursors: projection.usageCursors }),
+  ...(projection.pricingVersion === undefined ? {} : { pricingVersion: projection.pricingVersion }),
 })
 
 const continueProjection = (
@@ -276,6 +280,7 @@ export const layer = Layer.effect(
         checkpointCursor: row.checkpoint_cursor ?? undefined,
         costUsd: row.cost_usd ?? undefined,
         usageCursors,
+        pricingVersion: row.pricing_version ?? undefined,
       } satisfies Projection
     })
     const storeUnit = Effect.fn("TranscriptRepository.storeUnit")(function* (turn: Turn, unit: Transcript.Unit) {
@@ -294,11 +299,12 @@ export const layer = Layer.effect(
         projection.usageCursors === undefined
           ? null
           : yield* Schema.encodeEffect(UsageCursorsJson)(projection.usageCursors)
-      yield* sql`INSERT INTO rika_transcript_checkpoints (turn_id, thread_id, model_phase, revision, oldest_cursor, checkpoint_cursor, cost_usd, usage_cursors_json, updated_at)
-          VALUES (${turn.id}, ${turn.threadId}, ${projection.modelPhase}, ${projection.revision}, ${projection.oldestCursor ?? null}, ${projection.checkpointCursor ?? null}, ${projection.costUsd ?? null}, ${usageCursors}, ${turn.updatedAt})
+      yield* sql`INSERT INTO rika_transcript_checkpoints (turn_id, thread_id, model_phase, revision, oldest_cursor, checkpoint_cursor, cost_usd, usage_cursors_json, pricing_version, updated_at)
+          VALUES (${turn.id}, ${turn.threadId}, ${projection.modelPhase}, ${projection.revision}, ${projection.oldestCursor ?? null}, ${projection.checkpointCursor ?? null}, ${projection.costUsd ?? null}, ${usageCursors}, ${projection.pricingVersion ?? null}, ${turn.updatedAt})
           ON CONFLICT(turn_id) DO UPDATE SET thread_id = excluded.thread_id, model_phase = excluded.model_phase,
             revision = excluded.revision, oldest_cursor = excluded.oldest_cursor, checkpoint_cursor = excluded.checkpoint_cursor,
-            cost_usd = excluded.cost_usd, usage_cursors_json = excluded.usage_cursors_json, updated_at = excluded.updated_at`
+            cost_usd = excluded.cost_usd, usage_cursors_json = excluded.usage_cursors_json,
+            pricing_version = excluded.pricing_version, updated_at = excluded.updated_at`
     }, Effect.mapError(error))
     const storedResult = Effect.fn("TranscriptRepository.storedResult")(function* (turnId: TurnId) {
       const result = yield* get(turnId)

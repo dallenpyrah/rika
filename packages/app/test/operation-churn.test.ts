@@ -17,7 +17,7 @@ type Client = {
 const patchSequences = (client: Client) =>
   client.events.flatMap((event) => (event._tag === "TranscriptPatched" ? [event.event.sequence] : []))
 
-it.effect("delivers every joined subscriber suffix exactly once through subscribe and unsubscribe churn", () =>
+it.effect("delivers each joined subscriber suffix exactly once through subscribe and unsubscribe churn", () =>
   Effect.gen(function* () {
     const thread: Thread.Thread = {
       id: Thread.ThreadId.make("churn-thread"),

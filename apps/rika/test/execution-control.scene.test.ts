@@ -9,7 +9,7 @@ test(
     Scene.run({
       workspace: { "fixture.txt": "scene fixture" },
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "fixture.txt" }, "active-steer-read")], 1_000),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "fixture.txt" }, "active-steer-read")], 1_000),
         Scene.model.text("ACTIVE_STEER_COMPLETE"),
       ],
       actions: [
@@ -31,7 +31,7 @@ test(
     Scene.run({
       workspace: { "fixture.txt": "scene fixture" },
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "fixture.txt" }, "queued-steer-read")], 1_500),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "fixture.txt" }, "queued-steer-read")], 1_500),
         Scene.model.text("QUEUED_STEER_COMPLETE"),
       ],
       actions: [
@@ -148,9 +148,9 @@ test(
   () =>
     Scene.run({
       workspace: { "approval.txt": "TOOL_APPROVAL_CONTENT" },
-      environment: { RIKA_TEST_APPROVAL_TOOLS: "read_file" },
+      environment: { RIKA_TEST_APPROVAL_TOOLS: "read" },
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "approval.txt" }, "approval-read")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "approval.txt" }, "approval-read")]),
         Scene.model.text("TOOL_APPROVAL_COMPLETE"),
       ],
       actions: [
@@ -172,7 +172,7 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf", args: ["RECONNECT_TOOL_COMPLETE"] }, "reconnect-tool"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["RECONNECT_TOOL_COMPLETE"] }, "reconnect-tool"),
         ]),
         Scene.model.text("RECONNECTED_COMPLETE", 1_000),
       ],
@@ -196,9 +196,9 @@ test(
   () =>
     Scene.run({
       workspace: { "restart-approval.txt": "RESTART_APPROVAL_CONTENT" },
-      environment: { RIKA_TEST_APPROVAL_TOOLS: "read_file" },
+      environment: { RIKA_TEST_APPROVAL_TOOLS: "read" },
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "restart-approval.txt" }, "restart-read")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "restart-approval.txt" }, "restart-read")]),
         Scene.model.text("RESTARTED_WAIT_COMPLETE"),
       ],
       actions: [

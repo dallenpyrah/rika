@@ -4,7 +4,7 @@ import { Context, Crypto, Effect, Layer, Option, PlatformError, Ref, Schema, Str
 import { LanguageModel, type Prompt, Response, Tool, Toolkit } from "effect/unstable/ai"
 
 export const hostAgentId = Ids.AgentId.make("agent:rika-thread-host")
-export const entityKind = Ids.EntityKindName.make("rika-thread")
+export const entityKind = Ids.ResidentKindName.make("rika-thread")
 export const continueAsNewAfterTurns = 32
 export const hostMaxWaitTurns = 1_000_000
 export const hostSelection: ModelRegistry.ModelSelection = { provider: "rika", model: "thread-host" }

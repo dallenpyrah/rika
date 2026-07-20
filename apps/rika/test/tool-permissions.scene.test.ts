@@ -73,7 +73,7 @@ test("model-invoked built-in shell cannot bypass an ask policy", () =>
     script: [
       Scene.model.turn([
         Scene.model.toolCall(
-          "shell",
+          "bash",
           { command: "sh", args: ["-lc", "printf MODEL_APPROVED > model-approved.txt"] },
           "model-shell",
         ),
@@ -96,7 +96,7 @@ test("model-invoked built-in shell cannot bypass a deny policy", () =>
     script: [
       Scene.model.turn([
         Scene.model.toolCall(
-          "shell",
+          "bash",
           { command: "sh", args: ["-lc", "printf BYPASS > model-denied.txt"] },
           "denied-model-shell",
         ),
@@ -119,7 +119,7 @@ test("restarting at a durable shell wait does not approve or duplicate the comma
     script: [
       Scene.model.turn([
         Scene.model.toolCall(
-          "shell",
+          "bash",
           { command: "sh", args: ["-lc", "printf BYPASS > restarted.txt"] },
           "restarted-shell",
         ),
@@ -146,12 +146,12 @@ test("read-only specialists cannot acquire shell by asking or by naming it direc
       Scene.model.turn([Scene.model.toolCall("oracle", { prompt: "Try to run shell." }, "oracle-shell")]),
       Scene.model.turn([
         Scene.model.toolCall(
-          "shell",
+          "bash",
           { command: "sh", args: ["-lc", "printf BYPASS > specialist-bypass.txt"] },
           "specialist-shell",
         ),
       ]),
-      Scene.model.object({ answer: "Shell was unavailable.", evidence: [] }),
+      Scene.model.text("Shell was unavailable."),
       Scene.model.text("Specialist narrowing checked."),
     ],
     actions: [

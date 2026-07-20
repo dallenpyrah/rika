@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { providers } from "@opencode-ai/models/snapshot"
 import {
   applyEvent,
   empty,
@@ -15,7 +16,7 @@ const usage = (cursor: string, sequence: number): SourceEvent => ({
   sequence,
   type: "model.usage.reported",
   createdAt: sequence,
-  data: { input_tokens: 1_000_000, output_tokens: 0, model: "test" },
+  data: { cost_usd: 1.25 },
 })
 
 describe("Transcript projection", () => {
@@ -90,7 +91,7 @@ describe("Transcript projection", () => {
         sequence: 2,
         type: "tool.call.requested",
         createdAt: 2,
-        data: { tool_call_id: "read", tool_name: "read_file", input: { path: "a.ts" } },
+        data: { tool_call_id: "read", tool_name: "read", input: { path: "a.ts" } },
       },
       {
         cursor: "3",
@@ -116,78 +117,24 @@ describe("Transcript projection", () => {
     ).toEqual(["first", "final"])
   })
 
-  it("projects an apply_patch draft as evolving file diffs before the call completes", () => {
-    let projection = empty("turn-a", "patch files")
-    const fragments = [
-      '{"patchText":"*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-old',
-      "\\n+new\\n*** Add File: src/b.ts\\n+hello",
-      '\\n*** End Patch"}',
-    ]
-    for (const [index, delta] of fragments.entries())
-      projection = applyEvent(projection, {
-        cursor: `delta-${index}`,
-        sequence: index,
-        type: "model.toolcall.delta",
-        createdAt: index,
-        data: { tool_call_id: "patch-1", tool_name: "apply_patch", delta },
-      })
-
-    expect("drafts" in projection).toBe(false)
-    expect(projection.units).toHaveLength(2)
-    expect(projection.units[1]).toMatchObject({
-      key: "tool:turn-a:patch-1",
-      content: {
-        _tag: "Block",
-        block: {
-          _tag: "ToolCall",
-          name: "apply_patch",
-          status: "running",
-          presentation: { family: "edit" },
-          files: [
-            { key: "turn-a:patch-1:0", path: "src/a.ts", kind: "update", patch: expect.stringContaining("-old") },
-            { key: "turn-a:patch-1:1", path: "src/b.ts", kind: "add", patch: expect.stringContaining("+hello") },
-          ],
-        },
-      },
-    })
-  })
-
-  it("replaces a patch preview with every completed unified diff on the same tool unit", () => {
-    const projection = project("turn-a", "patch files", [
+  it("projects completed unified diffs from any tool result", () => {
+    const projection = project("turn-a", "change files", [
       {
         cursor: "1",
         sequence: 1,
-        type: "model.toolcall.delta",
+        type: "tool.call.requested",
         createdAt: 1,
-        data: {
-          tool_call_id: "patch-1",
-          tool_name: "apply_patch",
-          delta: '{"patchText":"*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-old\\n+new\\n*** End Patch"}',
-        },
+        data: { tool_call_id: "change-1", tool_name: "bash", input: { command: "make changes" } },
       },
       {
         cursor: "2",
         sequence: 2,
-        type: "tool.call.requested",
+        type: "tool.result.received",
         createdAt: 2,
         data: {
-          tool_call_id: "patch-1",
-          tool_name: "apply_patch",
-          input: {
-            patchText: "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch",
-          },
-        },
-      },
-      {
-        cursor: "3",
-        sequence: 3,
-        type: "tool.result.received",
-        createdAt: 3,
-        data: {
-          tool_call_id: "patch-1",
+          tool_call_id: "change-1",
           output: {
-            text: "applied 2 operations",
-            truncated: false,
+            text: "changed 2 files",
             diff:
               "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n\n" +
               "diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+hello",
@@ -195,9 +142,8 @@ describe("Transcript projection", () => {
         },
       },
     ])
-    expect(projection.units).toHaveLength(2)
     expect(projection.units[1]).toMatchObject({
-      key: "tool:turn-a:patch-1",
+      key: "tool:turn-a:change-1",
       content: {
         _tag: "Block",
         block: {
@@ -287,49 +233,6 @@ describe("Transcript projection", () => {
         },
       },
     })
-  })
-
-  it("keeps a new-file result marked as a create when the events replay", () => {
-    const events: ReadonlyArray<SourceEvent> = [
-      {
-        cursor: "call",
-        sequence: 1,
-        type: "tool.call.requested",
-        createdAt: 1,
-        data: {
-          tool_call_id: "patch",
-          tool_name: "apply_patch",
-          input: { patchText: "*** Begin Patch\n*** Add File: tmp-agent-test.txt\n+hello\n*** End Patch" },
-        },
-      },
-      {
-        cursor: "result",
-        sequence: 2,
-        type: "tool.result.received",
-        createdAt: 2,
-        data: {
-          tool_call_id: "patch",
-          output: {
-            text: "applied",
-            diff: "diff --git a/tmp-agent-test.txt b/tmp-agent-test.txt\nnew file mode 100644\n--- /dev/null\n+++ b/tmp-agent-test.txt\n@@ -0,0 +1 @@\n+hello",
-          },
-        },
-      },
-    ]
-    const live = project("turn-a", "create the file", events)
-    const replayed = events.reduce((current, event) => applyEvent(current, event), empty("turn-a", "create the file"))
-    for (const projection of [live, replayed])
-      expect(projection.units[1]).toMatchObject({
-        key: "tool:turn-a:patch",
-        content: {
-          _tag: "Block",
-          block: {
-            _tag: "ToolCall",
-            status: "complete",
-            files: [{ path: "tmp-agent-test.txt", kind: "add", preview: false }],
-          },
-        },
-      })
   })
 
   it("labels a spawn call Subagent working before any child metadata arrives", () => {
@@ -435,7 +338,7 @@ describe("Transcript projection", () => {
         sequence: 1,
         type: "tool.call.requested",
         createdAt: 1,
-        data: { tool_call_id: "read", tool_name: "read_file" },
+        data: { tool_call_id: "read", tool_name: "read" },
       },
       {
         cursor: "tool-error",
@@ -495,7 +398,7 @@ describe("Transcript projection", () => {
           sequence: 2,
           type: "tool.call.requested",
           createdAt: 2,
-          data: { tool_call_id: "read", tool_name: "read_file" },
+          data: { tool_call_id: "read", tool_name: "read" },
         },
         {
           cursor: "tool-error",
@@ -590,18 +493,18 @@ describe("Transcript projection", () => {
   it("keeps a process wait as its own row and names it from the parent command", () => {
     const projection = project("turn-a", "run tests", [
       {
-        cursor: "shell",
+        cursor: "bash",
         sequence: 1,
         type: "tool.call.requested",
         createdAt: 1,
-        data: { tool_call_id: "shell-1", tool_name: "shell", input: { command: "bun", args: ["test"] } },
+        data: { tool_call_id: "bash-1", tool_name: "bash", input: { command: "bun", args: ["test"] } },
       },
       {
         cursor: "shell-result",
         sequence: 2,
         type: "tool.result.received",
         createdAt: 2,
-        data: { tool_call_id: "shell-1", output: { text: "", processId: "process-1", running: true } },
+        data: { tool_call_id: "bash-1", output: { text: "", processId: "process-1", running: true } },
       },
       {
         cursor: "wait",
@@ -632,7 +535,7 @@ describe("Transcript projection", () => {
         _tag: "Block",
         block: {
           _tag: "ToolCall",
-          parentId: "turn-a:shell-1",
+          parentId: "turn-a:bash-1",
           detail: "bun test",
           status: "failed",
           process: { exitCode: 7 },
@@ -663,7 +566,7 @@ describe("Transcript projection", () => {
         sequence: 1,
         type: "tool.call.requested",
         createdAt: 1,
-        data: { tool_call_id: "read", tool_name: "read_file", input: { path: "a.ts" } },
+        data: { tool_call_id: "read", tool_name: "read", input: { path: "a.ts" } },
       },
       {
         cursor: "result",
@@ -794,7 +697,7 @@ describe("Transcript projection", () => {
         sequence: 5,
         type: "tool.call.requested",
         createdAt: 5,
-        data: { tool_call_id: "call", tool_name: "read_file", input: { path: "a.ts" } },
+        data: { tool_call_id: "call", tool_name: "read", input: { path: "a.ts" } },
       },
       {
         cursor: "result",
@@ -808,14 +711,14 @@ describe("Transcript projection", () => {
         sequence: 7,
         type: "tool.approval.requested",
         createdAt: 7,
-        data: { wait_id: "approval", tool_name: "shell" },
+        data: { wait_id: "approval", tool_name: "bash" },
       },
       {
         cursor: "approval-resolved",
         sequence: 8,
         type: "tool.approval.resolved",
         createdAt: 8,
-        data: { wait_id: "approval", tool_name: "shell", approved: true },
+        data: { wait_id: "approval", tool_name: "bash", approved: true },
       },
       {
         cursor: "permission-requested",
@@ -961,14 +864,14 @@ describe("Transcript projection", () => {
         sequence: 9,
         type: "model.usage.reported",
         createdAt: 1,
-        data: { input_tokens: 1_000_000, output_tokens: 0, model: "test" },
+        data: { cost_usd: 1.25 },
       },
       {
         cursor: "usage-30",
         sequence: 30,
         type: "model.usage.reported",
         createdAt: 2,
-        data: { input_tokens: 1_000_000, output_tokens: 0, model: "test" },
+        data: { cost_usd: 1.25 },
       },
     ])
 
@@ -976,6 +879,34 @@ describe("Transcript projection", () => {
     expect(projection.checkpointCursor).toBe("foreign")
     expect(projection.costUsd).toBeCloseTo(2.5, 10)
     expect(projection.usageCursors).toEqual(["usage-9", "usage-30"])
+  })
+
+  it("uses models.dev context tiers at their published threshold", () => {
+    const model = providers.openai!.models["gpt-5.6-sol"]!
+    const tier = model.cost!.tiers![0]!
+    const event = (cursor: string, inputTokens: number): SourceEvent => ({
+      cursor,
+      sequence: 1,
+      type: "model.usage.reported",
+      createdAt: 1,
+      data: {
+        provider: "openai",
+        model: model.id,
+        input_tokens: inputTokens,
+        input_tokens_uncached: inputTokens,
+        output_tokens: 0,
+      },
+    })
+
+    expect(project("below", "", [event("below", tier.tier.size - 1)]).costUsd).toBeCloseTo(
+      ((tier.tier.size - 1) * model.cost!.input) / 1_000_000,
+      10,
+    )
+    expect(project("at", "", [event("at", tier.tier.size)]).costUsd).toBeCloseTo(
+      (tier.tier.size * tier.input) / 1_000_000,
+      10,
+    )
+    expect(project("at", "", [event("at", tier.tier.size)]).pricingVersion).toBeDefined()
   })
 
   it("counts duplicate and out-of-order usage events exactly once", () => {

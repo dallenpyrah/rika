@@ -6,12 +6,28 @@ import { Effect } from "effect"
 const shell = (id: string, command: string, output: string) => ({
   _tag: "ToolCall" as const,
   id,
-  name: "shell",
+  name: "bash",
   input: JSON.stringify({ command }),
   output,
   status: "complete" as const,
   presentation: { family: "shell" as const, action: "command", activeLabel: "Running", completeLabel: "Ran" },
   detail: command,
+  files: [],
+})
+
+const windowUnitToolCall = (id: string, family: "agent" | "explore") => ({
+  _tag: "ToolCall" as const,
+  id,
+  name: family === "agent" ? "task" : "read",
+  input: "{}",
+  status: "complete" as const,
+  presentation: {
+    family,
+    action: family === "agent" ? "task" : "read",
+    activeLabel: family === "agent" ? "Exploring" : "Reading",
+    completeLabel: family === "agent" ? "Explored" : "Read",
+  },
+  detail: id,
   files: [],
 })
 
@@ -99,7 +115,7 @@ const opentui = vi.hoisted(() => {
     scrollHeight = 24
     stickyScroll = true
     viewport = { height: 24 }
-    content = { minHeight: 0, justifyContent: "flex-end" }
+    content = new BoxRenderable(this.renderer, { minHeight: 0, justifyContent: "flex-end" })
     verticalScrollBar = { visible: true }
 
     scrollTo(offset: number) {
@@ -264,7 +280,6 @@ import {
   renderTranscript,
   renderTranscriptStyled,
 } from "../src/adapter"
-import { ExecutionEvents } from "../src"
 import { initial, ready, update, type Mode, type Model, type ThreadItem } from "../src/view-state"
 import { colors } from "../src/theme"
 
@@ -588,7 +603,7 @@ describe("Surface", () => {
     const children = Array.from({ length: 205 }, (_, index) => ({
       _tag: "ToolCall" as const,
       id: `child-${index}`,
-      name: "read_file",
+      name: "read",
       input: `{"path":"src/${index}.ts"}`,
       status: "complete" as const,
       presentation: {
@@ -617,9 +632,54 @@ describe("Surface", () => {
 
     const bounded = boundedTranscriptModel(state)
 
-    expect(bounded.items).toHaveLength(201)
+    expect(bounded.items).toHaveLength(206)
     expect(bounded.blocks[0]).toMatchObject({ _tag: "ToolCall", id: "agent" })
     expect(bounded.items[0]).toMatchObject({ _tag: "Block", index: 0, id: "tool:agent" })
+  })
+
+  test("keeps a subagent's direct tool calls mounted whenever its nested child survives the window", () => {
+    const layout: ReadonlyArray<{
+      readonly id: string
+      readonly family: "agent" | "explore"
+      readonly parentId?: string
+    }> = [
+      { id: "agent", family: "agent" },
+      ...Array.from({ length: 30 }, (_, index) => ({
+        id: `agent-tool-${index}`,
+        family: "explore" as const,
+        parentId: "agent",
+      })),
+      { id: "nested", family: "agent", parentId: "agent" },
+      ...Array.from({ length: 250 }, (_, index) => ({
+        id: `nested-child-${index}`,
+        family: "explore" as const,
+        parentId: "nested",
+      })),
+    ]
+    const blocks = layout.map((entry) => windowUnitToolCall(entry.id, entry.family))
+    const state = model({
+      blocks,
+      items: layout.map((entry, index) =>
+        entry.parentId === undefined
+          ? { _tag: "Block" as const, index, id: `tool:${entry.id}`, turnId: "turn" }
+          : { _tag: "Block" as const, index, id: `tool:${entry.id}`, turnId: "child", parentId: entry.parentId },
+      ),
+    })
+
+    const bounded = boundedTranscriptModel(state)
+    const mountedIds = new Set(
+      (bounded.blocks as ReadonlyArray<Transcript.Block>).flatMap((block) =>
+        block._tag === "ToolCall" ? [block.id] : [],
+      ),
+    )
+
+    expect([...mountedIds].some((id) => id.startsWith("nested-child-"))).toBe(true)
+    expect(mountedIds.has("nested")).toBe(true)
+    for (let index = 0; index < 30; index += 1)
+      expect(
+        mountedIds.has(`agent-tool-${index}`),
+        `agent-tool-${index} should stay mounted with the nested child`,
+      ).toBe(true)
   })
 
   it.effect("mounts a bounded transcript window for large histories", () =>
@@ -648,7 +708,7 @@ describe("Surface", () => {
       {
         _tag: "ToolCall",
         id: "1",
-        name: "read_file",
+        name: "read",
         input: "a",
         status: "running",
         presentation: {
@@ -664,7 +724,7 @@ describe("Surface", () => {
       {
         _tag: "ToolCall",
         id: "2",
-        name: "write_file",
+        name: "write",
         input: "b",
         status: "complete",
         presentation: { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
@@ -756,7 +816,7 @@ describe("Surface", () => {
           {
             _tag: "ToolCall",
             id: "create",
-            name: "create_file",
+            name: "write",
             input: JSON.stringify({ path: "src/new.ts" }),
             status: "complete",
             presentation: { family: "edit", action: "create", activeLabel: "Creating", completeLabel: "Created" },
@@ -783,7 +843,7 @@ describe("Surface", () => {
 
   test("matches Amp edit, wait, explore, and subagent row shapes", () => {
     const presentation = {
-      edit: { family: "edit" as const, action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
+      edit: { family: "edit" as const, action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
       direct: { family: "direct" as const, action: "status", activeLabel: "Waiting for", completeLabel: "Waited for" },
       explore: {
         family: "explore" as const,
@@ -805,7 +865,7 @@ describe("Surface", () => {
         {
           _tag: "ToolCall",
           id: "patch",
-          name: "apply_patch",
+          name: "edit",
           input: "{}",
           status: "running",
           presentation: presentation.edit,
@@ -893,7 +953,7 @@ describe("Surface", () => {
         {
           _tag: "ToolCall",
           id: "child-shell",
-          name: "shell",
+          name: "bash",
           input: JSON.stringify({ command: "sleep 60" }),
           status: "cancelled",
           presentation: {
@@ -931,83 +991,16 @@ describe("Surface", () => {
     expect(built.ranges.find((range) => range.unit === "tool:child-shell")?.animated).toBe(false)
   })
 
-  test("grows an Edited diff on every tool-call delta tick and finishes with the unified diff", () => {
-    let projection = Transcript.empty("turn", "update the file")
-    let state = ExecutionEvents.projectUnits(initial("/workspace", "medium"), projection.units)
-    const fragments = [
-      '{"patchText":"*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-old',
-      "\\n+new",
-      '\\n+newer\\n*** End Patch"}',
-    ]
-    const frames: Array<string> = []
-    for (const [index, delta] of fragments.entries()) {
-      projection = Transcript.applyEvent(projection, {
-        cursor: `delta-${index}`,
-        sequence: index,
-        type: "model.toolcall.delta",
-        createdAt: index,
-        data: { tool_call_id: "patch", tool_name: "apply_patch", delta },
-      })
-      state = ExecutionEvents.projectUnits(state, projection.units)
-      frames.push(
-        renderTranscriptStyled(state)
-          .chunks.map((chunk) => chunk.text)
-          .join(""),
-      )
-    }
-
-    projection = Transcript.applyEvent(projection, {
-      cursor: "requested",
-      sequence: 3,
-      type: "tool.call.requested",
-      createdAt: 3,
-      data: {
-        tool_call_id: "patch",
-        tool_name: "apply_patch",
-        input: {
-          patchText: "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n+newer\n*** End Patch",
-        },
-      },
-    })
-    projection = Transcript.applyEvent(projection, {
-      cursor: "result",
-      sequence: 4,
-      type: "tool.result.received",
-      createdAt: 4,
-      data: {
-        tool_call_id: "patch",
-        output: {
-          text: "applied",
-          diff: "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-old\n+new\n+newer",
-        },
-      },
-    })
-    state = ExecutionEvents.projectUnits(state, projection.units)
-    const finalFrame = renderTranscriptStyled({ ...state, expandedRowKeys: ["tool:turn:patch"] })
-      .chunks.map((chunk) => chunk.text)
-      .join("")
-
-    expect(frames[0]).toContain("- old")
-    expect(frames[0]).not.toContain("+ new")
-    expect(frames[1]).toContain("+ new")
-    expect(frames[1]).not.toContain("+ newer")
-    expect(frames[2]).toContain("+ newer")
-    expect(frames[1]!.length).toBeGreaterThan(frames[0]!.length)
-    expect(frames[2]!.length).toBeGreaterThan(frames[1]!.length)
-    expect(finalFrame).toContain("1 - old")
-    expect(finalFrame).toContain("1 + new")
-    expect(finalFrame).toContain("2 + newer")
-  })
 
   const editToolBlock = {
     _tag: "ToolCall",
     id: "patch",
-    name: "apply_patch",
+    name: "edit",
     input: "{}",
     status: "complete",
     presentation: {
       family: "edit",
-      action: "patch",
+      action: "edit",
       activeLabel: "Editing",
       completeLabel: "Edited",
     },
@@ -1709,7 +1702,7 @@ describe("Surface", () => {
           .join("")
 
       surface.update(model({ input: "abcd", cursor: 2 }))
-      expect(surface.transcriptContent).toBeInstanceOf(Object)
+      expect(surface.transcriptScroll.content).toBeInstanceOf(Object)
       expect(inputText()).toBe("abcd")
       expect(surface.inputBox.title).toBe("")
       expect(modeLabelText()).toBe(" medium ")
@@ -1782,7 +1775,7 @@ describe("Surface", () => {
           paletteOpen: true,
         }),
       )
-      expect(surface.transcriptContent).toBeInstanceOf(Object)
+      expect(surface.transcriptScroll.content).toBeInstanceOf(Object)
       expect(
         renderTranscriptStyled(
           model({
@@ -1852,7 +1845,7 @@ describe("Surface", () => {
       )
       expect(surface.sidebar.visible).toBe(false)
       surface.update(model({ entries: [{ role: "assistant", text: "ok" }] }))
-      expect(surface.transcriptContent).toBeInstanceOf(Object)
+      expect(surface.transcriptScroll.content).toBeInstanceOf(Object)
     }),
   )
 })

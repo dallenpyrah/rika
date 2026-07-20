@@ -272,6 +272,11 @@ const usageCursorCheckpoints = Effect.gen(function* () {
   yield* sql`ALTER TABLE rika_transcript_checkpoints ADD COLUMN usage_cursors_json TEXT`
 })
 
+const pricingVersionCheckpoints = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`ALTER TABLE rika_transcript_checkpoints ADD COLUMN pricing_version TEXT`
+})
+
 const migrationNames = [
   "product_baseline",
   "turns",
@@ -288,6 +293,7 @@ const migrationNames = [
   "provider_execution_routes",
   "durable_queue_claims",
   "usage_cursor_checkpoints",
+  "pricing_version_checkpoints",
 ] as const
 
 const migrations = SqliteMigrator.fromRecord({
@@ -306,6 +312,7 @@ const migrations = SqliteMigrator.fromRecord({
   "13_provider_execution_routes": providerExecutionRoutes,
   "14_durable_queue_claims": durableQueueClaims,
   "15_usage_cursor_checkpoints": usageCursorCheckpoints,
+  "16_pricing_version_checkpoints": pricingVersionCheckpoints,
 })
 
 const migrationTableObjects = ["table:rika_migrations"]
@@ -347,6 +354,7 @@ const schemaObjectsByMigration: ReadonlyArray<ReadonlyArray<string>> = [
   semanticTranscriptObjects,
   queueObjects,
   queueObjects,
+  currentObjects,
   currentObjects,
   currentObjects,
 ]

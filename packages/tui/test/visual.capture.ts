@@ -37,7 +37,7 @@ const tool = (
   input: detail,
   status,
   presentation:
-    name === "read_file" || name === "grep"
+    name === "read" || name === "grep"
       ? {
           family: "explore",
           action: name === "grep" ? "grep" : "read",
@@ -144,11 +144,11 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
     ],
     ["reasoning-collapsed", reasoning, 80, 24],
     ["reasoning-expanded", update(reasoning, { _tag: "ReasoningToggled", index: 0 }), 80, 24],
-    ["tool", block(tool("tool-1", "read_file", "src/main.ts", "running")), 80, 24],
+    ["tool", block(tool("tool-1", "read", "src/main.ts", "running")), 80, 24],
     [
       "tool-expanded",
       {
-        ...block(tool("tool-1", "read_file", "src/main.ts", "complete", "contents")),
+        ...block(tool("tool-1", "read", "src/main.ts", "complete", "contents")),
         expandedRowKeys: ["tool:tool-1"],
       },
       80,
@@ -192,15 +192,15 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
       "edit-streaming",
       block({
         _tag: "ToolCall",
-        id: "streaming-patch",
-        name: "apply_patch",
-        input: '{"patchText":"*** Begin Patch\\n*** Update File: src/main.ts\\n@@\\n-old\\n+new"',
+        id: "streaming-edit",
+        name: "edit",
+        input: JSON.stringify({ path: "src/main.ts", oldText: "old", newText: "new" }),
         status: "running",
-        presentation: { family: "edit", action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
+        presentation: { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
         detail: "src/main.ts",
         files: [
           {
-            key: "streaming-patch:0",
+            key: "streaming-edit:0",
             path: "src/main.ts",
             kind: "update",
             patch: "--- a/src/main.ts\n+++ b/src/main.ts\n@@\n-old\n+new",
@@ -220,8 +220,8 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
         ...base(),
         blocks: [
           tool("requested", "grep", "TODO", "running"),
-          tool("running", "read_file", "README.md", "running"),
-          tool("complete", "edit_file", "report.md", "complete", "done"),
+          tool("running", "read", "README.md", "running"),
+          tool("complete", "edit", "report.md", "complete", "done"),
           { _tag: "ToolResult", id: "failed", output: "permission denied", failed: true },
         ],
       },
@@ -324,7 +324,7 @@ export const scenarios = (): ReadonlyArray<readonly [string, Model, number, numb
           {
             _tag: "ToolCall",
             id: "child-shell",
-            name: "shell",
+            name: "bash",
             input: JSON.stringify({ command: "sleep 60" }),
             status: "cancelled",
             presentation: {

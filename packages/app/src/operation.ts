@@ -538,6 +538,7 @@ const sourceProjection = (projection: TranscriptRepository.Projection): Transcri
   ...(projection.checkpointCursor === undefined ? {} : { checkpointCursor: projection.checkpointCursor }),
   ...(projection.costUsd === undefined ? {} : { costUsd: projection.costUsd }),
   ...(projection.usageCursors === undefined ? {} : { usageCursors: projection.usageCursors }),
+  ...(projection.pricingVersion === undefined ? {} : { pricingVersion: projection.pricingVersion }),
 })
 
 export const rootExecutionEvents: {
@@ -898,7 +899,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   turnId: String(turn.id),
                 }))
                 const first = values[0]
-                if (first !== undefined)
+                if (first?.executionRoute.title !== undefined)
                   threadRoots.push({
                     threadId: String(thread.id),
                     turnId: String(first.id),
@@ -914,7 +915,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
       let usageSnapshot: UsageCost.Snapshot | undefined
       const currentUsageCosts = (): UsageCost.Snapshot => usageSnapshot ?? UsageCost.empty
       const displayGlobalCostUsd = (totals: UsageCost.Snapshot): number =>
-        Math.max(totals.globalCostUsd, persistedGlobalCostUsd)
+        totals.complete ? totals.globalCostUsd : persistedGlobalCostUsd
       const loadUsageCosts = usageCostAdmission.withPermits(1)(
         Effect.suspend(() => {
           if (usageSnapshot !== undefined) return Effect.void
@@ -2198,16 +2199,17 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           if (backend.pageEvents === undefined) {
             const result = yield* backend.replay(turn.id)
             apply(result.events)
-            return projection
+            return { ...projection, pricingVersion: Transcript.pricingVersion }
           }
           let after: string | undefined
           const cursors = new Set<string>()
           while (true) {
             const page = yield* backend.pageEvents(turn.id, "forward", after, 200)
             apply(page.events)
-            if (!page.hasMore) return projection
+            if (!page.hasMore) return { ...projection, pricingVersion: Transcript.pricingVersion }
             const next = page.newestCursor
-            if (next === undefined || cursors.has(next)) return projection
+            if (next === undefined || cursors.has(next))
+              return yield* operationError(`Transcript event cursor did not advance for Turn ${turn.id}`)
             cursors.add(next)
             after = next
           }
@@ -2233,17 +2235,23 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               }
             }
           }
-          if (current.costUsd !== undefined) return
-          if (!current.units.some((unit) => unit.key !== `turn:${turn.id}:user`)) return
+          if (current.pricingVersion === Transcript.pricingVersion) return
           const replayed = yield* replayRootProjection(backend, turn)
-          if (replayed.costUsd === undefined) return
           const stored = yield* transcripts.get(turn.id)
-          if (stored === undefined || stored.costUsd !== undefined) return
+          if (stored === undefined || stored.pricingVersion === Transcript.pricingVersion) return
+          const source = sourceProjection(stored)
+          const {
+            costUsd: _costUsd,
+            usageCursors: _usageCursors,
+            pricingVersion: _pricingVersion,
+            ...preserved
+          } = source
           yield* projectionAdmission.withPermits(1)(
             transcripts.replace(turn, {
-              ...sourceProjection(stored),
-              costUsd: replayed.costUsd,
+              ...preserved,
+              ...(replayed.costUsd === undefined ? {} : { costUsd: replayed.costUsd }),
               ...(replayed.usageCursors === undefined ? {} : { usageCursors: replayed.usageCursors }),
+              pricingVersion: Transcript.pricingVersion,
             }),
           )
         })
@@ -2376,9 +2384,9 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           yield* Ref.set(transcriptHasOlder, hasOlder)
           const observedThreadCostUsd = usageCosts.threadCostUsd.get(thread.id)
           const threadCostUsd =
-            observedThreadCostUsd === undefined
+            observedThreadCostUsd === undefined || !usageCosts.complete
               ? page.threadCostUsd
-              : Math.max(observedThreadCostUsd, page.threadCostUsd)
+              : observedThreadCostUsd
           if (before === undefined) {
             const queue = yield* turns.readQueue(thread.id)
             const activeTurn = yield* turns.findActive(thread.id)

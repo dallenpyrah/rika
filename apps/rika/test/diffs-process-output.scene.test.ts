@@ -4,25 +4,26 @@ import { Scene } from "./scene"
 const quitAfter = (marker: string) => [Scene.action.writeAfter(marker, "\u0003", 500)]
 
 test(
-  "streams a patch preview and replaces it with the final single-file diff",
+  "renders an exact edit as a single-file diff",
   () =>
     Scene.run({
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             { command: "sh", args: ["-c", "mkdir -p src; echo \"export const mode = 'old'\" > src/config.ts"] },
             "seed-config",
           ),
         ]),
         Scene.model.turn([
           Scene.model.toolCall(
-            "apply_patch",
+            "edit",
             {
-              patchText:
-                "*** Begin Patch\n*** Update File: src/config.ts\n@@\n-export const mode = 'old'\n+export const mode = 'new'\n+export const enabled = true\n*** End Patch",
+              path: "src/config.ts",
+              oldText: "export const mode = 'old'\n",
+              newText: "export const mode = 'new'\nexport const enabled = true\n",
             },
-            "stream-config-patch",
+            "edit-config",
           ),
         ]),
         Scene.model.text("PATCH_STREAM_COMPLETE"),
@@ -43,19 +44,14 @@ test(
 )
 
 test(
-  "groups multi-file patches and expands each file independently",
+  "groups multi-file writes and expands each file independently",
   () =>
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall(
-            "apply_patch",
-            {
-              patchText:
-                "*** Begin Patch\n*** Add File: alpha.txt\n+ALPHA_FILE_BODY\n*** Add File: beta.txt\n+BETA_FILE_BODY\n*** Add File: gamma.txt\n+GAMMA_FILE_BODY\n*** End Patch",
-            },
-            "three-file-patch",
-          ),
+          Scene.model.toolCall("write", { path: "alpha.txt", content: "ALPHA_FILE_BODY\n" }, "write-alpha"),
+          Scene.model.toolCall("write", { path: "beta.txt", content: "BETA_FILE_BODY\n" }, "write-beta"),
+          Scene.model.toolCall("write", { path: "gamma.txt", content: "GAMMA_FILE_BODY\n" }, "write-gamma"),
         ]),
         Scene.model.text("MULTI_FILE_COMPLETE"),
       ],
@@ -83,9 +79,9 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf", args: ["FIRST_OUTPUT"] }, "first-command"),
-          Scene.model.toolCall("shell", { command: "printf", args: ["SECOND_OUTPUT"] }, "second-command"),
-          Scene.model.toolCall("shell", { command: "printf", args: ["THIRD_OUTPUT"] }, "third-command"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["FIRST_OUTPUT"] }, "first-command"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["SECOND_OUTPUT"] }, "second-command"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["THIRD_OUTPUT"] }, "third-command"),
         ]),
         Scene.model.text("COMMAND_GROUP_COMPLETE"),
       ],
@@ -114,7 +110,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             {
               command: "sh",
               args: ["-c", "i=1; while [ $i -le 20 ]; do echo BOUND_LINE_$i; i=$((i+1)); done; exit 7"],
@@ -147,7 +143,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             {
               command: "sh",
               args: ["-c", "printf EARLY_CHUNK; sleep 0.4; printf LATE_CHUNK"],
@@ -183,7 +179,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             {
               command: "sh",
               args: ["-c", 'printf STARTED_CHUNK; sleep 5; printf FORBIDDEN_\\"LATE_CHUNK\\"'],
@@ -214,8 +210,8 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf", args: ["DUPLICATE_OUTPUT"] }, "duplicate-one"),
-          Scene.model.toolCall("shell", { command: "printf", args: ["DUPLICATE_OUTPUT"] }, "duplicate-two"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["DUPLICATE_OUTPUT"] }, "duplicate-one"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["DUPLICATE_OUTPUT"] }, "duplicate-two"),
         ]),
         Scene.model.text("DUPLICATES_COMPLETE"),
       ],
@@ -238,7 +234,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             { command: "printf", args: ["# PROCESS_HEADING\\n**PROCESS_BOLD**\\n- PROCESS_ITEM"] },
             "markdown-output",
           ),

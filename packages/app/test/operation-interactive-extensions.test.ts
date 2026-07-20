@@ -1,9 +1,11 @@
 import { describe, expect, it } from "@effect/vitest"
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
+import * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
+import * as Transcript from "@rika/transcript"
 import { Context, Deferred, Effect, Fiber, Layer, Queue, Ref } from "effect"
 import { Operation } from "../src/index"
 import { executeInteractiveCommand } from "../src/operation-contract"
@@ -45,10 +47,14 @@ const interactiveLayer = (
   registration: Deferred.Deferred<Operation.InteractiveSession>,
   makeThreadId: Effect.Effect<Thread.ThreadId> = Effect.die("unused"),
   makeTurnId: Effect.Effect<Turn.TurnId> = Effect.die("unused"),
+  transcripts?: TranscriptRepository.Interface,
 ) =>
   Operation.productLayer({
     repositoryLayer: Layer.succeed(ThreadRepository.Service, repository),
     turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
+    ...(transcripts === undefined
+      ? {}
+      : { transcriptRepositoryLayer: Layer.succeed(TranscriptRepository.Service, transcripts) }),
     backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
     defaultWorkspace: "/work",
     makeThreadId,
@@ -57,6 +63,77 @@ const interactiveLayer = (
   })
 
 describe("interactive session extensions", () => {
+  it.effect("replays a stale pricing checkpoint and allows its cost to decrease", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const selected = thread("priced")
+        const repository = yield* ThreadRepository.makeMemory([selected])
+        const target: Turn.Turn = {
+          id: Turn.TurnId.make("turn-priced"),
+          threadId: selected.id,
+          prompt: "priced",
+          executionRoute: Turn.testExecutionRoute(),
+          status: "completed",
+          createdAt: 1,
+          updatedAt: 1,
+        }
+        const turns = yield* TurnRepository.makeMemory([target])
+        const transcriptContext = yield* Layer.build(TranscriptRepository.memoryLayer)
+        const transcripts = Context.get(transcriptContext, TranscriptRepository.Service)
+        yield* transcripts.replace(target, { ...Transcript.empty(target.id, target.prompt), costUsd: 15 })
+        const usage: ExecutionBackend.Event = {
+          cursor: "corrected-usage",
+          sequence: 1,
+          type: "model.usage.reported",
+          createdAt: 1,
+          data: { cost_usd: 5 },
+        }
+        const backend = ExecutionBackend.Service.of({
+          ...baseBackend,
+          inspect: (executionId) =>
+            Effect.succeed(
+              executionId === target.id
+                ? {
+                    turnId: executionId,
+                    status: "completed" as const,
+                    waits: [],
+                    pendingTools: [],
+                    children: [],
+                  }
+                : undefined,
+            ),
+          replay: (executionId) =>
+            Effect.succeed({ turnId: executionId, status: "completed" as const, events: [usage] }),
+        })
+        const registration = yield* Deferred.make<Operation.InteractiveSession>()
+        const context = yield* Layer.build(
+          interactiveLayer(repository, turns, backend, registration, Effect.die("unused"), Effect.die("unused"), transcripts),
+        )
+        const operation = Context.get(context, Operation.Service)
+        const operationFiber = yield* Effect.forkChild(
+          operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }),
+        )
+        const session = yield* Deferred.await(registration)
+        const events = yield* Queue.unbounded<Operation.InteractiveEvent>()
+        const feed = yield* Effect.forkChild(session.events((event) => Queue.offerUnsafe(events, event)))
+
+        yield* session.selectThread(selected.id, 1)
+        let loaded = yield* Queue.take(events)
+        while (loaded._tag !== "SelectionLoaded") loaded = yield* Queue.take(events)
+
+        expect(loaded.threadCostUsd).toBe(5)
+        expect(loaded.globalCostUsd).toBe(5)
+        expect(yield* transcripts.get(target.id)).toMatchObject({
+          costUsd: 5,
+          pricingVersion: Transcript.pricingVersion,
+        })
+
+        yield* Fiber.interrupt(feed)
+        yield* Fiber.interrupt(operationFiber)
+      }),
+    ),
+  )
+
   it.effect("loads one thread with its child cost and the data-root global total", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -259,7 +336,7 @@ describe("interactive session extensions", () => {
             sequence: 0,
             type: "tool.call.requested",
             createdAt: 3,
-            data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts" } },
+            data: { tool_call_id: "read", tool_name: "read", input: { path: "src/a.ts" } },
           },
           {
             cursor: "child-delegate",
@@ -297,7 +374,7 @@ describe("interactive session extensions", () => {
             sequence: 0,
             type: "tool.call.requested",
             createdAt: 6,
-            data: { tool_call_id: "shell", tool_name: "shell", input: { command: "bun test" } },
+            data: { tool_call_id: "bash", tool_name: "bash", input: { command: "bun test" } },
           },
           {
             cursor: "nested-response",

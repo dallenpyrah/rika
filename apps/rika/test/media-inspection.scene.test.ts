@@ -30,7 +30,7 @@ symlinkSync("png", "inside-link.png")
 symlinkSync("../outside.png", "outside-link.png")
 `
 
-const setupTurn = Scene.model.turn([Scene.model.toolCall("shell", { command: "bun", args: ["-e", setup] }, "setup")])
+const setupTurn = Scene.model.turn([Scene.model.toolCall("bash", { command: "bun", args: ["-e", setup] }, "setup")])
 
 test(
   "inspects every supported media format with metadata and the exact size boundary",

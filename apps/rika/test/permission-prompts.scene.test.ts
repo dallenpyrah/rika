@@ -68,7 +68,7 @@ test(
   () =>
     Scene.run({
       script: [
-        Scene.model.turn([Scene.model.toolCall("shell", { command: "printf", args: ["TOOL_OK"] }, "ordinary-tool")]),
+        Scene.model.turn([Scene.model.toolCall("bash", { command: "printf", args: ["TOOL_OK"] }, "ordinary-tool")]),
         Scene.model.text("ORDINARY_COMPLETE"),
         Scene.model.object({ title: "Ordinary tool" }),
       ],
@@ -88,7 +88,7 @@ test(
   () =>
     Scene.run({
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "missing-permission-scene.txt" }, "failed-tool")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "missing-permission-scene.txt" }, "failed-tool")]),
         Scene.model.text("FAILURE_OBSERVED"),
         Scene.model.object({ title: "Tool failure" }),
       ],
@@ -107,9 +107,9 @@ test(
   "allows a durable tool approval and resumes the scripted model",
   () =>
     Scene.run({
-      toolApprovals: ["shell"],
+      toolApprovals: ["bash"],
       script: [
-        Scene.model.turn([Scene.model.toolCall("shell", { command: "printf", args: ["APPROVED_TOOL"] }, "approved")]),
+        Scene.model.turn([Scene.model.toolCall("bash", { command: "printf", args: ["APPROVED_TOOL"] }, "approved")]),
         Scene.model.text("APPROVAL_COMPLETE"),
         Scene.model.object({ title: "Tool approval" }),
       ],
@@ -129,11 +129,11 @@ test(
   "denies a durable tool approval and lets the model handle the refusal",
   () =>
     Scene.run({
-      toolApprovals: ["shell"],
+      toolApprovals: ["bash"],
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             { command: "printf", args: ["\\106\\117\\122\\102\\111\\104\\104\\105\\116\\137\\124\\117\\117\\114"] },
             "denied",
           ),
@@ -157,10 +157,10 @@ test(
   "reconnects to one durable tool approval without duplicating its card",
   () =>
     Scene.run({
-      toolApprovals: ["shell"],
+      toolApprovals: ["bash"],
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf", args: ["AFTER_RECONNECT"] }, "reconnect"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["AFTER_RECONNECT"] }, "reconnect"),
         ]),
         Scene.model.text("RECONNECTED_COMPLETE"),
         Scene.model.object({ title: "Reconnect approval" }),
@@ -187,11 +187,11 @@ test(
   "cancels while a durable approval is pending without running the tool",
   () =>
     Scene.run({
-      toolApprovals: ["shell"],
+      toolApprovals: ["bash"],
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             { command: "printf", args: ["\\114\\101\\124\\105\\137\\122\\105\\123\\125\\114\\124"] },
             "cancelled",
           ),

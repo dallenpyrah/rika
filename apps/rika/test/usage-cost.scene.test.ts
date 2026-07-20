@@ -2,7 +2,7 @@ import { expect, test } from "vitest"
 import { Scene } from "./scene"
 
 test(
-  "does not price token-only Relay usage in the real TUI",
+  "estimates token-only Relay usage in the real TUI",
   () =>
     Scene.run({
       script: [
@@ -16,15 +16,14 @@ test(
         Scene.action.writeAfter("Usage converted.", "\u0003", 500),
       ],
     }).then((result) => {
-      expect(result.output).toContain("0.00")
-      expect(result.output).not.toContain("$11.25")
+      expect(result.output).toContain("$11.25")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,
 )
 
 test(
-  "keeps several child token reports at zero across durable replay",
+  "sums parent and child token estimates across durable replay",
   () =>
     Scene.run({
       script: [
@@ -38,9 +37,6 @@ test(
         ...["Alpha", "Beta", "Gamma"].map((name) =>
           Scene.model.text(`${name} usage complete.`, undefined, { inputTokens: 500_000, outputTokens: 500_000 }),
         ),
-        ...["Alpha", "Beta", "Gamma"].map((name) =>
-          Scene.model.object({ summary: `${name} usage complete`, files: [] }),
-        ),
         Scene.model.text("Parent usage complete.", 1_000, { inputTokens: 500_000, outputTokens: 500_000 }),
       ],
       actions: [
@@ -52,8 +48,7 @@ test(
       expect(result.output).toContain("Parent usage complete.")
       expect(result.diagnostics).toContain('"rika.event.type":"model.usage.reported"')
       expect(result.childExecutions).toHaveLength(3)
-      expect(result.output).toContain("$0.00")
-      expect(result.output).not.toMatch(/\$[1-9][0-9]*\.[0-9]{2}/)
+      expect(result.output).toContain("$24.13")
       expect(result.diagnostics.match(/resident\.connection\.accepted/g)?.length ?? 0).toBe(2)
       expect(result.diagnostics).toContain("usage-alpha")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')

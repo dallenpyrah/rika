@@ -1,5 +1,5 @@
 import { Function, Option, Schema } from "effect"
-import type { Model, TranscriptBlock, TranscriptItem } from "./view-state"
+import type { Model, TranscriptBlock, TranscriptItem } from "../view-state"
 
 export type ToolGroupKind = "explore" | "edit" | "shell" | "other"
 
@@ -24,10 +24,10 @@ export type TranscriptUnit =
 
 export type TranscriptUnitId = string
 
-const readToolNames = new Set(["read_file", "read", "view_file"])
+const readToolNames = new Set(["read", "view_file"])
 const searchToolNames = new Set(["grep", "find_files", "glob", "list_dir", "codebase_search"])
-const editToolNames = new Set(["edit_file", "create_file", "apply_patch", "write_file"])
-const shellToolNames = new Set(["shell", "bash", "run_command"])
+const editToolNames = new Set(["edit", "write"])
+const shellToolNames = new Set(["bash", "run_command"])
 const ToolInputJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
 export interface PathTarget {
@@ -166,7 +166,40 @@ export const orderedTranscriptItems = (model: Model): ReadonlyArray<TranscriptIt
         ...model.blocks.map((_, index) => ({ _tag: "Block" as const, index })),
       ]
 
+interface RowsCache {
+  readonly blocks: ReadonlyArray<unknown>
+  readonly entries: ReadonlyArray<unknown>
+  readonly entryItemByIndex: ReadonlyMap<number, TranscriptItem>
+  readonly blockItemByIndex: ReadonlyMap<number, TranscriptItem>
+  units?: ReadonlyArray<TranscriptUnit>
+}
+
+const rowsCacheByItems = new WeakMap<ReadonlyArray<unknown>, RowsCache>()
+
+const rowsCacheFor = (model: Model): RowsCache | undefined => {
+  if (model.items.length === 0) return undefined
+  const cached = rowsCacheByItems.get(model.items)
+  if (cached !== undefined && cached.blocks === model.blocks && cached.entries === model.entries) return cached
+  const entryItemByIndex = new Map<number, TranscriptItem>()
+  const blockItemByIndex = new Map<number, TranscriptItem>()
+  for (const item of model.items as ReadonlyArray<TranscriptItem>) {
+    const byIndex = item._tag === "Entry" ? entryItemByIndex : blockItemByIndex
+    if (!byIndex.has(item.index)) byIndex.set(item.index, item)
+  }
+  const built: RowsCache = { blocks: model.blocks, entries: model.entries, entryItemByIndex, blockItemByIndex }
+  rowsCacheByItems.set(model.items, built)
+  return built
+}
+
 export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => {
+  const cache = rowsCacheFor(model)
+  if (cache?.units !== undefined) return cache.units
+  const units = transcriptUnitsImpl(model)
+  if (cache !== undefined) cache.units = units
+  return units
+}
+
+const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
   const units: Array<TranscriptUnit> = []
   const childItems = new Map<string, Array<TranscriptItem>>()
   for (const item of orderedTranscriptItems(model)) {
@@ -271,10 +304,11 @@ export const expandableUnits = (model: Model): ReadonlyArray<TranscriptUnit> =>
 
 export const expandableRowIds = (model: Model): ReadonlyArray<TranscriptUnitId> => {
   const ids: Array<TranscriptUnitId> = []
+  const expanded = new Set(model.expandedRowKeys)
   const appendTool = (unit: ToolTranscriptUnit) => {
     const id = transcriptUnitId(model, unit)
     ids.push(id)
-    if (!model.expandedRowKeys.includes(id)) return
+    if (!expanded.has(id)) return
     for (const child of unit.children ?? []) appendTool(child)
     if (unit.group === "edit") {
       const files = unit.blocks.flatMap((index) => {
@@ -301,11 +335,15 @@ export const transcriptUnitId: {
   (model: Model, unit: TranscriptUnit): TranscriptUnitId
   (unit: TranscriptUnit): (model: Model) => TranscriptUnitId
 } = Function.dual(2, (model: Model, unit: TranscriptUnit): TranscriptUnitId => {
+  const cache = rowsCacheFor(model)
   if (unit.kind === "entry") {
     const entry = model.entries[unit.entry]
-    const item = orderedTranscriptItems(model).find(
-      (candidate) => candidate._tag === "Entry" && candidate.index === unit.entry,
-    )
+    const item =
+      cache !== undefined
+        ? cache.entryItemByIndex.get(unit.entry)
+        : orderedTranscriptItems(model).find(
+            (candidate) => candidate._tag === "Entry" && candidate.index === unit.entry,
+          )
     return `entry:${item?.id ?? `${entry?.turnId ?? "legacy"}:${entry?.role ?? "entry"}:${unit.entry}`}`
   }
   if (unit.kind === "tool") {
@@ -313,9 +351,10 @@ export const transcriptUnitId: {
     return `tool:${block.id}`
   }
   const block = model.blocks[unit.block] as TranscriptBlock
-  const item = orderedTranscriptItems(model).find(
-    (candidate) => candidate._tag === "Block" && candidate.index === unit.block,
-  )
+  const item =
+    cache !== undefined
+      ? cache.blockItemByIndex.get(unit.block)
+      : orderedTranscriptItems(model).find((candidate) => candidate._tag === "Block" && candidate.index === unit.block)
   if (item?.id !== undefined) return `block:${item.id}`
   if ("id" in block && typeof block.id === "string") return `block:${block.id}`
   return `block:${block._tag}:${unit.block}`

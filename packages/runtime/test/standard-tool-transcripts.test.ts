@@ -10,11 +10,10 @@ import { start } from "./current-execution-route"
 const cases = [
   ["find_files", { query: "fixture" }, "query"],
   ["grep", { pattern: "needle", regex: false }, "pattern"],
-  ["read_file", { path: "fixture.txt", limit: 1 }, "path"],
-  ["create_file", { path: "created.txt", content: "value" }, "path"],
-  ["edit_file", { path: "fixture.txt", oldText: "old", newText: "new" }, "path"],
-  ["apply_patch", { patchText: "*** Begin Patch\n*** End Patch" }, "patchText"],
-  ["shell", { command: "printf", args: ["safe"] }, "command"],
+  ["read", { path: "fixture.txt", limit: 1 }, "path"],
+  ["write", { path: "created.txt", content: "value" }, "path"],
+  ["edit", { path: "fixture.txt", oldText: "old", newText: "new" }, "path"],
+  ["bash", { command: "printf", args: ["safe"] }, "command"],
   ["shell_command_status", { processId: "process-1", waitMillis: 0 }, "processId"],
   ["git_status", {}, "refresh"],
   ["web_search", { objective: "deterministic research", searchQueries: ["fixture"] }, "objective"],
@@ -51,12 +50,12 @@ for (const [name, parameters, malformedField] of cases) {
           TestModel.text(`${name} complete`),
         ])
         const definition = Catalog.get(name)!
-        const marker = name === "read_file" ? "[REDACTED]" : `deterministic ${name}`
+        const marker = name === "read" ? "[REDACTED]" : `deterministic ${name}`
         const bounded = marker
           .repeat(Math.ceil((definition.outputLimit + 1) / marker.length))
           .slice(0, definition.outputLimit)
         const runtimeLayer = Runtime.testLayer((request) =>
-          request._tag === "ReadFile"
+          request._tag === "Read"
             ? Effect.succeed({ text: "[REDACTED]", truncated: false })
             : Effect.succeed({ text: bounded, truncated: true }),
         )
@@ -104,9 +103,9 @@ for (const [name, parameters, malformedField] of cases) {
               expect(result.replay.events).toEqual(result.completed.events)
               expect(definition.permission).toBe("allow")
               expect(transcript).not.toContain("rika-tool-matrix-")
-              if (name !== "read_file" && name !== "find_thread" && name !== "read_thread")
+              if (name !== "read" && name !== "find_thread" && name !== "read_thread")
                 expect(transcript).toContain('"truncated":true')
-              if (name === "read_file") expect(transcript).toContain("[REDACTED]")
+              if (name === "read") expect(transcript).toContain("[REDACTED]")
             })
           }),
         ),

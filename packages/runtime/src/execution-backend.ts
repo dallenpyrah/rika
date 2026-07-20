@@ -11,12 +11,11 @@ import {
   ChildFanOutHost,
   Client,
   Content,
-  type Entity,
   type Execution,
   Ids,
   ModelHub,
+  type Resident,
   Runtime,
-  SchemaRegistry,
   ToolRuntime as RelayToolRuntime,
   WorkflowDefinitionHost,
 } from "@relayfx/sdk"
@@ -54,7 +53,7 @@ import {
   Service,
   Status,
 } from "./execution-contract"
-import { outputSchemaRegistrations, parentPermissions, presets, resolve } from "./agent-profiles"
+import { mainInstructions, parentPermissions, presets, resolve } from "./agent-profiles"
 import * as MediaAnalyzer from "./media-analyzer"
 import * as ThreadHost from "./thread-host"
 import { definitions, idFor } from "./workflow-definitions"
@@ -377,8 +376,8 @@ const awaitExecutionAvailable = (
   timeoutMessage: string,
 ): Effect.Effect<void, Client.ClientError> => {
   const poll: Effect.Effect<void, Client.ClientError> = Effect.suspend(() =>
-    client
-      .getExecution(id)
+    client.executions
+      .get(id)
       .pipe(
         Effect.flatMap((existing) =>
           existing === undefined ? Effect.sleep("25 millis").pipe(Effect.andThen(poll)) : Effect.void,
@@ -418,7 +417,8 @@ const pinnedRouteForExecution = (client: Client.Interface, execution: Execution.
         executionRouteFromMetadata(current.agent_snapshot?.model.metadata)
       if (route !== undefined) return route
       const parentId: unknown = current.metadata?.parent_execution_id
-      current = typeof parentId === "string" ? yield* client.getExecution(Ids.ExecutionId.make(parentId)) : undefined
+      current =
+        typeof parentId === "string" ? yield* client.executions.get(Ids.ExecutionId.make(parentId)) : undefined
     }
     return undefined
   })
@@ -518,7 +518,7 @@ export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEven
 }
 const awaitChildResult = (client: Client.Interface, childId: string) => {
   const childExecutionId = Ids.ExecutionId.make(childId)
-  return client.streamExecution({ execution_id: childExecutionId }).pipe(
+  return client.executions.stream({ execution_id: childExecutionId }).pipe(
     Stream.takeUntil(
       (item) =>
         item.type === "execution.completed" || item.type === "execution.failed" || item.type === "execution.cancelled",
@@ -688,7 +688,7 @@ const executionTreeIds = (client: Client.Interface, root: Ids.ExecutionId) =>
       if (seen.has(String(current))) continue
       seen.add(String(current))
       ids.push(current)
-      const inspection = yield* client.inspectExecution(current)
+      const inspection = yield* client.executions.inspect(current)
       for (const child of inspection.child_runs) {
         pending.push(Ids.ExecutionId.make(String(child.child_execution_id)))
       }
@@ -754,7 +754,7 @@ const followExecution = (
       const followOne = (execution: Ids.ExecutionId, root: boolean, cursor: string | undefined) => {
         const consume = (nextCursor: string | undefined) =>
           Stream.runForEachWhile(
-            client.followExecution({
+            client.executions.follow({
               execution_id: execution,
               ...(nextCursor === undefined ? {} : { after_cursor: nextCursor }),
             }),
@@ -794,8 +794,8 @@ const followExecution = (
                       : undefined
               const inspectActionable =
                 stopAtActionableWait && isActionableWait(mapped) && typeof mapped.data?.wait_id === "string"
-                  ? client
-                      .inspectExecution(execution)
+                  ? client.executions
+                      .inspect(execution)
                       .pipe(
                         Effect.map((inspection) =>
                           inspection.waiting_on.some((wait) => wait.wait_id === mapped.data?.wait_id),
@@ -818,7 +818,7 @@ const followExecution = (
             },
           )
         return Effect.gen(function* () {
-          const inspection = yield* client.inspectExecution(execution).pipe(
+          const inspection = yield* client.executions.inspect(execution).pipe(
             Effect.retry({
               while: isExecutionNotFound,
               schedule: Schedule.spaced("10 millis"),
@@ -948,12 +948,13 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               .pipe(Effect.map((policy) => policy as Permissions.Ruleset | undefined))
       const registry =
         Option.getOrUndefined(yield* Effect.serviceOption(ThreadHost.Registry)) ?? (yield* ThreadHost.makeRegistry)
-      const hostInstances = new Map<string, Entity.Instance>()
+      const hostInstances = new Map<string, Resident.Instance>()
       const hostReady = yield* Effect.cached(
         Effect.gen(function* () {
-          yield* client.registerAgent({
+          yield* client.agents.register({
             id: ThreadHost.hostAgentId,
-            agent: Agent.make("rika-thread-host", {
+            agent: Agent.make({
+              name: "rika-thread-host",
               instructions: "Promote pending Rika turns delivered to this thread host.",
               model: ThreadHost.hostSelection,
               toolkit: ThreadHost.toolkit,
@@ -966,7 +967,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             max_wait_turns: ThreadHost.hostMaxWaitTurns,
             metadata: { steering_enabled: false, inbox_enabled: true },
           })
-          yield* client.registerEntityKind({
+          yield* client.residents.registerKind({
             kind: ThreadHost.entityKind,
             agent_id: ThreadHost.hostAgentId,
             inbox: { drain: "all" },
@@ -979,12 +980,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
       const hostGate = yield* Semaphore.make(1)
       const entityFor = Effect.fn("ExecutionBackend.entityFor")(function* (threadId: string, now: number) {
         let recovering = false
-        const existing = yield* client.getEntity({
+        const existing = yield* client.residents.get({
           kind: ThreadHost.entityKind,
-          key: Ids.EntityKey.make(threadId),
+          key: Ids.ResidentKey.make(threadId),
         })
         if (existing?.status === "active") {
-          const inspection = yield* client.inspectExecution(existing.execution_id)
+          const inspection = yield* client.executions.inspect(existing.execution_id)
           if (
             inspection.status === "completed" ||
             inspection.status === "failed" ||
@@ -999,18 +1000,18 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 "rika.thread_host.generation": existing.generation,
               }),
             )
-            yield* client.destroyEntity({
+            yield* client.residents.destroy({
               kind: ThreadHost.entityKind,
-              key: Ids.EntityKey.make(threadId),
+              key: Ids.ResidentKey.make(threadId),
               reason: "thread host execution ended; recreating a fresh generation",
               destroyed_at: now,
             })
             hostInstances.delete(threadId)
           }
         }
-        const instance = yield* client.getOrCreateEntity({
+        const instance = yield* client.residents.spawn({
           kind: ThreadHost.entityKind,
-          key: Ids.EntityKey.make(threadId),
+          key: Ids.ResidentKey.make(threadId),
           metadata: { rika_thread_id: threadId },
           created_at: now,
         })
@@ -1034,11 +1035,11 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
       })
       const awaitParkedHost = Effect.fn("ExecutionBackend.awaitParkedHost")(function* (
         threadId: string,
-        instance: Entity.Instance,
+        instance: Resident.Instance,
         now: number,
       ) {
         const outcome = yield* Effect.gen(function* () {
-          const inspection = yield* client.inspectExecution(instance.execution_id)
+          const inspection = yield* client.executions.inspect(instance.execution_id)
           if (
             inspection.status === "completed" ||
             inspection.status === "failed" ||
@@ -1055,9 +1056,9 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           Effect.orElseSucceed(() => "unknown" as const),
         )
         if (outcome !== "terminal") return instance
-        yield* client.destroyEntity({
+        yield* client.residents.destroy({
           kind: ThreadHost.entityKind,
-          key: Ids.EntityKey.make(threadId),
+          key: Ids.ResidentKey.make(threadId),
           reason: "thread host execution ended; recreating a fresh generation",
           destroyed_at: now,
         })
@@ -1080,7 +1081,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                   wake_generation: wake.generation,
                   queue_revision: wake.queueRevision,
                 })
-                yield* client.send({
+                yield* client.envelopes.send({
                   from: addressId,
                   to: instance.address_id,
                   content: [Content.text(notification)],
@@ -1164,7 +1165,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 },
               })
             })
-            const state = yield* client.createChildFanOut({
+            const state = yield* client.childRuns.createFanOut({
               fan_out_id: Ids.ChildFanOutId.make(input.fanOutId),
               parent_execution_id: parentExecutionId,
               children,
@@ -1180,13 +1181,13 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         ),
         inspectFanOut: Effect.fn("ExecutionBackend.inspectFanOut")(function* (fanOutId) {
           const result = yield* client
-            .inspectChildFanOut({ fan_out_id: Ids.ChildFanOutId.make(fanOutId) })
+            .childRuns.inspectFanOut({ fan_out_id: Ids.ChildFanOutId.make(fanOutId) })
             .pipe(Effect.mapError(error))
           return result.fan_out === null ? undefined : mapFanOut(result.fan_out)
         }),
         cancelFanOut: Effect.fn("ExecutionBackend.cancelFanOut")(function* (fanOutId, cancelledAt, reason) {
           const result = yield* client
-            .cancelChildFanOut({
+            .childRuns.cancelFanOut({
               fan_out_id: Ids.ChildFanOutId.make(fanOutId),
               cancelled_at: cancelledAt,
               ...(reason === undefined ? {} : { reason }),
@@ -1195,7 +1196,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           return mapFanOut(result.fan_out)
         }),
         registerWorkflows: Effect.fn("ExecutionBackend.registerWorkflows")(function* () {
-          return yield* Effect.forEach(definitions, (definition) => client.registerWorkflowDefinition(definition), {
+          return yield* Effect.forEach(definitions, (definition) => client.workflows.registerDefinition(definition), {
             concurrency: 1,
           }).pipe(
             Effect.map((records) =>
@@ -1210,7 +1211,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         }),
         startWorkflow: Effect.fn("ExecutionBackend.startWorkflow")(function* (name, runId, revision, ownerTurnId) {
           const result = yield* client
-            .startWorkflowRun({
+            .workflows.startRun({
               execution_id: workflowExecutionId(runId, ownerTurnId),
               workflow_definition_id: idFor(name),
               ...(revision === undefined ? {} : { revision }),
@@ -1220,19 +1221,19 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         }),
         inspectWorkflow: Effect.fn("ExecutionBackend.inspectWorkflow")(function* (runId, ownerTurnId) {
           const result = yield* client
-            .inspectWorkflowRun(workflowExecutionId(runId, ownerTurnId))
+            .workflows.inspectRun(workflowExecutionId(runId, ownerTurnId))
             .pipe(Effect.mapError(error))
           return result === undefined ? undefined : workflow(result)
         }),
         cancelWorkflow: Effect.fn("ExecutionBackend.cancelWorkflow")(function* (runId, ownerTurnId) {
           const result = yield* client
-            .cancelWorkflowRun(workflowExecutionId(runId, ownerTurnId))
+            .workflows.cancelRun(workflowExecutionId(runId, ownerTurnId))
             .pipe(Effect.mapError(error))
           return result === undefined ? undefined : workflow(result)
         }),
         invokeChild: Effect.fn("ExecutionBackend.invokeChild")(function* (input) {
           const parentExecutionId = executionId(input.parentTurnId)
-          const parent = yield* client.getExecution(parentExecutionId).pipe(Effect.mapError(error))
+          const parent = yield* client.executions.get(parentExecutionId).pipe(Effect.mapError(error))
           const routePin = executionRouteFromMetadata(parent?.agent_snapshot?.metadata)
           if (parent?.agent_snapshot === undefined || routePin === undefined)
             return yield* BackendError.make({ message: `Execution ${input.parentTurnId} has no pinned model route` })
@@ -1241,7 +1242,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           const depth = childExecutionDepth(String(parentExecutionId)) + 1
           const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(routePin).pipe(Effect.mapError(error))
           yield* client
-            .spawnChildRun({
+            .childRuns.spawn({
               execution_id: parentExecutionId,
               child_execution_id: makeChildExecutionId(input.parentTurnId, input.childId),
               address_id: addressId,
@@ -1257,7 +1258,6 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               },
               tool_names: availableTools(options, toolsAtDepth(preset.tool_names, depth)),
               permissions: preset.permissions,
-              output_schema_ref: preset.output_schema_ref,
               compaction_policy: pinnedCompactionPolicy(route, routePin.compactionSummary),
               metadata: {
                 product_profile: input.profile,
@@ -1366,10 +1366,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                   "rika.model.provider": selection.provider,
                 }),
               )
-              const registered = yield* client.registerAgent({
+              const registered = yield* client.agents.register({
                 id: agentId,
                 address: addressId,
-                agent: Agent.make(`rika-${encodeURIComponent(input.turnId)}`, {
+                agent: Agent.make({
+                  name: `rika-${encodeURIComponent(input.turnId)}`,
+                  instructions: mainInstructions,
                   model: selection,
                   toolkit: toolkitFor(options),
                   policy: TurnPolicy.forever,
@@ -1381,8 +1383,8 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
                 child_run_presets: childRunPresets,
               })
-              const start = client
-                .startExecutionByAgentDefinition({
+              const start = client.executions
+                .startByAgentDefinition({
                   root_address_id: addressId,
                   session_id: sessionId(input.threadId),
                   agent_id: agentId,
@@ -1396,7 +1398,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 .pipe(
                   Effect.asVoid,
                   Effect.catchTag("ClientError", (startError) =>
-                    client.getExecution(id).pipe(
+                    client.executions.get(id).pipe(
                       Effect.matchEffect({
                         onFailure: () => Effect.fail(startError),
                         onSuccess: (existing) => (existing === undefined ? Effect.fail(startError) : Effect.void),
@@ -1448,8 +1450,8 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           (effect) => traceWithoutResult("ExecutionBackend.follow", effect),
         ),
         replay: Effect.fn("ExecutionBackend.replay")(function* (turnId, afterCursor, reference) {
-          return yield* client
-            .replayExecution({
+          return yield* client.executions
+            .replay({
               execution_id: executionId(turnId, reference),
               ...(afterCursor === undefined ? {} : { after_cursor: afterCursor }),
             })
@@ -1462,8 +1464,8 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             )
         }),
         pageEvents: Effect.fn("ExecutionBackend.pageEvents")(function* (turnId, direction, cursor, limit, reference) {
-          return yield* client
-            .pageExecutionEvents({
+          return yield* client.executions
+            .pageEvents({
               execution_id: executionId(turnId, reference),
               direction,
               ...(cursor === undefined
@@ -1487,19 +1489,19 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           return yield* Effect.gen(function* () {
             const id = executionId(turnId, reference)
             yield* awaitExecutionAvailable(client, id, "Execution did not become available for cancellation")
-            const accepted = yield* client.cancelExecution({
+            const accepted = yield* client.executions.cancel({
               execution_id: id,
               cancelled_at: cancelledAt,
             })
-            const replay = yield* client.replayExecution({ execution_id: id })
+            const replay = yield* client.executions.replay({ execution_id: id })
             const events = replay.events.map(event)
             return { turnId, status: Status.make(accepted.status), events }
           }).pipe(Effect.mapError(error))
         }),
         inspect: Effect.fn("ExecutionBackend.inspect")(function* (turnId, reference) {
-          const existing = yield* client.getExecution(executionId(turnId, reference))
+          const existing = yield* client.executions.get(executionId(turnId, reference))
           if (existing === undefined) return undefined
-          return yield* client.inspectExecution(executionId(turnId, reference)).pipe(
+          return yield* client.executions.inspect(executionId(turnId, reference)).pipe(
             Effect.map((value) => ({
               turnId,
               status: Status.make(value.status),
@@ -1523,7 +1525,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           )
         }, Effect.mapError(error)),
         steer: Effect.fn("ExecutionBackend.steer")(function* (turnId, text, createdAt, reference) {
-          yield* client
+          yield* client.executions
             .steer({
               execution_id: executionId(turnId, reference),
               kind: "steering",
@@ -1536,7 +1538,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           return yield* Effect.gen(function* () {
             const ids = yield* executionTreeIds(client, executionId(turnId, reference))
             const approvals = yield* Effect.forEach(ids, (execution) =>
-              client.listPendingApprovals({ execution_id: execution }),
+              client.tools.listPendingApprovals({ execution_id: execution }),
             )
             return approvals.flatMap((result, index) =>
               result.approvals.map((approval) => ({
@@ -1552,8 +1554,8 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         }),
         resolveToolApproval: Effect.fn("ExecutionBackend.resolveToolApproval")(
           function* (waitId, approved, resolvedAt, comment) {
-            yield* client
-              .resolveToolApproval({
+            yield* client.tools
+              .resolveApproval({
                 wait_id: Ids.WaitId.make(waitId),
                 approved,
                 resolved_at: resolvedAt,
@@ -1564,7 +1566,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         ),
         resolvePermission: Effect.fn("ExecutionBackend.resolvePermission")(
           function* (waitId, answer, resolvedAt, reason) {
-            yield* client
+            yield* client.tools
               .resolvePermission({
                 wait_id: Ids.WaitId.make(waitId),
                 answer,
@@ -1616,8 +1618,8 @@ export const layer = <
               })
             }
             const client = yield* Deferred.await(relayClient)
-            const parent = yield* client
-              .getExecution(call.executionId)
+            const parent = yield* client.executions
+              .get(call.executionId)
               .pipe(
                 Effect.mapError((cause) => AgentTools.AgentToolError.make({ tool: toolName, message: String(cause) })),
               )
@@ -1710,7 +1712,6 @@ export const layer = <
                     },
                     tool_names: availableTools(options, toolsAtDepth(preset.tool_names, childDepth)),
                     permissions: preset.permissions,
-                    output_schema_ref: preset.output_schema_ref,
                     ...(policy === undefined ? {} : { compaction_policy: policy }),
                     metadata: {
                       product_profile: profile,
@@ -1726,7 +1727,7 @@ export const layer = <
             yield* Effect.forEach(
               children,
               (child) =>
-                client.spawnChildRun({
+                client.childRuns.spawn({
                   execution_id: call.executionId,
                   ...child,
                   wait: false,
@@ -1786,7 +1787,6 @@ export const layer = <
           const modelRegistry = Context.get(modelContext, ModelRegistry.Service)
           const languageModelLayer = Layer.succeedContext(modelContext)
           const sharedModelRegistryLayer = Layer.succeed(ModelRegistry.Service, modelRegistry)
-          const schemaRegistryLayer = SchemaRegistry.layer(outputSchemaRegistrations)
           const rikaToolRuntimeLayer =
             options.toolRuntimeLayerForWorkspace !== undefined && options.resolveWorkspace !== undefined
               ? routedToolRuntimeLayer(options.toolRuntimeLayerForWorkspace, (durableExecutionId) =>
@@ -1817,7 +1817,7 @@ export const layer = <
           )
           const childResult = (client: Client.Interface, childId: string) => {
             const childExecutionId = Ids.ExecutionId.make(childId)
-            return client.streamExecution({ execution_id: childExecutionId }).pipe(
+            return client.executions.stream({ execution_id: childExecutionId }).pipe(
               Stream.takeUntil(
                 (item) =>
                   item.type === "execution.completed" ||
@@ -1883,10 +1883,11 @@ export const layer = <
                                   }),
                             }
                       const childAgentId = fanOutAgentId(fanOutState.fan_out_id, child.child_execution_id)
-                      const registered = yield* client.registerAgent({
+                      const registered = yield* client.agents.register({
                         id: childAgentId,
                         address: child.address_id,
-                        agent: Agent.make(`rika-fan-out-${String(child.child_execution_id)}`, {
+                        agent: Agent.make({
+                          name: `rika-fan-out-${String(child.child_execution_id)}`,
                           ...(override.instructions === undefined ? {} : { instructions: override.instructions }),
                           model: childSelection,
                           toolkit: childToolkit,
@@ -1907,7 +1908,7 @@ export const layer = <
                           ? {}
                           : { compaction_policy: override.compaction_policy }),
                       })
-                      yield* client.startExecutionByAgentDefinition({
+                      yield* client.executions.startByAgentDefinition({
                         root_address_id: child.address_id,
                         session_id: childSessionId(child.child_execution_id),
                         agent_id: childAgentId,
@@ -1933,7 +1934,7 @@ export const layer = <
                   Effect.flatMap((client) =>
                     Clock.currentTimeMillis.pipe(
                       Effect.flatMap((cancelledAt) =>
-                        client.cancelExecution({
+                        client.executions.cancel({
                           execution_id: Ids.ExecutionId.make(String(childExecutionId)),
                           cancelled_at: cancelledAt,
                         }),
@@ -1979,10 +1980,11 @@ export const layer = <
                       const encodedInput = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(
                         operation.input ?? {},
                       )
-                      const registered = yield* client.registerAgent({
+                      const registered = yield* client.agents.register({
                         id: childAgentId,
                         address: grounded ? operation.address_id : addressId,
-                        agent: Agent.make(`rika-workflow-${String(childId)}`, {
+                        agent: Agent.make({
+                          name: `rika-workflow-${String(childId)}`,
                           instructions: preset.instructions,
                           model: childSelection,
                           toolkit: childToolkit,
@@ -1992,7 +1994,6 @@ export const layer = <
                         ...(options.permissionPolicy === undefined
                           ? {}
                           : { permission_rules: options.permissionPolicy }),
-                        output_schema_ref: preset.output_schema_ref,
                         metadata: {
                           ...preset.metadata,
                           steering_enabled: true,
@@ -2000,8 +2001,8 @@ export const layer = <
                         },
                         ...(policy === undefined ? {} : { compaction_policy: policy }),
                       })
-                      yield* client
-                        .startExecutionByAgentDefinition({
+                      yield* client.executions
+                        .startByAgentDefinition({
                           root_address_id: grounded ? operation.address_id : addressId,
                           session_id: childSessionId(childId),
                           agent_id: childAgentId,
@@ -2020,7 +2021,7 @@ export const layer = <
                         .pipe(
                           Effect.catchTag("ClientError", (startError) =>
                             client
-                              .getExecution(Ids.ExecutionId.make(String(childId)))
+                              .executions.get(Ids.ExecutionId.make(String(childId)))
                               .pipe(
                                 Effect.flatMap((existing) =>
                                   existing === undefined ? Effect.fail(startError) : Effect.succeed(existing),
@@ -2044,7 +2045,6 @@ export const layer = <
             database: SQLite.database({ filename: options.filename }),
             languageModelLayer,
             toolRuntimeLayer,
-            schemaRegistryLayer,
             childFanOutHostLayer: fanOutHandlers,
             workflowDefinitionHostLayer: workflowHandlers,
           })

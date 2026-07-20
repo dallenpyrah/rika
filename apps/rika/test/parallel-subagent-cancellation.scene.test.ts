@@ -12,9 +12,6 @@ test(
           ),
         ),
         ...["alpha", "beta", "gamma", "delta"].map((name) => Scene.model.text(`LATE_${name.toUpperCase()}`, 20_000)),
-        ...["alpha", "beta", "gamma", "delta"].map((name) =>
-          Scene.model.object({ summary: `LATE_${name.toUpperCase()}`, files: [] }),
-        ),
         Scene.model.text("Parent must not publish this response."),
       ],
       actions: [

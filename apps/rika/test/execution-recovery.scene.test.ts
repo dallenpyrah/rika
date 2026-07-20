@@ -25,7 +25,7 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf", args: ["DURABLE_TOOL_RESULT"] }, "recovery-tool"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["DURABLE_TOOL_RESULT"] }, "recovery-tool"),
         ]),
         Scene.model.text("ANSWER_AFTER_TOOL_REPLAY", 1_000),
       ],
@@ -50,7 +50,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             { command: "sh", args: ["-c", "printf FAILED_TOOL_MARKER; exit 7"] },
             "failed-tool",
           ),
@@ -81,7 +81,6 @@ test(
           ),
         ),
         ...["alpha", "beta"].map((name) => Scene.model.text(`LATE_${name.toUpperCase()}`, 20_000)),
-        ...["alpha", "beta"].map((name) => Scene.model.object({ summary: `LATE_${name.toUpperCase()}`, files: [] })),
         Scene.model.text("Parent must not publish this response."),
       ],
       actions: [

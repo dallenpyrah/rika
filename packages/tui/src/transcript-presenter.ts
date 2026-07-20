@@ -1,0 +1,43 @@
+export {
+  attachChildProjections,
+  emptyAttachments,
+  type AttachmentResult,
+  type ChildProjection,
+} from "./transcript-presenter/attachment"
+export {
+  projectChildUnits as applyChildUnits,
+  projectUnits as applyTurnUnits,
+  type Event,
+} from "./transcript-presenter/projection"
+export {
+  includeRowEnd,
+  isRowWindowPinned,
+  maxMountedTranscriptRows,
+  minimumRowEnd,
+  pinnedRowWindow,
+  relocateRowEnd,
+  resolveRowEnd,
+  rowWindowStart,
+  shiftRowEnd,
+  type RowWindowState,
+} from "./transcript-presenter/window"
+export {
+  escapePathTarget,
+  expandableRowIds,
+  expandableUnits,
+  isExpandableUnit,
+  orderedTranscriptItems,
+  toolDetail,
+  toolDetails,
+  toolKind,
+  transcriptUnitId as unitId,
+  transcriptUnits as rows,
+  unitToggleTargets,
+  type PathTarget,
+  type ToolDetail,
+  type ToolGroupKind,
+  type ToolKind,
+  type ToolTranscriptUnit,
+  type TranscriptUnit,
+  type TranscriptUnitId,
+} from "./transcript-presenter/rows"

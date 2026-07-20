@@ -1,10 +1,10 @@
 import { describe, expect, it } from "@effect/vitest"
 import { TurnPolicy } from "@batonfx/core"
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import {
   childRunSpawnPermission,
+  mainInstructions,
   names,
-  outputSchemas,
   presets,
   resolve,
   resolvePainter,
@@ -33,28 +33,35 @@ describe("product agent profiles", () => {
       expect(registered[name]?.model).toEqual(relayModel(model))
       expect(registered[name]?.tool_names).toEqual(Object.keys(profile.agent.toolkit.tools))
       expect(registered[name]?.permissions.length).toBeGreaterThan(0)
-      expect(registered[name]?.output_schema_ref).toMatch(/^rika\.agent\./)
+      expect(registered[name]).not.toHaveProperty("output_schema_ref")
     }
     expect(registered.Oracle).toMatchObject({
-      tool_names: ["find_files", "grep", "read_file", "task", "oracle", "librarian", "review"],
+      tool_names: ["find_files", "grep", "read"],
       permissions: ["workspace.read"],
     })
+    expect(registered.Oracle?.instructions).toContain("planning, reviewing, understanding code, and debugging")
+    expect(registered.Oracle?.instructions).toContain("do not modify files")
+    expect(mainInstructions).toContain("Consult Oracle frequently for complex or difficult tasks")
+    expect(mainInstructions).toContain("tell the user that you are consulting it")
+    expect(mainInstructions).toContain("after consulting Oracle, state that you did")
+    expect(mainInstructions).toContain("remaining responsible for the implementation and conclusion")
     expect(registered.Librarian).toMatchObject({
       tool_names: ["web_search", "read_web_page", "task", "oracle", "librarian", "review"],
       permissions: ["network.read"],
     })
     expect(registered.Review).toMatchObject({
-      tool_names: ["grep", "read_file", "git_status"],
+      tool_names: ["grep", "read", "git_status"],
       permissions: ["workspace.read"],
     })
+    expect(registered.Oracle?.tool_names).not.toContain("task")
     expect(registered.Task).toMatchObject({
       tool_names: [
         "find_files",
         "grep",
-        "read_file",
-        "create_file",
-        "edit_file",
-        "shell",
+        "read",
+        "write",
+        "edit",
+        "bash",
         "shell_command_status",
         "task",
         "oracle",
@@ -80,27 +87,6 @@ describe("product agent profiles", () => {
     expect(presets(model, oracleModel).Oracle?.model).toEqual(relayModel(oracleModel))
     expect(presets()(model).Oracle?.model).toEqual(relayModel(model))
   })
-
-  it.effect("accepts and rejects every shipping specialist structured output contract", () =>
-    Effect.gen(function* () {
-      const contracts = [
-        [outputSchemas.Task, { summary: "done", files: ["a.ts"] }, { summary: "done", files: "a.ts" }],
-        [outputSchemas.Oracle, { answer: "A", evidence: ["file:1"] }, { answer: "A", evidence: "file:1" }],
-        [
-          outputSchemas.Librarian,
-          { answer: "A", sources: ["https://example.test"] },
-          { answer: "A", sources: "https://example.test" },
-        ],
-        [outputSchemas.Review, { summary: "ok", findings: [] }, { summary: "ok", findings: "invalid" }],
-      ] as const
-      for (const [schema, valid, invalid] of contracts) {
-        expect(yield* Schema.decodeUnknownEffect(schema)(valid)).toEqual(valid)
-        expect(String(yield* Effect.flip(Schema.decodeUnknownEffect(schema)(invalid)))).toMatch(
-          /files|evidence|sources|findings/,
-        )
-      }
-    }),
-  )
 
   it("maps subagent handoff targets to registered presets and excludes the media-gated Painter", () => {
     const registered = presets(model)

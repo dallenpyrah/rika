@@ -3,10 +3,27 @@ import { Function } from "effect"
 const clip = (text: string, width: number): string =>
   text.length <= width ? text : width <= 1 ? "…" : `${text.slice(0, width - 1)}…`
 
+const renderDiffCache = new Map<string, string>()
+const styledDiffCache = new Map<string, ReadonlyArray<TextChunk> | null>()
+const diffCacheLimit = 256
+
+const cachedDiff = <A>(cache: Map<string, A>, key: string, compute: () => A): A => {
+  const cached = cache.get(key)
+  if (cached !== undefined) return cached
+  const value = compute()
+  if (cache.size >= diffCacheLimit) cache.delete(cache.keys().next().value!)
+  cache.set(key, value)
+  return value
+}
+
 export const renderDiff: {
   (width: number): (patch: string) => string
   (patch: string, width: number): string
-} = Function.dual(2, (patch: string, width: number): string => {
+} = Function.dual(2, (patch: string, width: number): string =>
+  cachedDiff(renderDiffCache, `${width}:${patch}`, () => renderDiffUncached(patch, width)),
+)
+
+const renderDiffUncached = (patch: string, width: number): string => {
   const lines = patch.split("\n")
   const rendered: Array<string> = []
   let oldLine = 0
@@ -36,7 +53,7 @@ export const renderDiff: {
     }
   }
   return rendered.length === 0 ? "(empty diff)" : rendered.join("\n")
-})
+}
 
 export type DiffStyleOptions = { readonly width: number; readonly indent?: number }
 
@@ -45,14 +62,17 @@ export const renderDiffStyled: {
   (patch: string, options: DiffStyleOptions): StyledText
 } = Function.dual(2, (patch: string, options: DiffStyleOptions): StyledText => {
   const indent = " ".repeat(options.indent ?? 2)
-  const lines = renderDiff(patch, Math.max(1, options.width - indent.length)).split("\n")
-  const chunks: Array<TextChunk> = []
-  lines.forEach((line, index) => {
-    const color = /^\s*\d*\s+\+/.test(line) ? colors.green : /^\s*\d+\s+\s*-/.test(line) ? colors.red : colors.muted
-    chunks.push(line.startsWith("@@") ? bold(fg(colors.blue)(`${indent}${line}`)) : fg(color)(`${indent}${line}`))
-    if (index < lines.length - 1) chunks.push(fg(colors.text)("\n"))
+  const chunks = cachedDiff(styledDiffCache, `s:${indent.length}:${options.width}:${patch}`, () => {
+    const lines = renderDiff(patch, Math.max(1, options.width - indent.length)).split("\n")
+    const built: Array<TextChunk> = []
+    lines.forEach((line, index) => {
+      const color = /^\s*\d*\s+\+/.test(line) ? colors.green : /^\s*\d+\s+\s*-/.test(line) ? colors.red : colors.muted
+      built.push(line.startsWith("@@") ? bold(fg(colors.blue)(`${indent}${line}`)) : fg(color)(`${indent}${line}`))
+      if (index < lines.length - 1) built.push(fg(colors.text)("\n"))
+    })
+    return built
   })
-  return new StyledText(chunks)
+  return new StyledText([...(chunks ?? [])])
 })
 
 export const renderPartialDiffStyled: {
@@ -60,24 +80,27 @@ export const renderPartialDiffStyled: {
   (patch: string, options: DiffStyleOptions): StyledText | undefined
 } = Function.dual(2, (patch: string, options: DiffStyleOptions): StyledText | undefined => {
   const indent = " ".repeat(options.indent ?? 2)
-  const lines = patch
-    .split("\n")
-    .filter(
-      (line): line is `${"+" | "-"}${string}` =>
-        (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")),
-    )
-  if (lines.length === 0) return undefined
-  const chunks: Array<TextChunk> = []
-  lines.forEach((line, index) => {
-    const marker = line[0]!
-    chunks.push(
-      fg(marker === "+" ? colors.green : colors.red)(
-        `${indent}${clip(`${marker} ${line.slice(1)}`, Math.max(1, options.width - indent.length))}`,
-      ),
-    )
-    if (index < lines.length - 1) chunks.push(fg(colors.text)("\n"))
+  const chunks = cachedDiff(styledDiffCache, `t:${indent.length}:${options.width}:${patch}`, () => {
+    const lines = patch
+      .split("\n")
+      .filter(
+        (line): line is `${"+" | "-"}${string}` =>
+          (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")),
+      )
+    if (lines.length === 0) return null
+    const built: Array<TextChunk> = []
+    lines.forEach((line, index) => {
+      const marker = line[0]!
+      built.push(
+        fg(marker === "+" ? colors.green : colors.red)(
+          `${indent}${clip(`${marker} ${line.slice(1)}`, Math.max(1, options.width - indent.length))}`,
+        ),
+      )
+      if (index < lines.length - 1) built.push(fg(colors.text)("\n"))
+    })
+    return built
   })
-  return new StyledText(chunks)
+  return chunks === null ? undefined : new StyledText([...chunks])
 })
 import { StyledText, bold, fg, type TextChunk } from "@opentui/core"
 import { colors } from "./theme"

@@ -45,19 +45,32 @@ const contentChunks = (row: Extract<Row, { number: number }>): ReadonlyArray<Tex
   return highlightLines(row.content, row.lang)[0] ?? []
 }
 
+const pierreCache = new Map<string, ReadonlyArray<TextChunk> | null>()
+const pierreCacheLimit = 256
+
 export const renderPierreDiff: {
   (options: DiffRenderOptions): (patch: string) => StyledText | undefined
   (patch: string, options: DiffRenderOptions): StyledText | undefined
 } = Function.dual(2, (patch: string, options: DiffRenderOptions): StyledText | undefined => {
+  const key = `${options.indent ?? 2}:${options.width}:${patch}`
+  const cached = pierreCache.get(key)
+  if (cached !== undefined) return cached === null ? undefined : new StyledText([...cached])
+  const chunks = renderPierreDiffChunks(patch, options)
+  if (pierreCache.size >= pierreCacheLimit) pierreCache.delete(pierreCache.keys().next().value!)
+  pierreCache.set(key, chunks)
+  return chunks === null ? undefined : new StyledText([...chunks])
+})
+
+const renderPierreDiffChunks = (patch: string, options: DiffRenderOptions): ReadonlyArray<TextChunk> | null => {
   const { width } = options
   const indent = " ".repeat(options.indent ?? 2)
   let parsed: ReturnType<typeof parsePatchFiles>
   try {
     parsed = parsePatchFiles(patch)
   } catch {
-    return undefined
+    return null
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) return undefined
+  if (!Array.isArray(parsed) || parsed.length === 0) return null
   const rows: Array<Row> = []
   let hasContent = false
   for (const result of parsed as ReadonlyArray<{ files?: ReadonlyArray<Record<string, any>> }>)
@@ -102,7 +115,7 @@ export const renderPierreDiff: {
         }
       }
     }
-  if (!hasContent) return undefined
+  if (!hasContent) return null
   const numberWidth = Math.max(1, ...rows.flatMap((row) => ("ellipsis" in row ? [] : [String(row.number).length])))
   const chunks: Array<TextChunk> = []
   rows.forEach((row, index) => {
@@ -116,5 +129,5 @@ export const renderPierreDiff: {
     chunks.push(fg(gutterColor)(gutter))
     for (const chunk of clipLine(contentChunks(row), Math.max(1, width - gutter.length))) chunks.push(chunk)
   })
-  return new StyledText(chunks)
-})
+  return chunks
+}

@@ -37,7 +37,7 @@ const executionText = (event: ResidentEvent) => {
 }
 
 test(
-  "large reasoning, shell, patch, and model output completes in order with bounded resident and TUI RSS",
+  "large reasoning, bash, write, and model output completes in order with bounded resident and TUI RSS",
   () =>
     runTest(
       Effect.acquireUseRelease(
@@ -57,8 +57,8 @@ test(
                   ...Array.from({ length: 500 }, (_, index) => ({ type: "reasoning", text: `REASON_${index};` })),
                   {
                     type: "toolCall",
-                    name: "shell",
-                    id: "long-shell",
+                    name: "bash",
+                    id: "long-bash",
                     params: {
                       command: "python3",
                       args: ["-c", "print('SHELL_OUTPUT_' * 12000)"],
@@ -68,13 +68,14 @@ test(
               },
               {
                 parts: [
-                  { type: "reasoning", text: "PATCH_REASONING_COMPLETE" },
+                  { type: "reasoning", text: "WRITE_REASONING_COMPLETE" },
                   {
                     type: "toolCall",
-                    name: "apply_patch",
-                    id: "long-patch",
+                    name: "write",
+                    id: "long-write",
                     params: {
-                      patchText: `*** Begin Patch\n*** Add File: long-stream-output.txt\n${patchLines.join("\n")}\n*** End Patch`,
+                      path: "long-stream-output.txt",
+                      content: `${patchLines.join("\n")}\n`,
                     },
                   },
                 ],

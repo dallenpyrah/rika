@@ -74,7 +74,7 @@ export const definitions: ReadonlyArray<Definition> = [
     },
   },
   {
-    name: "read_file",
+    name: "read",
     description: "Read a bounded UTF-8 file range",
     permission: "allow",
     idempotency: "safe",
@@ -89,7 +89,7 @@ export const definitions: ReadonlyArray<Definition> = [
     },
   },
   {
-    name: "create_file",
+    name: "write",
     description: "Create a new UTF-8 file without overwriting an existing path",
     permission: "allow",
     idempotency: "unsafe",
@@ -98,7 +98,7 @@ export const definitions: ReadonlyArray<Definition> = [
     presentation: { family: "edit", action: "create", activeLabel: "Creating", completeLabel: "Created" },
   },
   {
-    name: "edit_file",
+    name: "edit",
     description: "Replace one exact anchored text occurrence and reject stale or ambiguous anchors",
     permission: "allow",
     idempotency: "unsafe",
@@ -107,16 +107,7 @@ export const definitions: ReadonlyArray<Definition> = [
     presentation: { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
   },
   {
-    name: "apply_patch",
-    description: "Apply a validated Codex patch atomically with strict context matching",
-    permission: "allow",
-    idempotency: "unsafe",
-    timeoutMillis: 10_000,
-    outputLimit: 4_000,
-    presentation: { family: "edit", action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
-  },
-  {
-    name: "shell",
+    name: "bash",
     description: "Run one command in the workspace, returning a process id when it remains running",
     permission: "allow",
     idempotency: "unsafe",

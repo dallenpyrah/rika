@@ -21,8 +21,21 @@ export interface ProcessResult {
   readonly exitCode: number
 }
 
+const causeChain = (cause: unknown): string => {
+  const parts: Array<string> = []
+  let current: unknown = cause
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+    parts.push(String(current))
+    const detail = current as { readonly cause?: unknown; readonly description?: unknown; readonly syscall?: unknown }
+    if (typeof detail.description === "string") parts.push(`description=${detail.description}`)
+    if (typeof detail.syscall === "string") parts.push(`syscall=${detail.syscall}`)
+    current = detail.cause
+  }
+  return [...new Set(parts)].join(" <- ")
+}
+
 const processFailure = (operation: string, cause: unknown) =>
-  ProcessTestError.make({ operation, message: String(cause) })
+  ProcessTestError.make({ operation, message: causeChain(cause) })
 
 export const command = Effect.fn("E2eProcess.command")(function* (
   executable: string,
@@ -47,28 +60,23 @@ export const sandbox: Effect.Effect<Sandbox, ProcessTestError, BunServices.BunSe
   const home = path.join(root, "home")
   const workspace = path.join(root, "workspace")
   const state = path.join(root, "state")
-  const artifactRoot = path.join(root, "artifact")
-  yield* Effect.forEach([home, workspace, state, artifactRoot], (directory) =>
+  yield* Effect.forEach([home, workspace, state], (directory) =>
     fileSystem.makeDirectory(directory).pipe(Effect.mapError((cause) => processFailure("create sandbox", cause))),
   )
   const artifacts = path.resolve("artifacts")
-  const archive = (yield* fileSystem
-    .readDirectory(artifacts)
-    .pipe(Effect.mapError((cause) => processFailure("find packaged artifact", cause)))).find((entry) =>
-    entry.endsWith(`${process.platform}-${process.arch}.tar.gz`),
-  )
-  if (archive === undefined)
+  const binary = path.join(artifacts, "extracted", `rika-${process.platform}-${process.arch}`, "bin", "rika")
+  const available = yield* fileSystem
+    .exists(binary)
+    .pipe(Effect.mapError((cause) => processFailure("find packaged artifact", cause)))
+  if (!available)
     return yield* ProcessTestError.make({
       operation: "find packaged artifact",
-      message: `Packaged artifact for ${process.platform}-${process.arch} is missing`,
+      message: `Extracted packaged product for ${process.platform}-${process.arch} is missing; run the journey global setup`,
     })
-  const extracted = yield* command("tar", ["-xzf", path.join(artifacts, archive), "-C", artifactRoot])
-  if (extracted !== 0)
-    return yield* ProcessTestError.make({ operation: "extract packaged artifact", message: `tar exited ${extracted}` })
   return {
     root,
     workspace,
-    binary: path.join(artifactRoot, archive.replace(".tar.gz", ""), "bin", "rika"),
+    binary,
     env: {
       HOME: home,
       RIKA_DATABASE: path.join(state, "rika.db"),
@@ -91,6 +99,8 @@ export const runCommand = Effect.fn("E2eProcess.runCommand")(function* (
   } = {},
 ) {
   const encoder = new TextEncoder()
+  const budget = options.timeout ?? 60_000
+  let killedByTimeout = false
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
@@ -112,15 +122,18 @@ export const runCommand = Effect.fn("E2eProcess.runCommand")(function* (
         { concurrency: 3 },
       ).pipe(
         Effect.timeoutOrElse({
-          duration: options.timeout ?? 10_000,
+          duration: budget,
           orElse: () =>
-            handle.kill({ killSignal: "SIGKILL" }).pipe(
+            Effect.sync(() => {
+              killedByTimeout = true
+            }).pipe(
+              Effect.andThen(handle.kill({ killSignal: "SIGKILL" })),
               Effect.ignore,
               Effect.andThen(
                 Effect.fail(
                   ProcessTestError.make({
                     operation: `${executable} ${args.join(" ")}`,
-                    message: `process exceeded ${options.timeout ?? 10_000}ms`,
+                    message: `process exceeded ${budget}ms`,
                   }),
                 ),
               ),
@@ -137,7 +150,14 @@ export const runCommand = Effect.fn("E2eProcess.runCommand")(function* (
       }),
     ),
     Effect.mapError((cause) =>
-      Schema.is(ProcessTestError)(cause) ? cause : processFailure(`${executable} ${args.join(" ")}`, cause),
+      Schema.is(ProcessTestError)(cause)
+        ? cause
+        : killedByTimeout
+          ? ProcessTestError.make({
+              operation: `${executable} ${args.join(" ")}`,
+              message: `process exceeded ${budget}ms and was killed`,
+            })
+          : processFailure(`${executable} ${args.join(" ")}`, cause),
     ),
   )
 })

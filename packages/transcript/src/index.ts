@@ -1,8 +1,10 @@
 import { Catalog } from "@rika/tools"
 import { Function, Option, Schema } from "effect"
+import { pricingVersion, usageCostUsd } from "./model-cost"
 import type { Block, Content, Projection, SourceEvent, ToolFile, ToolProcess, Unit } from "./schema"
 
 export * from "./schema"
+export { pricingVersion } from "./model-cost"
 
 const record = (value: unknown): Record<string, unknown> =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
@@ -87,46 +89,6 @@ const upsertUnit = (projection: Projection, incoming: Unit): Projection => {
   return replaceUnit(projection, index, { ...incoming, order: projection.units[index]!.order })
 }
 
-const partialJsonString = (raw: string, keys: ReadonlyArray<string>): string | undefined => {
-  const keyPattern = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
-  const match = new RegExp(`"(?:${keyPattern})"\\s*:\\s*"`).exec(raw)
-  if (match === null) return undefined
-  let index = match.index + match[0].length
-  let value = ""
-  while (index < raw.length) {
-    const character = raw[index]!
-    if (character === '"') return value
-    if (character !== "\\") {
-      value += character
-      index += 1
-      continue
-    }
-    if (index + 1 >= raw.length) return value
-    const escaped = raw[index + 1]!
-    if (escaped === "u") {
-      const hex = raw.slice(index + 2, index + 6)
-      if (!/^[0-9a-fA-F]{4}$/.test(hex)) return value
-      value += String.fromCharCode(Number.parseInt(hex, 16))
-      index += 6
-      continue
-    }
-    value +=
-      escaped === "n"
-        ? "\n"
-        : escaped === "r"
-          ? "\r"
-          : escaped === "t"
-            ? "\t"
-            : escaped === "b"
-              ? "\b"
-              : escaped === "f"
-                ? "\f"
-                : escaped
-    index += 2
-  }
-  return value
-}
-
 const lineCounts = (patch: string): { readonly additions: number; readonly deletions: number } => {
   let additions = 0
   let deletions = 0
@@ -135,42 +97,6 @@ const lineCounts = (patch: string): { readonly additions: number; readonly delet
     if (line.startsWith("-") && !line.startsWith("---")) deletions += 1
   }
   return { additions, deletions }
-}
-
-const previewFiles = (callId: string, patch: string): ReadonlyArray<ToolFile> => {
-  const matches = [...patch.matchAll(/^\*\*\* (Add|Update|Delete) File: (.+)$/gm)]
-  return matches.map((match, ordinal) => {
-    const start = (match.index ?? 0) + match[0].length
-    const end = matches[ordinal + 1]?.index ?? patch.length
-    const body = patch
-      .slice(start, end)
-      .replace(/^\n/, "")
-      .replace(/\n?\*\*\* End Patch[\s\S]*$/, "")
-    const move = /^\*\*\* Move to: (.+)$/m.exec(body)?.[1]
-    const kind: ToolFile["kind"] =
-      match[1] === "Add" ? "add" : match[1] === "Delete" ? "delete" : move === undefined ? "update" : "move"
-    const path = move ?? match[2]!
-    const diffBody = body
-      .split("\n")
-      .filter((line) => line.startsWith("@@") || /^[ +-]/u.test(line))
-      .join("\n")
-    const rendered =
-      kind === "delete"
-        ? `--- a/${match[2]}\n+++ /dev/null\n${diffBody}`
-        : `--- ${kind === "add" ? "/dev/null" : `a/${match[2]}`}\n+++ b/${path}\n${diffBody}`
-    const counts = lineCounts(rendered)
-    const file = {
-      key: `${callId}:${ordinal}`,
-      path,
-      kind,
-      patch: rendered,
-      additions: counts.additions,
-      deletions: counts.deletions,
-      preview: true,
-      status: "running" as const,
-    }
-    return move === undefined ? file : Object.assign(file, { previousPath: match[2]! })
-  })
 }
 
 const normalizedDiffPath = (value: string): string => value.replace(/^(?:a|b)\//, "")
@@ -230,7 +156,7 @@ const detailFor = (name: string, inputText: string): string => {
   const normalizedName = name.toLowerCase()
   const input = inputRecord(inputText)
   const path = inputString(input, ["path", "file_path", "file"])
-  if (normalizedName === "read_file" || normalizedName === "read") {
+  if (normalizedName === "read") {
     const offset = typeof input.offset === "number" ? input.offset : 1
     const limit = typeof input.limit === "number" ? input.limit : undefined
     return `${path ?? name}${limit === undefined ? "" : ` L${offset}-${offset + Math.max(0, limit - 1)}`}`
@@ -239,7 +165,7 @@ const detailFor = (name: string, inputText: string): string => {
     return `${path === undefined ? "" : `${path} `}"${inputString(input, ["pattern"]) ?? ""}"`.trim()
   if (normalizedName === "find_files") return `"${inputString(input, ["query"]) ?? ""}"`
   if (normalizedName === "git_status") return "git status"
-  if (normalizedName === "shell") {
+  if (normalizedName === "bash") {
     const command = inputString(input, ["command", "cmd", "script"]) ?? ""
     const args = Array.isArray(input.args)
       ? input.args.filter((value): value is string => typeof value === "string")
@@ -251,18 +177,16 @@ const detailFor = (name: string, inputText: string): string => {
   if (normalizedName === "read_web_page") return inputString(input, ["url"]) ?? ""
   if (normalizedName === "find_thread") return inputString(input, ["query"]) ?? ""
   if (normalizedName === "read_thread") return inputString(input, ["threadId", "thread_id", "id"]) ?? ""
-  if (normalizedName === "apply_patch") return ""
   if (path !== undefined) return path
   return inputString(input, ["description", "prompt", "task", "query", "objective"]) ?? inputContentText(input) ?? ""
 }
 
 const inputFiles = (id: string, name: string, inputText: string): ReadonlyArray<ToolFile> => {
   const input = inputRecord(inputText)
-  if (name === "apply_patch") return previewFiles(id, inputString(input, ["patchText", "patch"]) ?? "")
   const path = inputString(input, ["path", "file_path", "file"])
-  if (path === undefined || (name !== "create_file" && name !== "edit_file")) return []
+  if (path === undefined || (name !== "write" && name !== "edit")) return []
   const patch =
-    name === "create_file"
+    name === "write"
       ? `--- /dev/null\n+++ b/${path}\n${string(input.content)
           .split("\n")
           .map((line) => `+${line}`)
@@ -278,7 +202,7 @@ const inputFiles = (id: string, name: string, inputText: string): ReadonlyArray<
     {
       key: `${id}:0`,
       path,
-      kind: name === "create_file" ? "add" : "update",
+      kind: name === "write" ? "add" : "update",
       patch,
       ...lineCounts(patch),
       preview: true,
@@ -361,26 +285,8 @@ const processResult = (output: unknown): ToolProcess | undefined => {
   return Object.keys(process).length === 0 ? undefined : process
 }
 
-const nonNegativeFinite = (value: unknown): number | undefined =>
-  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
-
-const tokenPricing = (model: string): readonly [number, number] =>
-  model.includes("haiku") || model.includes("mini") || model.includes("flash")
-    ? [0.8, 4]
-    : model.includes("claude") || model.includes("fable") || model.includes("opus")
-      ? [5, 25]
-      : [1.25, 10]
-
 const usageCost = (value: Record<string, unknown>): number | undefined => {
-  for (const key of ["cost_usd", "costUsd"]) {
-    const candidate = nonNegativeFinite(value[key])
-    if (candidate !== undefined) return candidate
-  }
-  const inputTokens = nonNegativeFinite(value.input_tokens)
-  const outputTokens = nonNegativeFinite(value.output_tokens)
-  if (inputTokens === undefined && outputTokens === undefined) return undefined
-  const [inputPrice, outputPrice] = tokenPricing(string(value.model).toLowerCase())
-  return ((inputTokens ?? 0) * inputPrice) / 1_000_000 + ((outputTokens ?? 0) * outputPrice) / 1_000_000
+  return usageCostUsd(value)
 }
 
 const applyUsage = (projection: Projection, event: SourceEvent): Projection => {
@@ -391,6 +297,7 @@ const applyUsage = (projection: Projection, event: SourceEvent): Projection => {
     ...projection,
     costUsd: (projection.costUsd ?? 0) + cost,
     usageCursors: [...(projection.usageCursors ?? []), event.cursor],
+    pricingVersion,
   }
 }
 
@@ -651,9 +558,7 @@ const applyToolDelta = (projection: Projection, turnId: string, event: SourceEve
   const delta = string(value.delta ?? event.text)
   const input = `${previous?.input ?? ""}${delta}`
   const name = string(value.tool_name ?? value.name, previous?.name ?? "tool")
-  const decodedPatch = name === "apply_patch" ? partialJsonString(input, ["patchText", "patch"]) : undefined
-  const base = toolBlock(id, name, input, previous)
-  const block = decodedPatch === undefined ? base : { ...base, files: previewFiles(id, decodedPatch) }
+  const block = toolBlock(id, name, input, previous)
   return upsertUnit(
     projection,
     unit(toolKey(turnId, rawId), turnId, event.sequence, 0, event.sequence, { _tag: "Block", block }),
@@ -675,7 +580,7 @@ const applyToolRequested = (projection: Projection, turnId: string, event: Sourc
       ? undefined
       : projection.units.find((candidate) => {
           if (candidate.content._tag !== "Block" || candidate.content.block._tag !== "ToolCall") return false
-          return candidate.content.block.name === "shell" && candidate.content.block.process?.processId === processId
+          return candidate.content.block.name === "bash" && candidate.content.block.process?.processId === processId
         })
   const block =
     parent?.content._tag === "Block" && parent.content.block._tag === "ToolCall"

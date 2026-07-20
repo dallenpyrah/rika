@@ -1,5 +1,4 @@
 export * as Catalog from "./tool-catalog"
-export * as ApplyPatch from "./apply-patch"
 export * as ParallelSearch from "./parallel-search"
 export * as ReadWebPage from "./read-web-page"
 export * as ProcessRegistry from "./process-registry"

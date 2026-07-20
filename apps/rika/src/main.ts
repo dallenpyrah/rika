@@ -1175,7 +1175,7 @@ export const configuredBackendLayer = ({
                 permissionPolicy: {
                   rules: [
                     { pattern: "*", level: "allow" },
-                    { pattern: "shell", level: shellPermission },
+                    { pattern: "bash", level: shellPermission },
                   ],
                 },
               }),
@@ -1225,7 +1225,7 @@ export const configuredBackendLayer = ({
                 rules: [
                   { pattern: "*", level: "allow" as const },
                   {
-                    pattern: "shell",
+                    pattern: "bash",
                     level: config.settings.permissions.shell ?? ConfigContract.defaults.permissions.shell!,
                   },
                 ],
@@ -1818,8 +1818,10 @@ if (import.meta.main) {
             model = ViewState.update(model, { _tag: "AssistantCompleted", text: event.text })
             model = ViewState.update(model, { _tag: "ExecutionCompleted" })
           } else if (event._tag === "TitleCostUpdated") {
-            model = { ...model, costUsd: event.globalCostUsd }
-            if (model.currentThreadId === event.threadId) threadCostUsd = event.threadCostUsd
+            if (model.currentThreadId === event.threadId) {
+              threadCostUsd = event.threadCostUsd
+              model = { ...model, costUsd: event.threadCostUsd }
+            }
           } else if (event._tag === "ThreadTitled") {
             if (model.currentThreadId === event.threadId) {
               const workspaceLabel = model.workspace.replace(/^\/Users\/[^/]+/, "~")

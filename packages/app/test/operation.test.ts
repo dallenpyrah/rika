@@ -839,7 +839,7 @@ describe("Operation", () => {
         yield* operation.run({ _tag: "ToolCatalog", action: "list" })
         for (const mode of ["low", "medium", "high", "ultra"] as const)
           yield* operation.run({ _tag: "ToolCatalog", action: "list", mode })
-        yield* operation.run({ _tag: "ToolCatalog", action: "show", name: "read_file" })
+        yield* operation.run({ _tag: "ToolCatalog", action: "show", name: "read" })
         const missing = yield* Effect.result(operation.run({ _tag: "ToolCatalog", action: "show", name: "missing" }))
         const catalogOutput = (yield* TestConsole.logLines).slice(catalogLine)
         yield* operation.run({ _tag: "Thread", action: "delete", threadId: "thread-a" })
@@ -854,7 +854,7 @@ describe("Operation", () => {
       const lines = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.String))(output.lines)
       expect(lines.some((line) => line.includes('"title":"Named"'))).toBe(true)
       expect(lines.some((line) => line.includes('"workspace":"/client-work"'))).toBe(true)
-      expect(lines.some((line) => line.includes('"name":"read_file"'))).toBe(true)
+      expect(lines.some((line) => line.includes('"name":"read"'))).toBe(true)
       const catalogOutput = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.String))(output.catalogOutput)
       expect(catalogOutput).toHaveLength(6)
       expect(new Set(catalogOutput.slice(0, 5))).toEqual(new Set([catalogOutput[0]!]))
@@ -884,7 +884,7 @@ describe("Operation", () => {
       ).toBe(true)
       const shownJson = yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(catalogOutput[5]!)
       const shown = yield* Schema.decodeUnknownEffect(ToolCatalog.Definition)(shownJson)
-      expect(shown).toEqual(definitions.find(({ name }) => name === "read_file"))
+      expect(shown).toEqual(definitions.find(({ name }) => name === "read"))
     }),
   )
 

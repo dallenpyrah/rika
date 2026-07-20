@@ -13,7 +13,7 @@ test(
       ],
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("read_file", { path: "src/alpha.ts", offset: 1, limit: 2 }, "read-range"),
+          Scene.model.toolCall("read", { path: "src/alpha.ts", offset: 1, limit: 2 }, "read-range"),
         ]),
         Scene.model.turn([Scene.model.toolCall("find_files", { query: ".txt" }, "find-hidden")]),
         Scene.model.turn([
@@ -43,11 +43,11 @@ test(
       outsideFiles: { "secret.txt": "OUTSIDE_SECRET" },
       symlinks: [{ path: "escape.txt", target: "secret.txt", outside: true }],
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "escape.txt" }, "read-symlink")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "escape.txt" }, "read-symlink")]),
         Scene.model.turn([Scene.model.toolCall("grep", { pattern: "[", regex: true }, "invalid-regex")]),
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "missing.txt" }, "read-missing")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "missing.txt" }, "read-missing")]),
         Scene.model.turn([
-          Scene.model.toolCall("read_file", { path: "inside.txt", offset: -1, limit: 0 }, "invalid-range"),
+          Scene.model.toolCall("read", { path: "inside.txt", offset: -1, limit: 0 }, "invalid-range"),
         ]),
         Scene.model.text("FILE_ERRORS_COMPLETE"),
       ],
@@ -74,7 +74,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             {
               command: "sh",
               args: ["-c", "mkfifo blocked.txt; (sleep 2; printf released > blocked.txt) >/dev/null 2>&1 &"],
@@ -84,7 +84,7 @@ test(
         ]),
         Scene.model.turn([
           Scene.model.textPart("FILE_READ_STARTED"),
-          Scene.model.toolCall("read_file", { path: "blocked.txt" }, "cancel-read"),
+          Scene.model.toolCall("read", { path: "blocked.txt" }, "cancel-read"),
         ]),
         Scene.model.text("LATE_FILE_RESPONSE"),
       ],

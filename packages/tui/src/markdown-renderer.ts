@@ -420,13 +420,26 @@ const isPlainLine = (source: string): boolean => {
   return true
 }
 
-const renderLines = (source: string, plain: boolean, width: number): Lines => {
+const renderLinesUncached = (source: string, plain: boolean, width: number): Lines => {
   const safeSource = terminalSafeText(source)
   if (isPlainLine(safeSource)) return wrapChunks([fg(colors.text)(safeSource)], width)
   const tokens = Lexer.lex(safeSource, { gfm: true })
   const lines = blockLines(tokens, 0, plain, Math.max(1, Math.floor(width)))
   while (lines.length > 0 && lines[lines.length - 1]!.length === 0) lines.pop()
   return lines.map((line) => line.map((chunk) => ({ ...chunk, text: terminalSafeText(chunk.text) })))
+}
+
+const renderLinesCache = new Map<string, Lines>()
+const renderLinesCacheLimit = 512
+
+const renderLines = (source: string, plain: boolean, width: number): Lines => {
+  const key = `${plain ? "p" : "m"}:${width}:${source}`
+  const cached = renderLinesCache.get(key)
+  if (cached !== undefined) return cached
+  const lines = renderLinesUncached(source, plain, width)
+  if (renderLinesCache.size >= renderLinesCacheLimit) renderLinesCache.delete(renderLinesCache.keys().next().value!)
+  renderLinesCache.set(key, lines)
+  return lines
 }
 
 export const renderMarkdown: {

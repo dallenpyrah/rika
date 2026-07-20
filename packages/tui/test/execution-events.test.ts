@@ -2,7 +2,7 @@ import * as Transcript from "@rika/transcript"
 import { describe, expect, it } from "vitest"
 import { ExecutionEvents, ViewState } from "../src"
 import { renderTranscriptStyled } from "../src/adapter"
-import { transcriptUnitId, transcriptUnits } from "../src/transcript-units"
+import { unitId as transcriptUnitId, rows as transcriptUnits } from "../src/transcript-presenter"
 
 const event = (
   cursor: string,
@@ -18,7 +18,7 @@ describe("ExecutionEvents.projectUnits", () => {
     projection = Transcript.applyEvent(
       projection,
       event("call", 0, "tool.call.requested", {
-        data: { tool_call_id: "call", tool_name: "read_file", input: { path: "src/a.ts" } },
+        data: { tool_call_id: "call", tool_name: "read", input: { path: "src/a.ts" } },
       }),
     )
     model = ExecutionEvents.projectUnits(model, projection.units)
@@ -41,7 +41,7 @@ describe("ExecutionEvents.projectUnits", () => {
       event("input-0", 0, "model.input.prepared"),
       event("assistant-0", 1, "model.output.completed", { text: "I will inspect it." }),
       event("call", 2, "tool.call.requested", {
-        data: { tool_call_id: "call", tool_name: "read_file", input: { path: "src/a.ts" } },
+        data: { tool_call_id: "call", tool_name: "read", input: { path: "src/a.ts" } },
       }),
       event("result", 3, "tool.result.received", { data: { tool_call_id: "call", output: "contents" } }),
       event("input-1", 4, "model.input.prepared"),
@@ -60,12 +60,12 @@ describe("ExecutionEvents.projectUnits", () => {
   it("keeps overlapping tool ids separate across turns", () => {
     const first = Transcript.project("turn-1", "first", [
       event("call", 0, "tool.call.requested", {
-        data: { tool_call_id: "call", tool_name: "read_file", input: { path: "a.ts" } },
+        data: { tool_call_id: "call", tool_name: "read", input: { path: "a.ts" } },
       }),
     ])
     const second = Transcript.project("turn-2", "second", [
       event("call", 0, "tool.call.requested", {
-        data: { tool_call_id: "call", tool_name: "read_file", input: { path: "b.ts" } },
+        data: { tool_call_id: "call", tool_name: "read", input: { path: "b.ts" } },
       }),
     ])
     const model = ExecutionEvents.projectUnits(ViewState.initial("/work"), [...first.units, ...second.units])
@@ -107,13 +107,13 @@ describe("ExecutionEvents.projectUnits", () => {
     ])
     const child = Transcript.project("child:turn:oracle", "", [
       event("read", 0, "tool.call.requested", {
-        data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts", offset: 3, limit: 4 } },
+        data: { tool_call_id: "read", tool_name: "read", input: { path: "src/a.ts", offset: 3, limit: 4 } },
       }),
       event("read-result", 1, "tool.result.received", {
         data: { tool_call_id: "read", output: "contents" },
       }),
       event("shell", 2, "tool.call.requested", {
-        data: { tool_call_id: "shell", tool_name: "shell", input: { command: "bun test" } },
+        data: { tool_call_id: "shell", tool_name: "bash", input: { command: "bun test" } },
       }),
       event("shell-result", 3, "tool.result.received", {
         data: { tool_call_id: "shell", output: { text: "passed", exitCode: 0 } },
@@ -179,7 +179,7 @@ describe("ExecutionEvents.projectUnits", () => {
     for (const [index, childId] of nestedIds.entries()) {
       const child = Transcript.project(childId, "", [
         event(`read-${index}`, 0, "tool.call.requested", {
-          data: { tool_call_id: "read", tool_name: "read_file", input: { path: `src/${index}.ts` } },
+          data: { tool_call_id: "read", tool_name: "read", input: { path: `src/${index}.ts` } },
         }),
         event(`answer-${index}`, 1, "model.output.completed", {
           text: `## Area ${index + 1}\n\n**Complete.**`,
@@ -222,7 +222,7 @@ describe("ExecutionEvents.projectUnits", () => {
     ])
     const child = Transcript.project("child:turn:oracle", "", [
       event("read", 0, "tool.call.requested", {
-        data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/projection.ts" } },
+        data: { tool_call_id: "read", tool_name: "read", input: { path: "src/projection.ts" } },
       }),
       event("answer", 1, "model.output.completed", { text: "## Projection fixed\n\n**All checks pass.**" }),
     ])
@@ -490,7 +490,7 @@ describe("ExecutionEvents.projectUnits", () => {
     ])
     const childProjection = Transcript.project(childId, "", [
       event("read", 0, "tool.call.requested", {
-        data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/projection.ts" } },
+        data: { tool_call_id: "read", tool_name: "read", input: { path: "src/projection.ts" } },
       }),
       event("answer", 1, "model.output.completed", { text: "## Review complete\n\n**No defects found.**" }),
     ])
@@ -534,7 +534,7 @@ describe("ExecutionEvents.projectUnits", () => {
       ])
       const child = Transcript.project("child", "", [
         event("inner", 0, "tool.call.requested", {
-          data: { tool_call_id: "inner", tool_name: "read_file", input: { path: "missing.ts" } },
+          data: { tool_call_id: "inner", tool_name: "read", input: { path: "missing.ts" } },
         }),
         event("inner-result", 1, "tool.result.received", {
           data: { tool_call_id: "inner", error: "File not found" },
@@ -580,7 +580,7 @@ describe("ExecutionEvents.projectUnits", () => {
     ])
     const child = Transcript.project("child", "", [
       event("inner", 0, "tool.call.requested", {
-        data: { tool_call_id: "inner", tool_name: "read_file", input: { path: "missing.ts" } },
+        data: { tool_call_id: "inner", tool_name: "read", input: { path: "missing.ts" } },
       }),
       event("inner-error", 1, "tool.result.received", {
         data: { tool_call_id: "inner", error: "File not found" },
@@ -619,7 +619,7 @@ describe("ExecutionEvents.projectUnits", () => {
     ])
     const child = Transcript.project(childId, "", [
       event("shell", 0, "tool.call.requested", {
-        data: { tool_call_id: "shell", tool_name: "shell", input: { command: "sleep 60" } },
+        data: { tool_call_id: "shell", tool_name: "bash", input: { command: "sleep 60" } },
       }),
       event("child-cancelled", 1, "execution.cancelled"),
     ])
@@ -651,7 +651,7 @@ describe("ExecutionEvents.projectUnits", () => {
     ])
     const child = Transcript.project("child", "", [
       event("shell", 2, "tool.call.requested", {
-        data: { tool_call_id: "shell", tool_name: "shell", input: { command: "sleep 60" } },
+        data: { tool_call_id: "shell", tool_name: "bash", input: { command: "sleep 60" } },
       }),
       event("child-cancelled", 3, "execution.cancelled", { data: { reason: "parent stopped this child" } }),
     ])

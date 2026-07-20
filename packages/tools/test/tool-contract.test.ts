@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Ref, Schema, Stream } from "effect"
+import { Effect, Schema } from "effect"
 import { Tool } from "effect/unstable/ai"
 import { AgentTools, Catalog, ParallelSearch, ProcessRegistry, Runtime, ThreadTools } from "../src"
 import { provide } from "./test-layer"
@@ -33,10 +33,9 @@ describe("tool contracts", () => {
 
   it("defines permission and output policies for every initial tool", () => {
     expect(Catalog.definitions.length).toBeGreaterThanOrEqual(9)
-    expect(Catalog.get("read_file")?.permission).toBe("allow")
-    expect(Catalog.get("create_file")?.permission).toBe("allow")
-    expect(Catalog.get("edit_file")?.permission).toBe("allow")
-    expect(Catalog.get("apply_patch")?.permission).toBe("allow")
+    expect(Catalog.get("read")?.permission).toBe("allow")
+    expect(Catalog.get("write")?.permission).toBe("allow")
+    expect(Catalog.get("edit")?.permission).toBe("allow")
     expect(Catalog.get("oracle")?.permission).toBe("allow")
     expect(Catalog.get("librarian")?.permission).toBe("allow")
     expect(Catalog.get("painter")?.permission).toBe("allow")
@@ -47,10 +46,9 @@ describe("tool contracts", () => {
       true,
     )
     expect(Catalog.definitions.filter(({ idempotency }) => idempotency === "unsafe").map(({ name }) => name)).toEqual([
-      "create_file",
-      "edit_file",
-      "apply_patch",
-      "shell",
+      "write",
+      "edit",
+      "bash",
       "oracle",
       "librarian",
       "review",
@@ -72,17 +70,17 @@ describe("tool contracts", () => {
 
   it.effect("rejects invalid bounds while preserving file ranges for typed runtime failures", () =>
     Effect.gen(function* () {
-      const definition = Catalog.get("read_file")!
+      const definition = Catalog.get("read")!
       yield* Effect.flip(Schema.decodeUnknownEffect(Catalog.Definition)({ ...definition, timeoutMillis: 0 }))
       yield* Effect.flip(Schema.decodeUnknownEffect(Catalog.Definition)({ ...definition, outputLimit: 1.5 }))
       expect(
-        yield* Schema.decodeUnknownEffect(Runtime.Request)({ _tag: "ReadFile", path: "a", offset: -1, limit: 0 }),
-      ).toEqual({ _tag: "ReadFile", path: "a", offset: -1, limit: 0 })
+        yield* Schema.decodeUnknownEffect(Runtime.Request)({ _tag: "Read", path: "a", offset: -1, limit: 0 }),
+      ).toEqual({ _tag: "Read", path: "a", offset: -1, limit: 0 })
       yield* Effect.flip(
-        Schema.decodeUnknownEffect(Runtime.Request)({ _tag: "ReadFile", path: "a", offset: Number.POSITIVE_INFINITY }),
+        Schema.decodeUnknownEffect(Runtime.Request)({ _tag: "Read", path: "a", offset: Number.POSITIVE_INFINITY }),
       )
       yield* Effect.flip(
-        Schema.decodeUnknownEffect(Runtime.Request)({ _tag: "Shell", command: "echo", args: [], waitMillis: 0.5 }),
+        Schema.decodeUnknownEffect(Runtime.Request)({ _tag: "Bash", command: "echo", args: [], waitMillis: 0.5 }),
       )
       yield* Effect.flip(Schema.decodeUnknownEffect(ThreadTools.FindThreadInput)({ query: "all", limit: 0 }))
     }),
@@ -91,22 +89,22 @@ describe("tool contracts", () => {
   it.effect("round-trips canonical typed failures and rejects incomplete failure results", () =>
     Effect.gen(function* () {
       const failure = Runtime.ToolError.make({
-        tool: "ReadFile",
+        tool: "read",
         message: "missing",
         kind: "operation",
         outcome: "known",
       })
       expect(yield* Schema.decodeUnknownEffect(Runtime.ToolError)(failure)).toEqual(failure)
       yield* Effect.flip(
-        Schema.decodeUnknownEffect(Runtime.ToolError)({ _tag: "ToolError", tool: "ReadFile", message: "missing" }),
+        Schema.decodeUnknownEffect(Runtime.ToolError)({ _tag: "ToolError", tool: "read", message: "missing" }),
       )
     }),
   )
 
   it("defines an Amp presentation for every built-in tool", () => {
     expect(Catalog.definitions.every((definition) => definition.presentation !== undefined)).toBe(true)
-    expect(Catalog.get("apply_patch")?.presentation).toMatchObject({ family: "edit" })
-    expect(Catalog.get("read_file")?.presentation).toMatchObject({ family: "explore", action: "read" })
+    expect(Catalog.get("edit")?.presentation).toMatchObject({ family: "edit" })
+    expect(Catalog.get("read")?.presentation).toMatchObject({ family: "explore", action: "read" })
     expect(Catalog.get("shell_command_status")?.presentation).toMatchObject({ family: "direct", action: "status" })
     expect(Catalog.get("find_thread")?.presentation).toMatchObject({
       family: "explore",
@@ -236,66 +234,10 @@ describe("tool contracts", () => {
     }),
   )
 
-  it.effect("routes every model-facing toolkit handler through the runtime contract", () =>
-    Effect.gen(function* () {
-      const requests = yield* Ref.make<ReadonlyArray<Runtime.Request>>([])
-      const runtimeLayer = Runtime.testLayer((request) =>
-        Ref.update(requests, (current) => [...current, request]).pipe(
-          Effect.as({ text: request._tag, truncated: false }),
-        ),
-      )
-      yield* Effect.gen(function* () {
-        const toolkit = yield* Runtime.toolkit
-        yield* toolkit.handle("find_files", { query: "src" }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("grep", { pattern: "needle", regex: false }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("read_file", { path: "a.ts", offset: 1, limit: 2 }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("read_file", { path: "b.ts" }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("create_file", { path: "new.ts", content: "new" }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit
-          .handle("edit_file", { path: "a.ts", oldText: "old", newText: "new" })
-          .pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("apply_patch", { patchText: "patch" }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("shell", { command: "echo", args: ["ok"] }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit
-          .handle("shell", { command: "echo", args: [], cwd: "src", waitMillis: 1 })
-          .pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("shell_command_status", { processId: "1" }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit
-          .handle("shell_command_status", { processId: "1", waitMillis: 1 })
-          .pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("git_status", {}).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit
-          .handle("web_search", { objective: "Current docs", searchQueries: ["current docs"] })
-          .pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("read_web_page", { url: "https://example.com" }).pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit
-          .handle("read_web_page", {
-            url: "https://example.com",
-            objective: "docs",
-            fullContent: true,
-            forceRefetch: true,
-          })
-          .pipe(Effect.flatMap(Stream.runDrain))
-        yield* toolkit.handle("view_media", { path: "image.png" }).pipe(Effect.flatMap(Stream.runDrain))
-      }).pipe(provide(Runtime.handlerLayer.pipe(Layer.provide(runtimeLayer))))
-      expect((yield* Ref.get(requests)).map((request) => request._tag)).toEqual([
-        "FindFiles",
-        "Grep",
-        "ReadFile",
-        "ReadFile",
-        "CreateFile",
-        "EditFile",
-        "ApplyPatch",
-        "Shell",
-        "Shell",
-        "ShellCommandStatus",
-        "ShellCommandStatus",
-        "GitStatus",
-        "WebSearch",
-        "ReadWebPage",
-        "ReadWebPage",
-        "ViewMedia",
-      ])
-    }),
-  )
+  it("registers the migrated core model-facing tool names", () => {
+    expect(Object.keys(Runtime.toolkit.tools)).toEqual(expect.arrayContaining(["read", "write", "edit", "bash"]))
+    expect(
+      ["read_file", "create_file", "edit_file", "shell", "apply_patch"].filter((name) => name in Runtime.toolkit.tools),
+    ).toEqual([])
+  })
 })

@@ -166,7 +166,7 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
           toolApprovalWaitIds.map((waitId) => ({
             waitId,
             callId: `call-${waitId}`,
-            toolName: "create_file",
+            toolName: "write",
             input: { path: "a.ts" },
             requestedAt: 0,
           })),

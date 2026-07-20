@@ -32,7 +32,7 @@ const readCall = (
 ): Extract<ViewState.TranscriptBlock, { _tag: "ToolCall" }> => ({
   _tag: "ToolCall",
   id,
-  name: "read_file",
+  name: "read",
   input: detail,
   status,
   presentation: {
@@ -489,7 +489,7 @@ describe("ViewState", () => {
       block: {
         _tag: "ToolCall",
         id: "1",
-        name: "read_file",
+        name: "read",
         input: "a.ts",
         status: "running",
         presentation: {
@@ -937,10 +937,10 @@ describe("ViewState", () => {
     const call: Extract<ViewState.TranscriptBlock, { _tag: "ToolCall" }> = {
       _tag: "ToolCall",
       id: "patch",
-      name: "apply_patch",
+      name: "edit",
       input: "{}",
       status: "complete",
-      presentation: { family: "edit", action: "patch", activeLabel: "Editing", completeLabel: "Edited" },
+      presentation: { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
       detail: "",
       files: [editFile("patch:0", "src/a.ts"), editFile("patch:1", "src/b.ts")],
     }

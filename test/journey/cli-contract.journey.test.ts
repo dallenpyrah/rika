@@ -154,10 +154,10 @@ describe("packaged CLI contract", () => {
           const listed = yield* run(context, ["tools", "list"])
           expect(listed.exitCode).toBe(0)
           const tools = Schema.decodeUnknownSync(NamedItemsJson)(listed.stdout)
-          expect(tools.some((tool) => tool.name === "read_file")).toBe(true)
-          const shown = yield* run(context, ["tools", "show", "read_file"])
+          expect(tools.some((tool) => tool.name === "read")).toBe(true)
+          const shown = yield* run(context, ["tools", "show", "read"])
           expect(shown.exitCode).toBe(0)
-          expect(Schema.decodeUnknownSync(NamedItemJson)(shown.stdout).name).toBe("read_file")
+          expect(Schema.decodeUnknownSync(NamedItemJson)(shown.stdout).name).toBe("read")
           expect((yield* run(context, ["tools", "show", "missing-tool"])).exitCode).not.toBe(0)
         }),
       ),

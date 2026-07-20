@@ -3,7 +3,7 @@ import { createTestRenderer, ManualClock } from "@opentui/core/testing"
 import { expect, test } from "vitest"
 import { Data, Effect } from "effect"
 import stringWidth from "string-width"
-import { Surface, maxMountedTranscriptEntries } from "../src/adapter"
+import { Surface, maxMountedTranscriptEntries, maxMountedTranscriptRows } from "../src/adapter"
 import { colors } from "../src/theme"
 import {
   applyQueueDelta,
@@ -30,7 +30,7 @@ const styledTextValue = (value: { readonly chunks: ReadonlyArray<{ readonly text
 const streamingShell = (id: string, output?: string) => ({
   _tag: "ToolCall" as const,
   id,
-  name: "shell",
+  name: "bash",
   input: `{"command":"printf ${id}"}`,
   status: "running" as const,
   presentation: {
@@ -400,6 +400,129 @@ test("moves the bounded transcript window to older mounted entries and keeps it 
         expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptEntries * 2)
         surface.update({ ...base, input: "next", cursor: 4 })
         expect(state.transcriptWindowEnd).toBe(400)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+const giantSubagentModel = (childCount: number): Model => {
+  const rootBlock = {
+    _tag: "ToolCall" as const,
+    id: "root-tool",
+    name: "task",
+    input: "{}",
+    status: "complete" as const,
+    presentation: {
+      family: "agent" as const,
+      action: "task",
+      activeLabel: "Subagent working",
+      completeLabel: "Subagent finished",
+    },
+    detail: "delegated task",
+    files: [],
+  }
+  const childBlocks = Array.from({ length: childCount }, (_, index) => ({
+    _tag: "ToolCall" as const,
+    id: `child-${index}`,
+    name: "bash",
+    input: "{}",
+    status: "complete" as const,
+    presentation: {
+      family: "shell" as const,
+      action: "shell",
+      activeLabel: "Running",
+      completeLabel: "Ran",
+    },
+    detail: `cmd-${index}`,
+    files: [],
+  }))
+  const blocks = [rootBlock, ...childBlocks]
+  const items = blocks.map((block, index) => ({
+    _tag: "Block" as const,
+    index,
+    id: `block-${block.id}`,
+    turnId: "turn-1",
+    ...(index === 0 ? {} : { parentId: "root-tool" }),
+  }))
+  return {
+    ...initial("/work", "high"),
+    blocks,
+    items,
+    expandedRowKeys: ["tool:root-tool"],
+    scrollFollow: false,
+  }
+}
+
+test("keeps mounted renderables bounded inside one giant expanded subagent tree", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const model = giantSubagentModel(300)
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        const state = surface as unknown as { readonly transcriptChildren: ReadonlyArray<Renderable> }
+        expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptRows * 2)
+        expect(state.transcriptChildren.length).toBeGreaterThan(0)
+        const frame = setup.captureCharFrame()
+        expect(frame).toContain("├ ✓ $ cmd-60")
+        expect(frame).not.toContain("cmd-59 ")
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("grows the row window backward inside a giant tree and keeps the reading position", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const model = giantSubagentModel(300)
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScroll.scrollTo(0)
+        yield* openTui(() => setup.flush())
+        const firstBefore = Number(/cmd-(\d+)/.exec(setup.captureCharFrame())?.[1])
+        setup.mockInput.pressKey("\x1b[5~")
+        yield* openTui(() => setup.flush())
+        const state = surface as unknown as {
+          readonly transcriptRowWindow: { readonly end: number }
+          readonly transcriptChildren: ReadonlyArray<Renderable>
+        }
+        const firstAfter = Number(/cmd-(\d+)/.exec(setup.captureCharFrame())?.[1])
+        expect(state.transcriptRowWindow.end).toBeGreaterThan(0)
+        expect(state.transcriptRowWindow.end).toBeLessThan(301)
+        expect(firstAfter).toBeLessThan(firstBefore)
+        expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptRows * 2)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("keeps the scrollbar geometry consistent across backward row-window growth", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const model = giantSubagentModel(300)
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScroll.scrollTo(0)
+        yield* openTui(() => setup.flush())
+        setup.mockInput.pressKey("\x1b[5~")
+        yield* openTui(() => setup.flush())
+        expect(surface.transcriptScrollbar.scrollSize).toBe(surface.transcriptScroll.scrollHeight)
+        expect(surface.transcriptScrollbar.viewportSize).toBeGreaterThanOrEqual(1)
+        expect(surface.transcriptScrollbar.scrollPosition).toBe(surface.transcriptScroll.scrollTop)
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -1128,7 +1251,7 @@ test("ticks Amp status and running-tool spinners every 200ms without rebuilding 
       const running = {
         _tag: "ToolCall" as const,
         id: "long-running",
-        name: "shell",
+        name: "bash",
         input: '{"command":"sleep 5"}',
         status: "running" as const,
         presentation: {
@@ -1311,7 +1434,7 @@ test("toggles expandable transcript headers without selecting them and keeps bod
           {
             _tag: "ToolCall",
             id: "shell-selection",
-            name: "shell",
+            name: "bash",
             input: '{"command":"printf transcript-output"}',
             status: "complete",
             presentation: {
@@ -1524,7 +1647,7 @@ test("renders a subagent tool tree and expands each child independently", () =>
           {
             _tag: "ToolCall",
             id: "child-read",
-            name: "read_file",
+            name: "read",
             input: '{"path":"src/a.ts","offset":2,"limit":3}',
             output: "read child output",
             status: "complete",
@@ -1551,7 +1674,7 @@ test("renders a subagent tool tree and expands each child independently", () =>
           {
             _tag: "ToolCall",
             id: "child-shell",
-            name: "shell",
+            name: "bash",
             input: '{"command":"bun test"}',
             output: "shell child output",
             status: "complete",
@@ -2323,7 +2446,7 @@ test("drives keyboard, palette, resize, frame capture, and teardown", () =>
           block: {
             _tag: "ToolCall",
             id: "1",
-            name: "read_file",
+            name: "read",
             input: "src/main.ts",
             status: "running",
             presentation: {

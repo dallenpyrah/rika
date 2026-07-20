@@ -448,6 +448,7 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                                   const consume = Effect.gen(function* () {
                                     while (true) {
                                       const frames = yield* Queue.takeAll(feed.frames)
+                                      const batchTails = new Map<string, (typeof frames)[number]>()
                                       for (const queued of frames) {
                                         yield* Effect.uninterruptible(
                                           Effect.sync(() => {
@@ -463,20 +464,25 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                                                   )
                                                 : Effect.void,
                                             ),
-                                            Effect.andThen(
-                                              write(
-                                                json({
-                                                  _tag: "interactive-feed-ack",
-                                                  connectionId: queued.connectionId,
-                                                  requestId: queued.requestId,
-                                                  sessionId: queued.sessionId,
-                                                  feedGeneration: queued.feedGeneration,
-                                                  throughSequence: queued.sequence,
-                                                } satisfies ResidentService.ClientMessage),
-                                              ),
-                                            ),
-                                            Effect.mapError((error) => unavailable(error.message)),
                                           ),
+                                        )
+                                        batchTails.set(
+                                          `${queued.connectionId} ${queued.requestId} ${queued.sessionId} ${queued.feedGeneration}`,
+                                          queued,
+                                        )
+                                      }
+                                      for (const queued of batchTails.values()) {
+                                        yield* Effect.uninterruptible(
+                                          write(
+                                            json({
+                                              _tag: "interactive-feed-ack",
+                                              connectionId: queued.connectionId,
+                                              requestId: queued.requestId,
+                                              sessionId: queued.sessionId,
+                                              feedGeneration: queued.feedGeneration,
+                                              throughSequence: queued.sequence,
+                                            } satisfies ResidentService.ClientMessage),
+                                          ).pipe(Effect.mapError((error) => unavailable(error.message))),
                                         )
                                         if (queued.sequence % 1_024 === 0)
                                           yield* Effect.logInfo("resident.feed.ack_consumed").pipe(

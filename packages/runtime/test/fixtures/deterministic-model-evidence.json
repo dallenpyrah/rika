@@ -8,7 +8,7 @@
     },
     {
       "name": "tool-call",
-      "call": { "id": "read-1", "name": "read_file", "input": { "path": "fixture.txt" } },
+      "call": { "id": "read-1", "name": "read", "input": { "path": "fixture.txt" } },
       "result": { "path": "fixture.txt", "content": "tool fixture" }
     },
     {

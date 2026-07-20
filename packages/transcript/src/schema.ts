@@ -172,5 +172,6 @@ export const Projection = Schema.Struct({
   checkpointCursor: Schema.optionalKey(Schema.String),
   costUsd: Schema.optionalKey(Schema.Finite),
   usageCursors: Schema.optionalKey(Schema.Array(Schema.String)),
+  pricingVersion: Schema.optionalKey(Schema.String),
 })
 export type Projection = typeof Projection.Type

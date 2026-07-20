@@ -7,6 +7,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: "unit",
+          setupFiles: ["test/unit/setup-relay-polling.ts"],
           include: [
             "packages/*/test/**/*.test.ts",
             "apps/*/test/**/*.test.ts",
@@ -20,7 +21,6 @@ export default defineConfig({
             "**/*.stress.journey.test.ts",
             "**/scene.test.ts",
           ],
-          maxWorkers: 2,
           sequence: { groupOrder: 0 },
         },
       },
@@ -30,7 +30,6 @@ export default defineConfig({
           name: "scene",
           include: ["packages/*/test/**/*.scene.test.ts", "apps/*/test/**/*.scene.test.ts", "**/scene.test.ts"],
           exclude: ["repos/**"],
-          fileParallelism: false,
           testTimeout: 40_000,
           sequence: { groupOrder: 1 },
         },
@@ -41,7 +40,6 @@ export default defineConfig({
           name: "journey",
           include: ["test/journey/**/*.journey.test.ts"],
           exclude: ["test/journey/**/*.stress.journey.test.ts"],
-          fileParallelism: false,
           globalSetup: ["test/journey/setup-packaged-product.ts"],
           sequence: { groupOrder: 2 },
         },

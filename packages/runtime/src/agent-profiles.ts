@@ -11,54 +11,36 @@ export class PainterUnavailableError extends Schema.TaggedErrorClass<PainterUnav
   { message: Schema.String, provider: Schema.String, model: Schema.String },
 ) {}
 
-export const outputSchemas = {
-  Oracle: Schema.Struct({ answer: Schema.String, evidence: Schema.Array(Schema.String) }),
-  Librarian: Schema.Struct({ answer: Schema.String, sources: Schema.Array(Schema.String) }),
-  Painter: Schema.Struct({
-    text: Schema.String,
-    artifact: Schema.Struct({ path: Schema.String, mimeType: Schema.String, kind: Schema.String }),
-  }),
-  Review: Schema.Struct({
-    summary: Schema.String,
-    findings: Schema.Array(
-      Schema.Struct({ severity: Schema.String, message: Schema.String, path: Schema.optionalKey(Schema.String) }),
-    ),
-  }),
-  ReadThread: Schema.Struct({ answer: Schema.String, threadIds: Schema.Array(Schema.String) }),
-  Task: Schema.Struct({ summary: Schema.String, files: Schema.Array(Schema.String) }),
-} as const
+export const mainInstructions =
+  "Oracle is a read-only, high-reasoning advisor for planning, reviewing, understanding code, and debugging. Consult Oracle frequently for complex or difficult tasks. Before consulting Oracle, tell the user that you are consulting it; after consulting Oracle, state that you did and use its advice while remaining responsible for the implementation and conclusion."
 
 const definitions = {
   Oracle: {
-    instructions: "Answer a focused technical question using read-only workspace evidence. Do not modify files.",
-    tools: [Tools.findFilesTool, Tools.grepTool, Tools.readFileTool],
+    instructions:
+      "Act as a read-only, high-reasoning technical advisor for planning, reviewing, understanding code, and debugging. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
+    tools: [Tools.findFilesTool, Tools.grepTool, Tools.readTool],
     permissions: ["workspace.read"],
-    schema: "rika.agent.oracle.v1",
   },
   Librarian: {
     instructions: "Research current authoritative sources and return cited findings. Do not modify files.",
     tools: [Tools.webSearchTool, Tools.readWebPageTool],
     permissions: ["network.read"],
-    schema: "rika.agent.librarian.v1",
   },
   Painter: {
     instructions:
       "Produce a requested visual artifact through the available media route and report its metadata. Do not modify source files.",
     tools: [Tools.viewMediaTool],
     permissions: ["workspace.read"],
-    schema: "rika.agent.painter.v1",
   },
   Review: {
     instructions: "Review workspace changes for correctness, regressions, and missing tests. Do not modify files.",
-    tools: [Tools.grepTool, Tools.readFileTool, Tools.gitStatusTool],
+    tools: [Tools.grepTool, Tools.readTool, Tools.gitStatusTool],
     permissions: ["workspace.read"],
-    schema: "rika.agent.review.v1",
   },
   ReadThread: {
     instructions: "Answer only from local thread transcripts and identify the threads used.",
     tools: [ThreadTools.findThreadTool, ThreadTools.readThreadTool],
     permissions: ["thread.read"],
-    schema: "rika.agent.read-thread.v1",
   },
   Task: {
     instructions:
@@ -66,14 +48,13 @@ const definitions = {
     tools: [
       Tools.findFilesTool,
       Tools.grepTool,
-      Tools.readFileTool,
-      Tools.createFileTool,
-      Tools.editFileTool,
-      Tools.shellTool,
+      Tools.readTool,
+      Tools.writeTool,
+      Tools.editTool,
+      Tools.bashTool,
       Tools.shellCommandStatusTool,
     ],
     permissions: ["workspace.read", "workspace.write", "process.run"],
-    schema: "rika.agent.task.v1",
   },
 } as const
 
@@ -81,7 +62,7 @@ const resolveImpl = (name: Name, model: ModelRegistry.ModelSelection) => {
   const definition = definitions[name]
   const toolkit = Toolkit.make(
     ...definition.tools,
-    ...(name === "Review" ? [] : Object.values(AgentTools.modelToolkit.tools)),
+    ...(name === "Oracle" || name === "Review" ? [] : Object.values(AgentTools.modelToolkit.tools)),
   )
   const relayModel = {
     provider: model.provider,
@@ -90,7 +71,8 @@ const resolveImpl = (name: Name, model: ModelRegistry.ModelSelection) => {
   }
   return {
     name,
-    agent: Agent.make(`rika-${name.toLowerCase()}`, {
+    agent: Agent.make({
+      name: `rika-${name.toLowerCase()}`,
       instructions: definition.instructions,
       model,
       toolkit,
@@ -101,10 +83,8 @@ const resolveImpl = (name: Name, model: ModelRegistry.ModelSelection) => {
       model: relayModel,
       tool_names: Object.keys(toolkit.tools),
       permissions: [...definition.permissions],
-      output_schema_ref: definition.schema,
       metadata: { product_profile: name },
     },
-    outputSchema: outputSchemas[name],
   }
 }
 
@@ -163,11 +143,6 @@ export const parentPermissions = [...new Set(names.flatMap((name) => definitions
 }))
 
 export const childRunSpawnPermission = { name: "relay.child_run.spawn", value: true }
-
-export const outputSchemaRegistrations = names.map((name) => ({
-  ref: definitions[name].schema,
-  schema: outputSchemas[name],
-}))
 
 export const subagentHandoffTargets = [
   { name: "oracle", preset_name: "Oracle" },

@@ -14,9 +14,6 @@ test(
         ...["Alpha", "Beta", "Gamma", "Delta"].map((name) =>
           Scene.model.text(`## ${name} complete\n\n**Verified.**`, 100),
         ),
-        ...["Alpha", "Beta", "Gamma", "Delta"].map((name) =>
-          Scene.model.object({ summary: `${name} complete`, files: [] }),
-        ),
         Scene.model.text("All parallel work complete."),
       ],
       actions: [
@@ -44,10 +41,8 @@ test(
   () =>
     Scene.run({
       script: [
-        Scene.model.turn([
-          Scene.model.toolCall("task", { prompt: "Return malformed structured output." }, "call-failed"),
-        ]),
-        Scene.model.object({ summary: "Malformed", files: "not-an-array" }),
+        Scene.model.turn([Scene.model.toolCall("task", { prompt: "Fail deterministically." }, "call-failed")]),
+        Scene.model.failure("deterministic child failure"),
         Scene.model.text("Parent continued after child failure."),
       ],
       actions: [

@@ -17,7 +17,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.reasoning("REASONING_DETAIL_MARKER"),
-          Scene.model.toolCall("shell", { command: "printf", args: ["TOOL_DETAIL_MARKER"] }, "detail-shell"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["TOOL_DETAIL_MARKER"] }, "detail-shell"),
         ]),
         Scene.model.text("NAV_DONE"),
       ],
@@ -135,14 +135,17 @@ test(
   "click toggles an expandable transcript row",
   () =>
     Scene.run({
+      workspace: { "click-marker.txt": "CLICK_EXPANDED_BODY_OK\n" },
       script: [
-        Scene.model.turn([Scene.model.toolCall("shell", { command: "pwd", args: [] }, "click-shell")]),
+        Scene.model.turn([
+          Scene.model.toolCall("bash", { command: "cat", args: ["click-marker.txt"] }, "click-shell"),
+        ]),
         Scene.model.text("CLICK_READY"),
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Render a clickable tool.\r"),
         Scene.action.clickAfter("CLICK_READY", 8, 23),
-        Scene.action.writeAfter("/tmp/rika-scene-", "\u0003", 500),
+        Scene.action.writeAfter("CLICK_EXPANDED_BODY_OK", "\u0003", 500),
       ],
     }).then((result) => {
       expect(result.actionsCompleted, result.output).toBe(3)
@@ -162,8 +165,8 @@ test(
             return [
               Scene.model.reasoning(`MOUNT_REASON_${String(index).padStart(3, "0")}`),
               index % 2 === 0
-                ? Scene.model.toolCall("read_file", { path: marker }, `mount-${index}`)
-                : Scene.model.toolCall("create_file", { path: marker, content: marker }, `mount-${index}`),
+                ? Scene.model.toolCall("read", { path: marker }, `mount-${index}`)
+                : Scene.model.toolCall("write", { path: marker, content: marker }, `mount-${index}`),
             ]
           }).flat(),
         ),

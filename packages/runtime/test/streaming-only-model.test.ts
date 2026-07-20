@@ -88,7 +88,7 @@ describe("streamingOnlyLanguageModel", () => {
         Response.makePart("reasoning-end", { id: "r1" }),
         Response.makePart("tool-call", {
           id: "call-1",
-          name: "shell",
+          name: "bash",
           params: { command: "ls" },
           providerExecuted: false,
         }),
@@ -97,7 +97,7 @@ describe("streamingOnlyLanguageModel", () => {
       const model = streamingOnlyLanguageModel(scriptedModel(parts, []))
       const response = yield* model.generateText({ prompt: "hello" })
       expect(response.reasoningText).toBe("thinking")
-      expect((response.toolCalls as Array<{ name: string }>).map((call) => call.name)).toEqual(["shell"])
+      expect((response.toolCalls as Array<{ name: string }>).map((call) => call.name)).toEqual(["bash"])
       expect(response.text).toBe("done")
     }),
   )

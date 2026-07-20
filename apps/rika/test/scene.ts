@@ -230,9 +230,11 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     RIKA_DATABASE: `${state}/rika.db`,
     RIKA_RELAY_DATABASE: `${state}/relay.db`,
     RIKA_INTERNAL_RESIDENT_STARTUP_HOLD: "0",
-    ...(options.editorContent === undefined
-      ? {}
-      : { EDITOR: editor, VISUAL: editor, RIKA_TEST_EDITOR_CONTENT: options.editorContent }),
+    ...(options.editorContent !== undefined
+      ? { EDITOR: editor, VISUAL: editor, RIKA_TEST_EDITOR_CONTENT: options.editorContent }
+      : options.executable === undefined
+        ? { EDITOR: "/usr/bin/false", VISUAL: "/usr/bin/false" }
+        : { EDITOR: `${bin}/${options.executable.name}`, VISUAL: `${bin}/${options.executable.name}` }),
     ...(options.mediaAnalyzer === undefined
       ? {}
       : "response" in options.mediaAnalyzer
@@ -348,7 +350,14 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     }),
   )
   yield* resident.kill({ killSignal: "SIGTERM" }).pipe(Effect.ignore)
-  yield* resident.exitCode.pipe(Effect.timeout("2 seconds"), Effect.ignore)
+  yield* resident.exitCode.pipe(
+    Effect.timeoutOrElse({
+      duration: "2 seconds",
+      orElse: () => resident.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore, Effect.andThen(resident.exitCode)),
+    }),
+    Effect.timeout("2 seconds"),
+    Effect.ignore,
+  )
   if (Number(helperExitCode) !== 0) return yield* Effect.die(stderr)
   const result = yield* Schema.decodeUnknownEffect(PtyResult)(stdout.trim())
   const terminalOutput = stripTerminalControl(Buffer.from(result.output, "base64").toString("utf8"))
@@ -368,6 +377,23 @@ const scenario = Effect.fn("Scene.run")(function* (options: Options) {
     fs
       .readDirectory(`${state}/diagnostics`)
       .pipe(Effect.map((names) => names.every((name) => !diagnosticProcessRunning(name)))),
+  ).pipe(
+    Effect.catchDefect(() =>
+      Effect.gen(function* () {
+        const names = yield* fs.readDirectory(`${state}/diagnostics`).pipe(Effect.orElseSucceed(() => []))
+        const leaked = names.filter(diagnosticProcessRunning)
+        for (const name of leaked) {
+          const pid = Number.parseInt(name.slice(0, -".open.jsonl".length).split("-").at(-1) ?? "", 10)
+          if (Number.isInteger(pid))
+            yield* Effect.sync(() => {
+              try {
+                process.kill(pid, "SIGKILL")
+              } catch {}
+            })
+        }
+        return yield* SceneError.make({ message: `Scene leaked running processes: ${leaked.join(", ")}` })
+      }),
+    ),
   )
   const names = yield* fs.readDirectory(`${state}/diagnostics`)
   const logs = yield* Effect.forEach(

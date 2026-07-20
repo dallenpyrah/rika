@@ -14,13 +14,13 @@ describe("agent depth", () => {
     expect(delegationAvailableAtDepth(0)).toBe(true)
     expect(delegationAvailableAtDepth(1)).toBe(true)
     expect(delegationAvailableAtDepth(2)).toBe(false)
-    expect(toolsAtDepth(["read_file", "task", "oracle", "librarian", "review"], 1)).toEqual([
-      "read_file",
+    expect(toolsAtDepth(["read", "task", "oracle", "librarian", "review"], 1)).toEqual([
+      "read",
       "task",
       "oracle",
       "librarian",
       "review",
     ])
-    expect(toolsAtDepth(["read_file", "task", "oracle", "librarian", "review"], 2)).toEqual(["read_file"])
+    expect(toolsAtDepth(["read", "task", "oracle", "librarian", "review"], 2)).toEqual(["read"])
   })
 })

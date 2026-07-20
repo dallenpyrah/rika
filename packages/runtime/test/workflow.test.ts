@@ -99,12 +99,19 @@ for (const scenario of [
               .pipe(Effect.forkScoped)
             yield* waitFor(rows, (items) => items.some((item) => item.type === "dispatch"))
             if (scenario.name === "research-synthesis") {
-              const dispatches = (yield* rows).filter((row) => row.type === "dispatch")
-              yield* Effect.all(
-                dispatches.map((row) => release(row.childId ?? "")),
-                { concurrency: "unbounded" },
+              yield* waitFor(
+                Effect.gen(function* () {
+                  const items = yield* rows
+                  yield* Effect.all(
+                    items.filter((item) => item.type === "dispatch").map((item) => release(item.childId ?? "")),
+                    { concurrency: "unbounded" },
+                  )
+                  return items
+                }),
+                (items) => items.filter((item) => item.type === "effect").length >= 2,
+                3_000,
+                "released research effects",
               )
-              yield* waitFor(rows, (items) => items.filter((item) => item.type === "effect").length >= 2)
             }
             yield* host.kill
             host = yield* startHost(database, directory)
@@ -120,19 +127,21 @@ for (const scenario of [
                 "recovered research dispatches",
               )
             }
-            const completed = yield* waitFor(
+            const observed = yield* waitFor(
               Effect.gen(function* () {
-                const dispatched = (yield* rows).filter((item) => item.type === "dispatch")
+                const visible = yield* rows
                 yield* Effect.all(
-                  dispatched.map((item) => release(item.childId ?? "")),
+                  visible.filter((item) => item.type === "dispatch").map((item) => release(item.childId ?? "")),
                   { concurrency: "unbounded" },
                 )
-                return yield* host.request(State, "inspect", `${scenario.name}-run`)
+                const state = yield* host.request(State, "inspect", `${scenario.name}-run`)
+                return { state, visible }
               }),
-              (state) => state.status === "completed",
+              ({ state }) => state.status === "completed",
               3_000,
               `${scenario.name} completion`,
             )
+            const completed = observed.state
             expect(completed.revision).toBe(pin.revision)
             expect(completed.digest).toBe(pin.digest)
             const visible = yield* rows

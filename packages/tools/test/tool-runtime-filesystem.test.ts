@@ -24,38 +24,38 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
         const found = yield* runtime.run({ _tag: "FindFiles", query: ".ts" })
         const literal = yield* runtime.run({ _tag: "Grep", pattern: "beta", regex: false })
         const regex = yield* runtime.run({ _tag: "Grep", pattern: "(?<=b)eta", regex: true })
-        const read = yield* runtime.run({ _tag: "ReadFile", path: "src/a.ts", offset: 1, limit: 1 })
-        const escapedRead = yield* Effect.result(runtime.run({ _tag: "ReadFile", path: "link/target.txt" }))
+        const read = yield* runtime.run({ _tag: "Read", path: "src/a.ts", offset: 1, limit: 1 })
+        const escapedRead = yield* Effect.result(runtime.run({ _tag: "Read", path: "link/target.txt" }))
         const escapedFind = yield* runtime.run({ _tag: "FindFiles", query: "link" })
         const escapedGrep = yield* runtime.run({ _tag: "Grep", pattern: "outside", regex: false })
-        const created = yield* runtime.run({ _tag: "CreateFile", path: "new/file.txt", content: "old" })
-        const duplicate = yield* Effect.result(runtime.run({ _tag: "CreateFile", path: "new/file.txt", content: "x" }))
-        const edited = yield* runtime.run({ _tag: "EditFile", path: "new/file.txt", oldText: "old", newText: "new" })
+        const created = yield* runtime.run({ _tag: "Write", path: "new/file.txt", content: "old" })
+        const duplicate = yield* Effect.result(runtime.run({ _tag: "Write", path: "new/file.txt", content: "x" }))
+        const edited = yield* runtime.run({ _tag: "Edit", path: "new/file.txt", oldText: "old", newText: "new" })
         const stale = yield* Effect.result(
-          runtime.run({ _tag: "EditFile", path: "new/file.txt", oldText: "old", newText: "x" }),
+          runtime.run({ _tag: "Edit", path: "new/file.txt", oldText: "old", newText: "x" }),
         )
         const ambiguous = yield* Effect.result(
-          runtime.run({ _tag: "EditFile", path: "src/a.ts", oldText: "alpha", newText: "x" }),
+          runtime.run({ _tag: "Edit", path: "src/a.ts", oldText: "alpha", newText: "x" }),
         )
         const symlinkCreate = yield* Effect.result(
-          runtime.run({ _tag: "CreateFile", path: "link/new.txt", content: "escaped" }),
+          runtime.run({ _tag: "Write", path: "link/new.txt", content: "escaped" }),
         )
         const symlinkEdit = yield* Effect.result(
-          runtime.run({ _tag: "EditFile", path: "link/target.txt", oldText: "outside", newText: "escaped" }),
+          runtime.run({ _tag: "Edit", path: "link/target.txt", oldText: "outside", newText: "escaped" }),
         )
-        const shell = yield* runtime.run({ _tag: "Shell", command: "bun", args: ["-e", "console.log('ok')"] })
+        const shell = yield* runtime.run({ _tag: "Bash", command: "bun", args: ["-e", "console.log('ok')"] })
         const escapedCwd = yield* Effect.result(
-          runtime.run({ _tag: "Shell", command: "pwd", args: [], cwd: "escaped-cwd" }),
+          runtime.run({ _tag: "Bash", command: "pwd", args: [], cwd: "escaped-cwd" }),
         )
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["init", "-q", "-b", "inspection"] })
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["config", "user.name", "Rika Test"] })
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["config", "user.email", "rika@example.test"] })
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["add", "src/a.ts"] })
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["commit", "-qm", "base"] })
-        yield* runtime.run({ _tag: "EditFile", path: "src/a.ts", oldText: "beta", newText: "changed" })
-        yield* runtime.run({ _tag: "CreateFile", path: "staged.txt", content: "staged" })
-        yield* runtime.run({ _tag: "Shell", command: "git", args: ["add", "staged.txt"] })
-        yield* runtime.run({ _tag: "CreateFile", path: "untracked.txt", content: "untracked" })
+        yield* runtime.run({ _tag: "Bash", command: "git", args: ["init", "-q", "-b", "inspection"] })
+        yield* runtime.run({ _tag: "Bash", command: "git", args: ["config", "user.name", "Rika Test"] })
+        yield* runtime.run({ _tag: "Bash", command: "git", args: ["config", "user.email", "rika@example.test"] })
+        yield* runtime.run({ _tag: "Bash", command: "git", args: ["add", "src/a.ts"] })
+        yield* runtime.run({ _tag: "Bash", command: "git", args: ["commit", "-qm", "base"] })
+        yield* runtime.run({ _tag: "Edit", path: "src/a.ts", oldText: "beta", newText: "changed" })
+        yield* runtime.run({ _tag: "Write", path: "staged.txt", content: "staged" })
+        yield* runtime.run({ _tag: "Bash", command: "git", args: ["add", "staged.txt"] })
+        yield* runtime.run({ _tag: "Write", path: "untracked.txt", content: "untracked" })
         const git = yield* runtime.run({ _tag: "GitStatus" })
         return {
           found,
@@ -183,61 +183,6 @@ test("bounds grep results to one thousand matches", () =>
       }).pipe(provide(BunServices.layer)),
     ),
   ))
-
-test(
-  "applies a validated multi-operation patch and leaves files unchanged on validation failure",
-  () =>
-    Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem
-          const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-patch-" })
-          yield* fileSystem.writeFileString(`${workspace}/a.txt`, "one\ntwo\nthree\n")
-          yield* fileSystem.writeFileString(`${workspace}/b.txt`, "new\n")
-          yield* fileSystem.writeFileString(`${workspace}/gone.txt`, "gone\n")
-          const runtimeLayer = Runtime.layer(workspace).pipe(
-            Layer.provide(MediaView.analyzerTestLayer(() => Effect.succeed("analysis"))),
-            Layer.provide(
-              Layer.merge(
-                ParallelSearch.testLayer(() => Effect.succeed([])),
-                ReadWebPage.testLayer(() => Effect.succeed("page")),
-              ),
-            ),
-          )
-          const result = yield* Effect.gen(function* () {
-            const runtime = yield* Runtime.Service
-            const applied = yield* runtime.run({
-              _tag: "ApplyPatch",
-              patchText:
-                "*** Begin Patch\n*** Update File: a.txt\n@@\n one\n-two\n+changed\n three\n*** Update File: b.txt\n*** Move to: moved/b.txt\n*** Delete File: gone.txt\n*** End Patch\n",
-            })
-            const moved = yield* fileSystem.readFileString(`${workspace}/moved/b.txt`)
-            yield* fileSystem.writeFileString(`${workspace}/stable.txt`, "stable\n")
-            const rejected = yield* Effect.result(
-              runtime.run({
-                _tag: "ApplyPatch",
-                patchText:
-                  "*** Begin Patch\n*** Add File: transient.txt\n+created\n*** Update File: stable.txt\n@@\n-stale\n+bad\n*** End Patch\n",
-              }),
-            )
-            return {
-              applied,
-              moved,
-              rejected,
-              transient: yield* fileSystem.exists(`${workspace}/transient.txt`),
-              stable: yield* fileSystem.readFileString(`${workspace}/stable.txt`),
-            }
-          }).pipe(provide(runtimeLayer))
-          expect(result.applied.text).toBe("applied 3 operations")
-          expect(result.moved).toBe("new\n")
-          expect(result.rejected._tag).toBe("Failure")
-          expect(result.transient).toBe(false)
-          expect(result.stable).toBe("stable\n")
-        }).pipe(provide(BunServices.layer)),
-      ),
-    ),
-  30_000,
-)
 
 test("views image metadata and routes documents through the injected analyzer", () => {
   const analyzed: Array<string> = []

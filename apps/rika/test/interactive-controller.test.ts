@@ -489,62 +489,6 @@ it("normalizes malformed page order and duplicate units across selection and pre
   expect(prepended.state.model.entries.map((entry) => entry.text)).toEqual(["old", "old answer", "new", "new answer"])
 })
 
-it("updates one typed apply-patch row while its diff is streaming", () => {
-  const page = InteractiveController.update(initialState(), {
-    _tag: "SelectionLoaded",
-    selectionEpoch: 1,
-    activitySequence: 0,
-    queueRevision: 0,
-    queue: [],
-    thread,
-    entries: entries("new", 2),
-    hasOlder: false,
-    threadCostUsd: 0,
-  })
-  const first = InteractiveController.update(page.state, {
-    _tag: "TranscriptPatched",
-    selectionEpoch: 1,
-    threadId: thread.id,
-    turnId: Turn.TurnId.make("new"),
-    event: {
-      cursor: "patch-0",
-      sequence: 0,
-      type: "model.toolcall.delta",
-      createdAt: 3,
-      data: {
-        tool_call_id: "call-1",
-        tool_name: "apply_patch",
-        delta: '{"patchText":"*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-old\\n+new',
-      },
-    },
-    revision: 0,
-  })
-  const second = InteractiveController.update(first.state, {
-    _tag: "TranscriptPatched",
-    selectionEpoch: 1,
-    threadId: thread.id,
-    turnId: Turn.TurnId.make("new"),
-    event: {
-      cursor: "patch-1",
-      sequence: 1,
-      type: "model.toolcall.delta",
-      createdAt: 4,
-      data: { tool_call_id: "call-1", tool_name: "apply_patch", delta: '\\n*** End Patch"}' },
-    },
-    revision: 1,
-  })
-
-  expect(first.state.model.blocks).toEqual([
-    expect.objectContaining({
-      _tag: "ToolCall",
-      id: "new:call-1",
-      files: [expect.objectContaining({ path: "src/a.ts", preview: true, additions: 1, deletions: 1 })],
-    }),
-  ])
-  expect(second.state.model.blocks).toHaveLength(1)
-  expect(second.state.model.items).toHaveLength(2)
-})
-
 it("projects replayed child execution tools beneath the matching subagent", () => {
   const page = InteractiveController.update(initialState(), {
     _tag: "SelectionLoaded",
@@ -598,7 +542,7 @@ it("projects replayed child execution tools beneath the matching subagent", () =
       sequence: 0,
       type: "tool.call.requested",
       createdAt: 5,
-      data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts" } },
+      data: { tool_call_id: "read", tool_name: "read", input: { path: "src/a.ts" } },
     },
     revision: 0,
   })
@@ -683,7 +627,7 @@ it("attaches parallel child streams when task rows lack explicit spawn links", (
         sequence: 0,
         type: "tool.call.requested",
         createdAt: 4,
-        data: { tool_call_id: "read", tool_name: "read_file", input: { path: `src/${index}.ts` } },
+        data: { tool_call_id: "read", tool_name: "read", input: { path: `src/${index}.ts` } },
       },
       revision: 0,
     }).state
@@ -750,7 +694,7 @@ it("reloads one completed subagent tree with rendered markdown and no serialized
       sequence: 0,
       type: "tool.call.requested",
       createdAt: 3,
-      data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/projection.ts" } },
+      data: { tool_call_id: "read", tool_name: "read", input: { path: "src/projection.ts" } },
     },
     {
       cursor: "answer",
@@ -835,11 +779,11 @@ it("keeps cancelled child tools terminal in live and reloaded projections", () =
   ])
   const child = Transcript.project(childId, "", [
     {
-      cursor: "shell",
+      cursor: "bash",
       sequence: 0,
       type: "tool.call.requested",
       createdAt: 4,
-      data: { tool_call_id: "shell", tool_name: "shell", input: { command: "sleep 60" } },
+      data: { tool_call_id: "bash", tool_name: "bash", input: { command: "sleep 60" } },
     },
   ])
   const durable = Transcript.withNestedProjections(parent, [{ parentId: `${target.id}:agent`, projection: child }])
@@ -867,7 +811,7 @@ it("keeps cancelled child tools terminal in live and reloaded projections", () =
   for (const model of [live, loaded]) {
     expect(model.blocks).toEqual([
       expect.objectContaining({ id: `${target.id}:agent`, status: "cancelled" }),
-      expect.objectContaining({ id: `${childId}:shell`, status: "cancelled" }),
+      expect.objectContaining({ id: `${childId}:bash`, status: "cancelled" }),
     ])
     expect(model.entries.filter((entry) => entry.role === "notice")).toEqual([])
     expect(
@@ -900,7 +844,7 @@ it("buffers live child patches until the parent subagent link arrives", () => {
       sequence: 0,
       type: "tool.call.requested",
       createdAt: 3,
-      data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts" } },
+      data: { tool_call_id: "read", tool_name: "read", input: { path: "src/a.ts" } },
     },
     revision: 0,
   })
@@ -993,7 +937,7 @@ it("keeps one of five status labels from submit until the turn completes", () =>
   expectStatus("Thinking 2 tok")
   patch(4, "tool.call.requested", undefined, {
     tool_call_id: "read",
-    tool_name: "read_file",
+    tool_name: "read",
     input: { path: "src/a.ts" },
   })
   expectStatus("Running tools")
@@ -1069,7 +1013,7 @@ it("keeps 200ms tool lifecycle events in distinct TUI frames", () => {
       createdAt: now,
       data:
         type === "tool.call.requested"
-          ? { tool_call_id: callId, tool_name: "read_file", input: { path: `${callId}.ts` } }
+          ? { tool_call_id: callId, tool_name: "read", input: { path: `${callId}.ts` } }
           : { tool_call_id: callId, output: callId },
     },
     revision: sequence,
@@ -1117,7 +1061,7 @@ it("keeps the authoritative thread cost stable while older pages are prepended",
   expect(prepended.state.model.costUsd).toBe(3.75)
 })
 
-it("shows the global total and updates it when child usage arrives", () => {
+it("shows the session total and updates it when child usage arrives", () => {
   const page = InteractiveController.update(initialState(), {
     _tag: "SelectionLoaded",
     selectionEpoch: 1,
@@ -1157,8 +1101,8 @@ it("shows the global total and updates it when child usage arrives", () => {
     revision: 0,
   })
 
-  expect(page.state.model.costUsd).toBe(10)
-  expect(child.state.model.costUsd).toBe(10.25)
+  expect(page.state.model.costUsd).toBe(0.5)
+  expect(child.state.model.costUsd).toBe(0.75)
   expect(child.state.threadCostUsd).toBe(0.75)
   expect(child.state.projections.get("parent")?.costUsd).toBe(0.75)
 })

@@ -119,7 +119,7 @@ test(
       Effect.gen(function* () {
         const program = withBackend(
           [
-            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "read-1" })]),
+            TestModel.turn([TestModel.toolCall("read", { path: "fixture.txt" }, { id: "read-1" })]),
             TestModel.text("tool complete"),
           ],
           (fixture, directory) =>
@@ -232,7 +232,7 @@ test(
         const program = withBackend(
           [
             TestModel.toolCall(
-              "shell",
+              "bash",
               { command: "/bin/sleep", args: ["0.2"], waitMillis: 500 },
               { id: "timed-tool" },
             ),
@@ -283,9 +283,9 @@ test(
             yield* fileSystem.makeDirectory(firstWorkspace)
             yield* fileSystem.makeDirectory(secondWorkspace)
             const fixture = yield* TestModel.make([
-              TestModel.toolCall("create_file", { path: "result.txt", content: "first" }),
+              TestModel.toolCall("write", { path: "result.txt", content: "first" }),
               TestModel.text("first complete"),
-              TestModel.toolCall("create_file", { path: "result.txt", content: "second" }),
+              TestModel.toolCall("write", { path: "result.txt", content: "second" }),
               TestModel.text("second complete"),
             ])
             const workspaceByExecution = new Map([
@@ -347,7 +347,7 @@ test(
             yield* fileSystem.makeDirectory(workspace)
             yield* fileSystem.writeFileString(`${workspace}/fixture.txt`, "workflow workspace marker")
             const fixture = yield* TestModel.make([
-              TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "call-workflow-read" }),
+              TestModel.toolCall("read", { path: "fixture.txt" }, { id: "call-workflow-read" }),
               TestModel.text("investigated"),
               TestModel.object({ answer: "investigated", evidence: [] }),
               TestModel.text("implemented"),
@@ -480,7 +480,7 @@ test(
       Effect.gen(function* () {
         const cases = [
           ["turn-unknown", "not_a_rika_tool", {}],
-          ["turn-malformed", "read_file", { path: 42 }],
+          ["turn-malformed", "read", { path: 42 }],
         ] as const
         yield* Effect.forEach(cases, ([turnId, name, params]) =>
           Effect.gen(function* () {
@@ -543,14 +543,9 @@ test(
   () =>
     runNative(
       Effect.gen(function* () {
-        const childOutput =
-          'CHILD_OK{"type":"structured","value":{"summary":"CHILD_OK","files":[]},"schema_ref":"rika.agent.task.v1"}'
+        const childOutput = "CHILD_OK"
         const result = yield* withBackend(
-          [
-            TestModel.text("parent ready"),
-            TestModel.text("CHILD_OK"),
-            TestModel.object({ summary: "CHILD_OK", files: [] }),
-          ],
+          [TestModel.text("parent ready"), TestModel.text("CHILD_OK")],
           (_, directory) =>
             Effect.gen(function* () {
               const backend = yield* ExecutionBackend.Service
@@ -609,26 +604,16 @@ test(
           Effect.gen(function* () {
             const fileSystem = yield* FileSystem.FileSystem
             const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-runtime-routes-" })
-            const main = yield* TestModel.make(
-              [
-                TestModel.text("parent-main"),
-                TestModel.text("child-main"),
-                TestModel.object({ summary: "child-main", files: [] }),
-              ],
-              {
-                provider: "main-provider",
-                model: "main-model",
-                registrationKey: "main",
-              },
-            )
-            const oracle = yield* TestModel.make(
-              [TestModel.text("child-oracle"), TestModel.object({ answer: "child-oracle", evidence: [] })],
-              {
-                provider: "oracle-provider",
-                model: "oracle-model",
-                registrationKey: "oracle",
-              },
-            )
+            const main = yield* TestModel.make([TestModel.text("parent-main"), TestModel.text("child-main")], {
+              provider: "main-provider",
+              model: "main-model",
+              registrationKey: "main",
+            })
+            const oracle = yield* TestModel.make([TestModel.text("child-oracle")], {
+              provider: "oracle-provider",
+              model: "oracle-model",
+              registrationKey: "oracle",
+            })
             const executionRoute: ExecutionBackend.ExecutionRoutePin = {
               mode: "test",
               tokenBudget: 1_000,
@@ -681,12 +666,9 @@ test(
           }),
         )
         expect(result.fanOut?.state).toBe("satisfied")
-        expect(result.fanOut?.members.map((member) => member.output)).toEqual([
-          'child-oracle{"type":"structured","value":{"answer":"child-oracle","evidence":[]},"schema_ref":"rika.agent.oracle.v1"}',
-          'child-main{"type":"structured","value":{"summary":"child-main","files":[]},"schema_ref":"rika.agent.task.v1"}',
-        ])
-        expect(result.mainRequests).toHaveLength(3)
-        expect(result.oracleRequests).toHaveLength(2)
+        expect(result.fanOut?.members.map((member) => member.output)).toEqual(["child-oracle", "child-main"])
+        expect(result.mainRequests).toHaveLength(2)
+        expect(result.oracleRequests).toHaveLength(1)
         expect(encodeJson(result.mainRequests[1]?.prompt)).toContain("ask main")
         expect(encodeJson(result.oracleRequests[0]?.prompt)).toContain("ask Oracle")
       }),
@@ -745,7 +727,7 @@ test(
         })
         const result = yield* withBackend(
           [
-            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "overflow-read" })]),
+            TestModel.turn([TestModel.toolCall("read", { path: "fixture.txt" }, { id: "overflow-read" })]),
             TestModel.failure(overflow),
             TestModel.text(
               "Goal: Recover the rejected request. The fixture was read. Replay from the compacted projection.",
@@ -812,7 +794,7 @@ test(
         })
         const result = yield* withBackend(
           [
-            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "overflow-twice-read" })]),
+            TestModel.turn([TestModel.toolCall("read", { path: "fixture.txt" }, { id: "overflow-twice-read" })]),
             TestModel.failure(overflow),
             TestModel.text("Goal: Retry once. The first request overflowed. Use one compacted replay."),
             TestModel.failure(overflow),
@@ -864,7 +846,7 @@ test(
       Effect.gen(function* () {
         const program = withBackend(
           [
-            TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "steer-read" })], {
+            TestModel.turn([TestModel.toolCall("read", { path: "fixture.txt" }, { id: "steer-read" })], {
               delay: Duration.millis(100),
             }),
             TestModel.text("steered"),
@@ -910,7 +892,7 @@ test(
             const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-compaction-" })
             yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "sensitive fixture contents")
             const fixture = yield* TestModel.make([
-              TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "compact-read" })], {
+              TestModel.turn([TestModel.toolCall("read", { path: "fixture.txt" }, { id: "compact-read" })], {
                 usage,
               }),
               TestModel.text(
@@ -1037,7 +1019,7 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
               const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-permission-" })
               yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "permission fixture")
               const fixture = yield* TestModel.make([
-                TestModel.turn([TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: `read-${answer}` })]),
+                TestModel.turn([TestModel.toolCall("read", { path: "fixture.txt" }, { id: `read-${answer}` })]),
                 TestModel.text(`${answer} complete`),
               ])
               const options = {
@@ -1046,7 +1028,7 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
                 registration: fixture.registration,
                 selection: fixture.selection,
                 modelVariantPolicy: "fixed-selection" as const,
-                permissionPolicy: { rules: [{ pattern: "read_file", level: "ask" as const }] },
+                permissionPolicy: { rules: [{ pattern: "read", level: "ask" as const }] },
               }
               const useBackend = <A, E>(effect: Effect.Effect<A, E, ExecutionBackend.Service>) =>
                 provide(effect, RelayExecutionBackend.layer(options))

@@ -8,7 +8,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             {
               command: "sh",
               args: [
@@ -20,7 +20,7 @@ test(
             "start-process",
           ),
         ]),
-        Scene.model.turn([Scene.model.toolCall("shell", { command: "touch", args: ["release"] }, "release-process")]),
+        Scene.model.turn([Scene.model.toolCall("bash", { command: "touch", args: ["release"] }, "release-process")]),
         Scene.model.turn([
           Scene.model.toolCall("shell_command_status", { processId: "1", waitMillis: 1_000 }, "poll-process"),
         ]),
@@ -51,7 +51,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             { command: "sh", args: ["-c", "printf ESCAPED_WORKSPACE"], cwd: ".." },
             "escaped-cwd",
           ),

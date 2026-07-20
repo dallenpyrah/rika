@@ -17,12 +17,13 @@ const reportedTokens = (
   model: string,
   inputTokens: number | null,
   outputTokens: number | null,
+  data: Readonly<Record<string, unknown>> = {},
 ): ExecutionBackend.Event => ({
   cursor,
   sequence: 0,
   type: "model.usage.reported",
   createdAt: 1,
-  data: { model, input_tokens: inputTokens, output_tokens: outputTokens },
+  data: { provider: "openai", model, input_tokens: inputTokens, output_tokens: outputTokens, ...data },
 })
 
 const reader = (
@@ -58,15 +59,80 @@ const reader = (
 })
 
 describe("UsageCost", () => {
-  it("estimates cost from reported tokens when no monetary usage exists", () => {
-    expect(UsageCost.eventCostUsd(reportedTokens("haiku", "claude-3-5-haiku-latest", 1_000_000, 1_000_000))).toBe(4.8)
-    expect(UsageCost.eventCostUsd(reportedTokens("opus", "claude-opus-4-1", 1_000_000, 1_000_000))).toBe(30)
-    expect(UsageCost.eventCostUsd(reportedTokens("partial", "gpt-5-mini", null, 1_000_000))).toBe(4)
-    expect(UsageCost.eventCostUsd(reportedTokens("early-budget", "gpt-5", 500_000, 0))).toBe(0.625)
+  it("prices uncached input, cache reads, and output from the models.dev snapshot", () => {
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("cached", "gpt-5.6-sol", 10_000, 100, {
+          input_tokens_uncached: 1_000,
+          input_tokens_cache_read: 9_000,
+          input_tokens_cache_write: null,
+        }),
+      ),
+    ).toBeCloseTo(0.0125, 10)
+  })
+
+  it("uses the provider-returned model snapshot and falls back to the configured model", () => {
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("snapshot", "gpt-5.6-luna", 100_000, 0, {
+          model_snapshot: "gpt-5.6-sol",
+          input_tokens_uncached: 100_000,
+        }),
+      ),
+    ).toBe(0.5)
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("fallback", "gpt-5.6-luna", 100_000, 0, {
+          model_snapshot: "unknown",
+          input_tokens_uncached: 100_000,
+        }),
+      ),
+    ).toBe(0.1)
+  })
+
+  it("selects provider pricing modes from reported service metadata", () => {
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("priority", "gpt-5.6-sol", 1_000_000, 1_000_000, {
+          service_tier: "priority",
+          input_tokens_uncached: 1_000_000,
+        }),
+      ),
+    ).toBe(70)
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("unknown-tier", "gpt-5.6-sol", 1_000_000, 0, {
+          service_tier: "flex",
+          input_tokens_uncached: 1_000_000,
+        }),
+      ),
+    ).toBeUndefined()
+  })
+
+  it("derives uncached input without charging cache reads at the full rate", () => {
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("derived", "gpt-5.6-terra", 200_000, 0, {
+          input_tokens_uncached: null,
+          input_tokens_cache_read: 180_000,
+          input_tokens_cache_write: 0,
+        }),
+      ),
+    ).toBeCloseTo(0.095, 10)
   })
 
   it("leaves missing and malformed reports unpriced", () => {
     expect(UsageCost.eventCostUsd(reportedTokens("missing", "test", null, null))).toBeUndefined()
+    expect(UsageCost.eventCostUsd(reportedTokens("unknown-model", "unknown", 1_000, 1_000))).toBeUndefined()
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("inconsistent", "gpt-5.6-sol", 100, 0, {
+          input_tokens_uncached: 80,
+          input_tokens_cache_read: 30,
+          input_tokens_cache_write: 0,
+        }),
+      ),
+    ).toBeUndefined()
     expect(UsageCost.eventCostUsd(usage("negative", -10))).toBeUndefined()
   })
 

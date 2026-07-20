@@ -130,12 +130,10 @@ test(
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Coordinate nested work." }, "depth-one")]),
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Complete the nested check." }, "depth-two")]),
         Scene.model.turn([
-          Scene.model.toolCall("read_file", { path: "nested-evidence.ts", offset: 0, limit: 20 }, "nested-read"),
+          Scene.model.toolCall("read", { path: "nested-evidence.ts", offset: 0, limit: 20 }, "nested-read"),
         ]),
         Scene.model.text("Depth two verified the boundary."),
-        Scene.model.object({ summary: "Depth two complete", files: [] }),
         Scene.model.text("Depth one synthesized the nested result."),
-        Scene.model.object({ summary: "Depth one complete", files: [] }),
         Scene.model.text("Parent received the nested result."),
       ],
       actions: [
@@ -166,7 +164,6 @@ test(
       script: [
         Scene.model.turn([Scene.model.toolCall("oracle", { prompt: "Review the boundary." }, "oracle-child")]),
         Scene.model.text("The boundary is sound."),
-        Scene.model.object({ answer: "The boundary is sound.", evidence: [] }),
         Scene.model.text("Parent accepted the Oracle answer."),
       ],
       actions: [
@@ -190,12 +187,11 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf child-workspace-marker > marker.txt" }, "write-marker"),
+          Scene.model.toolCall("bash", { command: "printf child-workspace-marker > marker.txt" }, "write-marker"),
         ]),
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Read marker.txt." }, "workspace-child")]),
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "marker.txt" }, "read-marker")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "marker.txt" }, "read-marker")]),
         Scene.model.text("Child read child-workspace-marker."),
-        Scene.model.object({ summary: "Workspace marker read", files: [] }),
         Scene.model.text("Parent received the workspace result."),
       ],
       actions: [
@@ -210,4 +206,28 @@ test(
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   30_000,
+)
+
+test(
+  "returns the child's final assistant text without issuing a structured report turn",
+  () =>
+    Scene.run({
+      script: [
+        Scene.model.turn([Scene.model.toolCall("task", { prompt: "Summarize the workspace." }, "text-report-child")]),
+        Scene.model.text("CHILD_TEXT_REPORT_OK"),
+        Scene.model.text("PARENT_RELAYED_OK"),
+      ],
+      actions: [
+        Scene.action.writeAfter("Welcome to Rika", "Delegate a text-only report.\r"),
+        Scene.action.writeAfter("Subagent finished", "\t", 100),
+        Scene.action.writeAfterDelay("\r", 100),
+        Scene.action.writeAfter("CHILD_TEXT_REPORT_OK", "", 100),
+      ],
+    }).then((result) => {
+      expect(result.output).toContain("Subagent finished")
+      expect(result.output).toContain("CHILD_TEXT_REPORT_OK")
+      expect(result.output).toContain("PARENT_RELAYED_OK")
+      expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
+    }),
+  45_000,
 )

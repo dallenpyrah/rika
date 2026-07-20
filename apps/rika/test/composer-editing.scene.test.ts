@@ -81,6 +81,7 @@ test(
   "keeps the draft usable when no external editor is configured",
   () =>
     Scene.run({
+      environment: { EDITOR: null, VISUAL: null },
       script: [Scene.model.text("NO_EDITOR_RECOVERY_OK")],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "keep this draft\u0007"),

@@ -2,7 +2,7 @@ import type * as Operation from "@rika/app/operation"
 import type * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import type * as Turn from "@rika/persistence/turn"
 import * as Transcript from "@rika/transcript"
-import { ExecutionEvents, ViewState } from "@rika/tui"
+import { TranscriptPresenter, ViewState } from "@rika/tui"
 import { Function } from "effect"
 
 type TranscriptEvent = Extract<
@@ -26,6 +26,7 @@ export interface State {
   readonly revisions: ReadonlyMap<string, number>
   readonly projections: ReadonlyMap<string, Transcript.Projection>
   readonly threadCostUsd: number
+  readonly attachedChildRevisions?: ReadonlyMap<string, number>
 }
 
 export interface Update {
@@ -128,7 +129,7 @@ const project = (
   entries: ReadonlyArray<TranscriptRepository.Entry>,
   displayCostUsd: number,
 ) => {
-  const next = ExecutionEvents.projectUnits(
+  const next = TranscriptPresenter.applyTurnUnits(
     model,
     entries.map((entry) => entry.unit),
   )
@@ -157,50 +158,6 @@ const projections = (
       ] as const
     }),
   )
-}
-
-const executionKey = (value: string): string => value.replace(/^execution:/, "")
-
-const childParent = (
-  model: ViewState.Model,
-  turnId: string,
-): Extract<ViewState.TranscriptBlock, { readonly _tag: "ToolCall" }> | undefined => {
-  const childKey = executionKey(turnId)
-  const blocks = model.blocks as ReadonlyArray<ViewState.TranscriptBlock>
-  for (const item of model.items as ReadonlyArray<ViewState.TranscriptItem>) {
-    if (item._tag !== "Block") continue
-    const block = blocks[item.index]
-    if ((block as { readonly _tag?: unknown } | undefined)?._tag !== "ToolCall") continue
-    const tool = block as Extract<ViewState.TranscriptBlock, { readonly _tag: "ToolCall" }>
-    if (tool.childId !== undefined && executionKey(tool.childId) === childKey) return tool
-    if (tool.presentation.family !== "agent") continue
-    const prefix = `${item.turnId}:`
-    const toolCallId = tool.id.startsWith(prefix) ? tool.id.slice(prefix.length) : tool.id
-    if (childKey.endsWith(`:${toolCallId}`)) return tool
-  }
-  return undefined
-}
-
-const projectChildProjections = (
-  model: ViewState.Model,
-  replayTurns: ReadonlyMap<string, Turn.Turn>,
-  availableProjections: ReadonlyMap<string, Transcript.Projection>,
-): ViewState.Model => {
-  let next = model
-  const attached = new Set<string>()
-  let advanced = true
-  while (advanced) {
-    advanced = false
-    for (const [turnId, projection] of availableProjections) {
-      if (replayTurns.has(turnId) || attached.has(turnId)) continue
-      const parent = childParent(next, turnId)
-      if (parent === undefined) continue
-      next = ExecutionEvents.projectChildUnits(next, parent.id, projection.units)
-      attached.add(turnId)
-      advanced = true
-    }
-  }
-  return next
 }
 
 const sourceText = (event: Transcript.SourceEvent): string => {
@@ -385,7 +342,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     return {
       state: {
         selectionEpoch: event.selectionEpoch,
-        model: project(model, entries, event.globalCostUsd ?? event.threadCostUsd),
+        model: project(model, entries, event.threadCostUsd),
         replayTurns: new Map([
           ...entries.map((entry) => [entry.turn.id, entry.turn] as const),
           ...(event.activeTurn === undefined ? [] : [[event.activeTurn.id, event.activeTurn] as const]),
@@ -410,11 +367,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     return {
       state: {
         ...state,
-        model: prependProjection(
-          state.model,
-          prepended,
-          event.globalCostUsd ?? state.model.costUsd ?? event.threadCostUsd,
-        ),
+        model: prependProjection(state.model, prepended, event.threadCostUsd ?? state.threadCostUsd),
         replayTurns: new Map([...prepended.map((entry) => [entry.turn.id, entry.turn] as const), ...state.replayTurns]),
         entries,
         revisions,
@@ -427,13 +380,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
   if (event._tag === "TranscriptPatched") {
     if (event.selectionEpoch !== state.selectionEpoch) return { state, preserveAnchor: false }
     if (state.model.currentThreadId !== undefined && state.model.currentThreadId !== event.threadId)
-      return {
-        state:
-          event.globalCostUsd === undefined
-            ? state
-            : { ...state, model: { ...state.model, costUsd: event.globalCostUsd } },
-        preserveAnchor: false,
-      }
+      return { state, preserveAnchor: false }
     if (event.revision <= (state.revisions.get(event.turnId) ?? -1)) return { state, preserveAnchor: false }
     const turn = state.replayTurns.get(event.turnId)
     if (turn === undefined) {
@@ -447,18 +394,29 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       const previousCost = previous.costUsd ?? 0
       const nextCost = next.costUsd ?? 0
       const threadCostUsd = event.threadCostUsd ?? state.threadCostUsd + nextCost - previousCost
-      const globalCostUsd =
-        event.globalCostUsd ?? (state.model.costUsd ?? state.threadCostUsd) + nextCost - previousCost
+      const childTerminal =
+        event.event.type === "execution.completed" ||
+        event.event.type === "execution.failed" ||
+        event.event.type === "execution.cancelled"
+      const attached = TranscriptPresenter.attachChildProjections(
+        state.model,
+        state.replayTurns,
+        childProjections,
+        childTerminal
+          ? TranscriptPresenter.emptyAttachments
+          : (state.attachedChildRevisions ?? TranscriptPresenter.emptyAttachments),
+      )
       return {
         state: {
           ...state,
           model: {
-            ...projectChildProjections(state.model, state.replayTurns, childProjections),
-            costUsd: globalCostUsd,
+            ...attached.model,
+            costUsd: threadCostUsd,
           },
           revisions: new Map([...state.revisions, [event.turnId, event.revision]]),
           projections: childProjections,
           threadCostUsd,
+          attachedChildRevisions: attached.attachments,
         },
         preserveAnchor: false,
       }
@@ -473,19 +431,22 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     const previousCost = previous.costUsd ?? 0
     const nextCost = next.costUsd ?? 0
     const threadCostUsd = event.threadCostUsd ?? state.threadCostUsd + nextCost - previousCost
-    const globalCostUsd = event.globalCostUsd ?? (state.model.costUsd ?? state.threadCostUsd) + nextCost - previousCost
-    const projectedModel = {
-      ...projectChildProjections(
-        ExecutionEvents.projectUnits(state.model, next.units),
-        state.replayTurns,
-        nextProjections,
-      ),
-      activity: activityAfter(state.model.activity, event.event, next),
-    }
     const terminal =
       event.event.type === "execution.completed" ||
       event.event.type === "execution.failed" ||
       event.event.type === "execution.cancelled"
+    const attached = TranscriptPresenter.attachChildProjections(
+      TranscriptPresenter.applyTurnUnits(state.model, next.units),
+      state.replayTurns,
+      nextProjections,
+      terminal
+        ? TranscriptPresenter.emptyAttachments
+        : (state.attachedChildRevisions ?? TranscriptPresenter.emptyAttachments),
+    )
+    const projectedModel = {
+      ...attached.model,
+      activity: activityAfter(state.model.activity, event.event, next),
+    }
     const terminalStatus =
       event.event.type === "execution.completed"
         ? "completed"
@@ -516,7 +477,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     return {
       state: {
         ...state,
-        model: { ...model, costUsd: globalCostUsd },
+        model: { ...model, costUsd: threadCostUsd },
         replayTurns:
           terminalStatus === undefined
             ? state.replayTurns
@@ -525,6 +486,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
         revisions: new Map([...state.revisions, [event.turnId, event.revision]]),
         projections: nextProjections,
         threadCostUsd,
+        attachedChildRevisions: attached.attachments,
       },
       preserveAnchor: false,
     }

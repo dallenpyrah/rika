@@ -95,6 +95,7 @@ test("reaches prompt history after a completed turn", () =>
 
 test("reaches image paste and external editor handling without external services", () =>
   Scene.run({
+    environment: { EDITOR: null, VISUAL: null },
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "\u0016"),
       Scene.action.writeAfter("Clipboard does not contain a supported non-empty PNG image", "\u0007"),

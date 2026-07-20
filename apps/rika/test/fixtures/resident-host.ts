@@ -154,7 +154,7 @@ const program = Effect.gen(function* () {
                                     type === "tool.call.requested"
                                       ? {
                                           tool_call_id: callId,
-                                          tool_name: "read_file",
+                                          tool_name: "read",
                                           input: { path: `${callId}.ts` },
                                         }
                                       : { tool_call_id: callId, output: callId },
@@ -206,7 +206,7 @@ const program = Effect.gen(function* () {
                               sequence: 0,
                               type: "tool.call.requested",
                               createdAt: 2,
-                              data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/a.ts" } },
+                              data: { tool_call_id: "read", tool_name: "read", input: { path: "src/a.ts" } },
                             },
                             revision: 0,
                           })

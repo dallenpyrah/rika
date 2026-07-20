@@ -4,7 +4,7 @@ import stringWidth from "string-width"
 import type { Key } from "./keys"
 import { isPrintable } from "./keys"
 import { filter, type PaletteAction } from "./palette"
-import { expandableRowIds, transcriptUnitId, transcriptUnits } from "./transcript-units"
+import { expandableRowIds, rows as transcriptUnits, unitId as transcriptUnitId } from "./transcript-presenter"
 
 export const Mode = Schema.Literals(["low", "medium", "high", "ultra"])
 export type Mode = typeof Mode.Type

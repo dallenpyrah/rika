@@ -3,7 +3,6 @@ import { Tool, Toolkit } from "effect/unstable/ai"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as ParallelSearch from "./parallel-search"
 import { Service as ReadWebPageService } from "./read-web-page"
-import * as ApplyPatch from "./apply-patch"
 import * as ProcessRegistry from "./process-registry"
 import * as MediaView from "./media-view"
 import * as Catalog from "./tool-catalog"
@@ -16,26 +15,25 @@ const boundedDiff = (patch: string | undefined): { readonly diff?: string } =>
 
 export const FindFiles = Schema.Struct({ _tag: Schema.tag("FindFiles"), query: Schema.String })
 export const Grep = Schema.Struct({ _tag: Schema.tag("Grep"), pattern: Schema.String, regex: Schema.Boolean })
-export const ReadFile = Schema.Struct({
-  _tag: Schema.tag("ReadFile"),
+export const Read = Schema.Struct({
+  _tag: Schema.tag("Read"),
   path: Schema.String,
   offset: Schema.optionalKey(Schema.Finite),
   limit: Schema.optionalKey(Schema.Finite),
 })
-export const CreateFile = Schema.Struct({
-  _tag: Schema.tag("CreateFile"),
+export const Write = Schema.Struct({
+  _tag: Schema.tag("Write"),
   path: Schema.String,
   content: Schema.String,
 })
-export const EditFile = Schema.Struct({
-  _tag: Schema.tag("EditFile"),
+export const Edit = Schema.Struct({
+  _tag: Schema.tag("Edit"),
   path: Schema.String,
   oldText: Schema.String,
   newText: Schema.String,
 })
-export const ApplyPatchRequest = Schema.Struct({ _tag: Schema.tag("ApplyPatch"), patchText: Schema.String })
-export const Shell = Schema.Struct({
-  _tag: Schema.tag("Shell"),
+export const Bash = Schema.Struct({
+  _tag: Schema.tag("Bash"),
   command: Schema.String,
   args: Schema.Array(Schema.String),
   cwd: Schema.optionalKey(Schema.String),
@@ -64,11 +62,10 @@ export const ViewMedia = Schema.Struct({ _tag: Schema.tag("ViewMedia"), path: Sc
 export const Request = Schema.Union([
   FindFiles,
   Grep,
-  ReadFile,
-  CreateFile,
-  EditFile,
-  ApplyPatchRequest,
-  Shell,
+  Read,
+  Write,
+  Edit,
+  Bash,
   ShellCommandStatus,
   GitStatus,
   WebSearch,
@@ -124,17 +121,17 @@ export const grepTool = tool("grep", "Search UTF-8 workspace files for text or a
   pattern: Schema.String,
   regex: Schema.Boolean,
 })
-export const readFileTool = tool("read_file", "Read a bounded UTF-8 file range with stable line numbers", {
+export const readTool = tool("read", "Read a bounded UTF-8 file range with stable line numbers", {
   path: Schema.String,
   offset: Schema.optionalKey(Schema.NullOr(Schema.Finite)),
   limit: Schema.optionalKey(Schema.NullOr(Schema.Finite)),
 })
-export const createFileTool = tool("create_file", "Create a new UTF-8 file without overwriting an existing path", {
+export const writeTool = tool("write", "Create a new UTF-8 file without overwriting an existing path", {
   path: Schema.String,
   content: Schema.String,
 })
-export const editFileTool = tool(
-  "edit_file",
+export const editTool = tool(
+  "edit",
   "Replace one exact text occurrence and reject stale or ambiguous anchors",
   {
     path: Schema.String,
@@ -142,15 +139,8 @@ export const editFileTool = tool(
     newText: Schema.String,
   },
 )
-export const applyPatchTool = tool(
-  "apply_patch",
-  "Apply a Codex patch. Validates every add, update, delete, or move before writing and rejects stale or ambiguous context.",
-  {
-    patchText: Schema.String,
-  },
-)
-export const shellTool = tool(
-  "shell",
+export const bashTool = tool(
+  "bash",
   "Run one command in the workspace and return a process id if it outlives the wait",
   {
     command: Schema.String,
@@ -195,11 +185,10 @@ export const viewMediaTool = tool("view_media", "Inspect a workspace image or an
 export const toolkit = Toolkit.make(
   findFilesTool,
   grepTool,
-  readFileTool,
-  createFileTool,
-  editFileTool,
-  applyPatchTool,
-  shellTool,
+  readTool,
+  writeTool,
+  editTool,
+  bashTool,
   shellCommandStatusTool,
   gitStatusTool,
   webSearchTool,
@@ -219,19 +208,18 @@ export const handlerLayer = toolkit.toLayer(
     return {
       find_files: ({ query }) => runtime.run({ _tag: "FindFiles", query }),
       grep: ({ pattern, regex }) => runtime.run({ _tag: "Grep", pattern, regex }),
-      read_file: ({ path, offset, limit }) =>
+      read: ({ path, offset, limit }) =>
         runtime.run({
-          _tag: "ReadFile",
+          _tag: "Read",
           path,
           ...(offset == null ? {} : { offset }),
           ...(limit == null ? {} : { limit }),
         }),
-      create_file: ({ path, content }) => runtime.run({ _tag: "CreateFile", path, content }),
-      edit_file: ({ path, oldText, newText }) => runtime.run({ _tag: "EditFile", path, oldText, newText }),
-      apply_patch: ({ patchText }) => runtime.run({ _tag: "ApplyPatch", patchText }),
-      shell: ({ command, args, cwd, waitMillis }) =>
+      write: ({ path, content }) => runtime.run({ _tag: "Write", path, content }),
+      edit: ({ path, oldText, newText }) => runtime.run({ _tag: "Edit", path, oldText, newText }),
+      bash: ({ command, args, cwd, waitMillis }) =>
         runtime.run({
-          _tag: "Shell",
+          _tag: "Bash",
           command,
           args,
           ...(cwd == null ? {} : { cwd }),
@@ -266,11 +254,7 @@ const bounded = (text: string, limit = maxOutput): Result => ({
 })
 const gitStatusOutputLimit = 20_000
 
-const toolName = (request: Request) =>
-  request._tag
-    .replace(/Request$/, "")
-    .replaceAll(/([a-z])([A-Z])/g, "$1_$2")
-    .toLowerCase()
+const toolName = (request: Request) => request._tag.replaceAll(/([a-z])([A-Z])/g, "$1_$2").toLowerCase()
 
 const contract = (request: Request) => Catalog.get(toolName(request))!
 
@@ -306,12 +290,12 @@ const toolError = (request: Request, cause: unknown, kind: "operation" | "timeou
   ToolError.make(
     kind === "timeout" && contract(request).idempotency === "unsafe"
       ? {
-          tool: request._tag,
+          tool: toolName(request),
           message: "Tool call timed out; its outcome is unknown and the call must not be repeated",
           kind,
           outcome: "unknown",
         }
-      : { tool: request._tag, message: String(cause), kind, outcome: "known" },
+      : { tool: toolName(request), message: String(cause), kind, outcome: "known" },
   )
 
 class RuntimeOperationError extends Data.TaggedError("RuntimeOperationError")<{ readonly message: string }> {}
@@ -354,7 +338,22 @@ export const layer = (workspace: string) =>
           ),
         )
       const resolveEdit = (value: string) =>
-        ApplyPatch.resolveContained(workspace, value, fileSystem, path, true).pipe(Effect.mapError(operationError))
+        resolve(value).pipe(
+          Effect.flatMap((target) => {
+            const relative = path.relative(workspace, target)
+            return Effect.forEach(relative.split(path.sep), (_, index) => {
+              const current = path.join(workspace, ...relative.split(path.sep).slice(0, index + 1))
+              return fileSystem.readLink(current).pipe(
+                Effect.option,
+                Effect.flatMap((link) =>
+                  Option.isNone(link)
+                    ? Effect.void
+                    : Effect.fail(new RuntimeOperationError({ message: `symbolic link is not writable: ${value}` })),
+                ),
+              )
+            }).pipe(Effect.as(target))
+          }),
+        )
       const isContained = (target: string) =>
         target === canonicalWorkspace || target.startsWith(`${canonicalWorkspace}${path.sep}`)
       const resolveContained = (value: string) =>
@@ -456,7 +455,7 @@ export const layer = (workspace: string) =>
                 }
                 return bounded(matches.join("\n"))
               }
-              case "ReadFile": {
+              case "Read": {
                 if (
                   (request.offset !== undefined && (!Number.isInteger(request.offset) || request.offset < 0)) ||
                   (request.limit !== undefined && (!Number.isInteger(request.limit) || request.limit < 1))
@@ -473,7 +472,7 @@ export const layer = (workspace: string) =>
                     .join("\n"),
                 )
               }
-              case "CreateFile": {
+              case "Write": {
                 const target = yield* resolveEdit(request.path)
                 if (yield* fileSystem.exists(target))
                   return yield* new RuntimeOperationError({ message: `${request.path} already exists` })
@@ -484,7 +483,7 @@ export const layer = (workspace: string) =>
                   ...boundedDiff(unifiedDiff(request.path, "", request.content, true)),
                 }
               }
-              case "EditFile": {
+              case "Edit": {
                 const target = yield* resolveEdit(request.path)
                 const content = yield* fileSystem.readFileString(target)
                 const first = content.indexOf(request.oldText)
@@ -498,9 +497,7 @@ export const layer = (workspace: string) =>
                   ...boundedDiff(unifiedDiff(request.path, content, next)),
                 }
               }
-              case "ApplyPatch":
-                return yield* ApplyPatch.apply(workspace, request.patchText, fileSystem, path)
-              case "Shell": {
+              case "Bash": {
                 const cwd = yield* resolveCwd(request.cwd ?? ".")
                 const processId = yield* processes.start(request.command, request.args, cwd)
                 const output = yield* processes

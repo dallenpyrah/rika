@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest"
 import { buildTranscript } from "../src/adapter"
-import { toolDetail, transcriptUnits } from "../src/transcript-units"
+import { toolDetail, rows as transcriptUnits } from "../src/transcript-presenter"
 import { initial, type Model, type TranscriptBlock } from "../src/view-state"
 
 type ToolCall = Extract<TranscriptBlock, { readonly _tag: "ToolCall" }>
@@ -49,7 +49,7 @@ const explore = (
 describe("tool presentation", () => {
   test("keeps a completed Explore group successful while showing its failed tool", () => {
     const blocks = [
-      call("read", "read_file", { path: "missing.ts" }, explore("read", "file"), {
+      call("read", "read", { path: "missing.ts" }, explore("read", "file"), {
         detail: "missing.ts",
         status: "failed",
         output: "File not found",
@@ -69,7 +69,7 @@ describe("tool presentation", () => {
     ["failed and cancelled", ["failed", "cancelled"], "✕ Explored"],
   ] as const)("shows an Explore group as terminal when %s", (_, statuses, expected) => {
     const blocks = statuses.map((status, index) =>
-      call(`read-${index}`, "read_file", { path: `${index}.ts` }, explore("read", "file"), {
+      call(`read-${index}`, "read", { path: `${index}.ts` }, explore("read", "file"), {
         detail: `${index}.ts`,
         status,
       }),
@@ -104,7 +104,7 @@ describe("tool presentation", () => {
 
   test("keeps source order while grouping only adjacent compatible families", () => {
     const blocks = [
-      call("read", "read_file", { path: "a.ts" }, explore("read", "file")),
+      call("read", "read", { path: "a.ts" }, explore("read", "file")),
       call("search", "grep", { pattern: "x" }, explore("grep", "search")),
       call(
         "unknown",
@@ -120,7 +120,7 @@ describe("tool presentation", () => {
       ),
       call(
         "shell-one",
-        "shell_command",
+        "bash",
         { command: "one" },
         {
           family: "shell",
@@ -131,7 +131,7 @@ describe("tool presentation", () => {
       ),
       call(
         "shell-two",
-        "run_terminal_command",
+        "bash",
         { command: "two" },
         {
           family: "shell",
@@ -166,7 +166,7 @@ describe("tool presentation", () => {
     )
     const shell = call(
       "shell",
-      "shell_command",
+      "bash",
       { command: "failing-command" },
       { family: "shell", action: "command", activeLabel: "Running", completeLabel: "Ran" },
       { status: "failed", detail: "failing-command", output, process: { exitCode: 23 } },

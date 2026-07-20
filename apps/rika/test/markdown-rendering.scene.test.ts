@@ -214,7 +214,6 @@ test(
           ),
         ),
         ...Array.from({ length: 4 }, () => Scene.model.text(childMarkdown, 100)),
-        ...Array.from({ length: 4 }, () => Scene.model.object({ summary: "CHILD-SUMMARY-FOXTROT", files: [] })),
         Scene.model.text("PARENT-END-GOLF"),
       ],
       actions: [

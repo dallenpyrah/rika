@@ -18,6 +18,7 @@ export interface Snapshot {
   readonly threadCostUsd: ReadonlyMap<string, number>
   readonly globalCostUsd: number
   readonly usageCursors: ReadonlySet<string>
+  readonly complete: boolean
 }
 
 export const maximumGlobalThreads = 100
@@ -27,6 +28,7 @@ export const empty: Snapshot = {
   threadCostUsd: new Map(),
   globalCostUsd: 0,
   usageCursors: new Set(),
+  complete: true,
 }
 
 export const eventCostUsd = (event: ExecutionBackend.Event): number | undefined =>
@@ -41,7 +43,9 @@ export const observe: {
   2,
   (snapshot: Snapshot, input: RootExecution & { readonly event: ExecutionBackend.Event }): Snapshot => {
     const costUsd = eventCostUsd(input.event)
-    if (costUsd === undefined || snapshot.usageCursors.has(input.event.cursor)) return snapshot
+    if (snapshot.usageCursors.has(input.event.cursor)) return snapshot
+    if (costUsd === undefined)
+      return input.event.type === "model.usage.reported" ? { ...snapshot, complete: false } : snapshot
     const turnCostUsd = new Map(snapshot.turnCostUsd)
     const threadCostUsd = new Map(snapshot.threadCostUsd)
     turnCostUsd.set(input.turnId, (turnCostUsd.get(input.turnId) ?? 0) + costUsd)
@@ -51,6 +55,7 @@ export const observe: {
       threadCostUsd,
       globalCostUsd: snapshot.globalCostUsd + costUsd,
       usageCursors: new Set(snapshot.usageCursors).add(input.event.cursor),
+      complete: snapshot.complete,
     }
   },
 )
@@ -78,9 +83,15 @@ export const collect = Effect.fn("UsageCost.collect")(function* (
     if (seenExecutions.has(current.executionId)) continue
     seenExecutions.add(current.executionId)
     const inspection = yield* readExecution(reader.inspect(current.executionId), current.executionId)
-    if (inspection === undefined) continue
+    if (inspection === undefined) {
+      snapshot = { ...snapshot, complete: false }
+      continue
+    }
     const replay = yield* readExecution(reader.replay(current.executionId), current.executionId)
-    if (replay === undefined) continue
+    if (replay === undefined) {
+      snapshot = { ...snapshot, complete: false }
+      continue
+    }
     for (const event of replay.events)
       snapshot = observe(snapshot, {
         threadId: current.threadId,

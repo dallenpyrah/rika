@@ -16,7 +16,7 @@ it("prepares replayed tool calls and results with the original provider identifi
         content: [
           Prompt.makePart("tool-call", {
             id: durableCallId,
-            name: "read_file",
+            name: "read",
             params: { path: "fixture.txt" },
             providerExecuted: false,
           }),
@@ -26,7 +26,7 @@ it("prepares replayed tool calls and results with the original provider identifi
         content: [
           Prompt.makePart("tool-result", {
             id: durableCallId,
-            name: "read_file",
+            name: "read",
             isFailure: false,
             result: "fixture",
           }),

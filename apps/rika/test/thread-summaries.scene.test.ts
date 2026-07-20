@@ -7,13 +7,7 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall(
-            "apply_patch",
-            {
-              patchText: "*** Begin Patch\n*** Add File: summary.txt\n+alpha\n+beta\n*** End Patch",
-            },
-            "summary-edit",
-          ),
+          Scene.model.toolCall("write", { path: "summary.txt", content: "alpha\nbeta\n" }, "summary-write"),
         ]),
         Scene.model.text("DONE"),
         Scene.model.object({ title: "Summary edit" }),

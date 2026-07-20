@@ -814,7 +814,7 @@ test("parses and builds multi-part, object, and delayed TestModel turns", () =>
         {
           parts: [
             { type: "reasoning", text: "inspect" },
-            { type: "toolCall", name: "read_file", params: { path: "a.txt" }, id: "read-1" },
+            { type: "toolCall", name: "read", params: { path: "a.txt" }, id: "read-1" },
           ],
           delayMs: 25,
           usage: { inputTokens: 7, outputTokens: 3 },
@@ -830,7 +830,7 @@ test("parses and builds multi-part, object, and delayed TestModel turns", () =>
           _tag: "Turn",
           parts: [
             { _tag: "Reasoning", text: "inspect" },
-            { _tag: "ToolCall", name: "read_file", params: { path: "a.txt" }, id: "read-1", providerExecuted: false },
+            { _tag: "ToolCall", name: "read", params: { path: "a.txt" }, id: "read-1", providerExecuted: false },
           ],
           delay: 25,
           usage: {

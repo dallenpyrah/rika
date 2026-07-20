@@ -66,22 +66,22 @@ describe("configured OpenAI-compatible live model", () => {
           const fileSystem = yield* FileSystem.FileSystem
           const path = yield* Path.Path
           yield* fileSystem.makeDirectory(path.join(directory, ".git"))
-          const createFile = Tool.make("create_file", {
+          const write = Tool.make("write", {
             description: "Create one UTF-8 file in the disposable repository",
             parameters: Schema.Struct({ path: Schema.String, content: Schema.String }),
             success: Schema.String,
           })
-          const toolkit = Toolkit.make(createFile)
+          const toolkit = Toolkit.make(write)
           const agent = Agent.make("live-coder", {
             model: selection,
             instructions:
-              "Use create_file exactly once. Create answer.ts containing export const answer = 42 followed by a newline.",
+              "Use write exactly once. Create answer.ts containing export const answer = 42 followed by a newline.",
             toolkit,
           })
           const result = yield* run(agent, "Implement the requested answer.ts file.").pipe(
             Effect.provide(
               toolkit.toLayer({
-                create_file: ({ path: filename, content }) =>
+                write: ({ path: filename, content }) =>
                   fileSystem
                     .writeFileString(path.join(directory, filename), content, { flag: "wx" })
                     .pipe(Effect.as(filename), Effect.orDie),
@@ -90,7 +90,7 @@ describe("configured OpenAI-compatible live model", () => {
           )
           const content = yield* fileSystem.readFileString(path.join(directory, "answer.ts"))
           expect(content).toBe("export const answer = 42\n")
-          expect(normalize(result).toolCalls).toEqual(["create_file"])
+          expect(normalize(result).toolCalls).toEqual(["write"])
         }),
       (directory) =>
         FileSystem.FileSystem.pipe(

@@ -14,7 +14,6 @@ test(
           Scene.model.toolCall("oracle", { prompt: "Review the projection boundary." }, "oracle-review"),
         ]),
         Scene.model.text("## Boundary review\n\n**No projection defects found.**", 300),
-        Scene.model.object({ answer: "The projection boundary is sound.", evidence: [] }),
         Scene.model.text("ORACLE_TURN_COMPLETE"),
       ],
       actions: [
@@ -43,7 +42,6 @@ test(
       script: [
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Inspect the transcript order." }, "task-order")]),
         Scene.model.text("## Order checked\n\nTranscript order is **stable**.\n\nGENERAL_DETAIL"),
-        Scene.model.object({ summary: "Transcript order checked.", files: [] }),
         Scene.model.text("TASK_TURN_COMPLETE"),
       ],
       actions: [
@@ -72,9 +70,7 @@ test(
         Scene.model.turn([Scene.model.toolCall("task", { prompt: "Coordinate a nested review." }, "coordinator")]),
         Scene.model.turn([Scene.model.toolCall("oracle", { prompt: "Check the nested projection." }, "nested-oracle")]),
         Scene.model.text("## Nested review\n\n**Ownership is correct.**"),
-        Scene.model.object({ answer: "Nested ownership is correct.", evidence: [] }),
         Scene.model.text("Coordinator incorporated the nested review."),
-        Scene.model.object({ summary: "Nested review coordinated.", files: [] }),
         Scene.model.text("NESTED_TURN_COMPLETE"),
       ],
       actions: [
@@ -101,15 +97,14 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("read_file", { path: "missing-parent-file.ts", offset: 0, limit: 20 }, "parent-read"),
+          Scene.model.toolCall("read", { path: "missing-parent-file.ts", offset: 0, limit: 20 }, "parent-read"),
           Scene.model.toolCall("grep", { pattern: "owner", regex: false }, "parent-grep"),
           Scene.model.toolCall("task", { prompt: "Inspect one child file." }, "file-inspector"),
         ]),
         Scene.model.turn([
-          Scene.model.toolCall("read_file", { path: "missing-child-file.ts", offset: 0, limit: 20 }, "child-read"),
+          Scene.model.toolCall("read", { path: "missing-child-file.ts", offset: 0, limit: 20 }, "child-read"),
         ]),
         Scene.model.text("## Child inspection\n\nThe missing file result was handled."),
-        Scene.model.object({ summary: "Child file inspected.", files: [] }),
         Scene.model.text("CHILD_TOOL_TURN_COMPLETE"),
       ],
       actions: [
@@ -164,8 +159,6 @@ test(
         ]),
         Scene.model.text("## Alpha response\n\nALPHA_DETAIL", 100),
         Scene.model.text("## Beta response\n\nBETA_DETAIL", 100),
-        Scene.model.object({ summary: "Alpha inspected.", files: [] }),
-        Scene.model.object({ summary: "Beta inspected.", files: [] }),
         Scene.model.text("PARALLEL_TURN_COMPLETE"),
       ],
       actions: [

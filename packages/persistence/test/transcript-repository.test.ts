@@ -223,7 +223,7 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
           sequence: 3,
           type: "tool.call.requested",
           createdAt: 3,
-          data: { call_id: "call-a", name: "read_file", input: { path: "x.ts" } },
+          data: { call_id: "call-a", name: "read", input: { path: "x.ts" } },
         },
         {
           cursor: "result",
@@ -283,7 +283,7 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
           sequence: 0,
           type: "tool.call.requested",
           createdAt: 0,
-          data: { tool_call_id: "read", tool_name: "read_file", input: { path: "src/projection.ts" } },
+          data: { tool_call_id: "read", tool_name: "read", input: { path: "src/projection.ts" } },
         },
         {
           cursor: "answer",
@@ -336,6 +336,26 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
     }),
   )
 
+  test.effect("stores the pricing version and accepts a lower current-version rebuild", () =>
+    Effect.gen(function* () {
+      const repository = yield* TranscriptRepository.Service
+      const target = turn(23)
+      const stale = { ...Transcript.empty(target.id, target.prompt), costUsd: 15 }
+      yield* repository.replace(target, stale)
+      expect(yield* repository.get(target.id)).toMatchObject({ costUsd: 15, pricingVersion: undefined })
+
+      const rebuilt = {
+        ...Transcript.empty(target.id, target.prompt),
+        costUsd: 5,
+        pricingVersion: Transcript.pricingVersion,
+      }
+      expect(yield* repository.replace(target, rebuilt)).toMatchObject({
+        costUsd: 5,
+        pricingVersion: Transcript.pricingVersion,
+      })
+    }),
+  )
+
   test.effect("counts redelivered usage once across batches and sums global cost", () =>
     Effect.gen(function* () {
       const repository = yield* TranscriptRepository.Service
@@ -346,7 +366,7 @@ it.layer(TranscriptRepository.memoryLayer)("transcript repository", (test) => {
         sequence: 5,
         type: "model.usage.reported",
         createdAt: 5,
-        data: { input_tokens: 1_000_000, output_tokens: 0, model: "test" },
+        data: { cost_usd: 1.25 },
       }
       const before = yield* repository.globalCostUsd
       yield* repository.appendAll(target, [usage])
@@ -488,7 +508,7 @@ it.effect("persists usage cursors across reopen so redelivered usage never doubl
         sequence: 5,
         type: "model.usage.reported",
         createdAt: 5,
-        data: { input_tokens: 1_000_000, output_tokens: 0, model: "test" },
+        data: { cost_usd: 1.25 },
       }
       const makeLayer = () => {
         const database = Database.layer(filename)

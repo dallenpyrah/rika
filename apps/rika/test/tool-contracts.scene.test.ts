@@ -7,10 +7,10 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("create_file", { path: "contract.txt", content: "bounded" }, "create-contract"),
+          Scene.model.toolCall("write", { path: "contract.txt", content: "bounded" }, "create-contract"),
         ]),
         Scene.model.turn([
-          Scene.model.toolCall("create_file", { path: "contract.txt", content: "duplicate" }, "duplicate-contract"),
+          Scene.model.toolCall("write", { path: "contract.txt", content: "duplicate" }, "duplicate-contract"),
         ]),
         Scene.model.text("TOOL_CONTRACT_COMPLETE"),
       ],
@@ -33,7 +33,7 @@ test(
   () =>
     Scene.run({
       script: [
-        Scene.model.turn([Scene.model.toolCall("read_file", { path: "contract.txt", limit: 0 }, "invalid-contract")]),
+        Scene.model.turn([Scene.model.toolCall("read", { path: "contract.txt", limit: 0 }, "invalid-contract")]),
         Scene.model.text("INVALID_CONTRACT_REJECTED"),
       ],
       actions: [
@@ -56,7 +56,7 @@ test(
       script: [
         Scene.model.turn([
           Scene.model.toolCall(
-            "shell",
+            "bash",
             {
               command: "bun",
               args: [

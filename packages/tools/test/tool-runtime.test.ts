@@ -183,16 +183,16 @@ describe("Runtime", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const defaults = yield* runtime.run({ _tag: "ReadFile", path: "a.txt" })
-      const negative = yield* Effect.flip(runtime.run({ _tag: "ReadFile", path: "a.txt", offset: -4 }))
-      const zero = yield* Effect.flip(runtime.run({ _tag: "ReadFile", path: "a.txt", limit: 0 }))
-      const fractional = yield* Effect.flip(runtime.run({ _tag: "ReadFile", path: "a.txt", offset: 0.5 }))
-      const high = yield* runtime.run({ _tag: "ReadFile", path: "a.txt", offset: 1, limit: 5_000 })
+      const defaults = yield* runtime.run({ _tag: "Read", path: "a.txt" })
+      const negative = yield* Effect.flip(runtime.run({ _tag: "Read", path: "a.txt", offset: -4 }))
+      const zero = yield* Effect.flip(runtime.run({ _tag: "Read", path: "a.txt", limit: 0 }))
+      const fractional = yield* Effect.flip(runtime.run({ _tag: "Read", path: "a.txt", offset: 0.5 }))
+      const high = yield* runtime.run({ _tag: "Read", path: "a.txt", offset: 1, limit: 5_000 })
 
       expect(defaults.text).toBe("1: zero\n2: needle\n3: last")
-      expect(negative).toMatchObject({ _tag: "ToolError", tool: "ReadFile" })
-      expect(zero).toMatchObject({ _tag: "ToolError", tool: "ReadFile" })
-      expect(fractional).toMatchObject({ _tag: "ToolError", tool: "ReadFile" })
+      expect(negative).toMatchObject({ _tag: "ToolError", tool: "read" })
+      expect(zero).toMatchObject({ _tag: "ToolError", tool: "read" })
+      expect(fractional).toMatchObject({ _tag: "ToolError", tool: "read" })
       expect(high.text).toBe("2: needle\n3: last")
     }).pipe(provide(environment.runtime))
   })
@@ -202,7 +202,7 @@ describe("Runtime", () => {
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
       const error = yield* Effect.flip(runtime.run({ _tag: "Grep", pattern: "[", regex: true }))
-      expect(error).toMatchObject({ _tag: "ToolError", tool: "Grep" })
+      expect(error).toMatchObject({ _tag: "ToolError", tool: "grep" })
     }).pipe(provide(environment.runtime))
   })
 
@@ -248,16 +248,16 @@ describe("Runtime", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const created = yield* runtime.run({ _tag: "CreateFile", path: "new/file.txt", content: "old" })
+      const created = yield* runtime.run({ _tag: "Write", path: "new/file.txt", content: "old" })
       const existing = yield* Effect.flip(
-        runtime.run({ _tag: "CreateFile", path: "new/file.txt", content: "duplicate" }),
+        runtime.run({ _tag: "Write", path: "new/file.txt", content: "duplicate" }),
       )
-      const edited = yield* runtime.run({ _tag: "EditFile", path: "new/file.txt", oldText: "old", newText: "new" })
+      const edited = yield* runtime.run({ _tag: "Edit", path: "new/file.txt", oldText: "old", newText: "new" })
       const stale = yield* Effect.flip(
-        runtime.run({ _tag: "EditFile", path: "new/file.txt", oldText: "old", newText: "x" }),
+        runtime.run({ _tag: "Edit", path: "new/file.txt", oldText: "old", newText: "x" }),
       )
       const ambiguous = yield* Effect.flip(
-        runtime.run({ _tag: "EditFile", path: "ambiguous.txt", oldText: "same", newText: "x" }),
+        runtime.run({ _tag: "Edit", path: "ambiguous.txt", oldText: "same", newText: "x" }),
       )
 
       expect(created).toMatchObject({ text: "created new/file.txt", truncated: false })
@@ -267,7 +267,7 @@ describe("Runtime", () => {
       expect(edited.diff).toContain("-old")
       expect(edited.diff).toContain("+new")
       expect(environment.files.get("/workspace/new/file.txt")).toBe("new")
-      expect(existing).toMatchObject({ _tag: "ToolError", tool: "CreateFile" })
+      expect(existing).toMatchObject({ _tag: "ToolError", tool: "write" })
       expect(existing.message).toContain("already exists")
       expect(stale.message).toContain("stale anchor")
       expect(ambiguous.message).toContain("ambiguous anchor")
@@ -278,7 +278,7 @@ describe("Runtime", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const result = yield* runtime.run({ _tag: "CreateFile", path: "large.txt", content: "x".repeat(110_000) })
+      const result = yield* runtime.run({ _tag: "Write", path: "large.txt", content: "x".repeat(110_000) })
       expect(result.text.length + (result.diff?.length ?? 0)).toBe(4_000)
       expect(result.truncated).toBe(true)
     }).pipe(provide(environment.runtime))
@@ -288,16 +288,16 @@ describe("Runtime", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const ok = yield* runtime.run({ _tag: "Shell", command: "ok", args: ["one"] })
-      const bad = yield* runtime.run({ _tag: "Shell", command: "bad", args: [] })
+      const ok = yield* runtime.run({ _tag: "Bash", command: "ok", args: ["one"] })
+      const bad = yield* runtime.run({ _tag: "Bash", command: "bad", args: [] })
       const git = yield* runtime.run({ _tag: "GitStatus" })
-      const large = yield* runtime.run({ _tag: "Shell", command: "large", args: [] })
-      const running = yield* runtime.run({ _tag: "Shell", command: "running", args: [], waitMillis: 0 })
+      const large = yield* runtime.run({ _tag: "Bash", command: "large", args: [] })
+      const running = yield* runtime.run({ _tag: "Bash", command: "running", args: [], waitMillis: 0 })
       const completed = yield* Effect.flip(
         runtime.run({ _tag: "ShellCommandStatus", processId: ok.processId ?? "", waitMillis: 0 }),
       )
-      const failedStream = yield* runtime.run({ _tag: "Shell", command: "stream-failure", args: [] })
-      const unicodeBoundary = yield* runtime.run({ _tag: "Shell", command: "unicode-boundary", args: [] })
+      const failedStream = yield* runtime.run({ _tag: "Bash", command: "stream-failure", args: [] })
+      const unicodeBoundary = yield* runtime.run({ _tag: "Bash", command: "unicode-boundary", args: [] })
 
       expect(ok).toMatchObject({ text: "outerr", truncated: false, running: false, exitCode: 0 })
       expect(bad.text).toBe("outerr\nexit 7")
@@ -305,7 +305,7 @@ describe("Runtime", () => {
       expect(large.text).toHaveLength(40_000)
       expect(large.truncated).toBe(true)
       expect(running.running).toBe(true)
-      expect(completed).toMatchObject({ _tag: "ToolError", tool: "ShellCommandStatus" })
+      expect(completed).toMatchObject({ _tag: "ToolError", tool: "shell_command_status" })
       expect(failedStream).toMatchObject({ running: false, exitCode: 0, truncated: true })
       expect(unicodeBoundary).toMatchObject({ text: "x".repeat(39_999), truncated: true })
       expect(environment.commands.map(({ command, args, options }) => ({ command, args, cwd: options.cwd }))).toEqual([
@@ -326,7 +326,7 @@ describe("Runtime", () => {
       const runtime = yield* Runtime.Service
       const result = yield* Effect.flip(runtime.run({ _tag: "GitStatus" }))
 
-      expect(result).toMatchObject({ _tag: "ToolError", tool: "GitStatus" })
+      expect(result).toMatchObject({ _tag: "ToolError", tool: "git_status" })
       expect(result.message).toContain("fatal: not a git repository")
     }).pipe(provide(environment.runtime))
   })
@@ -337,7 +337,7 @@ describe("Runtime", () => {
       const runtime = yield* Runtime.Service
       const result = yield* Effect.flip(runtime.run({ _tag: "GitStatus" }))
 
-      expect(result).toMatchObject({ _tag: "ToolError", tool: "GitStatus" })
+      expect(result).toMatchObject({ _tag: "ToolError", tool: "git_status" })
     }).pipe(provide(environment.runtime))
   })
 
@@ -349,7 +349,7 @@ describe("Runtime", () => {
       yield* TestClock.adjust("10 seconds")
       const result = yield* Effect.flip(Fiber.join(timeoutFiber))
 
-      expect(result).toMatchObject({ _tag: "ToolError", tool: "GitStatus" })
+      expect(result).toMatchObject({ _tag: "ToolError", tool: "git_status" })
       expect(result.message).toContain("timed out")
     }).pipe(provide(environment.runtime))
   })
@@ -369,13 +369,13 @@ describe("Runtime", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const read = yield* Effect.flip(runtime.run({ _tag: "ReadFile", path: "missing.txt" }))
-      const shell = yield* Effect.flip(runtime.run({ _tag: "Shell", command: "fail-spawn", args: [] }))
+      const read = yield* Effect.flip(runtime.run({ _tag: "Read", path: "missing.txt" }))
+      const shell = yield* Effect.flip(runtime.run({ _tag: "Bash", command: "fail-spawn", args: [] }))
 
-      expect(read).toMatchObject({ _tag: "ToolError", tool: "ReadFile" })
+      expect(read).toMatchObject({ _tag: "ToolError", tool: "read" })
       expect(read).toMatchObject({ kind: "operation", outcome: "known" })
       expect(read.message).toContain("foreign failure")
-      expect(shell).toMatchObject({ _tag: "ToolError", tool: "Shell" })
+      expect(shell).toMatchObject({ _tag: "ToolError", tool: "bash" })
       expect(shell.message).toContain("foreign failure")
     }).pipe(provide(environment.runtime))
   })
@@ -385,14 +385,14 @@ describe("Runtime", () => {
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
       const call = yield* Effect.forkChild(
-        runtime.run({ _tag: "Shell", command: "never-spawn", args: [], waitMillis: 120_000 }),
+        runtime.run({ _tag: "Bash", command: "never-spawn", args: [], waitMillis: 120_000 }),
       )
       yield* Effect.yieldNow
       yield* TestClock.adjust("120 seconds")
       const failure = yield* Effect.flip(Fiber.join(call))
       expect(failure).toMatchObject({
         _tag: "ToolError",
-        tool: "Shell",
+        tool: "bash",
         kind: "timeout",
         outcome: "unknown",
       })
@@ -424,7 +424,7 @@ describe("Runtime", () => {
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
       const call = yield* Effect.forkChild(
-        runtime.run({ _tag: "Shell", command: "running", args: [], waitMillis: 10_000 }),
+        runtime.run({ _tag: "Bash", command: "running", args: [], waitMillis: 10_000 }),
       )
       yield* Effect.yieldNow
       yield* Fiber.interrupt(call)
@@ -471,14 +471,10 @@ describe("Runtime", () => {
     }).pipe(provide(environment.runtime))
   })
 
-  it.effect("routes patch, status, web page, and media requests and rejects escaped paths", () => {
+  it.effect("routes status, web page, and media requests and rejects escaped paths", () => {
     const environment = testEnvironment()
     return Effect.gen(function* () {
       const runtime = yield* Runtime.Service
-      const patch = yield* runtime.run({
-        _tag: "ApplyPatch",
-        patchText: "*** Begin Patch\n*** Add File: patched.txt\n+value\n*** End Patch\n",
-      })
       const status = yield* Effect.flip(
         runtime.run({ _tag: "ShellCommandStatus", processId: "missing", waitMillis: -1 }),
       )
@@ -491,12 +487,11 @@ describe("Runtime", () => {
         forceRefetch: true,
       })
       const media = yield* Effect.flip(runtime.run({ _tag: "ViewMedia", path: "missing.png" }))
-      const escaped = yield* Effect.flip(runtime.run({ _tag: "ReadFile", path: "../outside" }))
-      expect(patch.text).toBe("applied 1 operation")
-      expect(status).toMatchObject({ _tag: "ToolError", tool: "ShellCommandStatus" })
+      const escaped = yield* Effect.flip(runtime.run({ _tag: "Read", path: "../outside" }))
+      expect(status).toMatchObject({ _tag: "ToolError", tool: "shell_command_status" })
       expect(pageDefault.text).toBe("page")
       expect(pageOptions.text).toBe("page")
-      expect(media.tool).toBe("ViewMedia")
+      expect(media.tool).toBe("view_media")
       expect(escaped.message).toContain("escapes workspace")
     }).pipe(provide(environment.runtime))
   })

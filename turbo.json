@@ -11,14 +11,88 @@
     "typecheck": {
       "dependsOn": ["^build"]
     },
-    "//#dependency-check": {},
-    "//#diagnostics": {},
-    "//#effect-check": {},
-    "//#format-check": {},
-    "//#lint": {},
-    "//#pattern-check": {},
-    "//#test": {
-      "cache": false
+    "//#dependency-check": {
+      "inputs": [
+        "package.json",
+        "bun.lock",
+        "apps/*/package.json",
+        "packages/*/package.json",
+        "scripts/check-dependencies.ts"
+      ]
+    },
+    "//#diagnostics": {
+      "inputs": [
+        "tsconfig.json",
+        "bun.lock",
+        "apps/**/*.ts",
+        "packages/**/*.ts",
+        "scripts/**/*.ts",
+        "test/**/*.ts",
+        "!**/dist/**"
+      ]
+    },
+    "//#effect-check": {
+      "inputs": [
+        "sgconfig.yml",
+        "ast-grep/**",
+        "apps/**/*.ts",
+        "packages/**/*.ts",
+        "scripts/**/*.ts",
+        "test/**/*.ts",
+        "!**/dist/**"
+      ]
+    },
+    "//#format-check": {
+      "inputs": [
+        "package.json",
+        ".prettierignore",
+        "**/*.ts",
+        "**/*.js",
+        "**/*.json",
+        "**/*.md",
+        "**/*.yml",
+        "**/*.yaml",
+        "!repos/**",
+        "!artifacts/**",
+        "!plans/**",
+        "!**/dist/**",
+        "!coverage/**",
+        "!packages/tui/test/fixtures/visual/*.styles.json"
+      ]
+    },
+    "//#lint": {
+      "inputs": ["package.json", "apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "!**/dist/**"]
+    },
+    "//#pattern-check": {
+      "inputs": ["sgconfig.yml", "ast-grep/**", "apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "!**/dist/**"]
+    },
+    "//#test-unit": {
+      "inputs": [
+        "vitest.config.ts",
+        "tsconfig.json",
+        "bun.lock",
+        "apps/**",
+        "packages/**",
+        "scripts/**",
+        "test/**",
+        "!**/dist/**",
+        "!test/journey/**"
+      ]
+    },
+    "//#test-scene": {
+      "inputs": ["vitest.config.ts", "tsconfig.json", "bun.lock", "apps/**", "packages/**", "!**/dist/**"]
+    },
+    "//#test-journey": {
+      "inputs": [
+        "vitest.config.ts",
+        "tsconfig.json",
+        "bun.lock",
+        "apps/**",
+        "packages/**",
+        "scripts/**",
+        "test/journey/**",
+        "!**/dist/**"
+      ]
     }
   }
 }

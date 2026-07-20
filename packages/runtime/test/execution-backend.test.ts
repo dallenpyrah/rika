@@ -116,13 +116,15 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
       readonly max_wait_turns?: unknown
     }>
   >([])
-  const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["startExecutionByAgentDefinition"]>[0]>>([])
-  const lookups = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["getExecution"]>[0]>>([])
-  const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["replayExecution"]>[0]>>([])
-  const pages = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["pageExecutionEvents"]>[0]>>([])
-  const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["cancelExecution"]>[0]>>([])
+  const starts = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["executions"]["startByAgentDefinition"]>[0]>>(
+    [],
+  )
+  const lookups = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["executions"]["get"]>[0]>>([])
+  const replays = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["executions"]["replay"]>[0]>>([])
+  const pages = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["executions"]["pageEvents"]>[0]>>([])
+  const cancellations = yield* Ref.make<ReadonlyArray<Parameters<Client.Interface["executions"]["cancel"]>[0]>>([])
   const nextRevision = yield* Ref.make(40)
-  const implementation: Client.Interface = {
+  const flat = {
     registerAgent: <Tools extends Record<string, import("effect/unstable/ai").Tool.Any>, Requirements>(
       input: Client.RegisterAgentInput<Tools, Requirements>,
     ) =>
@@ -154,7 +156,9 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     listAddressBookRoutes: unused,
     startExecution: unused,
     startExecutionByAddress: unused,
-    startExecutionByAgentDefinition: (input) =>
+    startExecutionByAgentDefinition: (
+      input: Parameters<Client.Interface["executions"]["startByAgentDefinition"]>[0],
+    ) =>
       Ref.update(starts, (values) => [...values, input]).pipe(
         Effect.andThen(
           options?.fail === "start"
@@ -165,7 +169,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
               }),
         ),
       ),
-    cancelExecution: (input) =>
+    cancelExecution: (input: Parameters<Client.Interface["executions"]["cancel"]>[0]) =>
       Ref.update(cancellations, (values) => [...values, input]).pipe(
         Effect.andThen(
           options?.fail === "cancel"
@@ -174,7 +178,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
         ),
       ),
     steer: unused,
-    getExecution: (input) =>
+    getExecution: (input: Parameters<Client.Interface["executions"]["get"]>[0]) =>
       Ref.update(lookups, (values) => [...values, input]).pipe(
         Effect.andThen(Ref.get(lookups)),
         Effect.flatMap((values) =>
@@ -212,7 +216,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     listSessions: unused,
     getSession: unused,
     listWaits: unused,
-    replayExecution: (input) =>
+    replayExecution: (input: Parameters<Client.Interface["executions"]["replay"]>[0]) =>
       Ref.update(replays, (values) => [...values, input]).pipe(
         Effect.andThen(
           options?.fail === "replay"
@@ -220,7 +224,7 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
             : Effect.succeed({ events: options?.replayEvents ?? [] }),
         ),
       ),
-    pageExecutionEvents: (input) =>
+    pageExecutionEvents: (input: Parameters<Client.Interface["executions"]["pageEvents"]>[0]) =>
       Ref.update(pages, (values) => [...values, input]).pipe(
         Effect.as({
           events: options?.pageEvents ?? [],
@@ -295,6 +299,44 @@ const makeClient = Effect.fn("ExecutionBackendTest.makeClient")(function* (optio
     watchExecutions: () => Stream.empty,
     watchPresence: () => Stream.empty,
   }
+  const implementation = {
+    agents: { register: flat.registerAgent },
+    executions: {
+      startByAgentDefinition: flat.startExecutionByAgentDefinition,
+      cancel: flat.cancelExecution,
+      steer: flat.steer,
+      get: flat.getExecution,
+      inspect: flat.inspectExecution,
+      replay: flat.replayExecution,
+      pageEvents: flat.pageExecutionEvents,
+      stream: flat.streamExecution,
+      follow: flat.followExecution,
+    },
+    tools: {
+      listPendingApprovals: flat.listPendingApprovals,
+      resolveApproval: flat.resolveToolApproval,
+      resolvePermission: flat.resolvePermission,
+    },
+    childRuns: {
+      spawn: flat.spawnChildRun,
+      createFanOut: flat.createChildFanOut,
+      inspectFanOut: flat.inspectChildFanOut,
+      cancelFanOut: flat.cancelChildFanOut,
+    },
+    workflows: {
+      registerDefinition: flat.registerWorkflowDefinition,
+      startRun: flat.startWorkflowRun,
+      inspectRun: flat.inspectWorkflowRun,
+      cancelRun: flat.cancelWorkflowRun,
+    },
+    residents: {
+      registerKind: flat.registerEntityKind,
+      spawn: flat.getOrCreateEntity,
+      get: flat.getEntity,
+      destroy: flat.destroyEntity,
+    },
+    envelopes: { send: flat.send },
+  } as unknown as Client.Interface
   return { implementation, registrations, starts, lookups, replays, pages, cancellations }
 })
 
@@ -399,7 +441,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       definition: {
         instructions: "Complete the task",
         model: { provider: "test", model: "gpt-5.6-luna", registration_key: "luna-low" },
-        tool_names: ["read_file"],
+        tool_names: ["read"],
         permissions: ["workspace.read"],
         output_schema_ref: "rika.agent.task.v1",
         metadata: { product_profile: "Task", rika_reasoning_effort: "low" },
@@ -412,7 +454,7 @@ describe("ExecutionBackend Relay client adapter", () => {
       ...base,
       instructions: "Complete the task",
       model: { provider: "test", model: "gpt-5.6-luna", registration_key: "luna-low" },
-      tool_names: ["read_file"],
+      tool_names: ["read"],
       permissions: ["workspace.read"],
       output_schema_ref: "rika.agent.task.v1",
       metadata: { product_profile: "Task", rika_reasoning_effort: "low" },
@@ -449,6 +491,11 @@ describe("ExecutionBackend Relay client adapter", () => {
         policy: TurnPolicy.forever,
         toolExecution: { concurrency: 4 },
       })
+      const agent = registration.agent as { readonly instructions: string }
+      expect(agent.instructions).toContain("Consult Oracle frequently for complex or difficult tasks")
+      expect(agent.instructions).toContain("tell the user that you are consulting it")
+      expect(agent.instructions).toContain("after consulting Oracle, state that you did")
+      expect(agent.instructions).toContain("remaining responsible for the implementation and conclusion")
       expect(registration.metadata).toMatchObject({ rika_agent_depth: 0 })
       expect(registration.metadata?.multi_agent_enabled).toBeUndefined()
       expect(registration.permissions).not.toContainEqual({ name: "relay.child_run.spawn", value: true })
@@ -571,34 +618,37 @@ describe("ExecutionBackend Relay client adapter", () => {
       const fixture = yield* makeClient()
       const started = yield* Deferred.make<void>()
       const release = yield* Deferred.make<void>()
-      const running = relayEvent("tool.call.requested", 1, [], { tool_name: "shell", input: "sleep 20" })
+      const running = relayEvent("tool.call.requested", 1, [], { tool_name: "bash", input: "sleep 20" })
       const completed = relayEvent("execution.completed", 2)
       const implementation: Client.Interface = {
         ...fixture.implementation,
-        startExecutionByAgentDefinition: (input) =>
-          Deferred.succeed(started, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-            Effect.as({ execution_id: input.execution_id!, status: "completed" as const }),
-          ),
-        getExecution: () =>
-          Deferred.isDone(started).pipe(
-            Effect.map((visible) =>
-              visible
-                ? {
-                    id: Ids.ExecutionId.make("execution:turn-a"),
-                    root_address_id: Ids.AddressId.make("address:rika"),
-                    status: "running" as const,
-                    created_at: 1,
-                    updated_at: 1,
-                  }
-                : undefined,
+        executions: {
+          ...fixture.implementation.executions,
+          startByAgentDefinition: (input) =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as({ execution_id: input.execution_id!, status: "completed" as const }),
             ),
-          ),
-        followExecution: () =>
-          Stream.concat(
-            Stream.fromEffect(Deferred.await(started).pipe(Effect.as({ _tag: "event" as const, event: running }))),
-            Stream.fromEffect(Deferred.await(release).pipe(Effect.as({ _tag: "event" as const, event: completed }))),
-          ),
+          get: () =>
+            Deferred.isDone(started).pipe(
+              Effect.map((visible) =>
+                visible
+                  ? {
+                      id: Ids.ExecutionId.make("execution:turn-a"),
+                      root_address_id: Ids.AddressId.make("address:rika"),
+                      status: "running" as const,
+                      created_at: 1,
+                      updated_at: 1,
+                    }
+                  : undefined,
+              ),
+            ),
+          follow: () =>
+            Stream.concat(
+              Stream.fromEffect(Deferred.await(started).pipe(Effect.as({ _tag: "event" as const, event: running }))),
+              Stream.fromEffect(Deferred.await(release).pipe(Effect.as({ _tag: "event" as const, event: completed }))),
+            ),
+        },
       }
       const seen: Array<string> = []
       const result = yield* Effect.gen(function* () {
@@ -882,7 +932,7 @@ describe("ExecutionBackend Relay client adapter", () => {
   it.effect("registers compaction and permission policy options", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
-      const permissionPolicy = [{ tool: "shell", action: "deny" }] as never
+      const permissionPolicy = [{ tool: "bash", action: "deny" }] as never
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         const route = currentExecutionRoute()
@@ -921,7 +971,7 @@ describe("ExecutionBackend Relay client adapter", () => {
   it.effect("resolves permission policy from the durable execution", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
-      const permissionPolicy = { rules: [{ pattern: "shell", level: "deny" as const }] }
+      const permissionPolicy = { rules: [{ pattern: "bash", level: "deny" as const }] }
       yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
         yield* start(backend, { threadId: "thread-a", turnId: "turn-a", prompt: "prompt", startedAt: 1 })
@@ -1134,7 +1184,10 @@ describe("ExecutionBackend Relay client adapter", () => {
       const fixture = yield* makeClient({ fail: "lookup" })
       const implementation: Client.Interface = {
         ...fixture.implementation,
-        startExecutionByAgentDefinition: () => Effect.fail(clientFailure("start failed")),
+        executions: {
+          ...fixture.implementation.executions,
+          startByAgentDefinition: () => Effect.fail(clientFailure("start failed")),
+        },
       }
       const failure = yield* Effect.gen(function* () {
         const backend = yield* ExecutionBackend.Service
@@ -1223,14 +1276,14 @@ describe("ExecutionBackend Relay client adapter", () => {
             last_event_cursor: "last",
             waiting_on: [{ wait_id: "wait-1", mode: "external", created_at: 1 }],
             pending_tool_calls: [
-              { tool_call_id: "call-1", tool_name: "shell", input: { command: "pwd" }, requested_at: 2 },
+              { tool_call_id: "call-1", tool_name: "bash", input: { command: "pwd" }, requested_at: 2 },
             ],
             child_runs: [{ child_execution_id: "child:one", status: "completed" }],
           }),
         steer: (input: unknown) => (calls.push(["steer", input]), Effect.succeed({})),
         listPendingApprovals: () =>
           Effect.succeed({
-            approvals: [{ wait_id: "wait-1", tool_call_id: "call-1", tool_name: "shell", input: {}, requested_at: 3 }],
+            approvals: [{ wait_id: "wait-1", tool_call_id: "call-1", tool_name: "bash", input: {}, requested_at: 3 }],
           }),
         resolveToolApproval: (input: unknown) => (calls.push(["approval", input]), Effect.succeed({})),
         resolvePermission: (input: unknown) => (calls.push(["permission", input]), Effect.succeed({})),
@@ -1449,7 +1502,7 @@ describe("ExecutionBackend Relay client adapter", () => {
         ...relayEvent("permission.ask.requested", 1, undefined, {
           wait_id: "wait-child",
           tool_call_id: "call-child",
-          tool_name: "read_file",
+          tool_name: "read",
         }),
         execution_id: Ids.ExecutionId.make(childExecutionId),
       }
@@ -1495,7 +1548,7 @@ describe("ExecutionBackend Relay client adapter", () => {
                       wait_id: "approval-child",
                       execution_id: childExecutionId,
                       tool_call_id: "call-approval-child",
-                      tool_name: "shell",
+                      tool_name: "bash",
                       input: { command: "pwd" },
                       requested_at: 3,
                     },
@@ -1522,7 +1575,7 @@ describe("ExecutionBackend Relay client adapter", () => {
           waitId: "approval-child",
           executionId: childExecutionId,
           callId: "call-approval-child",
-          toolName: "shell",
+          toolName: "bash",
           input: { command: "pwd" },
           requestedAt: 3,
         },

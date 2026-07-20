@@ -51,9 +51,6 @@ test("three Task calls in one model turn run as overlapping durable children", (
         TestModel.turn([TestModel.text("alpha")], { delay: "400 millis" }),
         TestModel.turn([TestModel.text("beta")], { delay: "400 millis" }),
         TestModel.turn([TestModel.text("gamma")], { delay: "400 millis" }),
-        TestModel.object({ summary: "alpha", files: [] }),
-        TestModel.object({ summary: "beta", files: [] }),
-        TestModel.object({ summary: "gamma", files: [] }),
         TestModel.text("All three explorations finished."),
       ])
       const windows = yield* Ref.make<
@@ -232,25 +229,20 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
             TestModel.toolCall("task", { prompt: "Explore with inherited Sol." }, { id: "call-sol" }),
           ]),
           TestModel.text("Sol completed its exploration."),
-          TestModel.object({ summary: "Sol exploration complete.", files: [] }),
           TestModel.text("All model choices completed."),
         ],
         { provider: "test", model: "gpt-5.6-sol", registrationKey: "sol-xhigh" },
       )
-      const luna = yield* TestModel.make(
-        [
-          TestModel.text("Luna completed its exploration."),
-          TestModel.object({ summary: "Luna exploration complete.", files: [] }),
-        ],
-        { provider: "test", model: "gpt-5.6-luna", registrationKey: "luna-low" },
-      )
-      const terra = yield* TestModel.make(
-        [
-          TestModel.text("Terra completed its exploration."),
-          TestModel.object({ summary: "Terra exploration complete.", files: [] }),
-        ],
-        { provider: "test", model: "gpt-5.6-terra", registrationKey: "terra-medium" },
-      )
+      const luna = yield* TestModel.make([TestModel.text("Luna completed its exploration.")], {
+        provider: "test",
+        model: "gpt-5.6-luna",
+        registrationKey: "luna-low",
+      })
+      const terra = yield* TestModel.make([TestModel.text("Terra completed its exploration.")], {
+        provider: "test",
+        model: "gpt-5.6-terra",
+        registrationKey: "terra-medium",
+      })
       const executionRoute: ExecutionBackend.ExecutionRoutePin = {
         mode: "high",
         main: executionModelRoute("main", sol.selection, "xhigh"),
@@ -386,25 +378,20 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
             ),
           ]),
           TestModel.text("Depth one combined both results."),
-          TestModel.object({ summary: "Nested work complete.", files: [] }),
           TestModel.text("Root received the nested result."),
         ],
         { provider: "test", model: "gpt-5.6-terra", registrationKey: "terra-medium" },
       )
-      const luna = yield* TestModel.make(
-        [
-          TestModel.text("Luna completed the nested check."),
-          TestModel.object({ summary: "Luna nested check complete.", files: [] }),
-        ],
-        { provider: "test", model: "gpt-5.6-luna", registrationKey: "luna-medium" },
-      )
-      const sol = yield* TestModel.make(
-        [
-          TestModel.text("Oracle checked the nested design."),
-          TestModel.object({ answer: "The nested design is sound.", evidence: [] }),
-        ],
-        { provider: "test", model: "gpt-5.6-sol", registrationKey: "sol-medium" },
-      )
+      const luna = yield* TestModel.make([TestModel.text("Luna completed the nested check.")], {
+        provider: "test",
+        model: "gpt-5.6-luna",
+        registrationKey: "luna-medium",
+      })
+      const sol = yield* TestModel.make([TestModel.text("Oracle checked the nested design.")], {
+        provider: "test",
+        model: "gpt-5.6-sol",
+        registrationKey: "sol-medium",
+      })
       const executionRoute: ExecutionBackend.ExecutionRoutePin = {
         mode: "test",
         main: executionModelRoute("main", terra.selection),
@@ -495,7 +482,7 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           const oracleDepthTwoTools = solRequests[0]?.tools.map((tool) => tool.name) ?? []
           expect(settled.status).toBe("completed")
           expect(failures).toEqual([])
-          expect(terraRequests).toHaveLength(5)
+          expect(terraRequests).toHaveLength(4)
           expect(delegationResults).toHaveLength(2)
           expect(delegationResults.map((result) => ({ name: result.name, error: result.error }))).toEqual([
             { name: "oracle", error: null },
@@ -506,8 +493,8 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           expect(depthOneTools).toEqual(expect.arrayContaining(delegationTools))
           expect(lunaDepthTwoTools).not.toEqual(expect.arrayContaining(delegationTools))
           expect(oracleDepthTwoTools).not.toEqual(expect.arrayContaining(delegationTools))
-          expect(lunaRequests).toHaveLength(2)
-          expect(solRequests).toHaveLength(2)
+          expect(lunaRequests).toHaveLength(1)
+          expect(solRequests).toHaveLength(1)
           expect(
             children.some((child) => {
               const snapshot = JSON.parse(child.agent_snapshot_json) as {
@@ -574,7 +561,6 @@ test("model spawns a durable Oracle child through the handoff tool and resumes w
           ...Array.from({ length: 1_100 }, () => TestModel.text(".")),
           TestModel.text("Oracle investigated the boundary."),
         ]),
-        TestModel.object({ answer: "Oracle investigated the boundary.", evidence: [] }),
         TestModel.text("Parent synthesized the child answer."),
       ])
       const runtimeLayer = Runtime.testLayer(() => Effect.succeed({ text: "runtime", truncated: false }))
@@ -685,8 +671,8 @@ test("handoff children resolve real workspace tools through their parent Rika tu
       yield* fileSystem.writeFileString(`${workspace}/AGENTS.md`, "child workspace marker")
       const fixture = yield* TestModel.make([
         TestModel.toolCall("review", { prompt: "Inspect AGENTS.md." }, { id: "call-review" }),
-        TestModel.turn([TestModel.toolCall("read_file", { path: "AGENTS.md" }, { id: "call-child-read" })]),
-        TestModel.object({ summary: "Workspace inspected.", findings: [] }),
+        TestModel.turn([TestModel.toolCall("read", { path: "AGENTS.md" }, { id: "call-child-read" })]),
+        TestModel.text("Child inspected the workspace."),
         TestModel.text("Parent received the review."),
       ])
       const workspaces = new Map([["turn-review", workspace]])
@@ -767,9 +753,8 @@ test("handoff child approval asks surface through the parent and resume after ap
       yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "permission marker")
       const fixture = yield* TestModel.make([
         TestModel.toolCall("review", { prompt: "Read fixture.txt." }, { id: "call-parent-review" }),
-        TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "call-child-permission" }),
+        TestModel.toolCall("read", { path: "fixture.txt" }, { id: "call-child-permission" }),
         TestModel.text("Child read the fixture."),
-        TestModel.object({ summary: "Fixture read.", findings: [] }),
         TestModel.text("Parent received the approved child result."),
       ])
       const backendLayer = RelayExecutionBackend.layer({
@@ -779,7 +764,7 @@ test("handoff child approval asks surface through the parent and resume after ap
         selection: fixture.selection,
         modelVariantPolicy: "fixed-selection",
         toolRuntimeLayer: Runtime.layer(directory),
-        toolNeedsApproval: (name) => name === "read_file",
+        toolNeedsApproval: (name) => name === "read",
       })
       const backendContext = yield* Layer.build(backendLayer)
       return yield* Effect.gen(function* () {
@@ -814,7 +799,7 @@ test("handoff child approval asks surface through the parent and resume after ap
           expect(String(ask?.data?.execution_id).startsWith("child:execution%3Aturn-child-permission:")).toBe(true)
           expect(approvals[0]?.executionId).toBe(String(ask?.data?.execution_id))
           expect(completed.status).toBe("completed")
-          expect(requests.length).toBeGreaterThanOrEqual(5)
+          expect(requests.length).toBeGreaterThanOrEqual(4)
         }),
       ),
     ),
@@ -829,9 +814,8 @@ test("parent and handoff child may reuse a model tool-call identifier", () => {
       yield* fileSystem.writeFileString(`${directory}/fixture.txt`, "shared call id marker")
       const fixture = yield* TestModel.make([
         TestModel.toolCall("review", { prompt: "Read fixture.txt." }, { id: "call_shared" }),
-        TestModel.toolCall("read_file", { path: "fixture.txt" }, { id: "call_shared" }),
+        TestModel.toolCall("read", { path: "fixture.txt" }, { id: "call_shared" }),
         TestModel.text("Child reused the call id."),
-        TestModel.object({ summary: "Call id reused.", findings: [] }),
         TestModel.text("Parent received the child result."),
       ])
       const backendLayer = RelayExecutionBackend.layer({

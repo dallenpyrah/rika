@@ -7,21 +7,21 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("create_file", { path: "alpha.txt", content: "alpha\n" }, "create-alpha"),
-          Scene.model.toolCall("create_file", { path: "beta.txt", content: "beta\n" }, "create-beta"),
+          Scene.model.toolCall("write", { path: "alpha.txt", content: "alpha\n" }, "create-alpha"),
+          Scene.model.toolCall("write", { path: "beta.txt", content: "beta\n" }, "create-beta"),
         ]),
         Scene.model.turn([
-          Scene.model.toolCall("read_file", { path: "alpha.txt", offset: 1, limit: 1 }, "read-alpha"),
+          Scene.model.toolCall("read", { path: "alpha.txt", offset: 1, limit: 1 }, "read-alpha"),
           Scene.model.toolCall("grep", { pattern: "alpha", regex: false }, "grep-alpha"),
           Scene.model.toolCall("find_files", { query: "beta" }, "find-beta"),
         ]),
         Scene.model.turn([
-          Scene.model.toolCall("edit_file", { path: "alpha.txt", oldText: "alpha", newText: "ALPHA" }, "edit-alpha"),
-          Scene.model.toolCall("create_file", { path: "gamma.txt", content: "gamma\n" }, "create-gamma"),
+          Scene.model.toolCall("edit", { path: "alpha.txt", oldText: "alpha", newText: "ALPHA" }, "edit-alpha"),
+          Scene.model.toolCall("write", { path: "gamma.txt", content: "gamma\n" }, "create-gamma"),
         ]),
         Scene.model.turn([
-          Scene.model.toolCall("shell", { command: "printf", args: ["shell-output"] }, "shell-pass"),
-          Scene.model.toolCall("shell", { command: "sh", args: ["-c", "printf shell-failure; exit 7"] }, "shell-fail"),
+          Scene.model.toolCall("bash", { command: "printf", args: ["shell-output"] }, "shell-pass"),
+          Scene.model.toolCall("bash", { command: "sh", args: ["-c", "printf shell-failure; exit 7"] }, "shell-fail"),
         ]),
         Scene.model.text("DONE"),
       ],
@@ -35,7 +35,7 @@ test(
       expect(output).toContain("Explored 1 file, 2 searches")
       expect(output).toContain("2 files +2 -1")
       expect(output).toContain("Ran 2 commands, 1 failed")
-      expect(output).not.toMatch(/create_file|read_file|find_files|edit_file/)
+      expect(output).not.toMatch(/write|read|find_files|edit/)
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,
@@ -47,8 +47,8 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          Scene.model.toolCall("create_file", { path: "one.txt", content: "one\n" }, "create-one"),
-          Scene.model.toolCall("create_file", { path: "two.txt", content: "two\n" }, "create-two"),
+          Scene.model.toolCall("write", { path: "one.txt", content: "one\n" }, "create-one"),
+          Scene.model.toolCall("write", { path: "two.txt", content: "two\n" }, "create-two"),
         ]),
         Scene.model.text("Expansion ready."),
       ],

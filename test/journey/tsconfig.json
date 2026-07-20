@@ -29,6 +29,7 @@
     "./sidebar-scale.stress.journey.test.ts",
     "./stress-support.ts",
     "./thread-switch-streaming.stress.journey.test.ts",
-    "./thread-reopen.stress.journey.test.ts"
+    "./thread-reopen.stress.journey.test.ts",
+    "./transcript-render.stress.journey.test.ts"
   ]
 }

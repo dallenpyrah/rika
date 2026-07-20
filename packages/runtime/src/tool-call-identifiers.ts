@@ -2,7 +2,7 @@ import { Function } from "effect"
 import { Prompt, Response } from "effect/unstable/ai"
 
 const toolCallPrefix = (namespace: string) => `rika:${encodeURIComponent(namespace)}:`
-const executionNamespacePrefixes = ["execution:", "child:", "workflow:"]
+const executionNamespacePrefixes = ["execution:", "child:", "workflow:"] as const
 
 export const isExecutionNamespace = (value: string) =>
   executionNamespacePrefixes.some((prefix) => value.startsWith(prefix))

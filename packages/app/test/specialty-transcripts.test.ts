@@ -107,9 +107,7 @@ describe("specialty durable transcripts", () => {
           expect((yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(entry.output)).length).toBeLessThanOrEqual(
             definition!.outputLimit,
           )
-          const decoded = Schema.decodeUnknownExit(profile.outputSchema)(entry.output)
-          expect(decoded._tag).toBe("Success")
-          if (decoded._tag === "Success") expect(decoded.value).toEqual(entry.output)
+          expect(profile.preset).not.toHaveProperty("output_schema_ref")
           expect(
             yield* agents.invoke({
               parentTurnId: "parent-1",
@@ -192,13 +190,7 @@ describe("specialty durable transcripts", () => {
       expect(unavailable._tag).toBe("Failure")
       const painter = yield* AgentProfiles.resolvePainter(model, true)
       expect(painter.preset.tool_names).toEqual(["view_media", "task", "oracle", "librarian", "review"])
-      const decoded = Schema.decodeUnknownExit(painter.outputSchema)(
-        cases.find(({ tool }) => tool === "painter")!.output,
-      )
-      expect(decoded._tag).toBe("Success")
-      if (decoded._tag === "Success") {
-        expect(decoded.value).toMatchObject({ artifact: { path: "artifacts/card.png", mimeType: "image/png" } })
-      }
+      expect(painter.preset).not.toHaveProperty("output_schema_ref")
     }),
   )
 })
