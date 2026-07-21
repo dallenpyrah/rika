@@ -149,11 +149,20 @@ describe("Logging", () => {
           yield* TestClock.adjust(Duration.millis(999))
           assert.strictEqual(yield* Ref.get(writes), 0)
           yield* TestClock.adjust(Duration.millis(1))
-          assert.strictEqual(yield* Ref.get(writes), 1)
           const filename = path.join(root, "diagnostics", "client-2026-07-14T10-00-00-000Z-42.open.jsonl")
-          const records = yield* Effect.forEach((yield* fs.readFileString(filename)).trim().split("\n"), (line) =>
-            decodeRecord(line),
-          )
+          const decodeBatch = Effect.gen(function* () {
+            const content = (yield* fs.readFileString(filename)).trim()
+            if (content.length === 0) return undefined
+            return yield* Effect.forEach(content.split("\n"), (line) => decodeRecord(line))
+          }).pipe(Effect.orElseSucceed(() => undefined))
+          let records: ReadonlyArray<{ readonly message: string }> | undefined
+          for (let attempt = 0; records === undefined; attempt += 1) {
+            const decoded = yield* decodeBatch
+            if (decoded !== undefined && decoded.length === 2) records = decoded
+            else if (attempt >= 100_000) return yield* Effect.die("log batch did not flush")
+            else yield* Effect.yieldNow
+          }
+          assert.strictEqual(yield* Ref.get(writes), 1)
           assert.deepStrictEqual(
             records.map((record) => record.message),
             ["test.first", "test.second"],
