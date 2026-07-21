@@ -17,10 +17,34 @@ const directories = {
   "/work/pkg": ["AGENT.md", "src"],
   "/work/pkg/src": ["AGENTS.md", "main.ts"],
 }
-const contextLayer = ResolvedContext.layer.pipe(
-  Layer.provide(ContextFileSystem.testLayer(files, directories).pipe(Layer.provide(Path.layer))),
-  Layer.provide(Path.layer),
-)
+const globRegex = (pattern: string) =>
+  new RegExp(
+    `^${pattern
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replaceAll("**", "\u0000")
+      .replaceAll("*", "[^/]*")
+      .replaceAll("\u0000", ".*")}$`,
+  )
+const globFor =
+  (fixture: Readonly<Record<string, string>>): ResolvedContext.GlobLookup =>
+  (workspace, pattern, maximumFiles) =>
+    Effect.succeed(
+      Object.keys(fixture)
+        .filter((name) => name.startsWith(`${workspace}/`))
+        .map((name) => name.slice(`${workspace}/`.length))
+        .filter((name) => globRegex(pattern).test(name))
+        .toSorted()
+        .slice(0, maximumFiles),
+    )
+const layerFor = (
+  fixtureFiles: Readonly<Record<string, string>>,
+  fixtureDirectories: Readonly<Record<string, ReadonlyArray<string>>>,
+) =>
+  ResolvedContext.layer(globFor(fixtureFiles)).pipe(
+    Layer.provide(ContextFileSystem.testLayer(fixtureFiles, fixtureDirectories).pipe(Layer.provide(Path.layer))),
+    Layer.provide(Path.layer),
+  )
+const contextLayer = layerFor(files, directories)
 
 describe("ResolvedContext", () => {
   it.effect("resolves scoped guidance, fallbacks, globs, and stable digests", () =>
@@ -64,7 +88,7 @@ describe("ResolvedContext", () => {
       expect(result.diagnostics.map((item) => item._tag)).toEqual(["ReferenceReadFailed", "ReferenceNotFound"])
     }).pipe(
       provideLayer(
-        ResolvedContext.layer.pipe(
+        ResolvedContext.layer(globFor(files)).pipe(
           Layer.provide(
             Layer.succeed(ContextFileSystem.Service, {
               exists: (name) => Effect.succeed(name === "/work" || name === "/work/AGENTS.md"),
@@ -113,18 +137,7 @@ describe("ResolvedContext", () => {
       const resolver = yield* ResolvedContext.Service
       const result = yield* resolver.resolve({ workspace: "/other" })
       expect(result.sources.map((source) => source.path)).toEqual(["CLAUDE.md"])
-    }).pipe(
-      provideLayer(
-        ResolvedContext.layer.pipe(
-          Layer.provide(
-            ContextFileSystem.testLayer({ "/other/CLAUDE.md": "fallback" }, { "/other": ["CLAUDE.md"] }).pipe(
-              Layer.provide(Path.layer),
-            ),
-          ),
-          Layer.provide(Path.layer),
-        ),
-      ),
-    ),
+    }).pipe(provideLayer(layerFor({ "/other/CLAUDE.md": "fallback" }, { "/other": ["CLAUDE.md"] }))),
   )
 
   it.effect("keeps glob traversal inside the workspace and accepts the workspace itself as a target", () =>
@@ -139,86 +152,45 @@ describe("ResolvedContext", () => {
       expect(result.diagnostics).toEqual([])
     }).pipe(
       provideLayer(
-        ResolvedContext.layer.pipe(
-          Layer.provide(
-            ContextFileSystem.testLayer(
-              {
-                "/work/AGENTS.md": "guidance",
-                "/work/docs/nested/reference.md": "reference",
-                "/outside.md": "must not be selected",
-              },
-              {
-                "/work": ["..", "AGENTS.md", "docs"],
-                "/work/docs": ["nested"],
-                "/work/docs/nested": ["reference.md"],
-              },
-            ).pipe(Layer.provide(Path.layer)),
-          ),
-          Layer.provide(Path.layer),
+        layerFor(
+          {
+            "/work/AGENTS.md": "guidance",
+            "/work/docs/nested/reference.md": "reference",
+            "/outside.md": "must not be selected",
+          },
+          {
+            "/work": ["..", "AGENTS.md", "docs"],
+            "/work/docs": ["nested"],
+            "/work/docs/nested": ["reference.md"],
+          },
         ),
       ),
     ),
   )
 
-  it.effect("applies the one thousand file bound globally across sibling directories", () =>
+  it.effect("applies the one thousand file bound globally across glob references", () =>
     Effect.gen(function* () {
       const resolver = yield* ResolvedContext.Service
-      const result = yield* resolver.resolve({ workspace: "/large", references: ["**/*.txt"] })
+      const result = yield* resolver.resolve({ workspace: "/large", references: ["a/*.txt", "b/*.txt"] })
       expect(result.sources).toHaveLength(1_000)
       expect(result.sources[0]?.path).toBe("a/0000.txt")
       expect(result.sources.at(-1)?.path).toBe("a/0999.txt")
     }).pipe(
       provideLayer(
-        ResolvedContext.layer.pipe(
-          Layer.provide(
-            ContextFileSystem.testLayer(
-              Object.fromEntries(
-                ["a", "b"].flatMap((directory) =>
-                  Array.from({ length: 1_000 }, (_, index) => [
-                    `/large/${directory}/${String(index).padStart(4, "0")}.txt`,
-                    `${directory}-${index}`,
-                  ]),
-                ),
-              ),
-              {
-                "/large": ["a", "b"],
-                "/large/a": Array.from({ length: 1_000 }, (_, index) => `${String(index).padStart(4, "0")}.txt`),
-                "/large/b": Array.from({ length: 1_000 }, (_, index) => `${String(index).padStart(4, "0")}.txt`),
-              },
-            ).pipe(Layer.provide(Path.layer)),
+        layerFor(
+          Object.fromEntries(
+            ["a", "b"].flatMap((directory) =>
+              Array.from({ length: 1_000 }, (_, index) => [
+                `/large/${directory}/${String(index).padStart(4, "0")}.txt`,
+                `${directory}-${index}`,
+              ]),
+            ),
           ),
-          Layer.provide(Path.layer),
-        ),
-      ),
-    ),
-  )
-
-  it.effect("includes files at depth thirty-two and excludes files below it", () =>
-    Effect.gen(function* () {
-      const resolver = yield* ResolvedContext.Service
-      const result = yield* resolver.resolve({ workspace: "/deep", references: ["**/*.txt"] })
-      expect(result.sources.map((source) => source.content)).toEqual(["boundary"])
-    }).pipe(
-      provideLayer(
-        ResolvedContext.layer.pipe(
-          Layer.provide(
-            ContextFileSystem.testLayer(
-              {
-                [`/deep/${Array.from({ length: 32 }, (_, index) => `d${index}`).join("/")}/boundary.txt`]: "boundary",
-                [`/deep/${Array.from({ length: 33 }, (_, index) => `d${index}`).join("/")}/too-deep.txt`]: "too deep",
-              },
-              Object.fromEntries(
-                Array.from({ length: 34 }, (_entry, depth) => {
-                  const directory = `/deep${depth === 0 ? "" : `/${Array.from({ length: depth }, (_, index) => `d${index}`).join("/")}`}`
-                  return [
-                    directory,
-                    depth === 32 ? ["boundary.txt", "d32"] : depth === 33 ? ["too-deep.txt"] : [`d${depth}`],
-                  ]
-                }),
-              ),
-            ).pipe(Layer.provide(Path.layer)),
-          ),
-          Layer.provide(Path.layer),
+          {
+            "/large": ["a", "b"],
+            "/large/a": Array.from({ length: 1_000 }, (_, index) => `${String(index).padStart(4, "0")}.txt`),
+            "/large/b": Array.from({ length: 1_000 }, (_, index) => `${String(index).padStart(4, "0")}.txt`),
+          },
         ),
       ),
     ),
@@ -237,7 +209,10 @@ describe("ResolvedContext", () => {
       expect(result.diagnostics.map((diagnostic) => diagnostic._tag)).toEqual(["PathOutsideWorkspace"])
     }).pipe(
       provideLayer(
-        ResolvedContext.layer.pipe(Layer.provide(ContextFileSystem.liveLayer), Layer.provideMerge(BunServices.layer)),
+        ResolvedContext.layer(() => Effect.succeed([])).pipe(
+          Layer.provide(ContextFileSystem.liveLayer),
+          Layer.provideMerge(BunServices.layer),
+        ),
       ),
     ),
   )

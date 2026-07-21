@@ -1,10 +1,11 @@
-import { Context, Data, Effect, FileSystem, Layer, Option, Path, PlatformError, Schema } from "effect"
+import { Context, Data, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as WebSearchService from "./web-search"
 import { Service as ReadWebPageService } from "./read-web-page"
 import * as ProcessRegistry from "./process-registry"
 import * as MediaView from "./media-view"
 import * as ToolPolicy from "./tool-policy"
+import * as WorkspaceIndex from "./workspace-index"
 import { unifiedDiff } from "./unified-diff"
 
 import * as ToolDefinitions from "./tools"
@@ -197,7 +198,7 @@ class RuntimeOperationError extends Data.TaggedError("RuntimeOperationError")<{ 
 
 const operationError = (cause: unknown) => new RuntimeOperationError({ message: String(cause) })
 
-export const layerWithProcessRegistry = (workspace: string) =>
+const runtimeLayer = (workspace: string) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -207,6 +208,7 @@ export const layerWithProcessRegistry = (workspace: string) =>
       const readWebPage = yield* ReadWebPageService
       const processes = yield* ProcessRegistry.Service
       const mediaView = yield* MediaView.Service
+      const workspaceIndex = yield* WorkspaceIndex.Service
       const canonicalWorkspace = yield* fileSystem.realPath(workspace).pipe(Effect.orDie)
       const resolve = (value: string) =>
         Effect.try({
@@ -259,55 +261,40 @@ export const layerWithProcessRegistry = (workspace: string) =>
               : Effect.fail(new RuntimeOperationError({ message: `Path escapes workspace: ${value}` })),
           ),
         )
-      const listFiles = Effect.fn("ToolRuntime.listFiles")(function* () {
-        const found: Array<string> = []
-        const visited = new Set([canonicalWorkspace])
-        const ignored = (target: string) =>
-          path
-            .relative(canonicalWorkspace, target)
-            .split(path.sep)
-            .some((segment) => segment === ".git" || segment === "node_modules")
-        const visit = (directory: string): Effect.Effect<void, PlatformError.PlatformError> =>
-          Effect.gen(function* () {
-            for (const entry of yield* fileSystem.readDirectory(directory)) {
-              if (entry === ".git" || entry === "node_modules") continue
-              const absolute = path.join(directory, entry)
-              const canonical = yield* fileSystem.realPath(absolute).pipe(Effect.option)
-              if (Option.isNone(canonical) || !isContained(canonical.value) || ignored(canonical.value)) continue
-              const info = yield* fileSystem.stat(canonical.value)
-              if (info.type === "Directory") {
-                if (visited.has(canonical.value)) continue
-                visited.add(canonical.value)
-                yield* visit(canonical.value)
-              } else if (info.type === "File") found.push(path.relative(canonicalWorkspace, canonical.value))
-            }
-          })
-        yield* visit(canonicalWorkspace)
-        return found.toSorted()
+      const resolveRead = Effect.fn("ToolRuntime.resolveRead")(function* (value: string) {
+        const exact = yield* resolve(value)
+        if (yield* fileSystem.exists(exact)) return yield* resolveContained(value)
+        const found = yield* workspaceIndex.fileSearch(value, { pageSize: 20 })
+        const bestMatch = found.items[0]
+        if (bestMatch === undefined) return yield* new RuntimeOperationError({ message: `File not found: ${value}` })
+        return yield* resolveContained(bestMatch.relativePath)
       })
       return Service.of({
         run: Effect.fn("ToolRuntime.run")(function* (request) {
           const operation = Effect.gen(function* () {
             switch (request._tag) {
               case "Grep": {
-                if (request.regex) yield* Effect.try({ try: () => new RegExp(request.pattern), catch: operationError })
-                const expression = request.regex ? new RegExp(request.pattern) : undefined
                 const matches: Array<string> = []
-                for (const file of yield* listFiles()) {
-                  const content = yield* resolveContained(file).pipe(
-                    Effect.flatMap((target) => fileSystem.readFileString(target)),
-                    Effect.option,
-                  )
-                  if (content._tag === "None") continue
-                  const lines = content.value.split("\n")
-                  for (let index = 0; index < lines.length; index += 1) {
-                    const line = lines[index] ?? ""
-                    if (expression?.test(line) === true || (expression === undefined && line.includes(request.pattern)))
-                      matches.push(`${file}:${index + 1}:${line}`)
+                let cursor: WorkspaceIndex.GrepResult["nextCursor"] = null
+                do {
+                  const page: WorkspaceIndex.GrepResult = yield* workspaceIndex.grep(request.pattern, {
+                    mode: request.regex ? "regex" : "plain",
+                    smartCase: false,
+                    maxMatchesPerFile: 1_000,
+                    pageSize: 1_000 - matches.length,
+                    cursor,
+                  })
+                  if (page.regexFallbackError !== undefined)
+                    return yield* new RuntimeOperationError({ message: page.regexFallbackError })
+                  for (const match of page.items) {
+                    const target = yield* resolveContained(match.relativePath)
+                    matches.push(
+                      `${path.relative(canonicalWorkspace, target)}:${match.lineNumber}:${match.lineContent}`,
+                    )
                     if (matches.length === 1_000) break
                   }
-                  if (matches.length === 1_000) break
-                }
+                  cursor = page.nextCursor
+                } while (cursor !== null && matches.length < 1_000)
                 return bounded(matches.join("\n"))
               }
               case "Read": {
@@ -315,7 +302,7 @@ export const layerWithProcessRegistry = (workspace: string) =>
                 const end = request.readRange?.[1] ?? 1_000
                 if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start)
                   return yield* new RuntimeOperationError({ message: "Invalid file range" })
-                const target = yield* resolveContained(request.path)
+                const target = yield* resolveRead(request.path)
                 const lines = (yield* fileSystem.readFileString(target)).split("\n")
                 return bounded(
                   lines
@@ -425,6 +412,12 @@ export const layerWithProcessRegistry = (workspace: string) =>
       })
     }),
   ).pipe(Layer.provide(MediaView.layer(workspace)))
+
+export const layerWithProcessRegistry = (workspace: string) =>
+  runtimeLayer(workspace).pipe(Layer.provide(WorkspaceIndex.layer(workspace)))
+
+/** Runtime composition point for tests or hosts that provide their own index. */
+export const layerWithServices = (workspace: string) => runtimeLayer(workspace)
 
 export const layer = (workspace: string) =>
   layerWithProcessRegistry(workspace).pipe(Layer.provide(ProcessRegistry.layer))

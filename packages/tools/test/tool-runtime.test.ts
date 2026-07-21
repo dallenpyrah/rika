@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Fiber, FileSystem, Layer, Option, Path, PlatformError, Ref, Schema, Sink, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { MediaView, ProcessRegistry, ReadWebPage, Runtime, WebSearch } from "../src"
+import { MediaView, ProcessRegistry, ReadWebPage, Runtime, WebSearch, WorkspaceIndex } from "../src"
 import { provide } from "./test-layer"
 
 const workspace = "/workspace"
@@ -57,7 +57,7 @@ const processHandle = ({ stdout, stderr, exitCode }: ProcessResult, onKill: () =
 }
 
 const testEnvironment = (
-  _git: "success" | "nonzero" | "missing" | "timeout" | "large" = "success",
+  git: "success" | "nonzero" | "missing" | "timeout" | "large" = "success",
   search: WebSearch.Interface["search"] = () =>
     Effect.succeed([
       {
@@ -123,21 +123,67 @@ const testEnvironment = (
       }
       if (executed === "bad") return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 7 }))
       if (executed === "git --no-optional-locks status --short --branch") {
-        if (false) return Effect.fail(platformError("spawn", command.command))
-        if (false)
+        if (git === "missing") return Effect.fail(platformError("spawn", executed))
+        if (git === "nonzero")
           return Effect.succeed(processHandle({ stdout: "", stderr: "fatal: not a git repository", exitCode: 128 }))
-        if (false) {
+        if (git === "timeout") {
           const handle = processHandle({ stdout: "", stderr: "", exitCode: 0 })
           return Effect.succeed({ ...handle, exitCode: Effect.never })
         }
-        if (false) return Effect.succeed(processHandle({ stdout: "x".repeat(20_001), stderr: "", exitCode: 0 }))
+        if (git === "large")
+          return Effect.succeed(processHandle({ stdout: "x".repeat(20_001), stderr: "", exitCode: 0 }))
         return Effect.succeed(processHandle({ stdout: "## main", stderr: "", exitCode: 0 }))
       }
       return Effect.succeed(processHandle({ stdout: "out", stderr: "err", exitCode: 0 }))
     }),
   )
   const dependencies = Layer.mergeAll(fileSystem, Path.layer, spawner)
-  const runtime = Runtime.layer(workspace).pipe(
+  const index = WorkspaceIndex.testLayer({
+    fileSearch: (query) => {
+      const items = Array.from(files.keys())
+        .filter((file) => file.includes(query))
+        .map((file) => ({
+          relativePath: file.slice(`${workspace}/`.length),
+          fileName: file.slice(file.lastIndexOf("/") + 1),
+          size: files.get(file)?.length ?? 0,
+          modified: 0,
+          accessFrecencyScore: 0,
+          modificationFrecencyScore: 0,
+          totalFrecencyScore: 0,
+          gitStatus: "clean",
+        }))
+      return Effect.succeed({ items, scores: [], totalMatched: items.length, totalFiles: files.size })
+    },
+    glob: () => Effect.succeed({ items: [], scores: [], totalMatched: 0, totalFiles: files.size }),
+    grep: (query, options) => {
+      if (options?.mode === "regex") {
+        try {
+          RegExp(query)
+        } catch (cause) {
+          return Effect.succeed({
+            items: [],
+            totalMatched: 0,
+            totalFilesSearched: 0,
+            totalFiles: files.size,
+            filteredFileCount: files.size,
+            nextCursor: null,
+            regexFallbackError: String(cause),
+          })
+        }
+      }
+      return Effect.succeed({
+        items: [],
+        totalMatched: 0,
+        totalFilesSearched: files.size,
+        totalFiles: files.size,
+        filteredFileCount: files.size,
+        nextCursor: null,
+      })
+    },
+  })
+  const runtime = Runtime.layerWithServices(workspace).pipe(
+    Layer.provide(ProcessRegistry.layer),
+    Layer.provide(index),
     Layer.provide(dependencies),
     Layer.provide(Layer.merge(WebSearch.testLayer(search), ReadWebPage.testLayer(read))),
     Layer.provide(MediaView.analyzerTestLayer(() => Effect.succeed("analysis"))),
@@ -284,7 +330,7 @@ describe("Runtime", () => {
 
       expect(read).toMatchObject({ _tag: "ToolError", tool: "read" })
       expect(read).toMatchObject({ kind: "operation", outcome: "known" })
-      expect(read.message).toContain("foreign failure")
+      expect(read.message).toContain("File not found")
       expect(shell).toMatchObject({ _tag: "ToolError", tool: "bash" })
       expect(shell.message).toContain("foreign failure")
     }).pipe(provide(environment.runtime))

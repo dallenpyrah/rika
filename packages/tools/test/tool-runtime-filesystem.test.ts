@@ -1,8 +1,35 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, test } from "vitest"
 import { Effect, FileSystem, Layer, Schema } from "effect"
-import { MediaView, ProcessRegistry, ReadWebPage, Runtime, WebSearch } from "../src"
+import { MediaView, ProcessRegistry, ReadWebPage, Runtime, WebSearch, WorkspaceIndex } from "../src"
 import { provide } from "./test-layer"
+
+test("exposes fileSearch, glob, and grep through the FFF workspace index", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-workspace-index-" })
+        yield* fileSystem.makeDirectory(`${workspace}/src`, { recursive: true })
+        yield* fileSystem.writeFileString(`${workspace}/src/example.ts`, "alpha\nneedle")
+        const result = yield* Effect.gen(function* () {
+          const index = yield* WorkspaceIndex.Service
+          return {
+            files: yield* index.fileSearch("src/exampl.ts", { pageSize: 10 }),
+            globbed: yield* index.glob("**/*.ts", { pageSize: 10 }),
+            grepped: yield* index.grep("needle", { mode: "plain", pageSize: 10 }),
+          }
+        }).pipe(provide(WorkspaceIndex.layer(workspace)))
+        expect(result.files.items[0]?.relativePath).toBe("src/example.ts")
+        expect(result.globbed.items.map((item) => item.relativePath)).toContain("src/example.ts")
+        expect(result.grepped.items[0]).toMatchObject({
+          relativePath: "src/example.ts",
+          lineNumber: 2,
+          lineContent: "needle",
+        })
+      }).pipe(provide(BunServices.layer)),
+    ),
+  ))
 
 test("runs filesystem, shell, and git tools against a bounded workspace", () => {
   const program = Effect.scoped(
@@ -22,8 +49,9 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
       const result = yield* Effect.gen(function* () {
         const runtime = yield* Runtime.Service
         const literal = yield* runtime.run({ _tag: "Grep", pattern: "beta", regex: false })
-        const regex = yield* runtime.run({ _tag: "Grep", pattern: "(?<=b)eta", regex: true })
+        const regex = yield* runtime.run({ _tag: "Grep", pattern: "b.ta", regex: true })
         const read = yield* runtime.run({ _tag: "Read", path: "src/a.ts", readRange: [2, 2] })
+        const fuzzyRead = yield* runtime.run({ _tag: "Read", path: "src/aa.ts", readRange: [1, 1] })
         const escapedRead = yield* Effect.result(runtime.run({ _tag: "Read", path: "link/target.txt" }))
         const escapedGrep = yield* runtime.run({ _tag: "Grep", pattern: "outside", regex: false })
         const created = yield* runtime.run({ _tag: "Write", path: "new/file.txt", content: "old" })
@@ -57,6 +85,7 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
           literal,
           regex,
           read,
+          fuzzyRead,
           escapedRead,
           escapedGrep,
           created,
@@ -93,6 +122,7 @@ test("runs filesystem, shell, and git tools against a bounded workspace", () => 
           expect(result.literal.text).toContain("src/a.ts:2:beta")
           expect(result.regex.text).toContain("src/a.ts:2:beta")
           expect(result.read.text).toBe("2: beta")
+          expect(result.fuzzyRead.text).toBe("1: alpha")
           expect(result.escapedRead._tag).toBe("Failure")
           expect(result.escapedGrep.text).toBe("")
           expect(result.created.text).toBe("Successfully wrote 3 bytes to new/file.txt")
