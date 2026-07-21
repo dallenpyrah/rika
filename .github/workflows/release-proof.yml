@@ -16,8 +16,8 @@ jobs:
         include:
           - { runner: macos-14, target: darwin-arm64 }
           - { runner: macos-13, target: darwin-x64 }
-          - { runner: ubuntu-24.04-arm, target: linux-arm64 }
-          - { runner: ubuntu-24.04, target: linux-x64 }
+          - { runner: blacksmith-4vcpu-ubuntu-2404-arm, target: linux-arm64 }
+          - { runner: blacksmith-4vcpu-ubuntu-2404, target: linux-x64 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
