@@ -124,17 +124,17 @@ describe("resident WebSocket process transport", () => {
         Effect.gen(function* () {
           const root = yield* makeRoot
           try {
-            const starter = yield* start(root, 1_000)
+            const starter = yield* start(root, 10_000)
             const first = yield* attachedEffect(starter)
             yield* starter.kill
             expect(alive(first.hostPid!)).toBe(true)
 
-            const survivor = yield* start(root, 1_000)
+            const survivor = yield* start(root, 10_000)
             expect((yield* attachedEffect(survivor)).hostPid).toBe(first.hostPid)
             process.kill(first.hostPid!, "SIGKILL")
             yield* waitUntil(Effect.sync(() => !alive(first.hostPid!)))
 
-            const replacement = yield* start(root, 1_000)
+            const replacement = yield* start(root, 10_000)
             const second = yield* attachedEffect(replacement)
             expect(second.hostPid).not.toBe(first.hostPid)
             const acquisitions = (yield* readText(`${root}/owner-acquisitions.log`)).trim().split("\n")

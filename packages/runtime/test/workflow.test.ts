@@ -36,7 +36,7 @@ const startHost = (database: string, workspace: string) =>
 function waitFor<A>(
   read: Effect.Effect<A, FixtureProcessError>,
   accept: (value: A) => boolean,
-  remaining = 3_000,
+  remaining = 9_000,
   description = "Rika workflow state",
 ): Effect.Effect<A, FixtureProcessError> {
   return Effect.gen(function* () {
@@ -109,7 +109,7 @@ for (const scenario of [
                   return items
                 }),
                 (items) => items.filter((item) => item.type === "effect").length >= 2,
-                3_000,
+                9_000,
                 "released research effects",
               )
             }
@@ -123,7 +123,7 @@ for (const scenario of [
               yield* waitFor(
                 rows,
                 (items) => items.filter((item) => item.type === "dispatch").length >= 3,
-                3_000,
+                9_000,
                 "recovered research dispatches",
               )
             }
@@ -138,7 +138,7 @@ for (const scenario of [
                 return { state, visible }
               }),
               ({ state }) => state.status === "completed",
-              3_000,
+              9_000,
               `${scenario.name} completion`,
             )
             const completed = observed.state

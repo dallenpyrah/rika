@@ -1,7 +1,9 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Config, Effect, FileSystem, Layer, Option, Schema } from "effect"
+import { Config, Data, Effect, FileSystem, Layer, Option, Schema } from "effect"
 
 const JsonLine = Schema.UnknownFromJsonString
+
+class RestartSignalError extends Data.TaggedError("RestartSignalError")<{ readonly message: string }> {}
 
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
@@ -18,7 +20,10 @@ const program = Effect.gen(function* () {
   const descriptor = yield* Config.string("RIKA_INTERNAL_RUNTIME_RESTART_FD").pipe(Config.withDefault("3"))
   const emitRestart = Effect.gen(function* () {
     const signal = yield* Schema.encodeUnknownEffect(JsonLine)({ _tag: "restart", threadId: "t-1" })
-    yield* fs.writeFileString(`/dev/fd/${descriptor}`, `${signal}\n`)
+    yield* Effect.tryPromise({
+      try: () => Bun.write(Bun.file(Number(descriptor)), `${signal}\n`),
+      catch: (cause) => new RestartSignalError({ message: String(cause) }),
+    })
   })
   if (mode === "always-restart") {
     yield* emitRestart
