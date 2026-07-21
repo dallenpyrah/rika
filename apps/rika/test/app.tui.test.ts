@@ -231,6 +231,7 @@ test(
         yield* Effect.promise(() => app.type("Read the fixture slowly."))
         app.pressEnter()
         yield* app.waitFrame("Read the fixture slowly.")
+        yield* app.waitFrame("Waiting")
         yield* Effect.promise(() => app.type("Focus on the exact fixture text."))
         yield* app.waitFrame("Focus on the exact fixture text.")
         app.pressKey("s", { ctrl: true })
