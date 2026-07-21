@@ -17,11 +17,17 @@ import {
   isFollowing,
   maxScrollTop,
   reanchor,
+  reduceViewport,
   resized,
   settle,
   toggled,
+  wheelIdle,
   windowStart,
+  type TranscriptViewport,
   type ViewportAnchor,
+  type ViewportEvent,
+  type ViewportState,
+  type WheelPhase,
 } from "../src/transcript-viewport"
 
 const anchor = (unitId: string, offset: number): ViewportAnchor => ({ unitId, offset })
@@ -73,6 +79,177 @@ describe("transcript viewport follow/anchor state", () => {
     const detached = detach(anchor("unit-a", 1))
     expect(anchorOf(reanchor(detached, anchor("unit-b", 9)))).toEqual({ unitId: "unit-b", offset: 9 })
     expect(isFollowing(reanchor(following, anchor("unit-b", 9)))).toBe(true)
+  })
+})
+
+const viewportOf = (mode: ViewportState, wheel: WheelPhase = wheelIdle, nextToken = 0): TranscriptViewport => ({
+  mode,
+  wheel,
+  nextToken,
+})
+
+const wheel = (
+  direction: "up" | "down",
+  delta: number,
+  facts: { atTrueBottom?: boolean; atMountedBottom?: boolean; anchorPending?: boolean } = {},
+): Extract<ViewportEvent, { _tag: "WheelObserved" }> => ({
+  _tag: "WheelObserved",
+  direction,
+  delta,
+  atTrueBottom: facts.atTrueBottom ?? false,
+  atMountedBottom: facts.atMountedBottom ?? false,
+  anchorPending: facts.anchorPending ?? false,
+})
+
+describe("transcript viewport wheel reducer", () => {
+  test("followed wheel-down at the true bottom is an exact no-op", () => {
+    const viewport = viewportOf(following)
+    const decision = reduceViewport(viewport, wheel("down", 3, { atTrueBottom: true, atMountedBottom: true }))
+    expect(decision.viewport).toBe(viewport)
+    expect(decision.effects).toEqual([])
+  })
+
+  test("followed wheel-down away from the true bottom schedules one settle", () => {
+    const decision = reduceViewport(viewportOf(following), wheel("down", 4))
+    expect(decision.viewport.mode).toBe(following)
+    expect(decision.viewport.wheel).toEqual({ _tag: "AwaitingSettle", token: 0, direction: "down", scrollBy: 0 })
+    expect(decision.viewport.nextToken).toBe(1)
+    expect(decision.effects).toEqual([{ _tag: "ScheduleWheelSettle", token: 0 }])
+  })
+
+  test("detached wheel-down at the true bottom still schedules a settle", () => {
+    const viewport = viewportOf(detach(anchor("unit-a", 2)))
+    const decision = reduceViewport(viewport, wheel("down", 1, { atTrueBottom: true }))
+    expect(decision.viewport.mode).toBe(viewport.mode)
+    expect(decision.effects).toEqual([{ _tag: "ScheduleWheelSettle", token: 0 }])
+  })
+
+  test("wheel-down at the mounted bottom accumulates settle scroll across events", () => {
+    const first = reduceViewport(viewportOf(following), wheel("down", 2, { atMountedBottom: true }))
+    const second = reduceViewport(first.viewport, wheel("down", 3, { atMountedBottom: true }))
+    expect(second.viewport.wheel).toEqual({ _tag: "AwaitingSettle", token: 0, direction: "down", scrollBy: 5 })
+    expect(second.effects).toEqual([])
+  })
+
+  test("first wheel-up detaches before notifying and scheduling", () => {
+    const decision = reduceViewport(viewportOf(following), wheel("up", 2))
+    expect(isAnchored(decision.viewport.mode)).toBe(true)
+    expect(decision.effects).toEqual([
+      { _tag: "ProjectState" },
+      { _tag: "NotifyDetached" },
+      { _tag: "ScheduleWheelSettle", token: 0 },
+    ])
+  })
+
+  test("wheel-up while detached preserves the anchor and does not notify again", () => {
+    const mode = detach(anchor("unit-a", 7))
+    const decision = reduceViewport(viewportOf(mode), wheel("up", 1))
+    expect(decision.viewport.mode).toBe(mode)
+    expect(decision.effects).toEqual([{ _tag: "ProjectState" }, { _tag: "ScheduleWheelSettle", token: 0 }])
+  })
+
+  test("wheel while an anchor transaction is pending queues into it instead of settling", () => {
+    const down = reduceViewport(viewportOf(following), wheel("down", 3, { anchorPending: true }))
+    expect(down.viewport.wheel).toEqual(wheelIdle)
+    expect(down.effects).toEqual([{ _tag: "QueueAnchorScroll", scrollBy: 3 }])
+    const up = reduceViewport(viewportOf(following), wheel("up", 2, { anchorPending: true }))
+    expect(up.effects).toEqual([
+      { _tag: "ProjectState" },
+      { _tag: "NotifyDetached" },
+      { _tag: "QueueAnchorScroll", scrollBy: -2 },
+    ])
+  })
+
+  test("a stale settle token is rejected without effects", () => {
+    const scheduled = reduceViewport(viewportOf(following), wheel("down", 1))
+    const cancelled = reduceViewport(scheduled.viewport, { _tag: "WheelCancelled" })
+    const decision = reduceViewport(cancelled.viewport, {
+      _tag: "WheelSettleFired",
+      token: 0,
+      atTrueBottom: false,
+      atMountedBottom: true,
+    })
+    expect(decision.viewport).toBe(cancelled.viewport)
+    expect(decision.effects).toEqual([])
+  })
+
+  test("a down settle at the followed true bottom produces no effects", () => {
+    const scheduled = reduceViewport(viewportOf(following), wheel("down", 1))
+    const decision = reduceViewport(scheduled.viewport, {
+      _tag: "WheelSettleFired",
+      token: 0,
+      atTrueBottom: true,
+      atMountedBottom: true,
+    })
+    expect(decision.viewport.wheel).toEqual(wheelIdle)
+    expect(decision.effects).toEqual([])
+  })
+
+  test("a down settle at the mounted bottom pages forward with the accumulated scroll", () => {
+    const scheduled = reduceViewport(viewportOf(following), wheel("down", 4, { atMountedBottom: true }))
+    const decision = reduceViewport(scheduled.viewport, {
+      _tag: "WheelSettleFired",
+      token: 0,
+      atTrueBottom: false,
+      atMountedBottom: true,
+    })
+    expect(decision.viewport.wheel).toEqual(wheelIdle)
+    expect(decision.effects).toEqual([{ _tag: "PageForward", scrollBy: 4 }])
+  })
+
+  test("an up settle reports settled geometry", () => {
+    const scheduled = reduceViewport(viewportOf(detach()), wheel("up", 2))
+    const decision = reduceViewport(scheduled.viewport, {
+      _tag: "WheelSettleFired",
+      token: 0,
+      atTrueBottom: false,
+      atMountedBottom: false,
+    })
+    expect(decision.viewport.wheel).toEqual(wheelIdle)
+    expect(decision.effects).toEqual([{ _tag: "ReportSettled" }])
+  })
+})
+
+describe("transcript viewport mode transitions", () => {
+  test("settling at the bottom follows and notifies exactly on the detached edge", () => {
+    const detached = viewportOf(detach(anchor("unit-a", 1)))
+    const followed = reduceViewport(detached, { _tag: "BottomSettled" })
+    expect(isFollowing(followed.viewport.mode)).toBe(true)
+    expect(followed.effects).toEqual([{ _tag: "NotifyFollowed" }])
+    const repeat = reduceViewport(followed.viewport, { _tag: "BottomSettled" })
+    expect(repeat.viewport).toBe(followed.viewport)
+    expect(repeat.effects).toEqual([])
+  })
+
+  test("an explicit follow command always notifies", () => {
+    const decision = reduceViewport(viewportOf(following), { _tag: "FollowCommanded" })
+    expect(isFollowing(decision.viewport.mode)).toBe(true)
+    expect(decision.effects).toEqual([{ _tag: "NotifyFollowed" }])
+  })
+
+  test("a detach command anchors and reprojects", () => {
+    const decision = reduceViewport(viewportOf(following), { _tag: "DetachCommanded" })
+    expect(isAnchored(decision.viewport.mode)).toBe(true)
+    expect(decision.effects).toEqual([{ _tag: "ProjectState" }])
+  })
+
+  test("model sync anchors when the model stops following", () => {
+    const decision = reduceViewport(viewportOf(following), {
+      _tag: "ModelSynced",
+      scrollFollow: false,
+      followForced: false,
+    })
+    expect(isAnchored(decision.viewport.mode)).toBe(true)
+    expect(decision.effects).toEqual([])
+  })
+
+  test("model sync restores follow only when forced", () => {
+    const detached = viewportOf(detach(anchor("unit-a", 3)))
+    const kept = reduceViewport(detached, { _tag: "ModelSynced", scrollFollow: true, followForced: false })
+    expect(kept.viewport).toBe(detached)
+    const forced = reduceViewport(detached, { _tag: "ModelSynced", scrollFollow: true, followForced: true })
+    expect(isFollowing(forced.viewport.mode)).toBe(true)
+    expect(forced.effects).toEqual([])
   })
 })
 

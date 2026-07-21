@@ -67,7 +67,17 @@ import {
 } from "./transcript-presenter"
 import { filter, type Command } from "./palette"
 import { colors, spacing } from "./theme"
-import { atBottomWithin, clampScrollTop, maxScrollTop, type ViewportMetrics } from "./transcript-viewport"
+import {
+  atBottomWithin,
+  clampScrollTop,
+  initialViewport,
+  isFollowing,
+  maxScrollTop,
+  reduceViewport,
+  type TranscriptViewport,
+  type ViewportEvent,
+  type ViewportMetrics,
+} from "./transcript-viewport"
 import { renderMarkdown, renderMarkdownLines, renderMarkdownStyled } from "./markdown-renderer"
 import { renderDiff, renderDiffStyled, renderPartialDiffStyled } from "./diff-renderer"
 import { renderPierreDiff } from "./pierre-diff"
@@ -1635,9 +1645,7 @@ export class Surface {
   private scrollProgrammatic = false
   private scrollFramePending = false
   private wheelTimer: TimerHandle | undefined
-  private wheelDirection: "up" | "down" | undefined
-  private wheelScrollBy = 0
-  private userScrollDetached = false
+  private transcriptViewport: TranscriptViewport = initialViewport
   private loaderPhase = 0
   private loaderTimer: TimerHandle | undefined
   private readonly clock: OpenTuiClock
@@ -1706,10 +1714,8 @@ export class Surface {
       onChange: (position) => {
         if (this.scrollbarSyncing || this.destroyed) return
         this.transcriptScroll.scrollTop = position
-        if (!this.atTranscriptBottom() && this.model?.scrollFollow === true) {
-          this.userScrollDetached = true
-          this.transcriptScroll.stickyScroll = false
-        }
+        if (!this.atTranscriptBottom() && isFollowing(this.transcriptViewport.mode))
+          this.dispatchTranscriptViewport({ _tag: "DetachCommanded" })
         this.queueTranscriptScroll(() => this.reportTranscriptScroll())
       },
     })
@@ -1972,8 +1978,7 @@ export class Surface {
     const mapped = fromOpenTui(key)
     if (this.suppressMouseJunk(mapped)) return
     if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "pageup") {
-      this.userScrollDetached = true
-      this.transcriptScroll.stickyScroll = false
+      this.dispatchTranscriptViewport({ _tag: "DetachCommanded" })
       const amount = Math.max(1, this.transcriptScroll.viewport.height - 1)
       if (this.queuePendingTranscriptScroll(-amount)) return
       if (this.transcriptScroll.scrollTop <= 1 && this.shiftTranscriptWindow(-100, true, -amount)) return
@@ -1987,8 +1992,7 @@ export class Surface {
       this.transcriptScroll.scrollBy(amount)
       this.reportTranscriptScroll(true)
     } else if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "end") {
-      this.userScrollDetached = false
-      this.handlers.scrollFollow?.()
+      this.dispatchTranscriptViewport({ _tag: "FollowCommanded" })
     } else if (mapped.ctrl && mapped.name === "v" && this.handlers.pasteImage !== undefined) this.handlers.pasteImage()
     else this.handlers.key(mapped)
   }
@@ -2004,6 +2008,45 @@ export class Surface {
     atBottomWithin(this.transcriptMetrics(), near ? 1 : 0) &&
     this.transcriptWindowEnd >= (this.model?.items.length ?? 0) &&
     (this.transcriptRowWindow.end === 0 || this.transcriptRowWindow.end >= this.transcriptRowTotal)
+  private dispatchTranscriptViewport(event: ViewportEvent): void {
+    const decision = reduceViewport(this.transcriptViewport, event)
+    this.transcriptViewport = decision.viewport
+    for (const effect of decision.effects)
+      switch (effect._tag) {
+        case "ProjectState":
+          this.transcriptScroll.stickyScroll = isFollowing(this.transcriptViewport.mode)
+          break
+        case "NotifyDetached":
+          this.handlers.scroll?.(this.transcriptScroll.scrollTop)
+          break
+        case "NotifyFollowed":
+          this.handlers.scrollFollow?.()
+          break
+        case "QueueAnchorScroll":
+          this.queuePendingTranscriptScroll(effect.scrollBy)
+          break
+        case "ScheduleWheelSettle":
+          this.scheduleWheelSettle(effect.token)
+          break
+        case "PageForward":
+          if (!this.shiftTranscriptWindow(100, true, effect.scrollBy)) this.handleTranscriptScroll()
+          break
+        case "ReportSettled":
+          this.handleTranscriptScroll()
+          break
+      }
+  }
+  private scheduleWheelSettle(token: number): void {
+    this.wheelTimer = this.clock.setTimeout(() => {
+      this.wheelTimer = undefined
+      this.dispatchTranscriptViewport({
+        _tag: "WheelSettleFired",
+        token,
+        atTrueBottom: this.atTranscriptBottom(),
+        atMountedBottom: this.atMountedTranscriptBottom(),
+      })
+    }, 16)
+  }
   private clampTranscriptScrollTop(scrollTop: number): number {
     return clampScrollTop(scrollTop, { ...this.transcriptMetrics(), scrollTop })
   }
@@ -2022,40 +2065,21 @@ export class Surface {
   private handleTranscriptWheel(event: MouseEvent): void {
     const direction = event.scroll?.direction
     if (direction !== "up" && direction !== "down") return
-    if (direction === "up") {
-      const detach = !this.userScrollDetached && this.model?.scrollFollow === true
-      this.userScrollDetached = true
-      this.transcriptScroll.stickyScroll = false
-      if (detach) this.handlers.scroll?.(this.transcriptScroll.scrollTop)
-    }
-    if (this.pendingTranscriptAnchor !== undefined) {
-      this.queuePendingTranscriptScroll((direction === "down" ? 1 : -1) * Math.max(1, event.scroll?.delta ?? 1))
-      return
-    }
-    this.wheelDirection = direction
-    if (direction === "down" && this.atMountedTranscriptBottom()) this.wheelScrollBy += event.scroll?.delta ?? 1
-    if (this.wheelTimer === undefined)
-      this.wheelTimer = this.clock.setTimeout(() => {
-        this.wheelTimer = undefined
-        const pendingDirection = this.wheelDirection
-        const scrollBy = this.wheelScrollBy
-        this.wheelDirection = undefined
-        this.wheelScrollBy = 0
-        if (
-          pendingDirection === "down" &&
-          this.atMountedTranscriptBottom() &&
-          this.shiftTranscriptWindow(100, true, scrollBy)
-        )
-          return
-        this.handleTranscriptScroll()
-      }, 16)
+    this.dispatchTranscriptViewport({
+      _tag: "WheelObserved",
+      direction,
+      delta: event.scroll?.delta ?? 1,
+      atTrueBottom: this.atTranscriptBottom(),
+      atMountedBottom: this.atMountedTranscriptBottom(),
+      anchorPending: this.pendingTranscriptAnchor !== undefined,
+    })
   }
   private cancelWheelReport(): void {
-    if (this.wheelTimer === undefined) return
-    this.clock.clearTimeout(this.wheelTimer)
-    this.wheelTimer = undefined
-    this.wheelDirection = undefined
-    this.wheelScrollBy = 0
+    if (this.wheelTimer !== undefined) {
+      this.clock.clearTimeout(this.wheelTimer)
+      this.wheelTimer = undefined
+    }
+    this.dispatchTranscriptViewport({ _tag: "WheelCancelled" })
   }
   private shiftTranscriptWindow(delta: number, preserveAnchor: boolean, scrollBy = 0, nearBottom = false): boolean {
     const model = this.model
@@ -2097,10 +2121,8 @@ export class Surface {
   private readonly reportTranscriptScroll = (nearBottom = false) => {
     if (this.scrollProgrammatic || this.destroyed) return
     this.syncTranscriptScrollbar()
-    if (this.atTranscriptBottom(nearBottom)) {
-      this.userScrollDetached = false
-      this.handlers.scrollFollow?.()
-    } else this.handlers.scroll?.(this.transcriptScroll.scrollTop)
+    if (this.atTranscriptBottom(nearBottom)) this.dispatchTranscriptViewport({ _tag: "BottomSettled" })
+    else this.handlers.scroll?.(this.transcriptScroll.scrollTop)
   }
   private syncTranscriptScrollbar(): void {
     if (this.destroyed) return
@@ -2132,7 +2154,7 @@ export class Surface {
     this.scrollFramePending = true
     this.defer(() => {
       this.scrollFramePending = false
-      if (this.model?.scrollFollow !== true || this.userScrollDetached) return
+      if (!isFollowing(this.transcriptViewport.mode)) return
       this.scrollProgrammatic = true
       this.transcriptScroll.scrollTo(maxScrollTop(this.transcriptMetrics()))
       this.scrollProgrammatic = false
@@ -2626,12 +2648,14 @@ export class Surface {
   update(model: Model, preserveTranscriptAnchor = false): void {
     const previousScrollHeight = this.transcriptScroll.scrollHeight
     const previousModel = this.model
-    if (
-      previousModel?.currentThreadId !== model.currentThreadId ||
-      (previousModel?.scrollFollow === false && model.scrollFollow)
-    )
-      this.userScrollDetached = false
-    const scrollFollow = model.scrollFollow && !this.userScrollDetached
+    this.dispatchTranscriptViewport({
+      _tag: "ModelSynced",
+      scrollFollow: model.scrollFollow,
+      followForced:
+        previousModel?.currentThreadId !== model.currentThreadId ||
+        (previousModel?.scrollFollow === false && model.scrollFollow),
+    })
+    const scrollFollow = isFollowing(this.transcriptViewport.mode)
     const transcriptLayoutChanged =
       previousModel !== undefined &&
       (previousModel.items !== model.items ||
@@ -2983,7 +3007,7 @@ export class Surface {
           const current = this.pendingTranscriptAnchor
           this.pendingTranscriptAnchor = undefined
           if (current === undefined || this.model?.currentThreadId !== current.threadId || this.destroyed) return
-          if (this.model?.scrollFollow === true && !this.userScrollDetached) return
+          if (isFollowing(this.transcriptViewport.mode)) return
           const anchored = current.anchor === undefined ? undefined : this.transcriptRecords.get(current.anchor.key)
           const anchorScreenY = current.anchor?.screenY
           const offset =
