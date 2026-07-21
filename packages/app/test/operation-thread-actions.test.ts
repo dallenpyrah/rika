@@ -19,20 +19,12 @@ const backend = ExecutionBackend.Service.of({
   inspectWorkflow: () => Effect.die("unused"),
   cancelWorkflow: () => Effect.die("unused"),
   start: () => Effect.die("unused"),
-  replay: (turnId) =>
-    Effect.succeed({
-      turnId,
-      status:
-        turnId === "failed"
-          ? "failed"
-          : (() => {
-              if (turnId === "cancelled") {
-                return "cancelled"
-              }
-              return "completed"
-            })(),
-      events: [],
-    }),
+  replay: (turnId) => {
+    let status: "failed" | "cancelled" | "completed" = "completed"
+    if (turnId === "failed") status = "failed"
+    else if (turnId === "cancelled") status = "cancelled"
+    return Effect.succeed({ turnId, status, events: [] })
+  },
   cancel: () => Effect.die("unused"),
   inspect: () => Effect.void.pipe(Effect.as(undefined)),
   steer: () => Effect.die("unused"),

@@ -351,18 +351,14 @@ export const normalizePinnedRuntime = (route: Turn.ExecutionModelRoute): Provide
 
 const accountStatus = (auth: OpenAiAuth.ServiceInterface) =>
   auth.status.pipe(
-    Effect.flatMap((status) =>
-      status._tag === "Present" || status._tag === "RefreshRequired"
-        ? Effect.succeed({ fingerprint: status.fingerprint, auth })
-        : (() => {
-            if (status._tag === "Unauthenticated") {
-              return Effect.void.pipe(Effect.as(undefined as Account | undefined))
-            }
-            return Effect.fail(
-              RuntimeError.make({ message: "OpenAI account credentials are corrupt; log out, then log in again" }),
-            )
-          })(),
-    ),
+    Effect.flatMap((status) => {
+      if (status._tag === "Present" || status._tag === "RefreshRequired")
+        return Effect.succeed({ fingerprint: status.fingerprint, auth })
+      if (status._tag === "Unauthenticated") return Effect.void.pipe(Effect.as(undefined as Account | undefined))
+      return Effect.fail(
+        RuntimeError.make({ message: "OpenAI account credentials are corrupt; log out, then log in again" }),
+      )
+    }),
     Effect.mapError((error) =>
       Schema.is(RuntimeError)(error)
         ? error

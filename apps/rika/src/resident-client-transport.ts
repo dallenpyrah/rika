@@ -194,22 +194,18 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   const closed = yield* Deferred.make<void>()
   const writer = (frame: string | Socket.CloseEvent) =>
     Deferred.isDone(closing).pipe(
-      Effect.flatMap((isClosing) =>
-        (() => {
-          if (isClosing) {
-            return Effect.fail(transportError("Resident connection is closing"))
-          }
-          return typeof frame === "string" && new TextEncoder().encode(frame).byteLength > maxFrameBytes
-            ? Effect.fail(transportError("Resident frame exceeds maximum size"))
-            : Queue.offer(outbound, frame).pipe(
-                Effect.timeoutOrElse({
-                  duration: "1 second",
-                  orElse: () => Effect.fail(transportError("Resident outbound queue is overloaded")),
-                }),
-                Effect.asVoid,
-              )
-        })(),
-      ),
+      Effect.flatMap((isClosing) => {
+        if (isClosing) return Effect.fail(transportError("Resident connection is closing"))
+        if (typeof frame === "string" && new TextEncoder().encode(frame).byteLength > maxFrameBytes)
+          return Effect.fail(transportError("Resident frame exceeds maximum size"))
+        return Queue.offer(outbound, frame).pipe(
+          Effect.timeoutOrElse({
+            duration: "1 second",
+            orElse: () => Effect.fail(transportError("Resident outbound queue is overloaded")),
+          }),
+          Effect.asVoid,
+        )
+      }),
     )
   yield* Effect.forkIn(Effect.forever(Queue.take(outbound).pipe(Effect.flatMap(rawWriter))), connectionScope)
   const accepted = yield* Deferred.make<ResidentService.HandshakeAccepted>()
@@ -277,350 +273,324 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                 catch: () => transportError("Invalid resident response"),
               })
           ).pipe(
-            Effect.flatMap((message) =>
-              (() => {
-                if (message === undefined) {
-                  return Effect.void
-                }
-                return (() => {
-                  if (message._tag === "accepted") {
-                    return (() => {
-                      if (message.identity !== options.identity || message.clientNonce !== clientNonce) {
-                        return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
-                      }
-                      return (() => {
-                        if (message.protocolVersion !== ResidentService.protocolVersion) {
-                          return Effect.fail(
-                            transportError(
-                              `An incompatible Rika resident${message.residentPid === undefined ? "" : ` (PID ${message.residentPid})`} is still running at ${options.url}; close other Rika clients, then run rika again`,
-                              "incompatible-resident",
-                            ),
-                          )
-                        }
-                        return (() => {
-                          if (
-                            !ResidentService.verifyServerProof(
-                              options.token,
-                              {
-                                identity: options.identity,
-                                clientNonce,
-                                clientKind: options.clientKind,
-                                protocolVersion: ResidentService.protocolVersion,
-                                buildIdentity: ResidentService.buildIdentity,
-                              },
-                              message,
-                            )
-                          ) {
-                            return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
-                          }
-                          return (() => {
-                            if (message.buildIdentity !== ResidentService.buildIdentity) {
-                              return Effect.fail(
-                                transportError(
-                                  `A different Rika build${message.residentPid === undefined ? "" : ` (resident PID ${message.residentPid})`} is still running at ${options.url}; Rika will replace it when no clients are using it`,
-                                  "incompatible-resident",
-                                ),
-                              )
-                            }
-                            return Effect.sync(() => (acceptedConnectionId = message.connectionId)).pipe(
-                              Effect.andThen(Deferred.succeed(accepted, message)),
-                            )
-                          })()
-                        })()
-                      })()
-                    })()
-                  }
-                  return (() => {
-                    if (message._tag === "rejected") {
-                      return Deferred.fail(
-                        connectionFailure,
-                        transportError("Resident service is draining", "resident-draining"),
+            Effect.flatMap((message) => {
+              if (message === undefined) return Effect.void
+              if (message._tag === "accepted") {
+                if (message.identity !== options.identity || message.clientNonce !== clientNonce)
+                  return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                if (message.protocolVersion !== ResidentService.protocolVersion)
+                  return Effect.fail(
+                    transportError(
+                      `An incompatible Rika resident${message.residentPid === undefined ? "" : ` (PID ${message.residentPid})`} is still running at ${options.url}; close other Rika clients, then run rika again`,
+                      "incompatible-resident",
+                    ),
+                  )
+                if (
+                  !ResidentService.verifyServerProof(
+                    options.token,
+                    {
+                      identity: options.identity,
+                      clientNonce,
+                      clientKind: options.clientKind,
+                      protocolVersion: ResidentService.protocolVersion,
+                      buildIdentity: ResidentService.buildIdentity,
+                    },
+                    message,
+                  )
+                )
+                  return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                if (message.buildIdentity !== ResidentService.buildIdentity)
+                  return Effect.fail(
+                    transportError(
+                      `A different Rika build${message.residentPid === undefined ? "" : ` (resident PID ${message.residentPid})`} is still running at ${options.url}; Rika will replace it when no clients are using it`,
+                      "incompatible-resident",
+                    ),
+                  )
+                return Effect.sync(() => (acceptedConnectionId = message.connectionId)).pipe(
+                  Effect.andThen(Deferred.succeed(accepted, message)),
+                )
+              }
+              if (message._tag === "rejected")
+                return Deferred.fail(
+                  connectionFailure,
+                  transportError("Resident service is draining", "resident-draining"),
+                )
+              if (message._tag === "pong")
+                return Effect.gen(function* () {
+                  const pending = (yield* Ref.get(pongs)).get(message.id)
+                  if (pending !== undefined) yield* Deferred.succeed(pending, undefined)
+                })
+              return Effect.gen(function* () {
+                const request = (yield* Ref.get(requests)).get(message.requestId)
+                if (request === undefined) return
+                if (message._tag === "output")
+                  yield* (message.channel === "stdout"
+                    ? request.stdout?.(message.text)
+                    : request.stderr?.(message.text)) ?? Effect.void
+                if (message._tag === "interactive-feed-event" || message._tag === "interactive-feed-resync") {
+                  const feed = request.feed
+                  if (
+                    acceptedConnectionId !== message.connectionId ||
+                    feed === undefined ||
+                    feed.sessionId !== message.sessionId ||
+                    feed.generation !== message.feedGeneration
+                  )
+                    return yield* transportError("Resident sent an event for a stale interactive feed")
+                  if (message.sequence < feed.expectedSequence) return
+                  if (message._tag === "interactive-feed-event" && message.sequence > feed.expectedSequence) {
+                    const afterSequence = feed.expectedSequence - 1
+                    if (feed.replayRequestedAfter !== afterSequence) {
+                      feed.replayRequestedAfter = afterSequence
+                      yield* write(
+                        json({
+                          _tag: "interactive-feed-replay",
+                          connectionId: message.connectionId,
+                          requestId: message.requestId,
+                          sessionId: message.sessionId,
+                          feedGeneration: message.feedGeneration,
+                          afterSequence,
+                        } satisfies ResidentService.ClientMessage),
                       )
                     }
-                    return message._tag === "pong"
-                      ? Effect.gen(function* () {
-                          const pending = (yield* Ref.get(pongs)).get(message.id)
-                          if (pending !== undefined) yield* Deferred.succeed(pending, undefined)
+                    return
+                  }
+                  feed.expectedSequence = message.sequence + 1
+                  feed.replayRequestedAfter = undefined
+                  if (message._tag === "interactive-feed-resync")
+                    yield* Effect.logInfo("resident.feed.barrier_received")
+                  if (message._tag === "interactive-feed-event")
+                    yield* traceInteractiveEvent("client.feed.event_received", receivedDeltas, message.event)
+                  yield* Queue.offer(feed.frames, message)
+                }
+                if (message._tag === "interactive-command-completed" || message._tag === "interactive-command-failed") {
+                  const feed = request.feed
+                  if (
+                    acceptedConnectionId !== message.connectionId ||
+                    feed === undefined ||
+                    feed.sessionId !== message.sessionId ||
+                    feed.generation !== message.feedGeneration
+                  )
+                    return yield* transportError("Resident sent a result for a stale interactive feed")
+                  const command = request.commands.get(message.commandSequence)
+                  if (command !== undefined)
+                    yield* message._tag === "interactive-command-completed"
+                      ? Deferred.succeed(command, undefined)
+                      : Deferred.fail(command, message.error)
+                }
+                if (
+                  message._tag === "interactive-started" &&
+                  request.input._tag === "Interactive" &&
+                  request.interactive !== undefined
+                ) {
+                  if (
+                    acceptedConnectionId !== message.connectionId ||
+                    request.feed !== undefined ||
+                    message.feedCapacity < 1
+                  )
+                    return yield* transportError("Resident started an invalid interactive feed")
+                  const feed: PhysicalFeed = {
+                    sessionId: message.sessionId,
+                    generation: message.feedGeneration,
+                    frames: yield* Queue.bounded<InteractiveFeedFrame>(message.feedCapacity),
+                    expectedSequence: 1,
+                    replayRequestedAfter: undefined,
+                    consumerAttached: false,
+                  }
+                  request.feed = feed
+                  let nextCommandSequence = 1
+                  const commandWriteLock = yield* Semaphore.make(1)
+                  const unavailable = (text: string) =>
+                    Operation.OperationUnavailable.make({ operation: "ResidentConnection", message: text })
+                  const invoke = Effect.fn("ResidentTransport.interactiveCommand")(function* (
+                    command: Operation.InteractiveCommand,
+                  ) {
+                    const done = yield* Deferred.make<void, Operation.OperationUnavailable>()
+                    const commandSequence = yield* commandWriteLock.withPermits(1)(
+                      Effect.gen(function* () {
+                        const frames = yield* Effect.try({
+                          try: () =>
+                            clientMessageFrames(`${message.requestId}:${nextCommandSequence}`, {
+                              _tag: "interactive-command",
+                              connectionId: message.connectionId,
+                              requestId: message.requestId,
+                              sessionId: message.sessionId,
+                              feedGeneration: message.feedGeneration,
+                              commandSequence: nextCommandSequence,
+                              command,
+                            }),
+                          catch: (error) =>
+                            Schema.is(ResidentService.ResidentServiceError)(error) &&
+                            error.reason === "message-too-large"
+                              ? Operation.OperationUnavailable.make({
+                                  operation: command._tag,
+                                  message:
+                                    "The prompt and attachments exceed the 16 MiB resident message limit; remove or shrink image attachments",
+                                })
+                              : unavailable(String(error)),
                         })
-                      : Effect.gen(function* () {
-                          const request = (yield* Ref.get(requests)).get(message.requestId)
-                          if (request === undefined) return
-                          if (message._tag === "output")
-                            yield* (message.channel === "stdout"
-                              ? request.stdout?.(message.text)
-                              : request.stderr?.(message.text)) ?? Effect.void
-                          if (message._tag === "interactive-feed-event" || message._tag === "interactive-feed-resync") {
-                            const feed = request.feed
-                            if (
-                              acceptedConnectionId !== message.connectionId ||
-                              feed === undefined ||
-                              feed.sessionId !== message.sessionId ||
-                              feed.generation !== message.feedGeneration
-                            )
-                              return yield* transportError("Resident sent an event for a stale interactive feed")
-                            if (message.sequence < feed.expectedSequence) return
-                            if (message._tag === "interactive-feed-event" && message.sequence > feed.expectedSequence) {
-                              const afterSequence = feed.expectedSequence - 1
-                              if (feed.replayRequestedAfter !== afterSequence) {
-                                feed.replayRequestedAfter = afterSequence
-                                yield* write(
+                        const sequence = nextCommandSequence
+                        nextCommandSequence += 1
+                        request.commands.set(sequence, done)
+                        yield* Effect.forEach(frames, write, { discard: true }).pipe(
+                          Effect.mapError((error) => unavailable(error.message)),
+                        )
+                        return sequence
+                      }),
+                    )
+                    yield* Effect.raceFirst(
+                      Deferred.await(done),
+                      Deferred.await(closed).pipe(
+                        Effect.andThen(
+                          Effect.fail(unavailable("Resident connection closed before the command outcome was known")),
+                        ),
+                      ),
+                    ).pipe(
+                      Effect.ensuring(
+                        Deferred.isDone(done).pipe(
+                          Effect.flatMap((completed) =>
+                            completed
+                              ? Effect.void
+                              : sendBestEffort(
                                   json({
-                                    _tag: "interactive-feed-replay",
+                                    _tag: "cancel-interactive-command",
                                     connectionId: message.connectionId,
                                     requestId: message.requestId,
                                     sessionId: message.sessionId,
                                     feedGeneration: message.feedGeneration,
-                                    afterSequence,
+                                    commandSequence,
                                   } satisfies ResidentService.ClientMessage),
-                                )
-                              }
-                              return
-                            }
-                            feed.expectedSequence = message.sequence + 1
-                            feed.replayRequestedAfter = undefined
-                            if (message._tag === "interactive-feed-resync")
-                              yield* Effect.logInfo("resident.feed.barrier_received")
-                            if (message._tag === "interactive-feed-event")
-                              yield* traceInteractiveEvent("client.feed.event_received", receivedDeltas, message.event)
-                            yield* Queue.offer(feed.frames, message)
-                          }
-                          if (
-                            message._tag === "interactive-command-completed" ||
-                            message._tag === "interactive-command-failed"
-                          ) {
-                            const feed = request.feed
-                            if (
-                              acceptedConnectionId !== message.connectionId ||
-                              feed === undefined ||
-                              feed.sessionId !== message.sessionId ||
-                              feed.generation !== message.feedGeneration
-                            )
-                              return yield* transportError("Resident sent a result for a stale interactive feed")
-                            const command = request.commands.get(message.commandSequence)
-                            if (command !== undefined)
-                              yield* message._tag === "interactive-command-completed"
-                                ? Deferred.succeed(command, undefined)
-                                : Deferred.fail(command, message.error)
-                          }
-                          if (
-                            message._tag === "interactive-started" &&
-                            request.input._tag === "Interactive" &&
-                            request.interactive !== undefined
-                          ) {
-                            if (
-                              acceptedConnectionId !== message.connectionId ||
-                              request.feed !== undefined ||
-                              message.feedCapacity < 1
-                            )
-                              return yield* transportError("Resident started an invalid interactive feed")
-                            const feed: PhysicalFeed = {
-                              sessionId: message.sessionId,
-                              generation: message.feedGeneration,
-                              frames: yield* Queue.bounded<InteractiveFeedFrame>(message.feedCapacity),
-                              expectedSequence: 1,
-                              replayRequestedAfter: undefined,
-                              consumerAttached: false,
-                            }
-                            request.feed = feed
-                            let nextCommandSequence = 1
-                            const commandWriteLock = yield* Semaphore.make(1)
-                            const unavailable = (text: string) =>
-                              Operation.OperationUnavailable.make({ operation: "ResidentConnection", message: text })
-                            const invoke = Effect.fn("ResidentTransport.interactiveCommand")(function* (
-                              command: Operation.InteractiveCommand,
-                            ) {
-                              const done = yield* Deferred.make<void, Operation.OperationUnavailable>()
-                              const commandSequence = yield* commandWriteLock.withPermits(1)(
-                                Effect.gen(function* () {
-                                  const frames = yield* Effect.try({
-                                    try: () =>
-                                      clientMessageFrames(`${message.requestId}:${nextCommandSequence}`, {
-                                        _tag: "interactive-command",
-                                        connectionId: message.connectionId,
-                                        requestId: message.requestId,
-                                        sessionId: message.sessionId,
-                                        feedGeneration: message.feedGeneration,
-                                        commandSequence: nextCommandSequence,
-                                        command,
-                                      }),
-                                    catch: (error) =>
-                                      Schema.is(ResidentService.ResidentServiceError)(error) &&
-                                      error.reason === "message-too-large"
-                                        ? Operation.OperationUnavailable.make({
-                                            operation: command._tag,
-                                            message:
-                                              "The prompt and attachments exceed the 16 MiB resident message limit; remove or shrink image attachments",
-                                          })
-                                        : unavailable(String(error)),
-                                  })
-                                  const sequence = nextCommandSequence
-                                  nextCommandSequence += 1
-                                  request.commands.set(sequence, done)
-                                  yield* Effect.forEach(frames, write, { discard: true }).pipe(
-                                    Effect.mapError((error) => unavailable(error.message)),
-                                  )
-                                  return sequence
-                                }),
-                              )
-                              yield* Effect.raceFirst(
-                                Deferred.await(done),
-                                Deferred.await(closed).pipe(
+                                ),
+                          ),
+                          Effect.andThen(Effect.sync(() => request.commands.delete(commandSequence))),
+                        ),
+                      ),
+                    )
+                  })
+                  const session: Operation.InteractiveSession = {
+                    events: (dispatch) =>
+                      Effect.suspend(() => {
+                        if (feed.consumerAttached)
+                          return Effect.fail(
+                            Operation.OperationUnavailable.make({
+                              operation: "InteractiveSession.events",
+                              message: "Interactive session already has an event consumer",
+                            }),
+                          )
+                        feed.consumerAttached = true
+                        const consume = Effect.gen(function* () {
+                          while (true) {
+                            const frames = yield* Queue.takeAll(feed.frames)
+                            const batchTails = new Map<string, (typeof frames)[number]>()
+                            for (const queued of frames) {
+                              yield* Effect.uninterruptible(
+                                Effect.sync(() => {
+                                  if (queued._tag === "interactive-feed-event") dispatch(queued.event)
+                                  else for (const event of queued.events) dispatch(event)
+                                }).pipe(
                                   Effect.andThen(
-                                    Effect.fail(
-                                      unavailable("Resident connection closed before the command outcome was known"),
-                                    ),
-                                  ),
-                                ),
-                              ).pipe(
-                                Effect.ensuring(
-                                  Deferred.isDone(done).pipe(
-                                    Effect.flatMap((completed) =>
-                                      completed
-                                        ? Effect.void
-                                        : sendBestEffort(
-                                            json({
-                                              _tag: "cancel-interactive-command",
-                                              connectionId: message.connectionId,
-                                              requestId: message.requestId,
-                                              sessionId: message.sessionId,
-                                              feedGeneration: message.feedGeneration,
-                                              commandSequence,
-                                            } satisfies ResidentService.ClientMessage),
-                                          ),
-                                    ),
-                                    Effect.andThen(Effect.sync(() => request.commands.delete(commandSequence))),
+                                    queued._tag === "interactive-feed-event"
+                                      ? traceInteractiveEvent(
+                                          "client.feed.event_dispatched",
+                                          dispatchedDeltas,
+                                          queued.event,
+                                        )
+                                      : Effect.void,
                                   ),
                                 ),
                               )
-                            })
-                            const session: Operation.InteractiveSession = {
-                              events: (dispatch) =>
-                                Effect.suspend(() => {
-                                  if (feed.consumerAttached)
-                                    return Effect.fail(
-                                      Operation.OperationUnavailable.make({
-                                        operation: "InteractiveSession.events",
-                                        message: "Interactive session already has an event consumer",
-                                      }),
-                                    )
-                                  feed.consumerAttached = true
-                                  const consume = Effect.gen(function* () {
-                                    while (true) {
-                                      const frames = yield* Queue.takeAll(feed.frames)
-                                      const batchTails = new Map<string, (typeof frames)[number]>()
-                                      for (const queued of frames) {
-                                        yield* Effect.uninterruptible(
-                                          Effect.sync(() => {
-                                            if (queued._tag === "interactive-feed-event") dispatch(queued.event)
-                                            else for (const event of queued.events) dispatch(event)
-                                          }).pipe(
-                                            Effect.andThen(
-                                              queued._tag === "interactive-feed-event"
-                                                ? traceInteractiveEvent(
-                                                    "client.feed.event_dispatched",
-                                                    dispatchedDeltas,
-                                                    queued.event,
-                                                  )
-                                                : Effect.void,
-                                            ),
-                                          ),
-                                        )
-                                        batchTails.set(
-                                          `${queued.connectionId} ${queued.requestId} ${queued.sessionId} ${queued.feedGeneration}`,
-                                          queued,
-                                        )
-                                      }
-                                      for (const queued of batchTails.values()) {
-                                        yield* Effect.uninterruptible(
-                                          write(
-                                            json({
-                                              _tag: "interactive-feed-ack",
-                                              connectionId: queued.connectionId,
-                                              requestId: queued.requestId,
-                                              sessionId: queued.sessionId,
-                                              feedGeneration: queued.feedGeneration,
-                                              throughSequence: queued.sequence,
-                                            } satisfies ResidentService.ClientMessage),
-                                          ).pipe(Effect.mapError((error) => unavailable(error.message))),
-                                        )
-                                        if (queued.sequence % 1_024 === 0)
-                                          yield* Effect.logInfo("resident.feed.ack_consumed").pipe(
-                                            Effect.annotateLogs("rika.resident.feed.sequence", queued.sequence),
-                                          )
-                                      }
-                                    }
-                                  }).pipe(
-                                    Effect.ensuring(
-                                      Effect.sync(() => {
-                                        feed.consumerAttached = false
-                                      }),
-                                    ),
-                                  )
-                                  return Effect.raceFirst(
-                                    consume,
-                                    Deferred.await(closed).pipe(
-                                      Effect.andThen(Effect.fail(unavailable("Resident connection closed"))),
-                                    ),
-                                  )
-                                }),
-                              submit: (prompt, mode, promptParts, modelTuning) =>
-                                invoke({
-                                  _tag: "Submit",
-                                  prompt,
-                                  ...(mode === undefined ? {} : { mode }),
-                                  ...(promptParts === undefined ? {} : { promptParts }),
-                                  ...(modelTuning === undefined ? {} : { modelTuning }),
-                                }),
-                              shell: (command, incognito) => invoke({ _tag: "Shell", command, incognito }),
-                              editQueued: (turnId, prompt) => invoke({ _tag: "EditQueued", turnId, prompt }),
-                              dequeue: (turnId) => invoke({ _tag: "Dequeue", turnId }),
-                              steerQueued: (turnId, text) => invoke({ _tag: "SteerQueued", turnId, text }),
-                              steer: (text) => invoke({ _tag: "Steer", text }),
-                              interruptAndSend: (prompt) => invoke({ _tag: "InterruptAndSend", prompt }),
-                              cancel: invoke({ _tag: "Cancel" }),
-                              newThread: invoke({ _tag: "NewThread" }),
-                              resolvePermission: (waitId, kind, decision) =>
-                                invoke({ _tag: "ResolvePermission", waitId, kind, decision }),
-                              selectThread: (threadId, selectionEpoch) =>
-                                invoke({ _tag: "SelectThread", threadId, selectionEpoch }),
-                              readQueue: (threadId) => invoke({ _tag: "ReadQueue", threadId }),
-                              loadOlder: invoke({ _tag: "LoadOlder" }),
-                              previewThread: (threadId) => invoke({ _tag: "PreviewThread", threadId }),
-                              reopenThread: (selectionEpoch) => invoke({ _tag: "ReopenThread", selectionEpoch }),
-                              replay: (turnId, afterCursor) =>
-                                invoke({
-                                  _tag: "Replay",
-                                  turnId,
-                                  ...(afterCursor === undefined ? {} : { afterCursor }),
-                                }),
+                              batchTails.set(
+                                `${queued.connectionId} ${queued.requestId} ${queued.sessionId} ${queued.feedGeneration}`,
+                                queued,
+                              )
                             }
-                            if (request.interactiveStarted !== undefined)
-                              yield* Deferred.succeed(request.interactiveStarted, {
-                                sessionId: message.sessionId,
-                                feedGeneration: message.feedGeneration,
-                                session,
-                              })
-                          }
-                          if (message._tag === "operation-completed" || message._tag === "operation-failed") {
-                            if (message._tag === "operation-completed") yield* Deferred.succeed(request.done, undefined)
-                            else yield* Deferred.fail(request.done, message.error)
-                            for (const command of request.commands.values())
-                              yield* Deferred.fail(
-                                command,
-                                message._tag === "operation-failed"
-                                  ? message.error
-                                  : Operation.OperationUnavailable.make({
-                                      operation: "ResidentConnection",
-                                      message: "Resident operation completed before the command outcome was known",
-                                    }),
+                            for (const queued of batchTails.values()) {
+                              yield* Effect.uninterruptible(
+                                write(
+                                  json({
+                                    _tag: "interactive-feed-ack",
+                                    connectionId: queued.connectionId,
+                                    requestId: queued.requestId,
+                                    sessionId: queued.sessionId,
+                                    feedGeneration: queued.feedGeneration,
+                                    throughSequence: queued.sequence,
+                                  } satisfies ResidentService.ClientMessage),
+                                ).pipe(Effect.mapError((error) => unavailable(error.message))),
                               )
-                            if (request.feed !== undefined) yield* Queue.shutdown(request.feed.frames)
+                              if (queued.sequence % 1_024 === 0)
+                                yield* Effect.logInfo("resident.feed.ack_consumed").pipe(
+                                  Effect.annotateLogs("rika.resident.feed.sequence", queued.sequence),
+                                )
+                            }
                           }
-                        })
-                  })()
-                })()
-              })(),
-            ),
+                        }).pipe(
+                          Effect.ensuring(
+                            Effect.sync(() => {
+                              feed.consumerAttached = false
+                            }),
+                          ),
+                        )
+                        return Effect.raceFirst(
+                          consume,
+                          Deferred.await(closed).pipe(
+                            Effect.andThen(Effect.fail(unavailable("Resident connection closed"))),
+                          ),
+                        )
+                      }),
+                    submit: (prompt, mode, promptParts, modelTuning) =>
+                      invoke({
+                        _tag: "Submit",
+                        prompt,
+                        ...(mode === undefined ? {} : { mode }),
+                        ...(promptParts === undefined ? {} : { promptParts }),
+                        ...(modelTuning === undefined ? {} : { modelTuning }),
+                      }),
+                    shell: (command, incognito) => invoke({ _tag: "Shell", command, incognito }),
+                    editQueued: (turnId, prompt) => invoke({ _tag: "EditQueued", turnId, prompt }),
+                    dequeue: (turnId) => invoke({ _tag: "Dequeue", turnId }),
+                    steerQueued: (turnId, text) => invoke({ _tag: "SteerQueued", turnId, text }),
+                    steer: (text) => invoke({ _tag: "Steer", text }),
+                    interruptAndSend: (prompt) => invoke({ _tag: "InterruptAndSend", prompt }),
+                    cancel: invoke({ _tag: "Cancel" }),
+                    newThread: invoke({ _tag: "NewThread" }),
+                    resolvePermission: (waitId, kind, decision) =>
+                      invoke({ _tag: "ResolvePermission", waitId, kind, decision }),
+                    selectThread: (threadId, selectionEpoch) =>
+                      invoke({ _tag: "SelectThread", threadId, selectionEpoch }),
+                    readQueue: (threadId) => invoke({ _tag: "ReadQueue", threadId }),
+                    loadOlder: invoke({ _tag: "LoadOlder" }),
+                    previewThread: (threadId) => invoke({ _tag: "PreviewThread", threadId }),
+                    reopenThread: (selectionEpoch) => invoke({ _tag: "ReopenThread", selectionEpoch }),
+                    replay: (turnId, afterCursor) =>
+                      invoke({
+                        _tag: "Replay",
+                        turnId,
+                        ...(afterCursor === undefined ? {} : { afterCursor }),
+                      }),
+                  }
+                  if (request.interactiveStarted !== undefined)
+                    yield* Deferred.succeed(request.interactiveStarted, {
+                      sessionId: message.sessionId,
+                      feedGeneration: message.feedGeneration,
+                      session,
+                    })
+                }
+                if (message._tag === "operation-completed" || message._tag === "operation-failed") {
+                  if (message._tag === "operation-completed") yield* Deferred.succeed(request.done, undefined)
+                  else yield* Deferred.fail(request.done, message.error)
+                  for (const command of request.commands.values())
+                    yield* Deferred.fail(
+                      command,
+                      message._tag === "operation-failed"
+                        ? message.error
+                        : Operation.OperationUnavailable.make({
+                            operation: "ResidentConnection",
+                            message: "Resident operation completed before the command outcome was known",
+                          }),
+                    )
+                  if (request.feed !== undefined) yield* Queue.shutdown(request.feed.frames)
+                }
+              })
+            }),
           ),
         ),
       { onOpen: write(handshake).pipe(Effect.ignore) },
@@ -1075,22 +1045,18 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                 awaitSession.pipe(
                   Effect.flatMap((session) =>
                     invoke(session).pipe(
-                      Effect.catchCause((cause) =>
-                        (() => {
-                          if (Cause.hasInterruptsOnly(cause)) {
-                            return Effect.interrupt
-                          }
-                          return isDisconnectedOperation(Cause.squash(cause))
-                            ? invalidate(session).pipe(Effect.andThen(retryRead(invoke)))
-                            : Effect.sync(() =>
-                                report({
-                                  _tag: "ExecutionFailed",
-                                  selectionEpoch: 0,
-                                  message: String(Cause.squash(cause)),
-                                }),
-                              )
-                        })(),
-                      ),
+                      Effect.catchCause((cause) => {
+                        if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt
+                        if (isDisconnectedOperation(Cause.squash(cause)))
+                          return invalidate(session).pipe(Effect.andThen(retryRead(invoke)))
+                        return Effect.sync(() =>
+                          report({
+                            _tag: "ExecutionFailed",
+                            selectionEpoch: 0,
+                            message: String(Cause.squash(cause)),
+                          }),
+                        )
+                      }),
                     ),
                   ),
                 ),
@@ -1101,33 +1067,29 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
               awaitSession.pipe(
                 Effect.flatMap((session) =>
                   invoke(session).pipe(
-                    Effect.catchCause((cause) =>
-                      (() => {
-                        if (Cause.hasInterruptsOnly(cause)) {
-                          return Effect.interrupt
-                        }
-                        return isDisconnectedOperation(Cause.squash(cause))
-                          ? invalidate(session).pipe(
-                              Effect.andThen(
-                                Effect.sync(() =>
-                                  report({
-                                    _tag: "ExecutionFailed",
-                                    selectionEpoch: 0,
-                                    message:
-                                      "Resident transport disconnected; the action outcome is unknown and was not retried",
-                                  }),
-                                ),
-                              ),
-                            )
-                          : Effect.sync(() =>
+                    Effect.catchCause((cause) => {
+                      if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt
+                      if (isDisconnectedOperation(Cause.squash(cause)))
+                        return invalidate(session).pipe(
+                          Effect.andThen(
+                            Effect.sync(() =>
                               report({
                                 _tag: "ExecutionFailed",
                                 selectionEpoch: 0,
-                                message: String(Cause.squash(cause)),
+                                message:
+                                  "Resident transport disconnected; the action outcome is unknown and was not retried",
                               }),
-                            )
-                      })(),
-                    ),
+                            ),
+                          ),
+                        )
+                      return Effect.sync(() =>
+                        report({
+                          _tag: "ExecutionFailed",
+                          selectionEpoch: 0,
+                          message: String(Cause.squash(cause)),
+                        }),
+                      )
+                    }),
                   ),
                 ),
               )

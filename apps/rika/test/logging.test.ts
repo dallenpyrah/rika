@@ -80,7 +80,18 @@ describe("Logging", () => {
                   authorization: secrets[4],
                   credential: secrets[5],
                   error: secrets[6],
+                  "rika.execution.id": "execution-42",
+                  "rika.failure.category": "invalid_input",
+                  "rika.failure.interrupted": false,
                   "rika.failure.kind": "InvalidInput",
+                  "rika.failure.outcome": "known",
+                  "rika.tool.call.id": "call-7",
+                  "rika.tool.deadline.ms": 10_000,
+                  "rika.tool.dependency": "parallel",
+                  "rika.tool.retry.attempt": 2,
+                  "rika.tool.retry.delay.ms": 200,
+                  "rika.duration.ms": 9_876,
+                  "rika.tool.name": "read",
                 }),
                 Effect.provide(logging),
               ),
@@ -92,7 +103,20 @@ describe("Logging", () => {
         for (const secret of secrets) assert.notInclude(content, secret)
         const record = yield* decodeRecord(content.trim())
         assert.strictEqual(record.message, "diagnostic.unstructured")
-        assert.deepStrictEqual(record.annotations, { "rika.failure.kind": "InvalidInput" })
+        assert.deepStrictEqual(record.annotations, {
+          "rika.execution.id": "execution-42",
+          "rika.failure.category": "invalid_input",
+          "rika.failure.interrupted": false,
+          "rika.failure.kind": "InvalidInput",
+          "rika.failure.outcome": "known",
+          "rika.tool.call.id": "call-7",
+          "rika.tool.deadline.ms": 10_000,
+          "rika.tool.dependency": "parallel",
+          "rika.tool.retry.attempt": 2,
+          "rika.tool.retry.delay.ms": 200,
+          "rika.duration.ms": 9_876,
+          "rika.tool.name": "read",
+        })
       }),
     )
 

@@ -115,15 +115,11 @@ const layerImpl = (filename: string, options: Options = {}) =>
         Effect.gen(function* () {
           const handle = yield* Effect.tryPromise({
             try: () => open(name, constants.O_RDONLY | constants.O_NOFOLLOW),
-            catch: (cause) =>
-              code(cause) === "ENOENT" && missing
-                ? failure("missing", "Credential file is missing")
-                : (() => {
-                    if (code(cause) === "ELOOP") {
-                      return unsafe("Credential storage cannot use symbolic links")
-                    }
-                    return failure("io", "Credential storage operation failed")
-                  })(),
+            catch: (cause) => {
+              if (code(cause) === "ENOENT" && missing) return failure("missing", "Credential file is missing")
+              if (code(cause) === "ELOOP") return unsafe("Credential storage cannot use symbolic links")
+              return failure("io", "Credential storage operation failed")
+            },
           })
           const stat = yield* io(() => handle.stat()).pipe(
             Effect.tapError(() => io(() => handle.close()).pipe(Effect.ignore)),

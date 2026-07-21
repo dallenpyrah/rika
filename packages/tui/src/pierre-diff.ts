@@ -125,15 +125,9 @@ const renderPierreDiffChunks = (patch: string, options: DiffRenderOptions): Read
       return
     }
     const gutter = `${indent}${String(row.number).padStart(numberWidth)} ${row.marker} `
-    const gutterColor =
-      row.marker === "+"
-        ? colors.green
-        : (() => {
-            if (row.marker === "-") {
-              return colors.red
-            }
-            return colors.muted
-          })()
+    let gutterColor = colors.muted
+    if (row.marker === "+") gutterColor = colors.green
+    else if (row.marker === "-") gutterColor = colors.red
     chunks.push(fg(gutterColor)(gutter))
     for (const chunk of clipLine(contentChunks(row), Math.max(1, width - gutter.length))) chunks.push(chunk)
   })

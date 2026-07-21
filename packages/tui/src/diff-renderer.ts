@@ -1,14 +1,10 @@
 import { Function } from "effect"
 
-const clip = (text: string, width: number): string =>
-  text.length <= width
-    ? text
-    : (() => {
-        if (width <= 1) {
-          return "…"
-        }
-        return `${text.slice(0, width - 1)}…`
-      })()
+const clip = (text: string, width: number): string => {
+  if (text.length <= width) return text
+  if (width <= 1) return "…"
+  return `${text.slice(0, width - 1)}…`
+}
 
 const renderDiffCache = new Map<string, string>()
 const styledDiffCache = new Map<string, ReadonlyArray<TextChunk> | null>()
@@ -73,14 +69,9 @@ export const renderDiffStyled: {
     const lines = renderDiff(patch, Math.max(1, options.width - indent.length)).split("\n")
     const built: Array<TextChunk> = []
     lines.forEach((line, index) => {
-      const color = /^\s*\d*\s+\+/.test(line)
-        ? colors.green
-        : (() => {
-            if (/^\s*\d+\s+\s*-/.test(line)) {
-              return colors.red
-            }
-            return colors.muted
-          })()
+      let color = colors.muted
+      if (/^\s*\d*\s+\+/.test(line)) color = colors.green
+      else if (/^\s*\d+\s+\s*-/.test(line)) color = colors.red
       built.push(line.startsWith("@@") ? bold(fg(colors.blue)(`${indent}${line}`)) : fg(color)(`${indent}${line}`))
       if (index < lines.length - 1) built.push(fg(colors.text)("\n"))
     })

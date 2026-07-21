@@ -210,6 +210,14 @@ const credentialFrom = (crypto: Crypto.Crypto, response: TokenResponse, previous
     if (tokenExpiry !== undefined && (tokenExpiry < 0 || !Number.isSafeInteger(tokenExpiry))) {
       return yield* authError("protocol", "Token expiry is invalid")
     }
+    let expiresAt: number
+    if (response.access_token !== undefined && response.expires_in !== undefined) {
+      expiresAt = now + response.expires_in * 1000
+    } else if (tokenExpiry !== undefined) {
+      expiresAt = tokenExpiry * 1000
+    } else {
+      expiresAt = previous?.expiresAt ?? now + 8 * 86_400_000
+    }
     return {
       formatVersion: credentialFormatVersion,
       accessToken,
@@ -218,15 +226,7 @@ const credentialFrom = (crypto: Crypto.Crypto, response: TokenResponse, previous
       accountId,
       fingerprint,
       generation: `${fingerprint}.${Encoding.encodeBase64Url(yield* crypto.randomBytes(16))}`,
-      expiresAt:
-        response.access_token !== undefined && response.expires_in !== undefined
-          ? now + response.expires_in * 1000
-          : (() => {
-              if (tokenExpiry !== undefined) {
-                return tokenExpiry * 1000
-              }
-              return previous?.expiresAt ?? now + 8 * 86_400_000
-            })(),
+      expiresAt,
       refreshedAt: now,
     } satisfies CredentialDisk
   }).pipe(
@@ -345,17 +345,16 @@ export const layer = (options: TimingOptions = {}) =>
             Effect.matchEffect({
               onFailure: (error) =>
                 error.kind === "corrupt" ? Effect.succeed<Status>({ _tag: "Corrupt" }) : Effect.fail(error),
-              onSuccess: (entry) =>
-                Effect.succeed<Status>(
-                  Option.isNone(entry)
-                    ? { _tag: "Unauthenticated" }
-                    : (() => {
-                        if (entry.value.expiresAt <= now + 300_000) {
-                          return { _tag: "RefreshRequired", fingerprint: entry.value.fingerprint }
-                        }
-                        return { _tag: "Present", fingerprint: entry.value.fingerprint }
-                      })(),
-                ),
+              onSuccess: (entry) => {
+                if (Option.isNone(entry)) return Effect.succeed<Status>({ _tag: "Unauthenticated" })
+                if (entry.value.expiresAt <= now + 300_000) {
+                  return Effect.succeed<Status>({
+                    _tag: "RefreshRequired",
+                    fingerprint: entry.value.fingerprint,
+                  })
+                }
+                return Effect.succeed<Status>({ _tag: "Present", fingerprint: entry.value.fingerprint })
+              },
             }),
           )
         }),

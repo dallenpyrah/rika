@@ -70,15 +70,11 @@ type Annotated = { readonly tag: Op["tag"]; readonly oldNo: number; readonly new
 
 const context = 3
 
-const marker = (tag: Op["tag"]): string =>
-  tag === "delete"
-    ? "-"
-    : (() => {
-        if (tag === "insert") {
-          return "+"
-        }
-        return " "
-      })()
+const marker = (tag: Op["tag"]): string => {
+  if (tag === "delete") return "-"
+  if (tag === "insert") return "+"
+  return " "
+}
 
 export const unifiedDiff: {
   (oldText: string, newText: string, created?: boolean): (path: string) => string | undefined

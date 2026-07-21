@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Redacted, Schema } from "effect"
+import { Clock, Effect, Fiber, Layer, Redacted, Schema } from "effect"
+import { TestClock } from "effect/testing"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { WebSearch } from "../src"
 import { provide } from "./test-layer"
@@ -72,6 +73,38 @@ describe("WebSearch registry", () => {
       expect(all._tag).toBe("WebSearchExecutionError")
       const incapable = yield* Effect.flip(search.search({ ...input, kind: "code" }))
       expect(incapable.message).toContain("No configured web search provider supports 'code'")
+    }),
+  )
+
+  it.effect("retries one transient transport failure but not permanent or rate-limited failures", () =>
+    Effect.gen(function* () {
+      let transientAttempts = 0
+      const attemptTimes: Array<number> = []
+      const transient = makeProvider("transient", 1, ["web"], () =>
+        Effect.gen(function* () {
+          attemptTimes.push(yield* Clock.currentTimeMillis)
+          transientAttempts += 1
+          return transientAttempts === 1
+            ? yield* WebSearch.ProviderFailure.make({ provider: "transient", kind: "transport", message: "reset" })
+            : { results: [result] }
+        }),
+      )
+      const search = WebSearch.make([transient])
+      const fiber = yield* Effect.forkChild(search.search(input))
+      yield* TestClock.adjust("200 millis")
+      expect((yield* Fiber.join(fiber))[0]?.results).toEqual([result])
+      expect(transientAttempts).toBe(2)
+      expect(attemptTimes[1]! - attemptTimes[0]!).toBe(200)
+
+      for (const kind of ["authentication", "rate-limit", "response"] as const) {
+        let attempts = 0
+        const provider = makeProvider(kind, 1, ["web"], () => {
+          attempts += 1
+          return Effect.fail(WebSearch.ProviderFailure.make({ provider: kind, kind, message: kind }))
+        })
+        yield* Effect.flip(WebSearch.make([provider]).search(input))
+        expect(attempts).toBe(1)
+      }
     }),
   )
 })

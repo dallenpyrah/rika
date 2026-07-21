@@ -88,17 +88,12 @@ const testEnvironment = (
   const fileSystem = FileSystem.layerNoop({
     realPath: (path) => Effect.succeed(realPaths.get(path) ?? path),
     readDirectory: (path) => Effect.succeed(directories.get(path) ?? []),
-    stat: (path) =>
-      Effect.succeed(
-        directories.has(path)
-          ? info("Directory")
-          : (() => {
-              if (files.has(path)) {
-                return info("File")
-              }
-              return info("Socket")
-            })(),
-      ),
+    stat: (path) => {
+      let type: FileSystem.File.Type = "Socket"
+      if (directories.has(path)) type = "Directory"
+      else if (files.has(path)) type = "File"
+      return Effect.succeed(info(type))
+    },
     readFileString: (path) => {
       if (path === "/workspace/src/unreadable.ts") return Effect.fail(platformError("readFileString", path))
       const content = files.get(path)
@@ -234,9 +229,16 @@ describe("Runtime", () => {
       const selected = yield* runtime.run({ _tag: "Read", path: "a.txt", readRange: [2, 3] })
 
       expect(defaults.text).toBe("1: zero\n2: needle\n3: last")
-      expect(negative).toMatchObject({ _tag: "ToolError", tool: "read" })
-      expect(reversed).toMatchObject({ _tag: "ToolError", tool: "read" })
-      expect(fractional).toMatchObject({ _tag: "ToolError", tool: "read" })
+      for (const failure of [negative, reversed, fractional]) {
+        expect(failure).toMatchObject({
+          _tag: "ToolError",
+          tool: "read",
+          category: "invalid_input",
+          outcome: "known",
+          recovery: "after_change",
+        })
+        expect(failure.message).toContain("Next action:")
+      }
       expect(selected.text).toBe("2: needle\n3: last")
     }).pipe(provide(environment.runtime))
   })
@@ -278,8 +280,10 @@ describe("Runtime", () => {
       expect(edited.diff).toContain("-duplicate")
       expect(edited.diff).toContain("+new")
       expect(environment.files.get("/workspace/new/file.txt")).toBe("new")
-      expect(stale.message).toContain("old_str was not found")
-      expect(ambiguous.message).toContain("old_str is not unique")
+      expect(stale).toMatchObject({ category: "conflict", outcome: "known", recovery: "after_change" })
+      expect(stale.message).toContain("Reread new/file.txt")
+      expect(ambiguous).toMatchObject({ category: "conflict", outcome: "known", recovery: "after_change" })
+      expect(ambiguous.message).toContain("more surrounding context")
       expect(replacedAll.diff).toContain("+changed changed")
     }).pipe(provide(environment.runtime))
   })
@@ -338,10 +342,17 @@ describe("Runtime", () => {
       const shell = yield* Effect.flip(runtime.run({ _tag: "Bash", command: "fail-spawn" }))
 
       expect(read).toMatchObject({ _tag: "ToolError", tool: "read" })
-      expect(read).toMatchObject({ kind: "operation", outcome: "known" })
+      expect(read).toMatchObject({
+        kind: "operation",
+        category: "not_found",
+        outcome: "known",
+        recovery: "after_change",
+      })
       expect(read.message).toContain("File not found")
+      expect(read.message).toContain("Search for the file")
       expect(shell).toMatchObject({ _tag: "ToolError", tool: "bash" })
-      expect(shell.message).toContain("foreign failure")
+      expect(shell).toMatchObject({ category: "access_denied", outcome: "unknown", recovery: "never" })
+      expect(shell.message).toContain("Inspect the workspace and process state")
     }).pipe(provide(environment.runtime))
   })
 
@@ -357,8 +368,62 @@ describe("Runtime", () => {
         _tag: "ToolError",
         tool: "bash",
         kind: "timeout",
+        category: "timeout",
         outcome: "unknown",
+        recovery: "never",
       })
+      expect(failure.message).toContain("after 120000ms")
+      expect(failure.message).toContain("must not be repeated unchanged")
+    }).pipe(provide(environment.runtime))
+  })
+
+  it.effect("times out safe calls with a known outcome and an actionable retry", () => {
+    const environment = testEnvironment("success", () => Effect.never)
+    return Effect.gen(function* () {
+      const runtime = yield* Runtime.Service
+      const call = yield* Effect.forkChild(
+        runtime.run({ _tag: "WebSearch", objective: "wait", searchQueries: ["wait"] }),
+      )
+      yield* Effect.yieldNow
+      yield* TestClock.adjust("30 seconds")
+      const failure = yield* Effect.flip(Fiber.join(call))
+      expect(failure).toMatchObject({
+        category: "timeout",
+        outcome: "known",
+        recovery: "later",
+      })
+      expect(failure.message).toContain("after 30000ms")
+      expect(failure.message).toContain("Retry once later")
+    }).pipe(provide(environment.runtime))
+  })
+
+  it.effect("keeps a provider retry inside the original tool deadline", () => {
+    let attempts = 0
+    const search = WebSearch.make([
+      {
+        id: "fixture",
+        priority: 1,
+        capabilities: new Set<WebSearch.Capability>(["web"]),
+        search: () => {
+          attempts += 1
+          return attempts === 1
+            ? Effect.fail(WebSearch.ProviderFailure.make({ provider: "fixture", kind: "transport", message: "reset" }))
+            : Effect.never
+        },
+      },
+    ])
+    const environment = testEnvironment("success", search.search)
+    return Effect.gen(function* () {
+      const runtime = yield* Runtime.Service
+      const call = yield* Effect.forkChild(
+        runtime.run({ _tag: "WebSearch", objective: "wait", searchQueries: ["wait"] }),
+      )
+      yield* Effect.yieldNow
+      yield* TestClock.adjust("30 seconds")
+      const failure = yield* Effect.flip(Fiber.join(call))
+      expect(attempts).toBe(2)
+      expect(failure).toMatchObject({ category: "timeout", outcome: "known", recovery: "later" })
+      expect(failure.message).toContain("after 30000ms")
     }).pipe(provide(environment.runtime))
   })
 
@@ -459,7 +524,65 @@ describe("Runtime", () => {
       expect(pageDefault.text).toBe("page")
       expect(pageOptions.text).toBe("page")
       expect(media.tool).toBe("view_media")
-      expect(escaped.message).toContain("escapes workspace")
+      expect(escaped).toMatchObject({ category: "access_denied", outcome: "known", recovery: "after_change" })
+      expect(escaped.message).toContain("Use a path under /workspace")
     }).pipe(provide(environment.runtime))
   })
+
+  it.effect("classifies unavailable and rate-limited web dependencies with recovery guidance", () =>
+    Effect.gen(function* () {
+      const unavailable = testEnvironment("success", () =>
+        Effect.fail(
+          WebSearch.SelectionError.make({ message: "No configured web search provider supports 'web' searches" }),
+        ),
+      )
+      const rateLimited = testEnvironment("success", () =>
+        Effect.fail(
+          WebSearch.ExecutionError.make({
+            message: "All selected web search providers failed",
+            outcomes: [
+              {
+                provider: "fixture",
+                error: WebSearch.ProviderFailure.make({ provider: "fixture", kind: "rate-limit", message: "limited" }),
+              },
+            ],
+          }),
+        ),
+      )
+      const unconfiguredPage = testEnvironment(
+        "success",
+        () => Effect.succeed([]),
+        () => Effect.fail(ReadWebPage.HttpError.make({ message: "PARALLEL_API_KEY is not configured" })),
+      )
+      const request = { _tag: "WebSearch" as const, objective: "docs", searchQueries: ["docs"] }
+      const pageRequest = { _tag: "ReadWebPage" as const, url: "https://example.com" }
+      const unavailableFailure = yield* Effect.gen(function* () {
+        const runtime = yield* Runtime.Service
+        return yield* Effect.flip(runtime.run(request))
+      }).pipe(provide(unavailable.runtime))
+      const rateFailure = yield* Effect.gen(function* () {
+        const runtime = yield* Runtime.Service
+        return yield* Effect.flip(runtime.run(request))
+      }).pipe(provide(rateLimited.runtime))
+      const pageFailure = yield* Effect.gen(function* () {
+        const runtime = yield* Runtime.Service
+        return yield* Effect.flip(runtime.run(pageRequest))
+      }).pipe(provide(unconfiguredPage.runtime))
+
+      expect(unavailableFailure).toMatchObject({
+        category: "dependency_unavailable",
+        recovery: "after_change",
+        outcome: "known",
+      })
+      expect(unavailableFailure.message).toContain("Configure a provider")
+      expect(rateFailure).toMatchObject({ category: "rate_limited", recovery: "later", outcome: "known" })
+      expect(rateFailure.message).toContain("Retry later")
+      expect(pageFailure).toMatchObject({
+        category: "dependency_unavailable",
+        recovery: "after_change",
+        outcome: "known",
+      })
+      expect(pageFailure.message).toContain("Configure PARALLEL_API_KEY")
+    }),
+  )
 })

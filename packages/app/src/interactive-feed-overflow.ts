@@ -20,15 +20,11 @@ export const make = (): State => ({
   criticalOverflowed: false,
 })
 
-const threadId = (event: InteractiveEvent): string | undefined =>
-  event._tag === "SelectionLoaded"
-    ? String(event.thread.id)
-    : (() => {
-        if ("threadId" in event && event.threadId !== undefined) {
-          return String(event.threadId)
-        }
-        return undefined
-      })()
+const threadId = (event: InteractiveEvent): string | undefined => {
+  if (event._tag === "SelectionLoaded") return String(event.thread.id)
+  if ("threadId" in event && event.threadId !== undefined) return String(event.threadId)
+  return undefined
+}
 
 const rememberThread = (state: State, threadIds: Set<string>, id: string) => {
   if (threadIds.has(id)) return

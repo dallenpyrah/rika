@@ -146,6 +146,53 @@ test(
 )
 
 test(
+  "persists actionable tool failures and returns them to the next model turn",
+  () =>
+    runNative(
+      Effect.gen(function* () {
+        const program = withBackend(
+          [
+            TestModel.turn([TestModel.toolCall("read", { path: "missing.txt" }, { id: "missing-read" })]),
+            TestModel.text("used recovery guidance"),
+          ],
+          (fixture, directory) =>
+            Effect.gen(function* () {
+              const backend = yield* ExecutionBackend.Service
+              const result = yield* start(backend, {
+                threadId: "thread-tool-failure",
+                turnId: "turn-tool-failure",
+                prompt: "read missing.txt",
+                startedAt: 1,
+              })
+              const stored = yield* Effect.acquireUseRelease(
+                Effect.sync(() => new Database(`${directory}/relay.db`, { readonly: true })),
+                (database) =>
+                  Effect.sync(() =>
+                    database
+                      .query<
+                        { readonly error: string | null; readonly output_json: string },
+                        [string]
+                      >("select error, output_json from relay_tool_results where tool_call_id = ?")
+                      .get("missing-read"),
+                  ),
+                (connection) => Effect.sync(() => connection.close()),
+              )
+              return { result, requests: yield* fixture.requests, stored }
+            }),
+        )
+        const result = yield* program
+        const guidance =
+          "File not found: missing.txt. The call did not change state. Next action: Search for the file or call read with a corrected path."
+        expect(result.result.status).toBe("completed")
+        expect(result.stored).toEqual({ error: `ToolError: ${guidance}`, output_json: "null" })
+        expect(encodeJson(result.requests[1])).toContain(guidance)
+        expect(encodeJson(result.requests[1])).toContain("missing-read")
+      }),
+    ),
+  30_000,
+)
+
+test(
   "keeps provider tool-call identifiers on the wire and namespaces durable keys by execution",
   () =>
     runNative(

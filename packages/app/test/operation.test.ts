@@ -116,17 +116,16 @@ const makeSelectionLoadHarness = Effect.fn("OperationTest.makeSelectionLoadHarne
   let targetGetFailed = false
   const delayedRepository = ThreadRepository.Service.of({
     ...repository,
-    get: (id) =>
-      targetGetFailed && id === target.id
-        ? Effect.fail(ThreadRepository.RepositoryError.make({ message: "forced thread lookup failure" }))
-        : [
-            targetGetBlocked && id === target.id
-              ? Deferred.succeed(targetGetEntered, undefined).pipe(
-                  Effect.andThen(Deferred.await(releaseTargetGet)),
-                  Effect.andThen(repository.get(id)),
-                )
-              : repository.get(id),
-          ][0],
+    get: (id) => {
+      if (targetGetFailed && id === target.id)
+        return Effect.fail(ThreadRepository.RepositoryError.make({ message: "forced thread lookup failure" }))
+      if (targetGetBlocked && id === target.id)
+        return Deferred.succeed(targetGetEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseTargetGet)),
+          Effect.andThen(repository.get(id)),
+        )
+      return repository.get(id)
+    },
   })
   const streamed: ReadonlyArray<ExecutionBackend.Event> = Array.from({ length: eventCount }, (_, index) => ({
     cursor: `selection-live-${index + 1}`,
@@ -666,22 +665,18 @@ describe("Operation", () => {
       const starts = yield* Ref.make<ReadonlyArray<string>>([])
       const terminalBackend = ExecutionBackend.Service.of({
         ...backend,
-        start: (input) =>
-          Ref.update(starts, (values) => [...values, String(input.turnId)]).pipe(
+        start: (input) => {
+          let status: "failed" | "cancelled" | "completed" = "completed"
+          if (input.turnId === "failed") status = "failed"
+          else if (input.turnId === "cancelled") status = "cancelled"
+          return Ref.update(starts, (values) => [...values, String(input.turnId)]).pipe(
             Effect.as({
               turnId: input.turnId,
-              status:
-                input.turnId === "failed"
-                  ? ("failed" as const)
-                  : (() => {
-                      if (input.turnId === "cancelled") {
-                        return "cancelled" as const
-                      }
-                      return "completed" as const
-                    })(),
+              status,
               events: [],
             }),
-          ),
+          )
+        },
       })
       yield* Operation.reconcile().pipe(
         provideLayer(
@@ -1654,16 +1649,11 @@ describe("Operation", () => {
             (event._tag === "TranscriptPatched" && event.turnId === "selection-live-turn"),
         )
         expect(
-          selectedTranscript.map((event) =>
-            event._tag === "SelectionLoaded"
-              ? event._tag
-              : (() => {
-                  if (event._tag === "TranscriptPatched") {
-                    return event.event.cursor
-                  }
-                  return ""
-                })(),
-          ),
+          selectedTranscript.map((event) => {
+            if (event._tag === "SelectionLoaded") return event._tag
+            if (event._tag === "TranscriptPatched") return event.event.cursor
+            return ""
+          }),
         ).toEqual(["SelectionLoaded", "selection-live-1", "selection-live-2", "selection-live-3"])
         expect(selectedTranscript.every((event) => "selectionEpoch" in event && event.selectionEpoch === 2)).toBe(true)
 
@@ -3171,44 +3161,44 @@ describe("Operation", () => {
           const runSync = Effect.runSyncWith(yield* Effect.context<never>())
           const caseBackend = ExecutionBackend.Service.of({
             ...backend,
-            start: (input) =>
-              status === "backend"
-                ? (() => {
-                    if (input.turnId === "turn-backend") {
-                      return turns
-                        .createForSubmission({
-                          id: Turn.TurnId.make("successor-backend"),
-                          threadId: Thread.ThreadId.make(input.threadId),
-                          prompt: "queued successor",
-                          executionRoute: executionRoute(),
-                          queueCapacity: 128,
-                          now: 1,
-                        })
-                        .pipe(
-                          Effect.mapError((cause) => ExecutionBackend.BackendError.make({ message: cause.message })),
-                          Effect.andThen(
-                            Effect.fail(ExecutionBackend.BackendError.make({ message: "interactive backend failed" })),
-                          ),
-                        )
-                    }
-                    return backend.start(input)
-                  })()
-                : Effect.succeed({
-                    turnId: input.turnId,
-                    status: status === "failed-event" ? ("failed" as const) : status,
-                    events:
-                      status === "failed-event"
-                        ? [
-                            {
-                              cursor: "failure-cursor",
-                              sequence: 1,
-                              type: "execution.failed",
-                              createdAt: 1,
-                              text: "opaque provider failure",
-                            },
-                          ]
-                        : [],
-                  }),
+            start: (input) => {
+              if (status === "backend") {
+                if (input.turnId === "turn-backend") {
+                  return turns
+                    .createForSubmission({
+                      id: Turn.TurnId.make("successor-backend"),
+                      threadId: Thread.ThreadId.make(input.threadId),
+                      prompt: "queued successor",
+                      executionRoute: executionRoute(),
+                      queueCapacity: 128,
+                      now: 1,
+                    })
+                    .pipe(
+                      Effect.mapError((cause) => ExecutionBackend.BackendError.make({ message: cause.message })),
+                      Effect.andThen(
+                        Effect.fail(ExecutionBackend.BackendError.make({ message: "interactive backend failed" })),
+                      ),
+                    )
+                }
+                return backend.start(input)
+              }
+              return Effect.succeed({
+                turnId: input.turnId,
+                status: status === "failed-event" ? ("failed" as const) : status,
+                events:
+                  status === "failed-event"
+                    ? [
+                        {
+                          cursor: "failure-cursor",
+                          sequence: 1,
+                          type: "execution.failed",
+                          createdAt: 1,
+                          text: "opaque provider failure",
+                        },
+                      ]
+                    : [],
+              })
+            },
           })
           yield* Effect.gen(function* () {
             const session = yield* openInteractiveSession(sessions, {

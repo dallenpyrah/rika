@@ -176,7 +176,8 @@ export const imagePasteBlockedNotice = (model: Pick<ViewState.Model, "editingTur
 
 const pastedImageFormat = (bytes: Uint8Array, declaredMediaType?: string) => {
   const prefix = (start: number, end: number) => new TextDecoder().decode(bytes.subarray(start, end))
-  const signature =
+  let signature: { readonly mediaType: string; readonly extension: string } | undefined
+  if (
     bytes.length >= 8 &&
     bytes[0] === 0x89 &&
     bytes[1] === 0x50 &&
@@ -186,20 +187,14 @@ const pastedImageFormat = (bytes: Uint8Array, declaredMediaType?: string) => {
     bytes[5] === 0x0a &&
     bytes[6] === 0x1a &&
     bytes[7] === 0x0a
-      ? { mediaType: "image/png", extension: "png" }
-      : (() => {
-          if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-            return { mediaType: "image/jpeg", extension: "jpg" }
-          }
-          return bytes.length >= 6 && /^GIF8[79]a$/.test(prefix(0, 6))
-            ? { mediaType: "image/gif", extension: "gif" }
-            : (() => {
-                if (bytes.length >= 12 && prefix(0, 4) === "RIFF" && prefix(8, 12) === "WEBP") {
-                  return { mediaType: "image/webp", extension: "webp" }
-                }
-                return undefined
-              })()
-        })()
+  )
+    signature = { mediaType: "image/png", extension: "png" }
+  else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    signature = { mediaType: "image/jpeg", extension: "jpg" }
+  else if (bytes.length >= 6 && /^GIF8[79]a$/.test(prefix(0, 6)))
+    signature = { mediaType: "image/gif", extension: "gif" }
+  else if (bytes.length >= 12 && prefix(0, 4) === "RIFF" && prefix(8, 12) === "WEBP")
+    signature = { mediaType: "image/webp", extension: "webp" }
   if (signature === undefined) return undefined
   const mediaType = declaredMediaType?.split(";", 1)[0]?.trim().toLowerCase()
   return mediaType === undefined || mediaType === signature.mediaType ? signature : undefined
@@ -260,14 +255,10 @@ export const resolveWorkspaceFile: {
 
 const editorArgumentsImpl = (editor: string, path: string, line?: number, column?: number): Array<string> => {
   const location = line === undefined ? path : `${path}:${line}${column === undefined ? "" : `:${column}`}`
-  return editor === "code" || editor.endsWith("/code")
-    ? [editor, "--goto", location]
-    : (() => {
-        if (editor === "vim" || editor === "nvim" || editor.endsWith("/vim") || editor.endsWith("/nvim")) {
-          return [editor, ...(line === undefined ? [] : [`+call cursor(${line},${column ?? 1})`]), path]
-        }
-        return [editor, path]
-      })()
+  if (editor === "code" || editor.endsWith("/code")) return [editor, "--goto", location]
+  if (editor === "vim" || editor === "nvim" || editor.endsWith("/vim") || editor.endsWith("/nvim"))
+    return [editor, ...(line === undefined ? [] : [`+call cursor(${line},${column ?? 1})`]), path]
+  return [editor, path]
 }
 
 export const editorArguments: {
@@ -275,23 +266,20 @@ export const editorArguments: {
   (editor: string, path: string, line?: number, column?: number): Array<string>
 } = Function.dual((args) => args.length >= 2, editorArgumentsImpl)
 
-const defaultOpenArgumentsImpl = (path: string, platform: NodeJS.Platform = process.platform): Array<string> =>
-  platform === "darwin"
-    ? ["open", path]
-    : (() => {
-        if (platform === "win32") {
-          return [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Start-Process -LiteralPath $args[0]",
-            "--",
-            path,
-          ]
-        }
-        return ["xdg-open", path]
-      })()
+const defaultOpenArgumentsImpl = (path: string, platform: NodeJS.Platform = process.platform): Array<string> => {
+  if (platform === "darwin") return ["open", path]
+  if (platform === "win32")
+    return [
+      "powershell.exe",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Start-Process -LiteralPath $args[0]",
+      "--",
+      path,
+    ]
+  return ["xdg-open", path]
+}
 
 export const defaultOpenArguments: {
   (platform?: NodeJS.Platform): (path: string) => Array<string>
@@ -352,28 +340,25 @@ const materializePromptPartsImpl = (parts: ReadonlyArray<ViewState.PromptPart>, 
         Effect.flatMap((fileSystem) =>
           Effect.all([fileSystem.stat(path), fileSystem.readFile(path)]).pipe(Effect.mapError(failure)),
         ),
-        Effect.flatMap(([info, bytes]) =>
-          info.type !== "File" || bytes.byteLength === 0
-            ? Effect.fail(
-                PromptAttachmentError.make({
-                  index,
-                  path: part.path,
-                  message: `Image attachment is missing or empty: ${part.path}`,
-                }),
-              )
-            : (() => {
-                if (bytes.byteLength > maxAttachmentBytes) {
-                  return Effect.fail(
-                    PromptAttachmentError.make({
-                      index,
-                      path: part.path,
-                      message: `Image attachment is too large (${attachmentMegabytes(bytes.byteLength)}; the limit is ${attachmentMegabytes(maxAttachmentBytes)}): ${part.path}`,
-                    }),
-                  )
-                }
-                return Effect.succeed({ mediaType: imageMediaType(path), bytes })
-              })(),
-        ),
+        Effect.flatMap(([info, bytes]) => {
+          if (info.type !== "File" || bytes.byteLength === 0)
+            return Effect.fail(
+              PromptAttachmentError.make({
+                index,
+                path: part.path,
+                message: `Image attachment is missing or empty: ${part.path}`,
+              }),
+            )
+          if (bytes.byteLength > maxAttachmentBytes)
+            return Effect.fail(
+              PromptAttachmentError.make({
+                index,
+                path: part.path,
+                message: `Image attachment is too large (${attachmentMegabytes(bytes.byteLength)}; the limit is ${attachmentMegabytes(maxAttachmentBytes)}): ${part.path}`,
+              }),
+            )
+          return Effect.succeed({ mediaType: imageMediaType(path), bytes })
+        }),
         Effect.flatMap(({ mediaType, bytes }) =>
           !mediaType.startsWith("image/")
             ? Effect.fail(
@@ -1090,15 +1075,16 @@ export const withPinnedRouteRegistration = Effect.fn("Main.withPinnedRouteRegist
     ...(registerModels === undefined ? {} : { registerModels }),
     start: (input) =>
       Effect.gen(function* () {
-        const resolved = isLegacyUnavailableExecutionRoute(input.executionRoute)
-          ? [
-              options.resolveLegacyRoute === undefined
-                ? yield* ExecutionBackend.BackendError.make({
-                    message: `Turn ${input.turnId} uses the legacy unavailable model route and cannot be started`,
-                  })
-                : yield* options.resolveLegacyRoute(input),
-            ][0]
-          : { executionRoute: input.executionRoute, registrations: [] }
+        let resolved
+        if (isLegacyUnavailableExecutionRoute(input.executionRoute)) {
+          if (options.resolveLegacyRoute === undefined)
+            return yield* ExecutionBackend.BackendError.make({
+              message: `Turn ${input.turnId} uses the legacy unavailable model route and cannot be started`,
+            })
+          resolved = yield* options.resolveLegacyRoute(input)
+        } else {
+          resolved = { executionRoute: input.executionRoute, registrations: [] }
+        }
         if (resolved.registrations.length > 0) {
           if (registerModels === undefined)
             return yield* ExecutionBackend.BackendError.make({
@@ -1178,18 +1164,12 @@ export const configuredBackendLayer = ({
           message: "RIKA_TEST_MEDIA_ANALYZER_RESPONSE and RIKA_TEST_MEDIA_ANALYZER_ERROR cannot both be set",
         })
       }
+      let backendKind: "test-script" | "test-response" | "provider"
+      if (testScript._tag === "Some") backendKind = "test-script"
+      else if (testResponse._tag === "Some") backendKind = "test-response"
+      else backendKind = "provider"
       yield* Effect.logInfo("model.backend.configured").pipe(
-        Effect.annotateLogs(
-          "rika.model.backend.kind",
-          testScript._tag === "Some"
-            ? "test-script"
-            : (() => {
-                if (testResponse._tag === "Some") {
-                  return "test-response"
-                }
-                return "provider"
-              })(),
-        ),
+        Effect.annotateLogs("rika.model.backend.kind", backendKind),
       )
       let registration: ModelRegistry.Registration
       let selection: ModelRegistry.ModelSelection
@@ -2495,20 +2475,18 @@ export const interactiveTui =
                     Effect.asVoid,
                   ),
                 )
+                const startInitialSelection = () => {
+                  if (input.last === true)
+                    return Effect.sync(() => startSelection((epoch) => session.reopenThread(epoch))).pipe(
+                      Effect.flatMap(Fiber.join),
+                    )
+                  if (input.threadId === undefined) return Effect.void
+                  return Effect.sync(() =>
+                    startSelection((epoch) => session.selectThread(input.threadId!, epoch)),
+                  ).pipe(Effect.flatMap(Fiber.join))
+                }
                 run(
-                  (input.last === true
-                    ? Effect.sync(() => startSelection((epoch) => session.reopenThread(epoch))).pipe(
-                        Effect.flatMap(Fiber.join),
-                      )
-                    : (() => {
-                        if (input.threadId === undefined) {
-                          return Effect.void
-                        }
-                        return Effect.sync(() =>
-                          startSelection((epoch) => session.selectThread(input.threadId!, epoch)),
-                        ).pipe(Effect.flatMap(Fiber.join))
-                      })()
-                  ).pipe(
+                  startInitialSelection().pipe(
                     Effect.andThen(
                       initialSubmitAction(input.prompt, model.mode) === undefined
                         ? Effect.void
@@ -2572,24 +2550,16 @@ if (import.meta.main) {
   const hostDataRoot = environment.hostDataRoot._tag === "Some" ? environment.hostDataRoot.value : undefined
   const home = environment.home._tag === "Some" ? environment.home.value : process.cwd()
   const defaultDataRoot = `${home}/.rika`
-  const database =
-    hostDataRoot === undefined
-      ? (() => {
-          if (environment.database._tag === "Some") {
-            return environment.database.value
-          }
-          return `${defaultDataRoot}/rika.db`
-        })()
-      : join(hostDataRoot, "rika.db")
-  const relayDatabase =
-    hostDataRoot === undefined
-      ? (() => {
-          if (environment.relayDatabase._tag === "Some") {
-            return environment.relayDatabase.value
-          }
-          return `${defaultDataRoot}/relay.db`
-        })()
-      : join(hostDataRoot, "relay.db")
+  let database: string
+  let relayDatabase: string
+  if (hostDataRoot === undefined) {
+    database = environment.database._tag === "Some" ? environment.database.value : `${defaultDataRoot}/rika.db`
+    relayDatabase =
+      environment.relayDatabase._tag === "Some" ? environment.relayDatabase.value : `${defaultDataRoot}/relay.db`
+  } else {
+    database = join(hostDataRoot, "rika.db")
+    relayDatabase = join(hostDataRoot, "relay.db")
+  }
   const globalConfig = `${home}/.config/rika/settings.json`
   const workspaceConfig = `${process.cwd()}/.rika/settings.json`
   const extensionLayer = Layer.mergeAll(
@@ -2642,15 +2612,9 @@ if (import.meta.main) {
         ),
       ),
   }
-  const editor =
-    environment.visual._tag === "Some"
-      ? environment.visual.value
-      : (() => {
-          if (environment.editor._tag === "Some") {
-            return environment.editor.value
-          }
-          return undefined
-        })()
+  let editor: string | undefined
+  if (environment.visual._tag === "Some") editor = environment.visual.value
+  else if (environment.editor._tag === "Some") editor = environment.editor.value
   const productDatabase = Layer.unwrap(
     Effect.gen(function* () {
       yield* Effect.all(
@@ -2976,17 +2940,17 @@ if (import.meta.main) {
             ).pipe(Effect.map((context) => Context.get(context, Operation.Service))),
           )
           return Operation.Service.of({
-            run: (input) =>
-              input._tag === "Auth"
-                ? Effect.scoped(Operation.runAuth(input, authOperations, process.cwd()))
-                : loadProduct.pipe(
-                    Effect.flatMap((service) => service.run(input)),
-                    Effect.mapError((error) =>
-                      Schema.is(Operation.OperationUnavailable)(error)
-                        ? error
-                        : Operation.OperationUnavailable.make({ operation: input._tag, message: String(error) }),
-                    ),
-                  ),
+            run: (input) => {
+              if (input._tag === "Auth") return Effect.scoped(Operation.runAuth(input, authOperations, process.cwd()))
+              return loadProduct.pipe(
+                Effect.flatMap((service) => service.run(input)),
+                Effect.mapError((error) =>
+                  Schema.is(Operation.OperationUnavailable)(error)
+                    ? error
+                    : Operation.OperationUnavailable.make({ operation: input._tag, message: String(error) }),
+                ),
+              )
+            },
           })
         }),
       ),
@@ -3061,28 +3025,20 @@ if (import.meta.main) {
                           }),
                         ),
                       )
+                    let clientKind: ResidentService.Handshake["clientKind"]
+                    if (clientInput._tag === "Interactive") clientKind = "interactive"
+                    else if (clientInput._tag === "Thread") clientKind = "thread-continue"
+                    else if (clientInput._tag === "Run") clientKind = "run"
+                    else if (clientInput._tag === "Review") clientKind = "review"
+                    else if (clientInput._tag === "Workflow") clientKind = "workflow"
+                    else clientKind = "product"
                     const connected = yield* Effect.result(
                       resident
                         .getOrCreate({
                           profile: "default",
                           dataRoot,
                           ...(runtimeRestarted ? { allowSupersede: false } : {}),
-                          clientKind:
-                            clientInput._tag === "Interactive"
-                              ? "interactive"
-                              : (() => {
-                                  if (clientInput._tag === "Thread") {
-                                    return "thread-continue"
-                                  }
-                                  return clientInput._tag === "Run"
-                                    ? "run"
-                                    : (() => {
-                                        if (clientInput._tag === "Review") {
-                                          return "review"
-                                        }
-                                        return clientInput._tag === "Workflow" ? "workflow" : "product"
-                                      })()
-                                })(),
+                          clientKind,
                           startHost: () =>
                             ResidentProcessStartup.spawn({
                               executable: process.execPath,

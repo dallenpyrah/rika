@@ -40,15 +40,11 @@ export const run = Effect.fn("ConfigOperations.run")(function* (
       { baseUrl: provider.baseUrl, ...(provider.apiKeyEnv === undefined ? {} : { apiKeyEnv: provider.apiKeyEnv }) },
     ]),
   )
-  const apiKeyStatus = (apiKeyEnv: string | undefined) =>
-    apiKeyEnv === undefined
-      ? "not-configured"
-      : (() => {
-          if (config.environment.providerCredentials[apiKeyEnv] === undefined) {
-            return "missing"
-          }
-          return "present"
-        })()
+  const apiKeyStatus = (apiKeyEnv: string | undefined) => {
+    if (apiKeyEnv === undefined) return "not-configured"
+    if (config.environment.providerCredentials[apiKeyEnv] === undefined) return "missing"
+    return "present"
+  }
   const providerApiKeys = Object.fromEntries(
     Object.entries(config.settings.providers).map(([id, provider]) => [id, apiKeyStatus(provider.apiKeyEnv)]),
   )

@@ -429,6 +429,8 @@ describe("Transcript projection", () => {
   })
 
   it("keeps the ToolError message as the output of a failed tool result", () => {
+    const guidance =
+      "File not found: a. The call did not change state. Next action: Search for the file or call read with a corrected path."
     const projection = project("turn-a", "prompt", [
       {
         cursor: "call",
@@ -442,11 +444,23 @@ describe("Transcript projection", () => {
         sequence: 2,
         type: "tool.result.received",
         createdAt: 2,
-        data: { tool_call_id: "call", output: { _tag: "ToolError", tool: "read", message: "file missing" } },
+        data: {
+          tool_call_id: "call",
+          output: {
+            _tag: "ToolError",
+            tool: "read",
+            message: guidance,
+            kind: "operation",
+            category: "not_found",
+            outcome: "known",
+            recovery: "after_change",
+            nextAction: "Search for the file or call read with a corrected path",
+          },
+        },
       },
     ])
     expect(projection.units[1]).toMatchObject({
-      content: { _tag: "Block", block: { _tag: "ToolCall", status: "failed", output: "file missing" } },
+      content: { _tag: "Block", block: { _tag: "ToolCall", status: "failed", output: guidance } },
     })
   })
 

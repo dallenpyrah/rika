@@ -186,25 +186,16 @@ const dispatcherLayer = (argv?: ReadonlyArray<string>) =>
                     restartEnvironment = decision.environment
                   }
                 }
+                let clientKind: ResidentService.Handshake["clientKind"]
+                if (input._tag === "Thread") clientKind = "thread-continue"
+                else if (input._tag === "Run") clientKind = "run"
+                else if (input._tag === "Review") clientKind = "review"
+                else if (input._tag === "Workflow") clientKind = "workflow"
+                else clientKind = "product"
                 const connected = yield* resident.getOrCreate({
                   profile: "default",
                   dataRoot,
-                  clientKind:
-                    input._tag === "Thread"
-                      ? "thread-continue"
-                      : (() => {
-                          if (input._tag === "Run") {
-                            return "run"
-                          }
-                          return input._tag === "Review"
-                            ? "review"
-                            : (() => {
-                                if (input._tag === "Workflow") {
-                                  return "workflow"
-                                }
-                                return "product"
-                              })()
-                        })(),
+                  clientKind,
                   startHost: () =>
                     ResidentProcessStartup.spawn({
                       executable: runtime.executable,

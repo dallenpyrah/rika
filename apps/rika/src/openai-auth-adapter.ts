@@ -10,18 +10,16 @@ import {
 } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
-const browserCommand = (url: string) => ({
-  command:
-    process.platform === "darwin"
-      ? "open"
-      : (() => {
-          if (process.platform === "win32") {
-            return "cmd"
-          }
-          return "xdg-open"
-        })(),
-  args: process.platform === "win32" ? ["/c", "start", "", url] : [url],
-})
+const browserCommand = (url: string) => {
+  let command: string
+  if (process.platform === "darwin") command = "open"
+  else if (process.platform === "win32") command = "cmd"
+  else command = "xdg-open"
+  return {
+    command,
+    args: process.platform === "win32" ? ["/c", "start", "", url] : [url],
+  }
+}
 
 const authFailure = (kind: OpenAiAuth.AuthError["kind"], message: string) =>
   OpenAiAuth.AuthError.make({ kind, message })
@@ -212,16 +210,12 @@ export const httpLayer = Layer.effect(
               }),
             ),
           ).pipe(
-            Effect.flatMap((response) =>
-              response.status >= 200 && response.status < 300
-                ? decode(response, OpenAiAuth.DevicePollResponse).pipe(Effect.map(Option.some))
-                : (() => {
-                    if (response.status === 403 || response.status === 404) {
-                      return Effect.succeed(Option.none())
-                    }
-                    return Effect.fail(authFailure("network", "OpenAI device authorization failed"))
-                  })(),
-            ),
+            Effect.flatMap((response) => {
+              if (response.status >= 200 && response.status < 300)
+                return decode(response, OpenAiAuth.DevicePollResponse).pipe(Effect.map(Option.some))
+              if (response.status === 403 || response.status === 404) return Effect.succeed(Option.none())
+              return Effect.fail(authFailure("network", "OpenAI device authorization failed"))
+            }),
           ),
         ),
     })

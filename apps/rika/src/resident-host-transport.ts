@@ -173,15 +173,9 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
     let overflow: InteractiveFeedOverflow.State | undefined
     let sentDetails = 0
     const rememberSelection = (event: Operation.InteractiveEvent) => {
-      const threadId =
-        event._tag === "SelectionLoaded"
-          ? String(event.thread.id)
-          : (() => {
-              if ("threadId" in event && event.threadId !== undefined) {
-                return String(event.threadId)
-              }
-              return undefined
-            })()
+      let threadId: string | undefined
+      if (event._tag === "SelectionLoaded") threadId = String(event.thread.id)
+      else if ("threadId" in event && event.threadId !== undefined) threadId = String(event.threadId)
       if (threadId !== undefined) selectedThreadId = threadId
       if ("selectionEpoch" in event) selectionEpoch = event.selectionEpoch
       return threadId
@@ -828,24 +822,22 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                         Fiber.await(sender),
                         Queue.offer(output, { _tag: "finished" }).pipe(Effect.andThen(Fiber.await(sender))),
                       )
-                      const outcome = Exit.isFailure(delivery)
-                        ? Exit.fail(
-                            Operation.OperationUnavailable.make({
-                              operation: message.input._tag,
-                              message: `Resident output delivery failed: ${Cause.pretty(delivery.cause)}`,
-                            }),
-                          )
-                        : (() => {
-                            if (outputOverflowed) {
-                              return Exit.fail(
-                                Operation.OperationUnavailable.make({
-                                  operation: message.input._tag,
-                                  message: "Resident client output queue is overloaded",
-                                }),
-                              )
-                            }
-                            return result
-                          })()
+                      let outcome
+                      if (Exit.isFailure(delivery))
+                        outcome = Exit.fail(
+                          Operation.OperationUnavailable.make({
+                            operation: message.input._tag,
+                            message: `Resident output delivery failed: ${Cause.pretty(delivery.cause)}`,
+                          }),
+                        )
+                      else if (outputOverflowed)
+                        outcome = Exit.fail(
+                          Operation.OperationUnavailable.make({
+                            operation: message.input._tag,
+                            message: "Resident client output queue is overloaded",
+                          }),
+                        )
+                      else outcome = result
                       yield* Exit.match(outcome, {
                         onFailure: (cause) => {
                           const failure = Cause.squash(cause)

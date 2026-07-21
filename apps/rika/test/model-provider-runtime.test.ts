@@ -2,7 +2,8 @@ import { expect, test } from "vitest"
 import { OpenAiAuth } from "@rika/app"
 import { ConfigContract } from "@rika/config"
 import * as Turn from "@rika/persistence/turn"
-import { Cause, ConfigProvider, Context, Effect, Layer, Redacted, Schema, Scope } from "effect"
+import { Runtime as RikaToolRuntime } from "@rika/tools"
+import { Cause, ConfigProvider, Context, Effect, Layer, Redacted, Schema, Scope, Stream } from "effect"
 import { LanguageModel } from "effect/unstable/ai"
 import {
   executionModelRoutes,
@@ -49,6 +50,27 @@ const withRuntime = <A, E>(
       return yield* effect(Context.get(context, ModelProviderRuntime.Service))
     }),
   ).pipe(Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment)))
+
+const openAiSettings = (baseUrl: string): ConfigContract.Settings => ({
+  ...ConfigContract.defaults,
+  providers: {
+    ...ConfigContract.defaults.providers,
+    openai: { protocol: "openai", baseUrl },
+  },
+})
+
+const sseResponse = (events: ReadonlyArray<unknown>) => {
+  const bytes = new TextEncoder().encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""))
+  const body = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      for (let offset = 0; offset < bytes.length; offset += 7) controller.enqueue(bytes.slice(offset, offset + 7))
+      controller.close()
+    },
+  })
+  return new Response(body, { headers: { "content-type": "text/event-stream" } })
+}
+
+const response = (id: string) => ({ id, model: "test-model", created_at: 1, output: [] })
 
 test("prepares distinct registrations for every default model tuple and aligns every pin", () =>
   Effect.runPromise(
@@ -122,6 +144,135 @@ test("sends configured reasoning effort and summary to custom OpenAI requests", 
           { effort: "xhigh", summary: "auto" },
           { effort: "max", summary: "auto" },
         ])
+      }),
+    ).pipe(Effect.ensuring(Effect.promise(() => server.stop(true)))),
+  )
+})
+
+test("assembles each fragmented OpenAI function call once and sends supported stream options", () => {
+  const requests = new Array<Record<string, unknown>>()
+  const handled = new Array<RikaToolRuntime.Request>()
+  const calls = [
+    { id: "item-1", callId: "call-1", path: "first.txt" },
+    { id: "item-2", callId: "call-2", path: "second.txt" },
+    { id: "item-3", callId: "call-3", path: "third.txt" },
+  ]
+  const events = calls.flatMap((call, outputIndex) => {
+    const args = JSON.stringify({ path: call.path })
+    return [
+      {
+        type: "response.output_item.added",
+        output_index: outputIndex,
+        sequence_number: outputIndex * 3,
+        item: { id: call.id, type: "function_call", call_id: call.callId, name: "read", arguments: "" },
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: call.id,
+        output_index: outputIndex,
+        sequence_number: outputIndex * 3 + 1,
+        delta: args,
+      },
+      {
+        type: "response.function_call_arguments.done",
+        item_id: call.id,
+        output_index: outputIndex,
+        sequence_number: outputIndex * 3 + 2,
+        arguments: args,
+      },
+    ]
+  })
+  events.push({ type: "response.completed", sequence_number: 10, response: response("response-burst") } as never)
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) =>
+      Effect.promise(() => request.json()).pipe(
+        Effect.map((body) => {
+          requests.push(body as Record<string, unknown>)
+          return requests.length === 1
+            ? sseResponse(events)
+            : sseResponse([{ type: "response.completed", sequence_number: 0, response: response("response-final") }])
+        }),
+        Effect.runPromise,
+      ),
+  })
+  return Effect.runPromise(
+    withRuntime(authService(), (runtime) =>
+      Effect.gen(function* () {
+        const route = ConfigContract.resolveModelRoute(openAiSettings(server.url.toString()), "medium", "main")
+        const prepared = yield* runtime.prepare([route])
+        const context = yield* Layer.build(prepared.registrations[0]!.layer)
+        const toolkitContext = yield* Layer.build(
+          RikaToolRuntime.handlerLayer.pipe(
+            Layer.provide(
+              RikaToolRuntime.testLayer((request) =>
+                Effect.sync(() => {
+                  handled.push(request)
+                  return { text: "read", truncated: false }
+                }),
+              ),
+            ),
+          ),
+        )
+        const toolkit = yield* RikaToolRuntime.toolkit.pipe(Effect.provide(toolkitContext))
+        const parts = yield* LanguageModel.streamText({ prompt: "read three files", toolkit }).pipe(
+          Stream.runCollect,
+          Effect.provide(context),
+        )
+        const toolCalls = Array.from(parts).filter((part) => part.type === "tool-call")
+        expect(toolCalls.map((part) => part.id)).toEqual(["call-1", "call-2", "call-3"])
+        expect(toolCalls.map((part) => part.params)).toEqual(calls.map((call) => ({ path: call.path })))
+        expect(handled).toEqual(calls.map((call) => ({ _tag: "Read", path: call.path })))
+        expect(requests).toHaveLength(1)
+        expect(requests.every((request) => request.stream === true)).toBe(true)
+        expect(requests.every((request) => !("stream_options" in request))).toBe(true)
+      }),
+    ).pipe(Effect.ensuring(Effect.promise(() => server.stop(true)))),
+  )
+})
+
+test("rejects a malformed OpenAI terminal without completing a partial function call", () => {
+  const events = [
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      sequence_number: 0,
+      item: { id: "partial-item", type: "function_call", call_id: "partial-call", name: "read", arguments: "" },
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: "partial-item",
+      output_index: 0,
+      sequence_number: 1,
+      delta: '{"path":"partial.txt"}',
+    },
+    { type: "response.completed", sequence_number: 2 },
+  ]
+  const server = Bun.serve({ port: 0, fetch: () => sseResponse(events) })
+  return Effect.runPromise(
+    withRuntime(authService(), (runtime) =>
+      Effect.gen(function* () {
+        const route = ConfigContract.resolveModelRoute(openAiSettings(server.url.toString()), "medium", "main")
+        const prepared = yield* runtime.prepare([route])
+        const context = yield* Layer.build(prepared.registrations[0]!.layer)
+        const toolkitContext = yield* Layer.build(
+          RikaToolRuntime.handlerLayer.pipe(
+            Layer.provide(RikaToolRuntime.testLayer(() => Effect.die("tool handlers are not executed by this test"))),
+          ),
+        )
+        const toolkit = yield* RikaToolRuntime.toolkit.pipe(Effect.provide(toolkitContext))
+        const exit = yield* Effect.exit(
+          LanguageModel.streamText({ prompt: "read one file", toolkit }).pipe(
+            Stream.runCollect,
+            Effect.provide(context),
+          ),
+        )
+        expect(exit._tag).toBe("Failure")
+        if (exit._tag === "Failure") {
+          const failure = Cause.pretty(exit.cause)
+          expect(failure).toContain("response")
+          expect(failure).not.toContain("partial.txt")
+        }
       }),
     ).pipe(Effect.ensuring(Effect.promise(() => server.stop(true)))),
   )

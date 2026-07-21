@@ -1,7 +1,7 @@
 import { Context, Data, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
 import { Toolkit } from "effect/unstable/ai"
 import * as WebSearchService from "./web-search"
-import { Service as ReadWebPageService } from "./read-web-page"
+import * as ReadWebPageService from "./read-web-page"
 import * as ProcessRegistry from "./process-registry"
 import * as MediaView from "./media-view"
 import * as ToolPolicy from "./tool-policy"
@@ -50,7 +50,10 @@ export class ToolError extends Schema.TaggedErrorClass<ToolError>()("ToolError",
   tool: Schema.String,
   message: Schema.String,
   kind: Schema.Literals(["operation", "timeout"]),
+  category: ToolDefinitions.Result.FailureCategory,
   outcome: Schema.Literals(["known", "unknown"]),
+  recovery: ToolDefinitions.Result.Recovery,
+  nextAction: Schema.String,
 }) {}
 
 export const grepTool = ToolDefinitions.Grep.tool
@@ -182,21 +185,164 @@ const boundResult = (request: Request, result: Result): Result => {
   }
 }
 
-const toolError = (request: Request, cause: unknown, kind: "operation" | "timeout") =>
-  ToolError.make(
-    kind === "timeout" && contract(request).idempotency === "unsafe"
-      ? {
-          tool: toolName(request),
-          message: "Tool call timed out; its outcome is unknown and the call must not be repeated",
-          kind,
-          outcome: "unknown",
-        }
-      : { tool: toolName(request), message: String(cause), kind, outcome: "known" },
+interface FailureDetails {
+  readonly category: ToolDefinitions.Result.FailureCategory
+  readonly message: string
+  readonly outcome: "known" | "unknown"
+  readonly recovery: ToolDefinitions.Result.Recovery
+  readonly nextAction: string
+}
+
+class RuntimeOperationError extends Data.TaggedError("RuntimeOperationError")<FailureDetails> {}
+
+const runtimeError = (details: FailureDetails) => new RuntimeOperationError(details)
+
+const tagOf = (cause: unknown) =>
+  cause !== null && typeof cause === "object" && "_tag" in cause && typeof cause._tag === "string"
+    ? cause._tag
+    : undefined
+
+const operationError = (cause: unknown): RuntimeOperationError => {
+  if (cause instanceof RuntimeOperationError) return cause
+  if (Schema.is(WebSearchService.SelectionError)(cause))
+    return runtimeError({
+      category: "dependency_unavailable",
+      message: cause.message,
+      outcome: "known",
+      recovery: "after_change",
+      nextAction: "Configure a provider that supports this search kind or choose a configured search kind",
+    })
+  if (Schema.is(WebSearchService.ExecutionError)(cause)) {
+    const rateLimited =
+      cause.outcomes.length > 0 && cause.outcomes.every((outcome) => outcome.error?.kind === "rate-limit")
+    return rateLimited
+      ? runtimeError({
+          category: "rate_limited",
+          message: "Every selected web search provider is rate limited",
+          outcome: "known",
+          recovery: "later",
+          nextAction: "Retry later or use a different configured provider",
+        })
+      : runtimeError({
+          category: "dependency_unavailable",
+          message: "Every selected web search provider failed before returning results",
+          outcome: "known",
+          recovery: "later",
+          nextAction: "Retry later or use a different configured provider",
+        })
+  }
+  if (Schema.is(ReadWebPageService.HttpError)(cause))
+    return cause.message.includes("PARALLEL_API_KEY")
+      ? runtimeError({
+          category: "dependency_unavailable",
+          message: "Web page extraction is unavailable because PARALLEL_API_KEY is not configured",
+          outcome: "known",
+          recovery: "after_change",
+          nextAction: "Configure PARALLEL_API_KEY or use another tool that can read the URL",
+        })
+      : runtimeError({
+          category: "dependency_unavailable",
+          message: "The web page provider failed before returning usable content",
+          outcome: "known",
+          recovery: "later",
+          nextAction: "Retry later or use another source",
+        })
+  if (Schema.is(ReadWebPageService.ContentError)(cause))
+    return cause.reason === "invalid_input"
+      ? runtimeError({
+          category: "invalid_input",
+          message: "The web page URL or request options are invalid",
+          outcome: "known",
+          recovery: "after_change",
+          nextAction: "Correct the URL or request options, or use another source",
+        })
+      : runtimeError({
+          category: "dependency_unavailable",
+          message: "The web page provider could not return usable content",
+          outcome: "known",
+          recovery: "later",
+          nextAction: "Use another source or retry later",
+        })
+  if (Schema.is(WorkspaceIndex.WorkspaceIndexError)(cause))
+    return runtimeError({
+      category: cause.operation === "initialize" || cause.operation === "scan" ? "dependency_unavailable" : "operation",
+      message:
+        cause.operation === "initialize" || cause.operation === "scan"
+          ? "The workspace index is unavailable"
+          : `The workspace index could not complete ${cause.operation}`,
+      outcome: "known",
+      recovery: cause.operation === "initialize" || cause.operation === "scan" ? "after_change" : "later",
+      nextAction:
+        cause.operation === "initialize" || cause.operation === "scan"
+          ? "Repair the workspace index installation or restart Rika after the index can initialize"
+          : "Retry once later or use a narrower direct file operation",
+    })
+  if (
+    tagOf(cause) === "PlatformError" &&
+    "reason" in (cause as object) &&
+    tagOf((cause as { reason: unknown }).reason) === "PermissionDenied"
   )
+    return runtimeError({
+      category: "access_denied",
+      message: "The operating system denied access for this operation",
+      outcome: "known",
+      recovery: "after_change",
+      nextAction: "Use an accessible path or correct the workspace permissions before retrying",
+    })
+  return runtimeError({
+    category: "operation",
+    message: "The operation failed before producing a usable result",
+    outcome: "known",
+    recovery: "after_change",
+    nextAction: "Review the input and retry only after correcting the likely cause",
+  })
+}
 
-class RuntimeOperationError extends Data.TaggedError("RuntimeOperationError")<{ readonly message: string }> {}
+const actionableMessage = (details: FailureDetails) =>
+  `${details.message.replace(/[.\s]+$/, "")}. ${
+    details.outcome === "known" ? "The call did not change state." : "The call may have changed state."
+  } Next action: ${details.nextAction.replace(/[.\s]+$/, "")}.`
 
-const operationError = (cause: unknown) => new RuntimeOperationError({ message: String(cause) })
+const toolError = (request: Request, cause: unknown, kind: "operation" | "timeout") => {
+  const unsafe = contract(request).idempotency === "unsafe"
+  let details: FailureDetails
+  if (kind !== "timeout") details = operationError(cause)
+  else if (unsafe)
+    details = {
+      category: "timeout",
+      message: `${toolName(request)} timed out after ${contract(request).timeoutMillis}ms without confirming completion`,
+      outcome: "unknown",
+      recovery: "never",
+      nextAction: "Inspect the workspace and process state; this call must not be repeated unchanged",
+    }
+  else
+    details = {
+      category: "timeout",
+      message: `${toolName(request)} timed out after ${contract(request).timeoutMillis}ms without producing a result`,
+      outcome: "known",
+      recovery: "later",
+      nextAction: "Retry once later with a narrower request or use an alternative tool",
+    }
+  const finalDetails =
+    unsafe && kind === "operation" && !(cause instanceof RuntimeOperationError)
+      ? {
+          category: details.category,
+          message: details.message,
+          outcome: "unknown" as const,
+          recovery: "never" as const,
+          nextAction: "Inspect the workspace and process state before deciding whether another call is safe",
+        }
+      : details
+  return ToolError.make({
+    tool: toolName(request),
+    message: actionableMessage(finalDetails),
+    kind,
+    category: finalDetails.category,
+    outcome: finalDetails.outcome,
+    recovery: finalDetails.recovery,
+    nextAction: finalDetails.nextAction,
+  })
+}
 
 const runtimeLayer = (workspace: string) =>
   Layer.effect(
@@ -205,7 +351,7 @@ const runtimeLayer = (workspace: string) =>
       const fileSystem = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const webSearch = yield* WebSearchService.Service
-      const readWebPage = yield* ReadWebPageService
+      const readWebPage = yield* ReadWebPageService.Service
       const processes = yield* ProcessRegistry.Service
       const mediaView = yield* MediaView.Service
       const workspaceIndex = yield* WorkspaceIndex.Service
@@ -215,7 +361,13 @@ const runtimeLayer = (workspace: string) =>
           try: () => {
             const target = path.resolve(workspace, value)
             if (target !== workspace && !target.startsWith(`${workspace}${path.sep}`))
-              throw new RuntimeOperationError({ message: `Path escapes workspace: ${value}` })
+              throw runtimeError({
+                category: "access_denied",
+                message: `Path escapes workspace: ${value}`,
+                outcome: "known",
+                recovery: "after_change",
+                nextAction: `Use a path under ${workspace}`,
+              })
             return target
           },
           catch: operationError,
@@ -230,7 +382,15 @@ const runtimeLayer = (workspace: string) =>
           Effect.flatMap(([canonicalRoot, canonicalTarget]) =>
             canonicalTarget === canonicalRoot || canonicalTarget.startsWith(`${canonicalRoot}${path.sep}`)
               ? Effect.succeed(canonicalTarget)
-              : Effect.fail(new RuntimeOperationError({ message: `Path escapes workspace: ${value}` })),
+              : Effect.fail(
+                  runtimeError({
+                    category: "access_denied",
+                    message: `Path escapes workspace: ${value}`,
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction: `Use a path under ${workspace}`,
+                  }),
+                ),
           ),
         )
       const resolveEdit = (value: string) =>
@@ -244,7 +404,15 @@ const runtimeLayer = (workspace: string) =>
                 Effect.flatMap((link) =>
                   Option.isNone(link)
                     ? Effect.void
-                    : Effect.fail(new RuntimeOperationError({ message: `symbolic link is not writable: ${value}` })),
+                    : Effect.fail(
+                        runtimeError({
+                          category: "access_denied",
+                          message: `Symbolic links are not writable through this tool: ${value}`,
+                          outcome: "known",
+                          recovery: "after_change",
+                          nextAction: "Use the real file path under the workspace",
+                        }),
+                      ),
                 ),
               )
             }).pipe(Effect.as(target))
@@ -258,7 +426,15 @@ const runtimeLayer = (workspace: string) =>
           Effect.flatMap((target) =>
             isContained(target)
               ? Effect.succeed(target)
-              : Effect.fail(new RuntimeOperationError({ message: `Path escapes workspace: ${value}` })),
+              : Effect.fail(
+                  runtimeError({
+                    category: "access_denied",
+                    message: `Path escapes workspace: ${value}`,
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction: `Use a path under ${workspace}`,
+                  }),
+                ),
           ),
         )
       const resolveRead = Effect.fn("ToolRuntime.resolveRead")(function* (value: string) {
@@ -266,7 +442,14 @@ const runtimeLayer = (workspace: string) =>
         if (yield* fileSystem.exists(exact)) return yield* resolveContained(value)
         const found = yield* workspaceIndex.fileSearch(value, { pageSize: 20 })
         const bestMatch = found.items[0]
-        if (bestMatch === undefined) return yield* new RuntimeOperationError({ message: `File not found: ${value}` })
+        if (bestMatch === undefined)
+          return yield* runtimeError({
+            category: "not_found",
+            message: `File not found: ${value}`,
+            outcome: "known",
+            recovery: "after_change",
+            nextAction: "Search for the file or call read with a corrected path",
+          })
         return yield* resolveContained(bestMatch.relativePath)
       })
       return Service.of({
@@ -285,7 +468,13 @@ const runtimeLayer = (workspace: string) =>
                     cursor,
                   })
                   if (page.regexFallbackError !== undefined)
-                    return yield* new RuntimeOperationError({ message: page.regexFallbackError })
+                    return yield* runtimeError({
+                      category: "invalid_input",
+                      message: "The grep pattern is not a valid regular expression",
+                      outcome: "known",
+                      recovery: "after_change",
+                      nextAction: "Correct the regular expression or set regex to false",
+                    })
                   for (const match of page.items) {
                     const target = yield* resolveContained(match.relativePath)
                     matches.push(
@@ -301,7 +490,13 @@ const runtimeLayer = (workspace: string) =>
                 const start = request.readRange?.[0] ?? 1
                 const end = request.readRange?.[1] ?? 1_000
                 if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start)
-                  return yield* new RuntimeOperationError({ message: "Invalid file range" })
+                  return yield* runtimeError({
+                    category: "invalid_input",
+                    message: "The file range is invalid",
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction: "Use whole-number line bounds where start is at least 1 and end is not before start",
+                  })
                 const target = yield* resolveRead(request.path)
                 const lines = (yield* fileSystem.readFileString(target)).split("\n")
                 return bounded(
@@ -326,14 +521,40 @@ const runtimeLayer = (workspace: string) =>
                 const target = yield* resolveEdit(request.path)
                 const content = yield* fileSystem.readFileString(target)
                 if (request.oldStr === request.newStr)
-                  return yield* new RuntimeOperationError({ message: "old_str and new_str must be different" })
+                  return yield* runtimeError({
+                    category: "invalid_input",
+                    message: "old_str and new_str must be different",
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction: "Provide replacement text that differs from old_str",
+                  })
                 if (request.oldStr.length === 0)
-                  return yield* new RuntimeOperationError({ message: "old_str must not be empty" })
+                  return yield* runtimeError({
+                    category: "invalid_input",
+                    message: "old_str must not be empty",
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction: "Provide the exact existing text to replace",
+                  })
                 const first = content.indexOf(request.oldStr)
-                if (first < 0) return yield* new RuntimeOperationError({ message: "old_str was not found" })
+                if (first < 0)
+                  return yield* runtimeError({
+                    category: "conflict",
+                    message: "old_str was not found in the current file",
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction: `Reread ${request.path} and retry with the current exact text`,
+                  })
                 const second = content.indexOf(request.oldStr, first + request.oldStr.length)
                 if (second >= 0 && request.replaceAll !== true)
-                  return yield* new RuntimeOperationError({ message: "old_str is not unique; set replace_all to true" })
+                  return yield* runtimeError({
+                    category: "conflict",
+                    message: "old_str is not unique in the current file",
+                    outcome: "known",
+                    recovery: "after_change",
+                    nextAction:
+                      "Retry with more surrounding context, or set replace_all only when every match should change",
+                  })
                 const next =
                   request.replaceAll === true
                     ? content.split(request.oldStr).join(request.newStr)

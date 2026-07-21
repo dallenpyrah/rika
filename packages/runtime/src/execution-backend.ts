@@ -89,6 +89,17 @@ const failureKind = (cause: Cause.Cause<unknown>) => {
   return typeof failure
 }
 
+const toolFailureAnnotations = (cause: Cause.Cause<unknown>) => {
+  const failure = Cause.squash(cause)
+  return Schema.is(RikaToolRuntime.ToolError)(failure)
+    ? {
+        "rika.failure.category": failure.category,
+        "rika.failure.outcome": failure.outcome,
+        "rika.failure.interrupted": false,
+      }
+    : { "rika.failure.interrupted": Cause.hasInterrupts(cause) }
+}
+
 const isExecutionNotFound = (failure: unknown) =>
   failure !== null && typeof failure === "object" && "_tag" in failure && failure._tag === "ExecutionNotFound"
 
@@ -200,10 +211,13 @@ export const routedToolRuntimeLayer: {
               const runtimeContext = yield* Layer.build(workspaceLayer)
               const runtime = Context.get(runtimeContext, RikaToolRuntime.Service)
               const startedAt = yield* Clock.currentTimeMillis
+              const deadline = ToolCatalog.get(String(call.call.name))?.timeoutMillis
               yield* Effect.logInfo("tool.started").pipe(
                 Effect.annotateLogs({
                   "rika.execution.id": String(call.executionId),
                   "rika.tool.call.id": String(call.call.id),
+                  ...(deadline === undefined ? {} : { "rika.tool.deadline.ms": deadline }),
+                  "rika.tool.name": String(call.call.name),
                 }),
               )
               return yield* runtime.run(request).pipe(
@@ -222,6 +236,7 @@ export const routedToolRuntimeLayer: {
                       Effect.logError("tool.failed").pipe(
                         Effect.annotateLogs({
                           "rika.duration.ms": failedAt - startedAt,
+                          ...toolFailureAnnotations(cause),
                           "rika.failure.kind": failureKind(cause),
                         }),
                       ),
@@ -231,6 +246,7 @@ export const routedToolRuntimeLayer: {
                 Effect.annotateLogs({
                   "rika.execution.id": String(call.executionId),
                   "rika.tool.call.id": String(call.call.id),
+                  ...(deadline === undefined ? {} : { "rika.tool.deadline.ms": deadline }),
                   "rika.tool.name": String(call.call.name),
                 }),
               )
@@ -241,9 +257,13 @@ export const routedToolRuntimeLayer: {
                 ? cause
                 : RikaToolRuntime.ToolError.make({
                     tool: request._tag,
-                    message: String(cause),
+                    message:
+                      "The tool failed before Rika could classify it. The call may have changed state. Next action: inspect current state before deciding whether another call is safe.",
                     kind: "operation",
-                    outcome: "known",
+                    category: "operation",
+                    outcome: "unknown",
+                    recovery: "never",
+                    nextAction: "Inspect current state before deciding whether another call is safe",
                   }),
             ),
           )) as RikaToolRuntime.Interface["run"]
@@ -532,16 +552,11 @@ export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEven
       : terminalContent
   const failure =
     recovered || terminalContent !== undefined || finalResponse !== undefined ? undefined : childFailureText(terminal)
+  let status: "completed" | "cancelled" | "failed" = "failed"
+  if (terminal?.type === "execution.completed" || recovered) status = "completed"
+  else if (terminal?.type === "execution.cancelled") status = "cancelled"
   return {
-    status:
-      terminal?.type === "execution.completed" || recovered
-        ? ("completed" as const)
-        : (() => {
-            if (terminal?.type === "execution.cancelled") {
-              return "cancelled" as const
-            }
-            return "failed" as const
-          })(),
+    status,
     output: failure === undefined ? primary : [...primary, { type: "text", text: failure }],
   }
 }
@@ -556,17 +571,13 @@ const awaitChildResult = (client: Client.Interface, childId: string) => {
     Effect.map((events) => resolveChildResult([...events])),
   )
 }
-const workflowExecutionId = (runId: string, ownerTurnId?: string, workspace?: string) =>
-  Ids.ExecutionId.make(
-    ownerTurnId === undefined
-      ? (() => {
-          if (workspace === undefined) {
-            return `workflow:${runId}`
-          }
-          return `workflow:workspace:${encodeURIComponent(workspace)}:run:${encodeURIComponent(runId)}`
-        })()
-      : `workflow:turn:${encodeURIComponent(ownerTurnId)}:run:${encodeURIComponent(runId)}`,
-  )
+const workflowExecutionId = (runId: string, ownerTurnId?: string, workspace?: string) => {
+  if (ownerTurnId !== undefined)
+    return Ids.ExecutionId.make(`workflow:turn:${encodeURIComponent(ownerTurnId)}:run:${encodeURIComponent(runId)}`)
+  if (workspace !== undefined)
+    return Ids.ExecutionId.make(`workflow:workspace:${encodeURIComponent(workspace)}:run:${encodeURIComponent(runId)}`)
+  return Ids.ExecutionId.make(`workflow:${runId}`)
+}
 const attachedWorkflow = (value: string) => {
   const match = /^workflow:turn:([^:]+):run:(.+)$/.exec(value)
   if (match === null) return undefined
@@ -829,15 +840,10 @@ const followExecution = (
               }
               const spawnedChild = childExecutionIdFromEvent(item.event)
               const mapped = attributedEvent(item.event, root ? undefined : String(execution))
-              const terminal =
-                mapped.type === "execution.completed"
-                  ? Status.make("completed")
-                  : (() => {
-                      if (mapped.type === "execution.failed") {
-                        return Status.make("failed")
-                      }
-                      return mapped.type === "execution.cancelled" ? Status.make("cancelled") : undefined
-                    })()
+              let terminal: Status | undefined
+              if (mapped.type === "execution.completed") terminal = Status.make("completed")
+              else if (mapped.type === "execution.failed") terminal = Status.make("failed")
+              else if (mapped.type === "execution.cancelled") terminal = Status.make("cancelled")
               const inspectActionable =
                 stopAtActionableWait && isActionableWait(mapped) && typeof mapped.data?.wait_id === "string"
                   ? client.executions
@@ -942,17 +948,13 @@ const followExecution = (
           "rika.execution.status": status,
         }),
       )
+      let finalStatus = status
+      if (stoppedAtActionableWait && (status === "running" || status === "queued")) {
+        finalStatus = Status.make("waiting")
+      }
       return {
         turnId,
-        status:
-          status === "running" || status === "queued"
-            ? (() => {
-                if (stoppedAtActionableWait) {
-                  return Status.make("waiting")
-                }
-                return status
-              })()
-            : status,
+        status: finalStatus,
         events,
       }
     }),
@@ -1187,16 +1189,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 child.model === undefined ? undefined : resolveSpawnModel(routePin, inherited, child.model)
               if (child.model !== undefined && requested === undefined)
                 return Effect.fail(BackendError.make({ message: `Model ${child.model} is not available` }))
-              const selected =
-                requested?.selection ??
-                (profileRoute === undefined
-                  ? (() => {
-                      if (profile === "Oracle") {
-                        return options.oracleSelection ?? options.selection
-                      }
-                      return options.selection
-                    })()
-                  : pinnedSelection(profileRoute))
+              let selected = requested?.selection
+              if (selected === undefined) {
+                if (profileRoute !== undefined) selected = pinnedSelection(profileRoute)
+                else if (profile === "Oracle") selected = options.oracleSelection ?? options.selection
+                else selected = options.selection
+              }
               const selectedRoute = requested === undefined ? profileRoute : routeForSelection(routePin, selected)
               const preset = resolve(profile, selected).preset
               const policy =
@@ -1537,18 +1535,16 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             )
         }),
         pageEvents: Effect.fn("ExecutionBackend.pageEvents")(function* (turnId, direction, cursor, limit, reference) {
+          const cursorPage: { after_cursor?: string; before_cursor?: string } = {}
+          if (cursor !== undefined) {
+            if (direction === "forward") cursorPage.after_cursor = cursor
+            else cursorPage.before_cursor = cursor
+          }
           return yield* client.executions
             .pageEvents({
               execution_id: executionId(turnId, reference),
               direction,
-              ...(cursor === undefined
-                ? {}
-                : (() => {
-                    if (direction === "forward") {
-                      return { after_cursor: cursor }
-                    }
-                    return { before_cursor: cursor }
-                  })()),
+              ...cursorPage,
               ...(limit === undefined ? {} : { limit }),
             })
             .pipe(
@@ -1767,22 +1763,24 @@ export const layer = <
                   }),
                 )
               }
-              const selected =
-                profile === "Task"
-                  ? resolveSpawnModel(routePin, parentSelection, childCall.model)
-                  : (() => {
-                      if (options.modelVariantPolicy === "fixed-selection") {
-                        return {
-                          selection:
-                            profile === "Oracle" ? (options.oracleSelection ?? options.selection) : options.selection,
-                          effort: routeForProfile(routePin, profile).effort,
-                        }
-                      }
-                      return {
-                        selection: pinnedSelection(routeForProfile(routePin, profile)),
-                        effort: routeForProfile(routePin, profile).effort,
-                      }
-                    })()
+              let selected:
+                | {
+                    readonly selection: ModelRegistry.ModelSelection
+                    readonly effort: string
+                  }
+                | undefined
+              if (profile === "Task") selected = resolveSpawnModel(routePin, parentSelection, childCall.model)
+              else {
+                const profileRoute = routeForProfile(routePin, profile)
+                let selection: ModelRegistry.ModelSelection
+                if (options.modelVariantPolicy !== "fixed-selection") selection = pinnedSelection(profileRoute)
+                else if (profile === "Oracle") selection = options.oracleSelection ?? options.selection
+                else selection = options.selection
+                selected = {
+                  selection,
+                  effort: profileRoute.effort,
+                }
+              }
               if (selected === undefined) {
                 return Effect.fail(
                   AgentTools.AgentToolError.make({
@@ -1944,16 +1942,11 @@ export const layer = <
                 const modelOutput = events.findLast(
                   (executionEvent) => executionEvent.type === "model.output.completed",
                 )
+                let status: "completed" | "cancelled" | "failed" = "failed"
+                if (terminal?.type === "execution.completed") status = "completed"
+                else if (terminal?.type === "execution.cancelled") status = "cancelled"
                 return {
-                  status:
-                    terminal?.type === "execution.completed"
-                      ? ("completed" as const)
-                      : (() => {
-                          if (terminal?.type === "execution.cancelled") {
-                            return "cancelled" as const
-                          }
-                          return "failed" as const
-                        })(),
+                  status,
                   output:
                     terminal?.content === undefined || terminal.content.length === 0
                       ? (modelOutput?.content ?? [])

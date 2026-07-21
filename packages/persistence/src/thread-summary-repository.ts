@@ -72,24 +72,18 @@ const RepairRow = Schema.Struct({
 
 const repositoryError = (error: unknown) => RepositoryError.make({ message: String(error) })
 const listLimit = (value: number | undefined) => Math.min(Math.max(value ?? 100, 1), 100)
-const statusRank = (status: Status): number =>
-  status === "accepted" || status === "running"
-    ? 3
-    : (() => {
-        if (status === "waiting") {
-          return 2
-        }
-        return status === "queued" ? 1 : 0
-      })()
-const summaryStatus = (rank: number): SummaryStatus =>
-  rank >= 3
-    ? "running"
-    : (() => {
-        if (rank === 2) {
-          return "waiting"
-        }
-        return rank === 1 ? "queued" : "idle"
-      })()
+const statusRank = (status: Status): number => {
+  if (status === "accepted" || status === "running") return 3
+  if (status === "waiting") return 2
+  if (status === "queued") return 1
+  return 0
+}
+const summaryStatus = (rank: number): SummaryStatus => {
+  if (rank >= 3) return "running"
+  if (rank === 2) return "waiting"
+  if (rank === 1) return "queued"
+  return "idle"
+}
 
 const decodeSummary = (row: unknown) =>
   Schema.decodeUnknownEffect(SummaryRow)(row).pipe(

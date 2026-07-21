@@ -205,14 +205,10 @@ export const renderBlock: {
       case "ToolCall": {
         if (isToolOutputDisplayed(block)) return renderTool(block, width)
         const running = block.status === "running"
-        const icon = running
-          ? "⠿"
-          : (() => {
-              if (block.status === "complete") {
-                return "✓"
-              }
-              return block.status === "cancelled" ? "⊘" : "✗"
-            })()
+        let icon = "✗"
+        if (running) icon = "⠿"
+        else if (block.status === "complete") icon = "✓"
+        else if (block.status === "cancelled") icon = "⊘"
         const label = running ? block.presentation.activeLabel : block.presentation.completeLabel
         return `${icon} ${label}${block.detail.length === 0 ? "" : ` ${block.detail}`}`
       }
@@ -231,25 +227,14 @@ export const renderBlock: {
       case "Permission":
         return `? ${block.title} [${block.status}]\n  ${block.detail}`
       case "ChildAgent": {
-        const icon =
-          block.status === "running"
-            ? "⠿"
-            : (() => {
-                if (block.status === "complete") {
-                  return "✓"
-                }
-                return block.status === "cancelled" ? "⊘" : "✗"
-              })()
-        return `${icon} Subagent ${
-          block.status === "running"
-            ? "working"
-            : (() => {
-                if (block.status === "cancelled") {
-                  return "cancelled"
-                }
-                return "finished"
-              })()
-        } ▸\n  ${block.name} · ${block.summary}`
+        let icon = "✗"
+        if (block.status === "running") icon = "⠿"
+        else if (block.status === "complete") icon = "✓"
+        else if (block.status === "cancelled") icon = "⊘"
+        let status = "finished"
+        if (block.status === "running") status = "working"
+        else if (block.status === "cancelled") status = "cancelled"
+        return `${icon} Subagent ${status} ▸\n  ${block.name} · ${block.summary}`
       }
       case "Workflow":
         return `◫ Workflow ${block.name} [${block.status}]\n  ${block.step}`
@@ -279,31 +264,21 @@ export const renderSidebar: {
         const index = row + model.threadSidebar.scrollTop
         if (row > 0) chunks.push(fg(colors.text)("\n"))
         const selected = model.threadSidebar.focused && index === model.threadSidebar.selected
-        const marker =
-          thread.id === model.currentThreadId
-            ? "*"
-            : (() => {
-                if (thread.status !== "idle") {
-                  return spinnerFrame
-                }
-                return thread.unread ? "○" : " "
-              })()
+        let marker = " "
+        if (thread.id === model.currentThreadId) marker = "*"
+        else if (thread.status !== "idle") marker = spinnerFrame
+        else if (thread.unread) marker = "○"
         const title = truncateToWidth(thread.title, sidebarWidth - 4)
         const padding = " ".repeat(Math.max(0, sidebarWidth - 4 - stringWidth(title)))
         const renderedRow = ` ${marker} ${title}${padding}`
         if (selected) chunks.push(bg(colors.amber)(fg(colors.surface)(renderedRow)))
         else {
           chunks.push(fg(colors.text)(" "))
-          chunks.push(
-            thread.id === model.currentThreadId
-              ? fg(colors.green)(marker)
-              : (() => {
-                  if (thread.status !== "idle") {
-                    return fg(colors.blue)(marker)
-                  }
-                  return thread.unread ? dim(fg(colors.blue)(marker)) : fg(colors.text)(marker)
-                })(),
-          )
+          let styledMarker = fg(colors.text)(marker)
+          if (thread.id === model.currentThreadId) styledMarker = fg(colors.green)(marker)
+          else if (thread.status !== "idle") styledMarker = fg(colors.blue)(marker)
+          else if (thread.unread) styledMarker = dim(fg(colors.blue)(marker))
+          chunks.push(styledMarker)
           chunks.push(fg(colors.text)(` ${title}${padding}`))
         }
         chunks.push(dim(fg(colors.text)("│")))
@@ -361,15 +336,11 @@ const wrapTextToWidth = (text: string, width: number): ReadonlyArray<string> => 
         end = index + segment.length
         if (/\s/u.test(segment)) breakAt = end
       }
-      const split =
-        breakAt > 0
-          ? breakAt
-          : (() => {
-              if (end > 0) {
-                return end
-              }
-              return graphemeSegmenter.segment(rest)[Symbol.iterator]().next().value?.segment.length ?? rest.length
-            })()
+      let split = breakAt
+      if (split === 0) split = end
+      if (split === 0) {
+        split = graphemeSegmenter.segment(rest)[Symbol.iterator]().next().value?.segment.length ?? rest.length
+      }
       lines.push(rest.slice(0, split).trimEnd())
       rest = rest.slice(split).trimStart()
     }
@@ -498,18 +469,12 @@ export const renderChangedFiles: {
 
 export const renderTranscript = (model: Model): string => {
   const welcome = model.entries.length === 0 ? `Rika\nLocal durable coding agent\n\n` : ""
-  const entries = model.entries
-    .map((entry) =>
-      entry.role === "user"
-        ? `┃ ${entry.text}`
-        : (() => {
-            if (entry.role === "notice") {
-              return `! ${entry.text}`
-            }
-            return renderMarkdown(entry.text, markdownWidthForColumn(model.width))
-          })(),
-    )
-    .join("\n\n")
+  const renderEntry = (entry: Model["entries"][number]): string => {
+    if (entry.role === "user") return `┃ ${entry.text}`
+    if (entry.role === "notice") return `! ${entry.text}`
+    return renderMarkdown(entry.text, markdownWidthForColumn(model.width))
+  }
+  const entries = model.entries.map(renderEntry).join("\n\n")
   const blocks = (model.blocks as ReadonlyArray<TranscriptBlock>)
     .map((block) => {
       if (block._tag === "Permission" && block.status === "pending") {
@@ -526,14 +491,7 @@ export const renderTranscript = (model: Model): string => {
   const ordered = (model.items as ReadonlyArray<TranscriptItem>).map((item) => {
     if (item._tag === "Block") return renderBlock(model.blocks[item.index] as TranscriptBlock, model.width)
     const entry = model.entries[item.index]!
-    return entry.role === "user"
-      ? `┃ ${entry.text}`
-      : (() => {
-          if (entry.role === "notice") {
-            return `! ${entry.text}`
-          }
-          return renderMarkdown(entry.text, markdownWidthForColumn(model.width))
-        })()
+    return renderEntry(entry)
   })
   return welcome + ordered.join("\n\n")
 }
@@ -592,15 +550,11 @@ const exploreChildLabel = (unit: ToolUnit): string => {
 
 const plural = (count: number, singular: string): string => `${count} ${singular}${count === 1 ? "" : "s"}`
 
-const iconChar = (failed: boolean, running: boolean, frame = idleSpinnerFrame, cancelled = false): string =>
-  running
-    ? frame
-    : (() => {
-        if (cancelled) {
-          return "⊘"
-        }
-        return failed ? "✕" : "✓"
-      })()
+const iconChar = (failed: boolean, running: boolean, frame = idleSpinnerFrame, cancelled = false): string => {
+  if (running) return frame
+  if (cancelled) return "⊘"
+  return failed ? "✕" : "✓"
+}
 
 const markerText = (expanded: boolean): string => (expanded ? " ▾" : " ▸")
 
@@ -843,15 +797,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     }
     chunks.push(...bordered)
   }
-  const statusIcon = (failed: boolean, running: boolean, cancelled = false): TextChunk =>
-    running
-      ? fg(colors.blue)(spinnerFrame)
-      : (() => {
-          if (cancelled) {
-            return fg(colors.amber)("⊘")
-          }
-          return failed ? fg(colors.red)("✕") : fg(colors.green)("✓")
-        })()
+  const statusIcon = (failed: boolean, running: boolean, cancelled = false): TextChunk => {
+    if (running) return fg(colors.blue)(spinnerFrame)
+    if (cancelled) return fg(colors.amber)("⊘")
+    return failed ? fg(colors.red)("✕") : fg(colors.green)("✓")
+  }
   const marker = (expanded: boolean): TextChunk => fg(colors.subtle)(expanded ? " ▾" : " ▸")
   const rowExpanded = (id: string): boolean => model.expandedRowKeys.includes(id)
   const highlight = (text: string) => append(bold(fg(colors.blue)(text)))
@@ -926,15 +876,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
   ): UnitLineRange | undefined => {
     const text = terminal.text.trim()
     if (text.length === 0) return
-    const color =
-      terminal.tone === "failed"
-        ? colors.red
-        : (() => {
-            if (terminal.tone === "cancelled") {
-              return colors.amber
-            }
-            return colors.text
-          })()
+    let color = colors.text
+    if (terminal.tone === "failed") color = colors.red
+    else if (terminal.tone === "cancelled") color = colors.amber
     const paint = (value: string) => (terminal.tone === "info" ? dim(fg(color)(value)) : fg(color)(value))
     const rows = wrapTextToWidth(text, Math.max(1, markdownWidthForColumn(model.width) - stringWidth(prefix)))
     const connector = prefix.lastIndexOf("│")
@@ -1046,19 +990,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     }
     const creates = diffs.length === 0 && allFiles.length > 0 && allFiles.every((file) => file.kind === "add")
     const label = paths.length === 1 ? paths[0] : plural(paths.length, "file")
-    const verb = creates
-      ? (() => {
-          if (running) {
-            return "Creating"
-          }
-          return "Created"
-        })()
-      : (() => {
-          if (paths.length === 1 && units.length === 1) {
-            return running ? units[0]!.block.presentation.activeLabel : units[0]!.block.presentation.completeLabel
-          }
-          return running ? "Editing" : "Edited"
-        })()
+    let verb = running ? "Editing" : "Edited"
+    if (creates) verb = running ? "Creating" : "Created"
+    else if (paths.length === 1 && units.length === 1) {
+      verb = running ? units[0]!.block.presentation.activeLabel : units[0]!.block.presentation.completeLabel
+    }
     const counts = `${added > 0 ? ` +${added}` : ""}${removed > 0 ? ` -${removed}` : ""}`
     if (selected)
       highlight(
@@ -1228,16 +1164,13 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     const failed = unit.block.status === "failed"
     const running = unit.block.status === "running"
     const cancelled = unit.block.status === "cancelled"
-    const label = running
-      ? unit.block.presentation.activeLabel
-      : (() => {
-          if (cancelled && unit.block.presentation.family === "agent") {
-            return cancelledAgentLabel(unit.block.presentation.activeLabel)
-          }
-          return failed && unit.block.presentation.family === "agent"
-            ? failedAgentLabel(unit.block.presentation.activeLabel)
-            : unit.block.presentation.completeLabel
-        })()
+    let label = unit.block.presentation.completeLabel
+    if (running) label = unit.block.presentation.activeLabel
+    else if (cancelled && unit.block.presentation.family === "agent") {
+      label = cancelledAgentLabel(unit.block.presentation.activeLabel)
+    } else if (failed && unit.block.presentation.family === "agent") {
+      label = failedAgentLabel(unit.block.presentation.activeLabel)
+    }
     const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
     const agent = unit.block.presentation.family === "agent"
     const output = agent || !isToolOutputDisplayed(unit.block) ? undefined : unit.block.output
@@ -1352,31 +1285,16 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       normalized.length === 0 || normalized === "child" || normalized === "task" || normalized === "subagent"
         ? "Subagent"
         : name.charAt(0).toUpperCase() + name.slice(1)
-    const phrase =
-      block.status === "cancelled"
-        ? `${display} cancelled`
-        : (() => {
-            if (display === "Oracle") {
-              return running ? "Oracle exploring" : "Oracle has spoken"
-            }
-            return display === "Librarian"
-              ? (() => {
-                  if (running) {
-                    return "Librarian is researching"
-                  }
-                  return "Librarian researched"
-                })()
-              : `${display} ${
-                  running
-                    ? "working"
-                    : (() => {
-                        if (block.status === "failed") {
-                          return "failed"
-                        }
-                        return "finished"
-                      })()
-                }`
-          })()
+    let phrase: string
+    if (block.status === "cancelled") phrase = `${display} cancelled`
+    else if (display === "Oracle") phrase = running ? "Oracle exploring" : "Oracle has spoken"
+    else if (display === "Librarian") phrase = running ? "Librarian is researching" : "Librarian researched"
+    else {
+      let status = "finished"
+      if (running) status = "working"
+      else if (block.status === "failed") status = "failed"
+      phrase = `${display} ${status}`
+    }
     append(statusIcon(block.status === "failed", running, block.status === "cancelled"))
     append(fg(colors.text)(` ${phrase}`))
     append(marker(expanded))
@@ -1411,15 +1329,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
   }
   const renderPlainBlock = (index: number) => {
     const block = model.blocks[index] as TranscriptBlock
-    const color =
-      block._tag === "ContextUsage"
-        ? colors.muted
-        : (() => {
-            if (block._tag === "Error") {
-              return colors.red
-            }
-            return colors.text
-          })()
+    let color = colors.text
+    if (block._tag === "ContextUsage") color = colors.muted
+    else if (block._tag === "Error") color = colors.red
     append(fg(color)(renderBlock(block, model.width)))
     if (block._tag === "Permission" && block.status === "pending") {
       const options = ["Allow once", "Always", "Deny"]
@@ -1484,37 +1396,28 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         return block.status === "cancelled" && block.presentation.family === "agent"
       })
     if (expanded && cancelledAgent) addExpandedBodyGutter(chunkStart)
+    let animated = false
+    if (unit.kind === "tool") {
+      animated = unit.blocks.some(
+        (index) => (model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>).status === "running",
+      )
+    } else if (unit.kind === "childAgent") {
+      animated = (model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "ChildAgent" }>).status === "running"
+    }
+    let targets: ReadonlyArray<PathTarget> | undefined
+    if (unit.kind === "tool") {
+      targets = toolDetails(model, unit).flatMap((detail) => (detail.target === undefined ? [] : [detail.target]))
+    } else if (unit.kind === "diff") {
+      targets = [{ path: (model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "Diff" }>).path }]
+    }
     const root: UnitLineRange = {
       start,
       end: nestedRanges.length === 0 ? line : nestedRanges[0]!.start - 1,
       unit: id,
       expandable,
-      animated:
-        unit.kind === "tool"
-          ? unit.blocks.some(
-              (index) => (model.blocks[index] as Extract<TranscriptBlock, { _tag: "ToolCall" }>).status === "running",
-            )
-          : (() => {
-              if (unit.kind === "childAgent") {
-                return (
-                  (model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "ChildAgent" }>).status === "running"
-                )
-              }
-              return false
-            })(),
+      animated,
       gapBefore: false,
-      ...(unit.kind === "tool"
-        ? {
-            targets: toolDetails(model, unit).flatMap((detail) => (detail.target === undefined ? [] : [detail.target])),
-          }
-        : (() => {
-            if (unit.kind === "diff") {
-              return {
-                targets: [{ path: (model.blocks[unit.block] as Extract<TranscriptBlock, { _tag: "Diff" }>).path }],
-              }
-            }
-            return {}
-          })()),
+      ...(targets === undefined ? {} : { targets }),
     }
     return { chunks, lines: line, root, nested: nestedRanges }
   }
@@ -2777,14 +2680,9 @@ export class Surface {
     this.statusLabel.bg = cutoutBackground(this.renderer)
     if (model.shortcutsOpen) this.setComposerResizePointer(false)
     const inputHeight = composerHeight(model)
-    const renderedInputHeight = model.shortcutsOpen
-      ? Math.min(Math.max(1, model.height - 4), spacing.inputHeight + 12)
-      : (() => {
-          if (model.queue.length > 0) {
-            return Math.min(inputHeight, Math.max(1, model.height - 2))
-          }
-          return inputHeight
-        })()
+    let renderedInputHeight = inputHeight
+    if (model.shortcutsOpen) renderedInputHeight = Math.min(Math.max(1, model.height - 4), spacing.inputHeight + 12)
+    else if (model.queue.length > 0) renderedInputHeight = Math.min(inputHeight, Math.max(1, model.height - 2))
     this.inputBox.minHeight = Math.min(spacing.inputHeight, renderedInputHeight)
     const sidebarWidth = fileSidebarLayoutWidth(model)
     const sidebarVisible = sidebarWidth > 0
@@ -2985,15 +2883,9 @@ export class Surface {
     this.queueLeftJoint.visible = queue.length > 0
     this.queueRightJoint.visible = queue.length > 0
     this.inputBox.borderColor = colors.text
-    const costText =
-      model.costUsd !== undefined
-        ? formatCost(model.costUsd)
-        : (() => {
-            if (model.busy) {
-              return "$····"
-            }
-            return ""
-          })()
+    let costText = ""
+    if (model.costUsd !== undefined) costText = formatCost(model.costUsd)
+    else if (model.busy) costText = "$····"
     this.inputBox.title = ""
     const modeChunks: Array<TextChunk> = []
     if (costText.length > 0) {
@@ -3139,21 +3031,11 @@ export class Surface {
       this.loaderTimer = undefined
     }
     const composerTop = model.height - renderedInputHeight
-    const overlay = model.threadSwitcher.open
-      ? ("threads" as const)
-      : (() => {
-          if (model.filePicker.open) {
-            return "files" as const
-          }
-          return model.modePicker.open
-            ? ("modes" as const)
-            : (() => {
-                if (model.palette.open || model.paletteOpen) {
-                  return "palette" as const
-                }
-                return undefined
-              })()
-        })()
+    let overlay: "threads" | "files" | "modes" | "palette" | undefined
+    if (model.threadSwitcher.open) overlay = "threads"
+    else if (model.filePicker.open) overlay = "files"
+    else if (model.modePicker.open) overlay = "modes"
+    else if (model.palette.open || model.paletteOpen) overlay = "palette"
     this.paletteBox.visible = overlay !== undefined
     this.palette.visible = this.paletteBox.visible
     this.paletteBox.bottomTitle = ""
@@ -3527,19 +3409,10 @@ const previewTranscriptLines = (
     }
   | undefined => {
   const selected = selectedThreadMetadata(model)
-  const preview = isReady(model.threadPreview)
-    ? (() => {
-        if (selected?.id === model.threadPreview.value.threadId) {
-          return model.threadPreview.value
-        }
-        return undefined
-      })()
-    : (() => {
-        if (model.threadPreview._tag === "Loading") {
-          return model.threadPreview.previous
-        }
-        return undefined
-      })()
+  let preview: Extract<Model["threadPreview"], { _tag: "Ready" }>["value"] | undefined
+  if (isReady(model.threadPreview)) {
+    if (selected?.id === model.threadPreview.value.threadId) preview = model.threadPreview.value
+  } else if (model.threadPreview._tag === "Loading") preview = model.threadPreview.previous
   if (preview === undefined || preview.turns.length === 0) return undefined
   let previewModel: Model = { ...initial(model.workspace, model.mode), width: Math.max(8, width), height: 200 }
   preview.turns.forEach((turn, index) => {
@@ -3694,14 +3567,10 @@ const threadSwitcherContent = (model: Model, innerWidth: number, innerHeight: nu
   const showPreview = horizontal || innerHeight >= 9
   const layoutWidth = Math.max(1, innerWidth - 1)
   const listWidth = threadSwitcherListWidth(model, innerWidth)
-  const listHeight = horizontal
-    ? innerHeight
-    : (() => {
-        if (showPreview) {
-          return Math.max(5, Math.min(innerHeight - 4, Math.floor(innerHeight * 0.42)))
-        }
-        return innerHeight
-      })()
+  let listHeight = innerHeight
+  if (!horizontal && showPreview) {
+    listHeight = Math.max(5, Math.min(innerHeight - 4, Math.floor(innerHeight * 0.42)))
+  }
   const previewWidth = horizontal ? Math.max(1, layoutWidth - listWidth - 2) : layoutWidth
   const previewHeight = horizontal ? Math.max(4, innerHeight - 3) : Math.max(4, innerHeight - listHeight - 2)
   const previewTop = horizontal ? 1 : listHeight
@@ -3758,38 +3627,21 @@ const filePickerContent = (model: Model, entries: ReadonlyArray<string>, innerWi
       chunks.push(fg(colors.text)(clipped))
     }
   })
-  if (chunks.length === 0)
-    chunks.push(
-      dim(
-        fg(colors.text)(
-          truncateToWidth(
-            model.filePicker.error !== undefined
-              ? `files unavailable: ${model.filePicker.error}`
-              : (() => {
-                  if (isLoading(model.filePicker.items)) {
-                    return "Loading files"
-                  }
-                  return "no matches"
-                })(),
-            innerWidth,
-          ),
-        ),
-      ),
-    )
+  if (chunks.length === 0) {
+    let emptyMessage = "no matches"
+    if (model.filePicker.error !== undefined) emptyMessage = `files unavailable: ${model.filePicker.error}`
+    else if (isLoading(model.filePicker.items)) emptyMessage = "Loading files"
+    chunks.push(dim(fg(colors.text)(truncateToWidth(emptyMessage, innerWidth))))
+  }
   return new StyledText(chunks)
 }
 
-const panelLoading = (model: Model): string | undefined =>
-  model.threadLoading
-    ? "Loading Thread"
-    : (() => {
-        if (model.changedFilesOpen && isLoading(model.changedFiles)) {
-          return "Loading changed files"
-        }
-        return (model.workspaceFilesOpen || model.filePicker.open) && isLoading(model.filePicker.items)
-          ? "Loading files"
-          : undefined
-      })()
+const panelLoading = (model: Model): string | undefined => {
+  if (model.threadLoading) return "Loading Thread"
+  if (model.changedFilesOpen && isLoading(model.changedFiles)) return "Loading changed files"
+  if ((model.workspaceFilesOpen || model.filePicker.open) && isLoading(model.filePicker.items)) return "Loading files"
+  return undefined
+}
 
 const compactWorkspace = (workspace: string): string => {
   const home = workspace.replace(/^\/Users\/[^/]+(?=\/|$)/, "~")

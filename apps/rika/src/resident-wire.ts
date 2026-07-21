@@ -34,22 +34,19 @@ const degradedReason =
 
 const serverMessageTooLarge = { _tag: "ServerMessageTooLarge" } as const
 
-const resyncTarget = (event: object) =>
-  "threadId" in event && event.threadId !== undefined
-    ? event.threadId
-    : (() => {
-        if (
-          "_tag" in event &&
-          event._tag === "SelectionLoaded" &&
-          "thread" in event &&
-          event.thread !== null &&
-          typeof event.thread === "object" &&
-          "id" in event.thread
-        ) {
-          return event.thread.id
-        }
-        return undefined
-      })()
+const resyncTarget = (event: object) => {
+  if ("threadId" in event && event.threadId !== undefined) return event.threadId
+  if (
+    "_tag" in event &&
+    event._tag === "SelectionLoaded" &&
+    "thread" in event &&
+    event.thread !== null &&
+    typeof event.thread === "object" &&
+    "id" in event.thread
+  )
+    return event.thread.id
+  return undefined
+}
 
 const messageChunkFields = {
   messageId: Schema.String,

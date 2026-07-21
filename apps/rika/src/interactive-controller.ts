@@ -457,15 +457,10 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       ...attached.model,
       activity: activityAfter(state.model.activity, event.event, next),
     }
-    const terminalStatus =
-      event.event.type === "execution.completed"
-        ? "completed"
-        : (() => {
-            if (event.event.type === "execution.failed") {
-              return "failed"
-            }
-            return event.event.type === "execution.cancelled" ? "cancelled" : undefined
-          })()
+    let terminalStatus: "completed" | "failed" | "cancelled" | undefined
+    if (event.event.type === "execution.completed") terminalStatus = "completed"
+    else if (event.event.type === "execution.failed") terminalStatus = "failed"
+    else if (event.event.type === "execution.cancelled") terminalStatus = "cancelled"
     const model = terminal
       ? { ...projectedModel, activeTurnId: undefined, busy: false, activity: undefined }
       : projectedModel

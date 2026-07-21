@@ -14,6 +14,7 @@ export class HttpError extends Schema.TaggedErrorClass<HttpError>()("ReadWebPage
 }) {}
 
 export class ContentError extends Schema.TaggedErrorClass<ContentError>()("ReadWebPageContentError", {
+  reason: Schema.Literals(["invalid_input", "content_unavailable"]),
   message: Schema.String,
 }) {}
 
@@ -60,7 +61,7 @@ const validateUrl = (value: string) =>
       if (url.username !== "" || url.password !== "") throw new Error("URL credentials are not allowed")
       return url.toString()
     },
-    catch: (cause) => ContentError.make({ message: `Invalid URL: ${String(cause)}` }),
+    catch: (cause) => ContentError.make({ reason: "invalid_input", message: `Invalid URL: ${String(cause)}` }),
   })
 
 const httpError = (cause: unknown) => HttpError.make({ message: String(cause) })
@@ -97,6 +98,7 @@ export const layer = (options: LayerOptions) =>
             .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(ApiResponse)), Effect.mapError(httpError))
           if (response.errors.length > 0) {
             return yield* ContentError.make({
+              reason: "content_unavailable",
               message: response.errors
                 .map(
                   (error) =>
@@ -106,12 +108,18 @@ export const layer = (options: LayerOptions) =>
             })
           }
           if (response.results.length === 0) {
-            return yield* ContentError.make({ message: `Extract ${response.extract_id} returned no results` })
+            return yield* ContentError.make({
+              reason: "content_unavailable",
+              message: `Extract ${response.extract_id} returned no results`,
+            })
           }
           if (input.fullContent === true) {
             const missing = response.results.find((result) => result.full_content == null)
             if (missing !== undefined) {
-              return yield* ContentError.make({ message: `Parallel returned no full content for ${missing.url}` })
+              return yield* ContentError.make({
+                reason: "content_unavailable",
+                message: `Parallel returned no full content for ${missing.url}`,
+              })
             }
             return response.results.map((result) => result.full_content!).join("\n\n")
           }

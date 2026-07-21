@@ -41,16 +41,11 @@ const execute = (
     const response = yield* client.execute(request).pipe(Effect.mapError((cause) => mapTransport(provider, cause)))
     if (response.status < 200 || response.status >= 300) {
       const remaining = Number(response.headers["x-ratelimit-remaining"])
-      const kind =
-        response.status === 429 || (response.status === 403 && remaining === 0)
-          ? "rate-limit"
-          : (() => {
-              if (response.status === 401 || response.status === 403) {
-                return "authentication"
-              }
-              return "response"
-            })()
-      return yield* failure(provider, kind, `HTTP ${response.status}`)
+      if (response.status === 429 || (response.status === 403 && remaining === 0))
+        return yield* failure(provider, "rate-limit", `HTTP ${response.status}`)
+      if (response.status === 401 || response.status === 403)
+        return yield* failure(provider, "authentication", `HTTP ${response.status}`)
+      return yield* failure(provider, "response", `HTTP ${response.status}`)
     }
     return yield* decodeBody(response).pipe(
       Effect.mapError((cause) => failure(provider, "response", `Malformed response: ${String(cause)}`)),

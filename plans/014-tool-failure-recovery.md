@@ -1,5 +1,20 @@
 # Tool Failure Recovery Plan
 
+## Implementation Status
+
+Implemented on July 21, 2026:
+
+- Local tool failures now carry a category, outcome certainty, recovery disposition, and one concrete next action. The actionable message survives Relay's current string-only failure persistence and reaches the next model turn with the original call ID.
+- Timeout feedback includes the configured deadline. Unsafe timed-out or unclassified mutation failures report an unknown outcome and prohibit unchanged retry.
+- Diagnostics retain execution ID, tool-call ID, tool name, deadline, duration, category, outcome, interruption state, and bounded retry facts without retaining raw causes.
+- Web search retries one read-only transport failure after 200 ms inside the original tool deadline. Authentication, rate-limit, response, timeout, cancellation, and unsafe failures do not retry.
+- Hidden-output tools display their failure guidance in the TUI. Historical string-only failures remain readable.
+- Current OpenAI fragmented-stream tests execute each completed call ID exactly once and execute no malformed partial call. The historical duplicate-call suspicion did not reproduce on the current dependency set, so no Rika-side accumulator or deduper was added.
+
+Blocked upstream:
+
+- Released `@relayfx/sdk` 0.4.2 persists failed toolkit results as strings and discards declared structured failure values. Rika therefore cannot persist the full structured object while preserving failed status until Relay exposes a supported encoder. The current implementation intentionally preserves actionable text rather than using private APIs or JSON-in-error strings.
+
 ## Recommendation
 
 Fix tool recovery as an interface problem, but do not treat every observed timeout as the same defect.

@@ -264,15 +264,9 @@ const cellLine = (
 ): Array<TextChunk> => {
   const contentWidth = content.reduce((sum, chunk) => sum + stringWidth(chunk.text), 0)
   const remaining = Math.max(0, width - contentWidth)
-  const left =
-    align === "right"
-      ? remaining
-      : (() => {
-          if (align === "center") {
-            return Math.floor(remaining / 2)
-          }
-          return 0
-        })()
+  let left = 0
+  if (align === "right") left = remaining
+  else if (align === "center") left = Math.floor(remaining / 2)
   const right = remaining - left
   return [fg(colors.text)(` ${" ".repeat(left)}`), ...content, fg(colors.text)(`${" ".repeat(right)} `)]
 }
@@ -325,7 +319,8 @@ const listLines = (list: Tokens.List, depth: number, plain: boolean, width: numb
   const indent = "  ".repeat(depth)
   list.items.forEach((item, index) => {
     const markerMatch = /^[ \t]*((?:[-*+])|(?:\d{1,9}[.)]))[ \t]+/.exec(item.raw)
-    const checkbox = item.task === true ? [item.checked === true ? "[x] " : "[ ] "][0] : ""
+    let checkbox = ""
+    if (item.task === true) checkbox = item.checked === true ? "[x] " : "[ ] "
     const marker = `${indent}${markerMatch?.[1] ?? "-"} ${checkbox}`
     const continuation = " ".repeat(marker.length)
     const contentWidth = Math.max(1, width - stringWidth(marker))

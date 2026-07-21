@@ -40,18 +40,15 @@ interface BrowserCommand {
   readonly args: ReadonlyArray<string>
 }
 
-const browserCommandImpl = (platform: NodeJS.Platform, url: string): BrowserCommand => ({
-  command:
-    platform === "darwin"
-      ? "open"
-      : (() => {
-          if (platform === "win32") {
-            return "cmd"
-          }
-          return "xdg-open"
-        })(),
-  args: platform === "win32" ? ["/c", "start", "", url] : [url],
-})
+const browserCommandImpl = (platform: NodeJS.Platform, url: string): BrowserCommand => {
+  let command = "xdg-open"
+  if (platform === "darwin") command = "open"
+  else if (platform === "win32") command = "cmd"
+  return {
+    command,
+    args: platform === "win32" ? ["/c", "start", "", url] : [url],
+  }
+}
 
 export const browserCommand: {
   (url: string): (platform: NodeJS.Platform) => BrowserCommand
@@ -236,26 +233,13 @@ const service = (
     const store = yield* OAuth.TokenStore
     const map = (server: string, operation: string) =>
       Effect.mapError((cause: unknown) => {
-        const detail =
-          typeof cause === "object" && cause !== null && "_tag" in cause
-            ? (() => {
-                if (cause._tag === "OAuthExpiredError") {
-                  return "OAuth callback state is invalid or expired"
-                }
-                return cause._tag === "OAuthDeniedError"
-                  ? "OAuth authorization was denied"
-                  : (() => {
-                      if (
-                        cause._tag === "OAuthProviderError" &&
-                        "operation" in cause &&
-                        typeof cause.operation === "string"
-                      ) {
-                        return `OAuth ${cause.operation} failed`
-                      }
-                      return `OAuth ${operation} failed`
-                    })()
-              })()
-            : `OAuth ${operation} failed`
+        let detail = `OAuth ${operation} failed`
+        if (typeof cause === "object" && cause !== null && "_tag" in cause) {
+          if (cause._tag === "OAuthExpiredError") detail = "OAuth callback state is invalid or expired"
+          else if (cause._tag === "OAuthDeniedError") detail = "OAuth authorization was denied"
+          else if (cause._tag === "OAuthProviderError" && "operation" in cause && typeof cause.operation === "string")
+            detail = `OAuth ${cause.operation} failed`
+        }
         return Error.make({ server, operation, message: detail })
       })
     return Service.of({

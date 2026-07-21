@@ -116,14 +116,10 @@ const unifiedFiles = (callId: string, diff: string, failed: boolean): ReadonlyAr
     const deleted = newPath === "/dev/null" || /deleted file mode/m.test(patch)
     const path = normalizedDiffPath(deleted ? oldPath! : newPath!)
     const previousPath = oldPath === undefined || oldPath === "/dev/null" ? undefined : normalizedDiffPath(oldPath)
-    const kind = created
-      ? "add"
-      : (() => {
-          if (deleted) {
-            return "delete"
-          }
-          return previousPath !== path ? "move" : "update"
-        })()
+    let kind: ToolFile["kind"] = "update"
+    if (created) kind = "add"
+    else if (deleted) kind = "delete"
+    else if (previousPath !== path) kind = "move"
     return [
       {
         key: `${callId}:${ordinal}`,
@@ -342,16 +338,9 @@ export const childParentMatch: {
 
 const agentPresentationFor = (name: string): Presentation => {
   const profile = name.toLowerCase()
-  return Catalog.resolvePresentation(
-    profile === "task" || profile === "child" || profile === "subagent"
-      ? "task"
-      : (() => {
-          if (profile === "oracle" || profile === "librarian") {
-            return profile
-          }
-          return `transfer_to_${profile}`
-        })(),
-  )
+  if (profile === "task" || profile === "child" || profile === "subagent") return Catalog.resolvePresentation("task")
+  if (profile === "oracle" || profile === "librarian") return Catalog.resolvePresentation(profile)
+  return Catalog.resolvePresentation(`transfer_to_${profile}`)
 }
 
 export const ensureChildTool: {
@@ -522,19 +511,7 @@ const applyChild = (projection: Projection, turnId: string, event: SourceEvent):
     const id = linkedTool.id
     const childState = childStatus(event, value)
     const profile = string(value.profile ?? value.preset_name ?? value.name).toLowerCase()
-    const presentation =
-      profile.length === 0
-        ? linkedTool.presentation
-        : Catalog.resolvePresentation(
-            profile === "task" || profile === "child" || profile === "subagent"
-              ? "task"
-              : (() => {
-                  if (profile === "oracle" || profile === "librarian") {
-                    return profile
-                  }
-                  return `transfer_to_${profile}`
-                })(),
-          )
+    const presentation = profile.length === 0 ? linkedTool.presentation : agentPresentationFor(profile)
     const updated = updateTool(projection, id, event.sequence, (tool) => ({
       ...tool,
       childId,
@@ -572,6 +549,12 @@ const applyChild = (projection: Projection, turnId: string, event: SourceEvent):
   )
 }
 
+const permissionStatus = (requested: boolean, approved: unknown): Extract<Block, { _tag: "Permission" }>["status"] => {
+  if (requested) return "pending"
+  if (approved === false) return "denied"
+  return "approved"
+}
+
 const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => {
   const value = sourcePayload(event)
   if (event.type === "tool.approval.requested" || event.type === "tool.approval.resolved")
@@ -581,15 +564,7 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
       kind: "tool-approval",
       title: string(value.tool_name, "Permission required"),
       detail: encodeInput(value.input),
-      status:
-        event.type === "tool.approval.requested"
-          ? "pending"
-          : (() => {
-              if (value.approved === false) {
-                return "denied"
-              }
-              return "approved"
-            })(),
+      status: permissionStatus(event.type === "tool.approval.requested", value.approved),
     }
   if (event.type === "permission.ask.requested" || event.type === "permission.ask.resolved")
     return {
@@ -598,15 +573,7 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
       kind: "permission",
       title: string(value.title ?? value.tool_name ?? value.name, "Permission required"),
       detail: encodeInput(value.input),
-      status:
-        event.type === "permission.ask.requested"
-          ? "pending"
-          : (() => {
-              if (value.approved === false) {
-                return "denied"
-              }
-              return "approved"
-            })(),
+      status: permissionStatus(event.type === "permission.ask.requested", value.approved),
     }
   if (event.type.includes("diff"))
     return { _tag: "Diff", path: string(value.path, "diff"), patch: event.text ?? string(value.patch ?? value.diff) }
@@ -633,20 +600,18 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
       ...(typeof value.height === "number" ? { height: value.height } : {}),
       ...(typeof value.bytes === "number" ? { bytes: value.bytes } : {}),
     }
-  if (event.type.includes("workflow"))
+  if (event.type.includes("workflow")) {
+    let status: Extract<Block, { _tag: "Workflow" }>["status"] = "running"
+    if (event.type.includes("failed")) status = "failed"
+    else if (event.type.includes("completed")) status = "complete"
+    else if (event.type.includes("wait")) status = "waiting"
     return {
       _tag: "Workflow",
       name: string(value.workflow ?? value.name, "workflow"),
       step: event.text ?? string(value.step ?? value.status),
-      status: event.type.includes("failed")
-        ? "failed"
-        : (() => {
-            if (event.type.includes("completed")) {
-              return "complete"
-            }
-            return event.type.includes("wait") ? "waiting" : "running"
-          })(),
+      status,
     }
+  }
   if (event.type.includes("error") || event.type.includes("failed") || event.type === "budget.exceeded")
     return {
       _tag: "Error",
@@ -766,23 +731,22 @@ const applyToolResult = (projection: Projection, turnId: string, event: SourceEv
   const errorText = string(value.error, string(record(output).message))
   const resultText = failed && errorText.length > 0 ? errorText : outputText(output)
   const diff = string(record(output).diff)
-  const updated = updateTool(projection, id, event.sequence, (tool) => ({
-    ...tool,
-    status: failed
-      ? "failed"
-      : (() => {
-          if (cancelled) {
-            return "cancelled"
-          }
-          return process?.running === true ? "running" : "complete"
-        })(),
-    output: resultText,
-    ...(process === undefined ? {} : { process: { ...tool.process, ...process } }),
-    files:
-      diff.length > 0
-        ? unifiedFiles(id, diff, failed)
-        : tool.files.map((file) => ({ ...file, preview: false, status: failed ? "failed" : "complete" })),
-  }))
+  const updated = updateTool(projection, id, event.sequence, (tool) => {
+    let status: Extract<Block, { _tag: "ToolCall" }>["status"] = "complete"
+    if (failed) status = "failed"
+    else if (cancelled) status = "cancelled"
+    else if (process?.running === true) status = "running"
+    return {
+      ...tool,
+      status,
+      output: resultText,
+      ...(process === undefined ? {} : { process: { ...tool.process, ...process } }),
+      files:
+        diff.length > 0
+          ? unifiedFiles(id, diff, failed)
+          : tool.files.map((file) => ({ ...file, preview: false, status: failed ? "failed" : "complete" })),
+    }
+  })
   if (updated !== projection) return updated
   const result: Block = { _tag: "ToolResult", id, output: resultText, failed }
   return upsertUnit(

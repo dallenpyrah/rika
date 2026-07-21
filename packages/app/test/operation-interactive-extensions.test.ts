@@ -293,43 +293,33 @@ describe("interactive session extensions", () => {
         const registration = yield* Deferred.make<Operation.InteractiveSession>()
         const backend = ExecutionBackend.Service.of({
           ...baseBackend,
-          inspect: (executionId) =>
-            Effect.succeed(
-              executionId === "turn-synth"
-                ? {
-                    turnId: executionId,
-                    status: "completed" as const,
-                    waits: [],
-                    pendingTools: [],
-                    children: [{ executionId: childId, status: "completed" as const }],
-                  }
-                : (() => {
-                    if (executionId === childId) {
-                      return {
-                        turnId: executionId,
-                        status: "completed" as const,
-                        waits: [],
-                        pendingTools: [],
-                        children: [],
-                      }
-                    }
-                    return undefined
-                  })(),
-            ),
-          replay: (executionId) =>
-            Effect.succeed({
-              turnId: executionId,
-              status: "completed" as const,
-              events:
-                executionId === "turn-synth"
-                  ? rootEvents
-                  : (() => {
-                      if (executionId === childId) {
-                        return childEvents
-                      }
-                      return []
-                    })(),
-            }),
+          inspect: (executionId) => {
+            if (executionId === "turn-synth") {
+              return Effect.succeed({
+                turnId: executionId,
+                status: "completed" as const,
+                waits: [],
+                pendingTools: [],
+                children: [{ executionId: childId, status: "completed" as const }],
+              })
+            }
+            if (executionId === childId) {
+              return Effect.succeed({
+                turnId: executionId,
+                status: "completed" as const,
+                waits: [],
+                pendingTools: [],
+                children: [],
+              })
+            }
+            return Effect.void.pipe(Effect.as(undefined))
+          },
+          replay: (executionId) => {
+            let events: ReadonlyArray<ExecutionBackend.Event> = []
+            if (executionId === "turn-synth") events = rootEvents
+            else if (executionId === childId) events = childEvents
+            return Effect.succeed({ turnId: executionId, status: "completed" as const, events })
+          },
         })
         const context = yield* Layer.build(interactiveLayer(repository, turns, backend, registration))
         const operation = Context.get(context, Operation.Service)
@@ -555,36 +545,27 @@ describe("interactive session extensions", () => {
               Effect.as({ turnId: executionId, status: "completed" as const, events }),
             )
           },
-          replay: (executionId) =>
-            Effect.succeed({
-              turnId: executionId,
-              status: "completed" as const,
-              events:
-                executionId === childId
-                  ? childEvents
-                  : (() => {
-                      if (executionId === nestedId) {
-                        return nestedEvents
-                      }
-                      return []
-                    })(),
-            }),
-          inspect: (executionId) =>
-            Effect.succeed({
+          replay: (executionId) => {
+            let events: ReadonlyArray<ExecutionBackend.Event> = []
+            if (executionId === childId) events = childEvents
+            else if (executionId === nestedId) events = nestedEvents
+            return Effect.succeed({ turnId: executionId, status: "completed" as const, events })
+          },
+          inspect: (executionId) => {
+            let children: ReadonlyArray<{ readonly executionId: string; readonly status: "completed" }> = []
+            if (executionId === "parent-turn") {
+              children = [{ executionId: childId, status: "completed" }]
+            } else if (executionId === childId) {
+              children = [{ executionId: nestedId, status: "completed" }]
+            }
+            return Effect.succeed({
               turnId: executionId,
               status: "completed" as const,
               waits: [],
               pendingTools: [],
-              children:
-                executionId === "parent-turn"
-                  ? [{ executionId: childId, status: "completed" as const }]
-                  : (() => {
-                      if (executionId === childId) {
-                        return [{ executionId: nestedId, status: "completed" as const }]
-                      }
-                      return []
-                    })(),
-            }),
+              children,
+            })
+          },
         })
         const layer = interactiveLayer(
           repository,

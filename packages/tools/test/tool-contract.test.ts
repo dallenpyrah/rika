@@ -113,7 +113,10 @@ describe("tool contracts", () => {
         tool: "read",
         message: "missing",
         kind: "operation",
+        category: "not_found",
         outcome: "known",
+        recovery: "after_change",
+        nextAction: "Correct the path",
       })
       expect(yield* Schema.decodeUnknownEffect(Runtime.ToolError)(failure)).toEqual(failure)
       yield* Effect.flip(

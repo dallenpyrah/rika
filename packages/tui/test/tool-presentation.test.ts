@@ -271,7 +271,8 @@ describe("tool presentation", () => {
     expect(expandableRowIds(value)).toEqual([])
   })
 
-  test.each(["running", "failed"] as const)("keeps %s hidden web output inline and out of navigation", (status) => {
+  test("keeps running web output inline and out of navigation", () => {
+    const status = "running"
     const webSearch = call(
       `web-${status}`,
       "web_search",
@@ -293,6 +294,30 @@ describe("tool presentation", () => {
     expect(rendered).not.toContain("▸")
     expect(rendered).not.toContain("▾")
     expect(expandableRowIds(value)).toEqual([])
+  })
+
+  test("shows recovery guidance when a hidden-output web tool fails", () => {
+    const guidance =
+      "Every selected web search provider is rate limited. The call did not change state. Next action: Retry later or use a different configured provider."
+    const webSearch = call(
+      "web-failed",
+      "web_search",
+      { objective: "Find current documentation" },
+      {
+        family: "direct",
+        action: "web-search",
+        activeLabel: "Web Search",
+        completeLabel: "Web Search",
+        outputDisplay: "hidden",
+      },
+      { status: "failed", detail: "Find current documentation", output: guidance },
+    )
+    const value = model([webSearch], ["tool:web-failed"])
+    const rendered = text(value)
+
+    expect(rendered).toContain(guidance)
+    expect(rendered).toContain("▾")
+    expect(expandableRowIds(value)).toEqual(["tool:web-failed"])
   })
 
   test("does not navigate to an expandable direct tool until it has output", () => {

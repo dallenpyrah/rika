@@ -51,21 +51,11 @@ export const escapePathTarget = (path: string): string =>
   [...path]
     .map((character) => {
       const code = character.codePointAt(0) ?? 0
-      return character === "\n"
-        ? "\\n"
-        : (() => {
-            if (character === "\r") {
-              return "\\r"
-            }
-            return character === "\t"
-              ? "\\t"
-              : (() => {
-                  if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
-                    return `\\u{${code.toString(16)}}`
-                  }
-                  return character
-                })()
-          })()
+      if (character === "\n") return "\\n"
+      if (character === "\r") return "\\r"
+      if (character === "\t") return "\\t"
+      if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return `\\u{${code.toString(16)}}`
+      return character
     })
     .join("")
 
@@ -145,28 +135,13 @@ type ToolFamily = Extract<TranscriptBlock, { _tag: "ToolCall" }>["presentation"]
 
 const toolKindImpl = (rawName: string, family: ToolFamily | undefined): ToolKind => {
   const name = rawName.toLowerCase()
-  return family === "explore"
-    ? (() => {
-        if (readToolNames.has(name) || name === "view_media") {
-          return "read"
-        }
-        return "search"
-      })()
-    : (() => {
-        if (family === "edit") {
-          return "edit"
-        }
-        return family === "shell"
-          ? "shell"
-          : (() => {
-              if (readToolNames.has(name)) {
-                return "read"
-              }
-              return searchToolNames.has(name)
-                ? "search"
-                : [editToolNames.has(name) ? "edit" : [shellToolNames.has(name) ? "shell" : "other"][0]][0]
-            })()
-      })()
+  if (family === "explore") return readToolNames.has(name) || name === "view_media" ? "read" : "search"
+  if (family === "edit") return "edit"
+  if (family === "shell") return "shell"
+  if (readToolNames.has(name)) return "read"
+  if (searchToolNames.has(name)) return "search"
+  if (editToolNames.has(name)) return "edit"
+  return shellToolNames.has(name) ? "shell" : "other"
 }
 
 export const toolKind: {
@@ -265,30 +240,19 @@ export const agentTerminal: {
     children: ReadonlyArray<TranscriptItem>,
   ): AgentTerminal | undefined => {
     const answer = lastAnswerEntry(model, children)
-    return block.status === "running"
-      ? undefined
-      : (() => {
-          if (block.status === "failed") {
-            return { kind: "error", tone: "failed", text: settledText(model, block, children, agentFailureFallback) }
-          }
-          return block.status === "complete"
-            ? (() => {
-                if (answer !== undefined) {
-                  return { kind: "answer", entry: answer }
-                }
-                return { kind: "error", tone: "info", text: settledText(model, block, children, agentEmptyFallback) }
-              })()
-            : (() => {
-                if (answer !== undefined) {
-                  return { kind: "answer", entry: answer }
-                }
-                return {
-                  kind: "error",
-                  tone: "cancelled",
-                  text: settledText(model, block, children, agentCancelledFallback),
-                }
-              })()
-        })()
+    if (block.status === "running") return undefined
+    if (block.status === "failed") {
+      return { kind: "error", tone: "failed", text: settledText(model, block, children, agentFailureFallback) }
+    }
+    if (answer !== undefined) return { kind: "answer", entry: answer }
+    if (block.status === "complete") {
+      return { kind: "error", tone: "info", text: settledText(model, block, children, agentEmptyFallback) }
+    }
+    return {
+      kind: "error",
+      tone: "cancelled",
+      text: settledText(model, block, children, agentCancelledFallback),
+    }
   },
 )
 
@@ -426,7 +390,7 @@ const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
 }
 
 export const isToolOutputDisplayed = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): boolean =>
-  block.presentation.outputDisplay !== "hidden"
+  block.status === "failed" || block.presentation.outputDisplay !== "hidden"
 
 export const isExpandableUnit: {
   (model: Model, unit: TranscriptUnit): boolean
@@ -508,12 +472,8 @@ export const transcriptUnitId: {
   return `block:${block._tag}:${unit.block}`
 })
 
-export const unitToggleTargets = (unit: TranscriptUnit): ReadonlyArray<number> =>
-  unit.kind === "tool"
-    ? unit.blocks
-    : (() => {
-        if (unit.kind === "reasoning" || unit.kind === "diff") {
-          return [unit.block]
-        }
-        return []
-      })()
+export const unitToggleTargets = (unit: TranscriptUnit): ReadonlyArray<number> => {
+  if (unit.kind === "tool") return unit.blocks
+  if (unit.kind === "reasoning" || unit.kind === "diff") return [unit.block]
+  return []
+}

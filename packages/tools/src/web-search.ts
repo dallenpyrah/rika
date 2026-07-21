@@ -75,6 +75,23 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@rika/tools/web-search/Service") {}
 
+const searchProvider = (provider: SearchProvider, request: SearchRequest) =>
+  provider.search(request).pipe(
+    Effect.catch((error) =>
+      error.kind !== "transport"
+        ? Effect.fail(error)
+        : Effect.logWarning("tool.retry.scheduled").pipe(
+            Effect.annotateLogs({
+              "rika.tool.dependency": provider.id,
+              "rika.tool.retry.attempt": 2,
+              "rika.tool.retry.delay.ms": 200,
+            }),
+            Effect.andThen(Effect.sleep("200 millis")),
+            Effect.andThen(provider.search(request)),
+          ),
+    ),
+  )
+
 const select = (providers: ReadonlyArray<SearchProvider>, input: SearchInput) => {
   const kind = input.kind ?? "web"
   const capable = providers
@@ -95,7 +112,7 @@ export const make = (providers: ReadonlyArray<SearchProvider>): Interface =>
       const outcomes: ReadonlyArray<ProviderOutcome> = yield* Effect.forEach(
         selected,
         (provider) =>
-          provider.search(request).pipe(
+          searchProvider(provider, request).pipe(
             Effect.map((outcome): ProviderOutcome => ({ provider: provider.id, ...outcome })),
             Effect.catch((error): Effect.Effect<ProviderOutcome> => Effect.succeed({ provider: provider.id, error })),
           ),
