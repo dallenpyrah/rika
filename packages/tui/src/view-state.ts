@@ -1239,22 +1239,6 @@ export const update: {
         historyIndex: undefined,
         historySearch: "",
       }
-      if (
-        model.busy &&
-        !model.cancelPending &&
-        model.activeTurnId !== undefined &&
-        submission._tag !== "Shell" &&
-        !model.pastedText.some((attachment) => attachment.type === "image")
-      )
-        return {
-          ...model,
-          input: "",
-          cursor: 0,
-          pastedText: [],
-          ...submittedHistory,
-          pendingSteering: [...model.pendingSteering, { turnId: model.activeTurnId, text: submittedPrompt }],
-          pendingAction: { _tag: "Steer", prompt: submittedPrompt, turnId: model.activeTurnId },
-        }
       return {
         ...model,
         input: "",
@@ -2099,6 +2083,11 @@ export const update: {
           if (key.name === "return")
             return {
               ...model,
+              ...(model.activeTurnId === undefined
+                ? {}
+                : {
+                    pendingSteering: [...model.pendingSteering, { turnId: model.activeTurnId, text: selected.prompt }],
+                  }),
               pendingAction: {
                 _tag: "SteerQueued",
                 id: selected.id,

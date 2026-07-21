@@ -1232,10 +1232,10 @@ describe("Transcript projection", () => {
       },
       { cursor: "output-4", sequence: 4, type: "model.output.completed", createdAt: 4, text: "Refocused." },
     ])
-    const steering = projection.units.find((candidate) => candidate.key === "steering:turn:3")
+    const steering = projection.units.find((candidate) => candidate.key === "steering:turn:3:0")
     expect(steering?.content).toEqual({ _tag: "Entry", role: "user", text: "Focus on the fixture text." })
     const keys = projection.units.map((candidate) => candidate.key)
-    expect(keys.indexOf("steering:turn:3")).toBeGreaterThan(keys.indexOf("tool:turn:call"))
+    expect(keys.indexOf("steering:turn:3:0")).toBeGreaterThan(keys.indexOf("tool:turn:call"))
   })
 
   it("ignores an empty steering drain event", () => {
@@ -1256,6 +1256,33 @@ describe("Transcript projection", () => {
     expect(projection.units.some((candidate) => candidate.key.startsWith("steering:"))).toBe(false)
   })
 
+  it("projects each delivered steering message as its own user entry", () => {
+    const projection = project("turn", "prompt", [
+      {
+        cursor: "steer-2",
+        sequence: 2,
+        type: "steering.delivered",
+        createdAt: 2,
+        text: "First correction.Second correction.",
+        content: [
+          { type: "text", text: "First correction." },
+          { type: "text", text: "Second correction." },
+        ],
+        data: {
+          kind: "steering",
+          drain_id: "drain:turn:steering:steering:sequence:2",
+          message_sequences: [0, 1],
+          message_count: 2,
+        },
+      },
+    ])
+    const steering = projection.units.filter((candidate) => candidate.key.startsWith("steering:turn:2"))
+    expect(steering.map((candidate) => candidate.content)).toEqual([
+      { _tag: "Entry", role: "user", text: "First correction." },
+      { _tag: "Entry", role: "user", text: "Second correction." },
+    ])
+  })
+
   it("replays a delivered steering event into one stable unit", () => {
     const delivered: SourceEvent = {
       cursor: "steer-1",
@@ -1272,6 +1299,6 @@ describe("Transcript projection", () => {
     }
     const first = applyEvent(empty("turn", "prompt"), delivered)
     const replayed = applyEvent(first, delivered)
-    expect(replayed.units.filter((candidate) => candidate.key === "steering:turn:1")).toHaveLength(1)
+    expect(replayed.units.filter((candidate) => candidate.key === "steering:turn:1:0")).toHaveLength(1)
   })
 })

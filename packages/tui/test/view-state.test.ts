@@ -469,21 +469,39 @@ describe("ViewState", () => {
     expect(repeated).toBe(cancelled)
   })
 
-  test("submitting while a turn is active becomes a pending steering send", () => {
+  test("submitting while a turn is active stays an ordinary submission", () => {
     const busy: ViewState.Model = {
       ...ViewState.initial("/work"),
       busy: true,
       activeTurnId: "turn-a",
-      input: "focus on the fixture",
-      cursor: 5,
+      input: "queued follow-up",
     }
-    const steered = ViewState.update(busy, { _tag: "Submitted" })
-    expect(steered.input).toBe("")
-    expect(steered.busy).toBe(true)
-    expect(steered.activeTurnId).toBe("turn-a")
-    expect(steered.submittedDrafts).toEqual([])
-    expect(steered.pendingSteering).toEqual([{ turnId: "turn-a", text: "focus on the fixture" }])
-    expect(steered.pendingAction).toEqual({ _tag: "Steer", prompt: "focus on the fixture", turnId: "turn-a" })
+    const submitted = ViewState.update(busy, { _tag: "Submitted", submissionId: "sub-q" })
+    expect(submitted.input).toBe("")
+    expect(submitted.busy).toBe(true)
+    expect(submitted.pendingSteering).toEqual([])
+    expect(submitted.pendingAction).toBeUndefined()
+    expect(submitted.submittedDrafts).toEqual([
+      { input: "queued follow-up", attachments: [], cursor: 0, submissionId: "sub-q" },
+    ])
+  })
+
+  test("steering a selected queued message opens a pending steering row", () => {
+    const busy: ViewState.Model = ViewState.resetQueue(
+      {
+        ...ViewState.initial("/work"),
+        busy: true,
+        activeTurnId: "turn-a",
+        currentThreadId: "thread",
+        queueSelection: "queued-1",
+      },
+      "thread",
+      1,
+      [{ id: "queued-1", prompt: "steer me please" }],
+    )
+    const steered = ViewState.update(busy, { _tag: "KeyPressed", key: key({ name: "return" }) })
+    expect(steered.pendingSteering).toEqual([{ turnId: "turn-a", text: "steer me please" }])
+    expect(steered.pendingAction).toEqual({ _tag: "SteerQueued", id: "queued-1", prompt: "steer me please" })
   })
 
   test("binds an accepted steering sequence and removes it on delivery", () => {

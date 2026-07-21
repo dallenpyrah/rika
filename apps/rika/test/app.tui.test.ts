@@ -266,13 +266,13 @@ test(
         yield* Effect.promise(() => app.type("Hold the queue head."))
         app.pressEnter()
         yield* app.waitFrame("Hold the queue head.")
-        yield* app.waitFrame("Waiting")
-        app.pressKey("c", { ctrl: true })
         yield* Effect.promise(() => app.type("Queued follow-up prompt."))
         app.pressEnter()
         yield* app.waitFrame("Queued follow-up prompt.")
+        app.pressKey("c", { ctrl: true })
         const promoted = yield* app.waitFrame("QUEUED_DONE")
         expect(promoted).not.toContain("LATE_QUEUE_HEAD")
+        expect(promoted).not.toContain("\u2298")
         yield* app.quit
       }),
     ),
@@ -280,7 +280,7 @@ test(
 )
 
 test(
-  "steers composer text on Enter with a pending lane and a delivered green entry",
+  "steers selected queued messages with a pending lane and distinct delivered entries",
   () =>
     TuiApp.run(
       Effect.gen(function* () {
@@ -300,13 +300,20 @@ test(
         yield* app.waitFrame("Read the fixture slowly.")
         yield* app.waitFrame("Waiting")
         yield* Effect.promise(() => app.type("Focus on the exact fixture text."))
+        app.pressEnter()
+        yield* Effect.promise(() => app.type("Answer in one sentence."))
         yield* app.waitFrame("Focus on the exact fixture text.")
+        app.pressKey("s", { ctrl: true })
+        yield* app.waitFrame("steering: Answer in one sentence.")
+        app.pressArrow("up")
+        yield* app.waitFrame("Enter to steer")
         app.pressEnter()
         yield* app.waitFrame("steering: Focus on the exact fixture text.")
         const steered = yield* app.waitFrame("ACTIVE_STEER_COMPLETE")
         expect(steered).not.toContain("Execution failed")
-        expect(steered).not.toContain("steering: Focus on the exact fixture text.")
-        expect(steered).toContain("Focus on the exact fixture text.")
+        expect(steered).not.toContain("steering:")
+        expect(steered).toContain("\u2503 Answer in one sentence.")
+        expect(steered).toContain("\u2503 Focus on the exact fixture text.")
         yield* app.quit
       }),
     ),

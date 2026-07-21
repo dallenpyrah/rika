@@ -887,18 +887,31 @@ const hasUsableFinalResponse = (projection: Projection, turnId: string) => {
   return projection.usableCompletionSequence !== undefined && projection.usableCompletionSequence > latestToolRevision
 }
 
+const steeringMessageTexts = (event: SourceEvent, count: number): ReadonlyArray<string> => {
+  const parts = (event.content ?? []).flatMap((part) => {
+    const value = record(part)
+    return value.type === "text" && typeof value.text === "string" ? [value.text] : []
+  })
+  if (parts.length === count) return parts.filter((text) => text.length > 0)
+  const joined = event.text ?? parts.join("\n")
+  return joined.length === 0 ? [] : [joined]
+}
+
 const applySteeringDelivered = (projection: Projection, turnId: string, event: SourceEvent): Projection => {
   const payload = sourcePayload(event)
   const count = typeof payload.message_count === "number" ? payload.message_count : 0
-  const text = event.text ?? ""
-  if (count === 0 || text.length === 0) return projection
-  return upsertUnit(
+  if (count === 0) return projection
+  return steeringMessageTexts(event, count).reduce(
+    (updated, text, index) =>
+      upsertUnit(
+        updated,
+        unit(`steering:${turnId}:${event.sequence}:${index}`, turnId, event.sequence, index, event.sequence, {
+          _tag: "Entry",
+          role: "user",
+          text,
+        }),
+      ),
     projection,
-    unit(`steering:${turnId}:${event.sequence}`, turnId, event.sequence, 0, event.sequence, {
-      _tag: "Entry",
-      role: "user",
-      text,
-    }),
   )
 }
 

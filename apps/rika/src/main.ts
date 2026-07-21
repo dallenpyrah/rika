@@ -2419,14 +2419,7 @@ export const interactiveTui =
                   ? ViewState.selectedThreadMetadata(model)?.id
                   : undefined
                 const submitting = key.name === "return" && !key.shift && !key.ctrl && ViewState.canSubmit(model)
-                const steering =
-                  submitting &&
-                  model.busy &&
-                  !model.cancelPending &&
-                  model.activeTurnId !== undefined &&
-                  ViewState.classifyPrompt(model.input)._tag !== "Shell" &&
-                  !model.pastedText.some((attachment) => attachment.type === "image")
-                const submissionId = submitting && !steering ? `submission-${++submissionSequence}` : undefined
+                const submissionId = submitting ? `submission-${++submissionSequence}` : undefined
                 const prompt = submitting ? model.input : undefined
                 const parts = prompt === undefined ? undefined : ViewState.promptParts(prompt, model.pastedText)
                 const submittedPrompt =
@@ -2460,7 +2453,7 @@ export const interactiveTui =
                   )
                   previewTimer = selectedPreviewTimer
                 }
-                if (!steering && submittedPrompt !== undefined && submittedPrompt.length > 0 && parts !== undefined)
+                if (submittedPrompt !== undefined && submittedPrompt.length > 0 && parts !== undefined)
                   Session.execute(adapter, {
                     _tag: "Submit",
                     prompt: submittedPrompt,
