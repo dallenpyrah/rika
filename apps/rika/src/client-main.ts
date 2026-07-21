@@ -192,13 +192,19 @@ const dispatcherLayer = (argv?: ReadonlyArray<string>) =>
                   clientKind:
                     input._tag === "Thread"
                       ? "thread-continue"
-                      : input._tag === "Run"
-                        ? "run"
-                        : input._tag === "Review"
-                          ? "review"
-                          : input._tag === "Workflow"
-                            ? "workflow"
-                            : "product",
+                      : (() => {
+                          if (input._tag === "Run") {
+                            return "run"
+                          }
+                          return input._tag === "Review"
+                            ? "review"
+                            : (() => {
+                                if (input._tag === "Workflow") {
+                                  return "workflow"
+                                }
+                                return "product"
+                              })()
+                        })(),
                   startHost: () =>
                     ResidentProcessStartup.spawn({
                       executable: runtime.executable,

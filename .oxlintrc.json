@@ -5,6 +5,9 @@
     "perf": "error",
     "suspicious": "error"
   },
+  "rules": {
+    "no-nested-ternary": "error"
+  },
   "overrides": [
     {
       "files": ["**/test/**"],

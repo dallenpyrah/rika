@@ -92,6 +92,10 @@ const program = Effect.scoped(
       )
     const version = yield* output(["--version"])
     if (!version.includes("rika")) return yield* failure("version", `Unexpected --version output: ${version}`)
+    if (Bun.argv.includes("--boot-only")) {
+      yield* Effect.log(`Release boot smoke passed for ${target}`)
+      return
+    }
     const listed = yield* output(["tools", "list"])
     const tools = yield* Schema.decodeUnknownEffect(NamedItemsJson)(listed).pipe(mapFailure("decode tools list"))
     if (!tools.some((tool) => tool.name === "read"))

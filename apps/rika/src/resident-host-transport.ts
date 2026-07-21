@@ -176,9 +176,12 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
       const threadId =
         event._tag === "SelectionLoaded"
           ? String(event.thread.id)
-          : "threadId" in event && event.threadId !== undefined
-            ? String(event.threadId)
-            : undefined
+          : (() => {
+              if ("threadId" in event && event.threadId !== undefined) {
+                return String(event.threadId)
+              }
+              return undefined
+            })()
       if (threadId !== undefined) selectedThreadId = threadId
       if ("selectionEpoch" in event) selectionEpoch = event.selectionEpoch
       return threadId
@@ -832,14 +835,17 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                               message: `Resident output delivery failed: ${Cause.pretty(delivery.cause)}`,
                             }),
                           )
-                        : outputOverflowed
-                          ? Exit.fail(
-                              Operation.OperationUnavailable.make({
-                                operation: message.input._tag,
-                                message: "Resident client output queue is overloaded",
-                              }),
-                            )
-                          : result
+                        : (() => {
+                            if (outputOverflowed) {
+                              return Exit.fail(
+                                Operation.OperationUnavailable.make({
+                                  operation: message.input._tag,
+                                  message: "Resident client output queue is overloaded",
+                                }),
+                              )
+                            }
+                            return result
+                          })()
                       yield* Exit.match(outcome, {
                         onFailure: (cause) => {
                           const failure = Cause.squash(cause)

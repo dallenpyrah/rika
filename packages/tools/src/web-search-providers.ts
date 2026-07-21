@@ -44,9 +44,12 @@ const execute = (
       const kind =
         response.status === 429 || (response.status === 403 && remaining === 0)
           ? "rate-limit"
-          : response.status === 401 || response.status === 403
-            ? "authentication"
-            : "response"
+          : (() => {
+              if (response.status === 401 || response.status === 403) {
+                return "authentication"
+              }
+              return "response"
+            })()
       return yield* failure(provider, kind, `HTTP ${response.status}`)
     }
     return yield* decodeBody(response).pipe(

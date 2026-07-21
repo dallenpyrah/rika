@@ -22,7 +22,15 @@ export const utf8ByteLength = (value: string): number => {
   let bytes = 0
   for (const character of value) {
     const point = character.codePointAt(0)!
-    bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+    bytes +=
+      point <= 0x7f
+        ? 1
+        : (() => {
+            if (point <= 0x7ff) {
+              return 2
+            }
+            return point <= 0xffff ? 3 : 4
+          })()
   }
   return bytes
 }
@@ -30,11 +38,12 @@ export const utf8ByteLength = (value: string): number => {
 export const formatActivityCounter = (tokens: number): string =>
   tokens < 1_000
     ? `${tokens} tok`
-    : tokens < 10_000
-      ? `${(tokens / 1_000).toFixed(2)}k tok`
-      : tokens < 1_000_000
-        ? `${(tokens / 1_000).toFixed(1)}k tok`
-        : `${(tokens / 1_000_000).toFixed(1)}M tok`
+    : (() => {
+        if (tokens < 10_000) {
+          return `${(tokens / 1_000).toFixed(2)}k tok`
+        }
+        return tokens < 1_000_000 ? `${(tokens / 1_000).toFixed(1)}k tok` : `${(tokens / 1_000_000).toFixed(1)}M tok`
+      })()
 
 export const formatActivity = (activity: Activity | undefined): string | undefined => {
   if (activity === undefined) return undefined
@@ -700,7 +709,14 @@ const continueShortcutsAfterEdit = (before: Model, after: Model): Model => {
     suffix += 1
   const oldEnd = before.input.length - suffix
   const nextTrigger =
-    trigger < prefix ? trigger : trigger >= oldEnd ? trigger + after.input.length - before.input.length : -1
+    trigger < prefix
+      ? trigger
+      : (() => {
+          if (trigger >= oldEnd) {
+            return trigger + after.input.length - before.input.length
+          }
+          return -1
+        })()
   return nextTrigger >= 0 && after.input[nextTrigger] === "?"
     ? { ...after, shortcutsOpen: true, shortcutsTrigger: nextTrigger }
     : { ...after, shortcutsOpen: false, shortcutsTrigger: undefined }
@@ -911,9 +927,12 @@ export const update: {
       const previewThreadId =
         model.threadPreview._tag === "Ready"
           ? model.threadPreview.value.threadId
-          : model.threadPreview._tag === "Loading"
-            ? model.threadPreview.previous?.threadId
-            : undefined
+          : (() => {
+              if (model.threadPreview._tag === "Loading") {
+                return model.threadPreview.previous?.threadId
+              }
+              return undefined
+            })()
       return {
         ...replacedThreads,
         threadSwitcher: {
@@ -964,9 +983,12 @@ export const update: {
       const scrollTop =
         selected < model.threadSidebar.scrollTop
           ? selected
-          : selected >= model.threadSidebar.scrollTop + model.height
-            ? selected - model.height + 1
-            : model.threadSidebar.scrollTop
+          : (() => {
+              if (selected >= model.threadSidebar.scrollTop + model.height) {
+                return selected - model.height + 1
+              }
+              return model.threadSidebar.scrollTop
+            })()
       return { ...model, threadSidebar: { ...model.threadSidebar, selected, scrollTop } }
     }
     case "ThreadSidebarSelectionConfirmed": {
@@ -1107,11 +1129,14 @@ export const update: {
                 activity:
                   incoming._tag === "ToolCall"
                     ? { _tag: "RunningTools" as const }
-                    : incoming._tag === "ToolResult" || incoming._tag === "Permission"
-                      ? { _tag: "Waiting" as const }
-                      : incoming._tag === "Reasoning"
-                        ? streamActivity(model.activity, "Thinking", incoming.text, undefined)
-                        : (model.activity ?? { _tag: "Waiting" as const }),
+                    : (() => {
+                        if (incoming._tag === "ToolResult" || incoming._tag === "Permission") {
+                          return { _tag: "Waiting" as const }
+                        }
+                        return incoming._tag === "Reasoning"
+                          ? streamActivity(model.activity, "Thinking", incoming.text, undefined)
+                          : (model.activity ?? { _tag: "Waiting" as const })
+                      })(),
               }
             : {}),
         }
@@ -1186,9 +1211,12 @@ export const update: {
               activity:
                 message.block._tag === "ToolCall"
                   ? ({ _tag: "RunningTools" } as const)
-                  : message.block._tag === "ToolResult" || message.block._tag === "Permission"
-                    ? ({ _tag: "Waiting" } as const)
-                    : (model.activity ?? ({ _tag: "Waiting" } as const)),
+                  : (() => {
+                      if (message.block._tag === "ToolResult" || message.block._tag === "Permission") {
+                        return { _tag: "Waiting" } as const
+                      }
+                      return model.activity ?? ({ _tag: "Waiting" } as const)
+                    })(),
             }
           : {}),
       }
@@ -1375,7 +1403,7 @@ export const update: {
       if (count === 0) return model
       const current = ids.indexOf(model.detailSelection ?? "")
       const nextIndex =
-        current < 0 ? (message.offset < 0 ? count - 1 : 0) : (((current + message.offset) % count) + count) % count
+        current < 0 ? [message.offset < 0 ? count - 1 : 0][0] : (((current + message.offset) % count) + count) % count
       return { ...model, detailSelection: ids[nextIndex]! }
     }
     case "DetailToggled": {
@@ -1412,9 +1440,12 @@ export const update: {
       const previous =
         model.threadPreview._tag === "Ready"
           ? model.threadPreview.value
-          : model.threadPreview._tag === "Loading"
-            ? model.threadPreview.previous
-            : undefined
+          : (() => {
+              if (model.threadPreview._tag === "Loading") {
+                return model.threadPreview.previous
+              }
+              return undefined
+            })()
       return {
         ...model,
         threadPreview: { _tag: "Loading", ...(previous === undefined ? {} : { previous }) },
@@ -1479,9 +1510,12 @@ export const update: {
           (model.threads as ReadonlyArray<ThreadItem>).findIndex((thread) => thread.id === model.currentThreadId),
         )
         return model.threadSidebar.open
-          ? model.threadSidebar.focused
-            ? { ...model, threadSidebar: { ...model.threadSidebar, open: false, focused: false } }
-            : { ...model, threadSidebar: { ...model.threadSidebar, focused: true } }
+          ? (() => {
+              if (model.threadSidebar.focused) {
+                return { ...model, threadSidebar: { ...model.threadSidebar, open: false, focused: false } }
+              }
+              return { ...model, threadSidebar: { ...model.threadSidebar, focused: true } }
+            })()
           : {
               ...model,
               threadSidebar: {
@@ -1544,25 +1578,27 @@ export const update: {
           const thread = threads[model.threadSwitcher.selected]
           return thread === undefined
             ? model
-            : model.threadSwitcher.kind === "mention"
-              ? insert(
-                  erase(
-                    {
-                      ...model,
-                      threadSwitcher: {
-                        open: false,
-                        query: "",
-                        selected: 0,
-                        kind: "switch",
-                        previewScroll: 0,
+            : (() => {
+                if (model.threadSwitcher.kind === "mention") {
+                  return insert(
+                    erase(
+                      {
+                        ...model,
+                        threadSwitcher: {
+                          open: false,
+                          query: "",
+                          selected: 0,
+                          kind: "switch",
+                          previewScroll: 0,
+                        },
+                        threadPreview: idle,
                       },
-                      threadPreview: idle,
-                    },
-                    Math.min(2 + model.threadSwitcher.query.length, model.cursor),
-                  ),
-                  `@${thread.id} `,
-                )
-              : {
+                      Math.min(2 + model.threadSwitcher.query.length, model.cursor),
+                    ),
+                    `@${thread.id} `,
+                  )
+                }
+                return {
                   ...model,
                   threadSwitcher: {
                     open: false,
@@ -1574,6 +1610,7 @@ export const update: {
                   threadPreview: idle,
                   pendingAction: { _tag: "SelectThread", id: thread.id },
                 }
+              })()
         }
         if (key.name === "backspace") {
           if (model.threadSwitcher.kind === "mention" && model.threadSwitcher.query.length === 0)
@@ -1609,9 +1646,12 @@ export const update: {
         const selected =
           key.name === "up"
             ? (model.threadSwitcher.selected + Math.max(1, threads.length) - 1) % Math.max(1, threads.length)
-            : key.name === "down"
-              ? (model.threadSwitcher.selected + 1) % Math.max(1, threads.length)
-              : model.threadSwitcher.selected
+            : (() => {
+                if (key.name === "down") {
+                  return (model.threadSwitcher.selected + 1) % Math.max(1, threads.length)
+                }
+                return model.threadSwitcher.selected
+              })()
         if (!isPrintable(key))
           return {
             ...model,
@@ -1714,9 +1754,12 @@ export const update: {
         const selected =
           key.name === "left" || key.name === "up"
             ? (model.modePicker.selected + 3) % 4
-            : key.name === "right" || key.name === "down"
-              ? (model.modePicker.selected + 1) % 4
-              : model.modePicker.selected
+            : (() => {
+                if (key.name === "right" || key.name === "down") {
+                  return (model.modePicker.selected + 1) % 4
+                }
+                return model.modePicker.selected
+              })()
         if (key.name === "return")
           return {
             ...model,
@@ -1730,9 +1773,12 @@ export const update: {
         const selected =
           key.name === "up"
             ? Math.max(0, model.palette.selected - 1)
-            : key.name === "down"
-              ? Math.max(0, Math.min(results.length - 1, model.palette.selected + 1))
-              : model.palette.selected
+            : (() => {
+                if (key.name === "down") {
+                  return Math.max(0, Math.min(results.length - 1, model.palette.selected + 1))
+                }
+                return model.palette.selected
+              })()
         if (key.name === "return") {
           const action = results[selected]?.action as PaletteAction | undefined
           if (action === undefined) return { ...model, palette: { ...model.palette, selected: 0 } }
@@ -1791,9 +1837,12 @@ export const update: {
         const selected =
           key.name === "up"
             ? (model.filePicker.selected + Math.max(1, files.length) - 1) % Math.max(1, files.length)
-            : key.name === "down"
-              ? (model.filePicker.selected + 1) % Math.max(1, files.length)
-              : model.filePicker.selected
+            : (() => {
+                if (key.name === "down") {
+                  return (model.filePicker.selected + 1) % Math.max(1, files.length)
+                }
+                return model.filePicker.selected
+              })()
         if (key.name === "return") {
           const file = files[selected]
           return file === undefined

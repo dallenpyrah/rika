@@ -128,9 +128,12 @@ const makeHarness = Effect.fn("InteractiveSessionTest.makeHarness")(function* (
           pageEvents: (turnId: string, direction: "forward" | "backward", cursor?: string, limit = 200) => {
             const boundary =
               cursor === undefined
-                ? direction === "forward"
-                  ? 0
-                  : pagedEvents.length
+                ? (() => {
+                    if (direction === "forward") {
+                      return 0
+                    }
+                    return pagedEvents.length
+                  })()
                 : pagedEvents.findIndex((event) => event.cursor === cursor) + (direction === "forward" ? 1 : 0)
             const page =
               direction === "forward"

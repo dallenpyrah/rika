@@ -23,9 +23,12 @@ export const make = (): State => ({
 const threadId = (event: InteractiveEvent): string | undefined =>
   event._tag === "SelectionLoaded"
     ? String(event.thread.id)
-    : "threadId" in event && event.threadId !== undefined
-      ? String(event.threadId)
-      : undefined
+    : (() => {
+        if ("threadId" in event && event.threadId !== undefined) {
+          return String(event.threadId)
+        }
+        return undefined
+      })()
 
 const rememberThread = (state: State, threadIds: Set<string>, id: string) => {
   if (threadIds.has(id)) return

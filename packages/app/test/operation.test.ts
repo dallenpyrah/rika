@@ -119,12 +119,14 @@ const makeSelectionLoadHarness = Effect.fn("OperationTest.makeSelectionLoadHarne
     get: (id) =>
       targetGetFailed && id === target.id
         ? Effect.fail(ThreadRepository.RepositoryError.make({ message: "forced thread lookup failure" }))
-        : targetGetBlocked && id === target.id
-          ? Deferred.succeed(targetGetEntered, undefined).pipe(
-              Effect.andThen(Deferred.await(releaseTargetGet)),
-              Effect.andThen(repository.get(id)),
-            )
-          : repository.get(id),
+        : [
+            targetGetBlocked && id === target.id
+              ? Deferred.succeed(targetGetEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseTargetGet)),
+                  Effect.andThen(repository.get(id)),
+                )
+              : repository.get(id),
+          ][0],
   })
   const streamed: ReadonlyArray<ExecutionBackend.Event> = Array.from({ length: eventCount }, (_, index) => ({
     cursor: `selection-live-${index + 1}`,
@@ -671,9 +673,12 @@ describe("Operation", () => {
               status:
                 input.turnId === "failed"
                   ? ("failed" as const)
-                  : input.turnId === "cancelled"
-                    ? ("cancelled" as const)
-                    : ("completed" as const),
+                  : (() => {
+                      if (input.turnId === "cancelled") {
+                        return "cancelled" as const
+                      }
+                      return "completed" as const
+                    })(),
               events: [],
             }),
           ),
@@ -1652,9 +1657,12 @@ describe("Operation", () => {
           selectedTranscript.map((event) =>
             event._tag === "SelectionLoaded"
               ? event._tag
-              : event._tag === "TranscriptPatched"
-                ? event.event.cursor
-                : "",
+              : (() => {
+                  if (event._tag === "TranscriptPatched") {
+                    return event.event.cursor
+                  }
+                  return ""
+                })(),
           ),
         ).toEqual(["SelectionLoaded", "selection-live-1", "selection-live-2", "selection-live-3"])
         expect(selectedTranscript.every((event) => "selectionEpoch" in event && event.selectionEpoch === 2)).toBe(true)
@@ -3165,23 +3173,26 @@ describe("Operation", () => {
             ...backend,
             start: (input) =>
               status === "backend"
-                ? input.turnId === "turn-backend"
-                  ? turns
-                      .createForSubmission({
-                        id: Turn.TurnId.make("successor-backend"),
-                        threadId: Thread.ThreadId.make(input.threadId),
-                        prompt: "queued successor",
-                        executionRoute: executionRoute(),
-                        queueCapacity: 128,
-                        now: 1,
-                      })
-                      .pipe(
-                        Effect.mapError((cause) => ExecutionBackend.BackendError.make({ message: cause.message })),
-                        Effect.andThen(
-                          Effect.fail(ExecutionBackend.BackendError.make({ message: "interactive backend failed" })),
-                        ),
-                      )
-                  : backend.start(input)
+                ? (() => {
+                    if (input.turnId === "turn-backend") {
+                      return turns
+                        .createForSubmission({
+                          id: Turn.TurnId.make("successor-backend"),
+                          threadId: Thread.ThreadId.make(input.threadId),
+                          prompt: "queued successor",
+                          executionRoute: executionRoute(),
+                          queueCapacity: 128,
+                          now: 1,
+                        })
+                        .pipe(
+                          Effect.mapError((cause) => ExecutionBackend.BackendError.make({ message: cause.message })),
+                          Effect.andThen(
+                            Effect.fail(ExecutionBackend.BackendError.make({ message: "interactive backend failed" })),
+                          ),
+                        )
+                    }
+                    return backend.start(input)
+                  })()
                 : Effect.succeed({
                     turnId: input.turnId,
                     status: status === "failed-event" ? ("failed" as const) : status,

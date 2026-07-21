@@ -89,7 +89,16 @@ const testEnvironment = (
     realPath: (path) => Effect.succeed(realPaths.get(path) ?? path),
     readDirectory: (path) => Effect.succeed(directories.get(path) ?? []),
     stat: (path) =>
-      Effect.succeed(directories.has(path) ? info("Directory") : files.has(path) ? info("File") : info("Socket")),
+      Effect.succeed(
+        directories.has(path)
+          ? info("Directory")
+          : (() => {
+              if (files.has(path)) {
+                return info("File")
+              }
+              return info("Socket")
+            })(),
+      ),
     readFileString: (path) => {
       if (path === "/workspace/src/unreadable.ts") return Effect.fail(platformError("readFileString", path))
       const content = files.get(path)

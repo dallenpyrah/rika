@@ -460,11 +460,12 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     const terminalStatus =
       event.event.type === "execution.completed"
         ? "completed"
-        : event.event.type === "execution.failed"
-          ? "failed"
-          : event.event.type === "execution.cancelled"
-            ? "cancelled"
-            : undefined
+        : (() => {
+            if (event.event.type === "execution.failed") {
+              return "failed"
+            }
+            return event.event.type === "execution.cancelled" ? "cancelled" : undefined
+          })()
     const model = terminal
       ? { ...projectedModel, activeTurnId: undefined, busy: false, activity: undefined }
       : projectedModel

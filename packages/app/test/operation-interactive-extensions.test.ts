@@ -303,15 +303,32 @@ describe("interactive session extensions", () => {
                     pendingTools: [],
                     children: [{ executionId: childId, status: "completed" as const }],
                   }
-                : executionId === childId
-                  ? { turnId: executionId, status: "completed" as const, waits: [], pendingTools: [], children: [] }
-                  : undefined,
+                : (() => {
+                    if (executionId === childId) {
+                      return {
+                        turnId: executionId,
+                        status: "completed" as const,
+                        waits: [],
+                        pendingTools: [],
+                        children: [],
+                      }
+                    }
+                    return undefined
+                  })(),
             ),
           replay: (executionId) =>
             Effect.succeed({
               turnId: executionId,
               status: "completed" as const,
-              events: executionId === "turn-synth" ? rootEvents : executionId === childId ? childEvents : [],
+              events:
+                executionId === "turn-synth"
+                  ? rootEvents
+                  : (() => {
+                      if (executionId === childId) {
+                        return childEvents
+                      }
+                      return []
+                    })(),
             }),
         })
         const context = yield* Layer.build(interactiveLayer(repository, turns, backend, registration))
@@ -542,7 +559,15 @@ describe("interactive session extensions", () => {
             Effect.succeed({
               turnId: executionId,
               status: "completed" as const,
-              events: executionId === childId ? childEvents : executionId === nestedId ? nestedEvents : [],
+              events:
+                executionId === childId
+                  ? childEvents
+                  : (() => {
+                      if (executionId === nestedId) {
+                        return nestedEvents
+                      }
+                      return []
+                    })(),
             }),
           inspect: (executionId) =>
             Effect.succeed({
@@ -553,9 +578,12 @@ describe("interactive session extensions", () => {
               children:
                 executionId === "parent-turn"
                   ? [{ executionId: childId, status: "completed" as const }]
-                  : executionId === childId
-                    ? [{ executionId: nestedId, status: "completed" as const }]
-                    : [],
+                  : (() => {
+                      if (executionId === childId) {
+                        return [{ executionId: nestedId, status: "completed" as const }]
+                      }
+                      return []
+                    })(),
             }),
         })
         const layer = interactiveLayer(

@@ -72,9 +72,12 @@ const isTerminalStatus = (
 const interactiveEventThreadId = (event: InteractiveEvent): string | undefined =>
   event._tag === "SelectionLoaded"
     ? String(event.thread.id)
-    : "threadId" in event && event.threadId !== undefined
-      ? String(event.threadId)
-      : undefined
+    : (() => {
+        if ("threadId" in event && event.threadId !== undefined) {
+          return String(event.threadId)
+        }
+        return undefined
+      })()
 
 const ignoreInteractiveEvent = (_event: InteractiveEvent) => {}
 
@@ -217,11 +220,14 @@ export const runAuth = Effect.fn("Operation.runAuth")(function* (
   yield* Console.log(
     status._tag === "Unauthenticated"
       ? "OpenAI account: unauthenticated"
-      : status._tag === "Present"
-        ? "OpenAI account: credentials present (remote validity not checked)"
-        : status._tag === "RefreshRequired"
-          ? "OpenAI account: refresh required (remote validity not checked)"
-          : "OpenAI account: credential store is corrupt; log in again after removing it",
+      : (() => {
+          if (status._tag === "Present") {
+            return "OpenAI account: credentials present (remote validity not checked)"
+          }
+          return status._tag === "RefreshRequired"
+            ? "OpenAI account: refresh required (remote validity not checked)"
+            : "OpenAI account: credential store is corrupt; log in again after removing it"
+        })(),
   )
 })
 
@@ -277,11 +283,12 @@ const reconcileInternal = Effect.fn("Operation.reconcile")(function* (
                   const status =
                     inspection === undefined
                       ? "failed"
-                      : inspection.state === "joining"
-                        ? "running"
-                        : inspection.state === "satisfied"
-                          ? "completed"
-                          : inspection.state
+                      : (() => {
+                          if (inspection.state === "joining") {
+                            return "running"
+                          }
+                          return inspection.state === "satisfied" ? "completed" : inspection.state
+                        })()
                   yield* turns.setStatus(turn.id, status, turn.lastCursor, yield* Clock.currentTimeMillis)
                   if (inspection?.state === "joining" && watchReviewOwner !== undefined)
                     yield* watchReviewOwner(turn, inspection)
@@ -622,11 +629,12 @@ const settledChildStatus = (
 ): "complete" | "failed" | "cancelled" | undefined =>
   status === "completed"
     ? "complete"
-    : status === "failed"
-      ? "failed"
-      : status === "cancelled"
-        ? "cancelled"
-        : undefined
+    : (() => {
+        if (status === "failed") {
+          return "failed"
+        }
+        return status === "cancelled" ? "cancelled" : undefined
+      })()
 
 const projectExecutionTree = Effect.fn("Operation.projectExecutionTree")(function* (
   backend: ExecutionBackend.Interface,
@@ -977,11 +985,11 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   startedAt: firstTurn.updatedAt,
                   executionRoute: titleExecutionRoute,
                 })
-              : isTerminalStatus(inspection.status)
-                ? yield* backend.replay(executionId)
-                : backend.follow === undefined
-                  ? undefined
-                  : yield* backend.follow(executionId, undefined)
+              : [
+                  isTerminalStatus(inspection.status)
+                    ? yield* backend.replay(executionId)
+                    : [backend.follow === undefined ? undefined : yield* backend.follow(executionId, undefined)][0],
+                ][0]
           if (result === undefined) return
           const previousGlobalCostUsd = currentUsageCosts().globalCostUsd
           for (const event of result.events)
@@ -1234,9 +1242,12 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
         const promptParts =
           turn.promptParts === undefined
             ? undefined
-            : resolved.prompt === turn.prompt
-              ? turn.promptParts
-              : [...turn.promptParts, { type: "text" as const, text: resolved.prompt.slice(turn.prompt.length) }]
+            : (() => {
+                if (resolved.prompt === turn.prompt) {
+                  return turn.promptParts
+                }
+                return [...turn.promptParts, { type: "text" as const, text: resolved.prompt.slice(turn.prompt.length) }]
+              })()
         if (options.executionExtensions === undefined)
           return { prompt: resolved.prompt, promptParts, extensionPin: turn.extensionPin, messages: resolved.messages }
         const extensions = yield* ExecutionExtensions.Service
@@ -1975,14 +1986,16 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   Effect.flatMap((claim) =>
                     claim === undefined
                       ? Effect.void
-                      : claim._tag === "Collision"
-                        ? Effect.gen(function* () {
-                            yield* turns.releaseQueuedClaim(claim.claim)
-                            return false
-                          })
-                        : restore(runPromoted(claim.claim)).pipe(
-                            Effect.ensuring(releaseTurnObserver(claim.claim.turn.id)),
-                          ),
+                      : [
+                          claim._tag === "Collision"
+                            ? Effect.gen(function* () {
+                                yield* turns.releaseQueuedClaim(claim.claim)
+                                return false
+                              })
+                            : restore(runPromoted(claim.claim)).pipe(
+                                Effect.ensuring(releaseTurnObserver(claim.claim.turn.id)),
+                              ),
+                        ][0],
                   ),
                 ),
             )
@@ -2889,7 +2902,14 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     else
                       yield* backend.resolvePermission(
                         waitId,
-                        decision === "allow" ? "Approved" : decision === "deny" ? "Denied" : "Always",
+                        decision === "allow"
+                          ? "Approved"
+                          : (() => {
+                              if (decision === "deny") {
+                                return "Denied"
+                              }
+                              return "Always"
+                            })(),
                         resolvedAt,
                       )
                     emit(sessionDispatch, {
@@ -3502,7 +3522,16 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 lanes
                   .map(
                     (lane) =>
-                      `## ${lane.id}\n${lane.output === undefined ? `Review lane ${lane.status}${lane.error === undefined ? "" : `: ${lane.error}`}` : typeof lane.output === "string" ? lane.output : encodeJson(lane.output)}`,
+                      `## ${lane.id}\n${
+                        lane.output === undefined
+                          ? `Review lane ${lane.status}${lane.error === undefined ? "" : `: ${lane.error}`}`
+                          : (() => {
+                              if (typeof lane.output === "string") {
+                                return lane.output
+                              }
+                              return encodeJson(lane.output)
+                            })()
+                      }`,
                   )
                   .join("\n\n"),
               )

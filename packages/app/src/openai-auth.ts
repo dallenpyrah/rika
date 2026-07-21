@@ -221,9 +221,12 @@ const credentialFrom = (crypto: Crypto.Crypto, response: TokenResponse, previous
       expiresAt:
         response.access_token !== undefined && response.expires_in !== undefined
           ? now + response.expires_in * 1000
-          : tokenExpiry !== undefined
-            ? tokenExpiry * 1000
-            : (previous?.expiresAt ?? now + 8 * 86_400_000),
+          : (() => {
+              if (tokenExpiry !== undefined) {
+                return tokenExpiry * 1000
+              }
+              return previous?.expiresAt ?? now + 8 * 86_400_000
+            })(),
       refreshedAt: now,
     } satisfies CredentialDisk
   }).pipe(
@@ -346,9 +349,12 @@ export const layer = (options: TimingOptions = {}) =>
                 Effect.succeed<Status>(
                   Option.isNone(entry)
                     ? { _tag: "Unauthenticated" }
-                    : entry.value.expiresAt <= now + 300_000
-                      ? { _tag: "RefreshRequired", fingerprint: entry.value.fingerprint }
-                      : { _tag: "Present", fingerprint: entry.value.fingerprint },
+                    : (() => {
+                        if (entry.value.expiresAt <= now + 300_000) {
+                          return { _tag: "RefreshRequired", fingerprint: entry.value.fingerprint }
+                        }
+                        return { _tag: "Present", fingerprint: entry.value.fingerprint }
+                      })(),
                 ),
             }),
           )

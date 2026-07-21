@@ -187,13 +187,19 @@ const pastedImageFormat = (bytes: Uint8Array, declaredMediaType?: string) => {
     bytes[6] === 0x1a &&
     bytes[7] === 0x0a
       ? { mediaType: "image/png", extension: "png" }
-      : bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-        ? { mediaType: "image/jpeg", extension: "jpg" }
-        : bytes.length >= 6 && /^GIF8[79]a$/.test(prefix(0, 6))
-          ? { mediaType: "image/gif", extension: "gif" }
-          : bytes.length >= 12 && prefix(0, 4) === "RIFF" && prefix(8, 12) === "WEBP"
-            ? { mediaType: "image/webp", extension: "webp" }
-            : undefined
+      : (() => {
+          if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+            return { mediaType: "image/jpeg", extension: "jpg" }
+          }
+          return bytes.length >= 6 && /^GIF8[79]a$/.test(prefix(0, 6))
+            ? { mediaType: "image/gif", extension: "gif" }
+            : (() => {
+                if (bytes.length >= 12 && prefix(0, 4) === "RIFF" && prefix(8, 12) === "WEBP") {
+                  return { mediaType: "image/webp", extension: "webp" }
+                }
+                return undefined
+              })()
+        })()
   if (signature === undefined) return undefined
   const mediaType = declaredMediaType?.split(";", 1)[0]?.trim().toLowerCase()
   return mediaType === undefined || mediaType === signature.mediaType ? signature : undefined
@@ -256,9 +262,12 @@ const editorArgumentsImpl = (editor: string, path: string, line?: number, column
   const location = line === undefined ? path : `${path}:${line}${column === undefined ? "" : `:${column}`}`
   return editor === "code" || editor.endsWith("/code")
     ? [editor, "--goto", location]
-    : editor === "vim" || editor === "nvim" || editor.endsWith("/vim") || editor.endsWith("/nvim")
-      ? [editor, ...(line === undefined ? [] : [`+call cursor(${line},${column ?? 1})`]), path]
-      : [editor, path]
+    : (() => {
+        if (editor === "vim" || editor === "nvim" || editor.endsWith("/vim") || editor.endsWith("/nvim")) {
+          return [editor, ...(line === undefined ? [] : [`+call cursor(${line},${column ?? 1})`]), path]
+        }
+        return [editor, path]
+      })()
 }
 
 export const editorArguments: {
@@ -269,17 +278,20 @@ export const editorArguments: {
 const defaultOpenArgumentsImpl = (path: string, platform: NodeJS.Platform = process.platform): Array<string> =>
   platform === "darwin"
     ? ["open", path]
-    : platform === "win32"
-      ? [
-          "powershell.exe",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "Start-Process -LiteralPath $args[0]",
-          "--",
-          path,
-        ]
-      : ["xdg-open", path]
+    : (() => {
+        if (platform === "win32") {
+          return [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process -LiteralPath $args[0]",
+            "--",
+            path,
+          ]
+        }
+        return ["xdg-open", path]
+      })()
 
 export const defaultOpenArguments: {
   (platform?: NodeJS.Platform): (path: string) => Array<string>
@@ -349,15 +361,18 @@ const materializePromptPartsImpl = (parts: ReadonlyArray<ViewState.PromptPart>, 
                   message: `Image attachment is missing or empty: ${part.path}`,
                 }),
               )
-            : bytes.byteLength > maxAttachmentBytes
-              ? Effect.fail(
-                  PromptAttachmentError.make({
-                    index,
-                    path: part.path,
-                    message: `Image attachment is too large (${attachmentMegabytes(bytes.byteLength)}; the limit is ${attachmentMegabytes(maxAttachmentBytes)}): ${part.path}`,
-                  }),
-                )
-              : Effect.succeed({ mediaType: imageMediaType(path), bytes }),
+            : (() => {
+                if (bytes.byteLength > maxAttachmentBytes) {
+                  return Effect.fail(
+                    PromptAttachmentError.make({
+                      index,
+                      path: part.path,
+                      message: `Image attachment is too large (${attachmentMegabytes(bytes.byteLength)}; the limit is ${attachmentMegabytes(maxAttachmentBytes)}): ${part.path}`,
+                    }),
+                  )
+                }
+                return Effect.succeed({ mediaType: imageMediaType(path), bytes })
+              })(),
         ),
         Effect.flatMap(({ mediaType, bytes }) =>
           !mediaType.startsWith("image/")
@@ -1076,11 +1091,13 @@ export const withPinnedRouteRegistration = Effect.fn("Main.withPinnedRouteRegist
     start: (input) =>
       Effect.gen(function* () {
         const resolved = isLegacyUnavailableExecutionRoute(input.executionRoute)
-          ? options.resolveLegacyRoute === undefined
-            ? yield* ExecutionBackend.BackendError.make({
-                message: `Turn ${input.turnId} uses the legacy unavailable model route and cannot be started`,
-              })
-            : yield* options.resolveLegacyRoute(input)
+          ? [
+              options.resolveLegacyRoute === undefined
+                ? yield* ExecutionBackend.BackendError.make({
+                    message: `Turn ${input.turnId} uses the legacy unavailable model route and cannot be started`,
+                  })
+                : yield* options.resolveLegacyRoute(input),
+            ][0]
           : { executionRoute: input.executionRoute, registrations: [] }
         if (resolved.registrations.length > 0) {
           if (registerModels === undefined)
@@ -1164,7 +1181,14 @@ export const configuredBackendLayer = ({
       yield* Effect.logInfo("model.backend.configured").pipe(
         Effect.annotateLogs(
           "rika.model.backend.kind",
-          testScript._tag === "Some" ? "test-script" : testResponse._tag === "Some" ? "test-response" : "provider",
+          testScript._tag === "Some"
+            ? "test-script"
+            : (() => {
+                if (testResponse._tag === "Some") {
+                  return "test-response"
+                }
+                return "provider"
+              })(),
         ),
       )
       let registration: ModelRegistry.Registration
@@ -2476,11 +2500,14 @@ export const interactiveTui =
                     ? Effect.sync(() => startSelection((epoch) => session.reopenThread(epoch))).pipe(
                         Effect.flatMap(Fiber.join),
                       )
-                    : input.threadId === undefined
-                      ? Effect.void
-                      : Effect.sync(() => startSelection((epoch) => session.selectThread(input.threadId!, epoch))).pipe(
-                          Effect.flatMap(Fiber.join),
-                        )
+                    : (() => {
+                        if (input.threadId === undefined) {
+                          return Effect.void
+                        }
+                        return Effect.sync(() =>
+                          startSelection((epoch) => session.selectThread(input.threadId!, epoch)),
+                        ).pipe(Effect.flatMap(Fiber.join))
+                      })()
                   ).pipe(
                     Effect.andThen(
                       initialSubmitAction(input.prompt, model.mode) === undefined
@@ -2547,15 +2574,21 @@ if (import.meta.main) {
   const defaultDataRoot = `${home}/.rika`
   const database =
     hostDataRoot === undefined
-      ? environment.database._tag === "Some"
-        ? environment.database.value
-        : `${defaultDataRoot}/rika.db`
+      ? (() => {
+          if (environment.database._tag === "Some") {
+            return environment.database.value
+          }
+          return `${defaultDataRoot}/rika.db`
+        })()
       : join(hostDataRoot, "rika.db")
   const relayDatabase =
     hostDataRoot === undefined
-      ? environment.relayDatabase._tag === "Some"
-        ? environment.relayDatabase.value
-        : `${defaultDataRoot}/relay.db`
+      ? (() => {
+          if (environment.relayDatabase._tag === "Some") {
+            return environment.relayDatabase.value
+          }
+          return `${defaultDataRoot}/relay.db`
+        })()
       : join(hostDataRoot, "relay.db")
   const globalConfig = `${home}/.config/rika/settings.json`
   const workspaceConfig = `${process.cwd()}/.rika/settings.json`
@@ -2612,9 +2645,12 @@ if (import.meta.main) {
   const editor =
     environment.visual._tag === "Some"
       ? environment.visual.value
-      : environment.editor._tag === "Some"
-        ? environment.editor.value
-        : undefined
+      : (() => {
+          if (environment.editor._tag === "Some") {
+            return environment.editor.value
+          }
+          return undefined
+        })()
   const productDatabase = Layer.unwrap(
     Effect.gen(function* () {
       yield* Effect.all(
@@ -3034,15 +3070,19 @@ if (import.meta.main) {
                           clientKind:
                             clientInput._tag === "Interactive"
                               ? "interactive"
-                              : clientInput._tag === "Thread"
-                                ? "thread-continue"
-                                : clientInput._tag === "Run"
-                                  ? "run"
-                                  : clientInput._tag === "Review"
-                                    ? "review"
-                                    : clientInput._tag === "Workflow"
-                                      ? "workflow"
-                                      : "product",
+                              : (() => {
+                                  if (clientInput._tag === "Thread") {
+                                    return "thread-continue"
+                                  }
+                                  return clientInput._tag === "Run"
+                                    ? "run"
+                                    : (() => {
+                                        if (clientInput._tag === "Review") {
+                                          return "review"
+                                        }
+                                        return clientInput._tag === "Workflow" ? "workflow" : "product"
+                                      })()
+                                })(),
                           startHost: () =>
                             ResidentProcessStartup.spawn({
                               executable: process.execPath,

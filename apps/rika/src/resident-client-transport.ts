@@ -195,9 +195,11 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   const writer = (frame: string | Socket.CloseEvent) =>
     Deferred.isDone(closing).pipe(
       Effect.flatMap((isClosing) =>
-        isClosing
-          ? Effect.fail(transportError("Resident connection is closing"))
-          : typeof frame === "string" && new TextEncoder().encode(frame).byteLength > maxFrameBytes
+        (() => {
+          if (isClosing) {
+            return Effect.fail(transportError("Resident connection is closing"))
+          }
+          return typeof frame === "string" && new TextEncoder().encode(frame).byteLength > maxFrameBytes
             ? Effect.fail(transportError("Resident frame exceeds maximum size"))
             : Queue.offer(outbound, frame).pipe(
                 Effect.timeoutOrElse({
@@ -205,7 +207,8 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                   orElse: () => Effect.fail(transportError("Resident outbound queue is overloaded")),
                 }),
                 Effect.asVoid,
-              ),
+              )
+        })(),
       ),
     )
   yield* Effect.forkIn(Effect.forever(Queue.take(outbound).pipe(Effect.flatMap(rawWriter))), connectionScope)
@@ -275,46 +278,66 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
               })
           ).pipe(
             Effect.flatMap((message) =>
-              message === undefined
-                ? Effect.void
-                : message._tag === "accepted"
-                  ? message.identity !== options.identity || message.clientNonce !== clientNonce
-                    ? Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
-                    : message.protocolVersion !== ResidentService.protocolVersion
-                      ? Effect.fail(
-                          transportError(
-                            `An incompatible Rika resident${message.residentPid === undefined ? "" : ` (PID ${message.residentPid})`} is still running at ${options.url}; close other Rika clients, then run rika again`,
-                            "incompatible-resident",
-                          ),
-                        )
-                      : !ResidentService.verifyServerProof(
-                            options.token,
-                            {
-                              identity: options.identity,
-                              clientNonce,
-                              clientKind: options.clientKind,
-                              protocolVersion: ResidentService.protocolVersion,
-                              buildIdentity: ResidentService.buildIdentity,
-                            },
-                            message,
+              (() => {
+                if (message === undefined) {
+                  return Effect.void
+                }
+                return (() => {
+                  if (message._tag === "accepted") {
+                    return (() => {
+                      if (message.identity !== options.identity || message.clientNonce !== clientNonce) {
+                        return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                      }
+                      return (() => {
+                        if (message.protocolVersion !== ResidentService.protocolVersion) {
+                          return Effect.fail(
+                            transportError(
+                              `An incompatible Rika resident${message.residentPid === undefined ? "" : ` (PID ${message.residentPid})`} is still running at ${options.url}; close other Rika clients, then run rika again`,
+                              "incompatible-resident",
+                            ),
                           )
-                        ? Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
-                        : message.buildIdentity !== ResidentService.buildIdentity
-                          ? Effect.fail(
-                              transportError(
-                                `A different Rika build${message.residentPid === undefined ? "" : ` (resident PID ${message.residentPid})`} is still running at ${options.url}; Rika will replace it when no clients are using it`,
-                                "incompatible-resident",
-                              ),
+                        }
+                        return (() => {
+                          if (
+                            !ResidentService.verifyServerProof(
+                              options.token,
+                              {
+                                identity: options.identity,
+                                clientNonce,
+                                clientKind: options.clientKind,
+                                protocolVersion: ResidentService.protocolVersion,
+                                buildIdentity: ResidentService.buildIdentity,
+                              },
+                              message,
                             )
-                          : Effect.sync(() => (acceptedConnectionId = message.connectionId)).pipe(
+                          ) {
+                            return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                          }
+                          return (() => {
+                            if (message.buildIdentity !== ResidentService.buildIdentity) {
+                              return Effect.fail(
+                                transportError(
+                                  `A different Rika build${message.residentPid === undefined ? "" : ` (resident PID ${message.residentPid})`} is still running at ${options.url}; Rika will replace it when no clients are using it`,
+                                  "incompatible-resident",
+                                ),
+                              )
+                            }
+                            return Effect.sync(() => (acceptedConnectionId = message.connectionId)).pipe(
                               Effect.andThen(Deferred.succeed(accepted, message)),
                             )
-                  : message._tag === "rejected"
-                    ? Deferred.fail(
+                          })()
+                        })()
+                      })()
+                    })()
+                  }
+                  return (() => {
+                    if (message._tag === "rejected") {
+                      return Deferred.fail(
                         connectionFailure,
                         transportError("Resident service is draining", "resident-draining"),
                       )
-                    : message._tag === "pong"
+                    }
+                    return message._tag === "pong"
                       ? Effect.gen(function* () {
                           const pending = (yield* Ref.get(pongs)).get(message.id)
                           if (pending !== undefined) yield* Deferred.succeed(pending, undefined)
@@ -593,7 +616,10 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                               )
                             if (request.feed !== undefined) yield* Queue.shutdown(request.feed.frames)
                           }
-                        }),
+                        })
+                  })()
+                })()
+              })(),
             ),
           ),
         ),
@@ -1050,9 +1076,11 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                   Effect.flatMap((session) =>
                     invoke(session).pipe(
                       Effect.catchCause((cause) =>
-                        Cause.hasInterruptsOnly(cause)
-                          ? Effect.interrupt
-                          : isDisconnectedOperation(Cause.squash(cause))
+                        (() => {
+                          if (Cause.hasInterruptsOnly(cause)) {
+                            return Effect.interrupt
+                          }
+                          return isDisconnectedOperation(Cause.squash(cause))
                             ? invalidate(session).pipe(Effect.andThen(retryRead(invoke)))
                             : Effect.sync(() =>
                                 report({
@@ -1060,7 +1088,8 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                                   selectionEpoch: 0,
                                   message: String(Cause.squash(cause)),
                                 }),
-                              ),
+                              )
+                        })(),
                       ),
                     ),
                   ),
@@ -1073,9 +1102,11 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                 Effect.flatMap((session) =>
                   invoke(session).pipe(
                     Effect.catchCause((cause) =>
-                      Cause.hasInterruptsOnly(cause)
-                        ? Effect.interrupt
-                        : isDisconnectedOperation(Cause.squash(cause))
+                      (() => {
+                        if (Cause.hasInterruptsOnly(cause)) {
+                          return Effect.interrupt
+                        }
+                        return isDisconnectedOperation(Cause.squash(cause))
                           ? invalidate(session).pipe(
                               Effect.andThen(
                                 Effect.sync(() =>
@@ -1094,7 +1125,8 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                                 selectionEpoch: 0,
                                 message: String(Cause.squash(cause)),
                               }),
-                            ),
+                            )
+                      })(),
                     ),
                   ),
                 ),

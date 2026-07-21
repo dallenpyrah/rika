@@ -41,7 +41,15 @@ interface BrowserCommand {
 }
 
 const browserCommandImpl = (platform: NodeJS.Platform, url: string): BrowserCommand => ({
-  command: platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open",
+  command:
+    platform === "darwin"
+      ? "open"
+      : (() => {
+          if (platform === "win32") {
+            return "cmd"
+          }
+          return "xdg-open"
+        })(),
   args: platform === "win32" ? ["/c", "start", "", url] : [url],
 })
 
@@ -230,13 +238,23 @@ const service = (
       Effect.mapError((cause: unknown) => {
         const detail =
           typeof cause === "object" && cause !== null && "_tag" in cause
-            ? cause._tag === "OAuthExpiredError"
-              ? "OAuth callback state is invalid or expired"
-              : cause._tag === "OAuthDeniedError"
-                ? "OAuth authorization was denied"
-                : cause._tag === "OAuthProviderError" && "operation" in cause && typeof cause.operation === "string"
-                  ? `OAuth ${cause.operation} failed`
-                  : `OAuth ${operation} failed`
+            ? (() => {
+                if (cause._tag === "OAuthExpiredError") {
+                  return "OAuth callback state is invalid or expired"
+                }
+                return cause._tag === "OAuthDeniedError"
+                  ? "OAuth authorization was denied"
+                  : (() => {
+                      if (
+                        cause._tag === "OAuthProviderError" &&
+                        "operation" in cause &&
+                        typeof cause.operation === "string"
+                      ) {
+                        return `OAuth ${cause.operation} failed`
+                      }
+                      return `OAuth ${operation} failed`
+                    })()
+              })()
             : `OAuth ${operation} failed`
         return Error.make({ server, operation, message: detail })
       })

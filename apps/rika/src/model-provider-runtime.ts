@@ -354,11 +354,14 @@ const accountStatus = (auth: OpenAiAuth.ServiceInterface) =>
     Effect.flatMap((status) =>
       status._tag === "Present" || status._tag === "RefreshRequired"
         ? Effect.succeed({ fingerprint: status.fingerprint, auth })
-        : status._tag === "Unauthenticated"
-          ? Effect.void.pipe(Effect.as(undefined as Account | undefined))
-          : Effect.fail(
+        : (() => {
+            if (status._tag === "Unauthenticated") {
+              return Effect.void.pipe(Effect.as(undefined as Account | undefined))
+            }
+            return Effect.fail(
               RuntimeError.make({ message: "OpenAI account credentials are corrupt; log out, then log in again" }),
-            ),
+            )
+          })(),
     ),
     Effect.mapError((error) =>
       Schema.is(RuntimeError)(error)

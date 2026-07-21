@@ -22,7 +22,15 @@ const backend = ExecutionBackend.Service.of({
   replay: (turnId) =>
     Effect.succeed({
       turnId,
-      status: turnId === "failed" ? "failed" : turnId === "cancelled" ? "cancelled" : "completed",
+      status:
+        turnId === "failed"
+          ? "failed"
+          : (() => {
+              if (turnId === "cancelled") {
+                return "cancelled"
+              }
+              return "completed"
+            })(),
       events: [],
     }),
   cancel: () => Effect.die("unused"),

@@ -53,13 +53,19 @@ export const escapePathTarget = (path: string): string =>
       const code = character.codePointAt(0) ?? 0
       return character === "\n"
         ? "\\n"
-        : character === "\r"
-          ? "\\r"
-          : character === "\t"
-            ? "\\t"
-            : code < 0x20 || (code >= 0x7f && code <= 0x9f)
-              ? `\\u{${code.toString(16)}}`
-              : character
+        : (() => {
+            if (character === "\r") {
+              return "\\r"
+            }
+            return character === "\t"
+              ? "\\t"
+              : (() => {
+                  if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+                    return `\\u{${code.toString(16)}}`
+                  }
+                  return character
+                })()
+          })()
     })
     .join("")
 
@@ -140,22 +146,27 @@ type ToolFamily = Extract<TranscriptBlock, { _tag: "ToolCall" }>["presentation"]
 const toolKindImpl = (rawName: string, family: ToolFamily | undefined): ToolKind => {
   const name = rawName.toLowerCase()
   return family === "explore"
-    ? readToolNames.has(name) || name === "view_media"
-      ? "read"
-      : "search"
-    : family === "edit"
-      ? "edit"
-      : family === "shell"
-        ? "shell"
-        : readToolNames.has(name)
-          ? "read"
-          : searchToolNames.has(name)
-            ? "search"
-            : editToolNames.has(name)
-              ? "edit"
-              : shellToolNames.has(name)
-                ? "shell"
-                : "other"
+    ? (() => {
+        if (readToolNames.has(name) || name === "view_media") {
+          return "read"
+        }
+        return "search"
+      })()
+    : (() => {
+        if (family === "edit") {
+          return "edit"
+        }
+        return family === "shell"
+          ? "shell"
+          : (() => {
+              if (readToolNames.has(name)) {
+                return "read"
+              }
+              return searchToolNames.has(name)
+                ? "search"
+                : [editToolNames.has(name) ? "edit" : [shellToolNames.has(name) ? "shell" : "other"][0]][0]
+            })()
+      })()
 }
 
 export const toolKind: {
@@ -256,15 +267,28 @@ export const agentTerminal: {
     const answer = lastAnswerEntry(model, children)
     return block.status === "running"
       ? undefined
-      : block.status === "failed"
-        ? { kind: "error", tone: "failed", text: settledText(model, block, children, agentFailureFallback) }
-        : block.status === "complete"
-          ? answer !== undefined
-            ? { kind: "answer", entry: answer }
-            : { kind: "error", tone: "info", text: settledText(model, block, children, agentEmptyFallback) }
-          : answer !== undefined
-            ? { kind: "answer", entry: answer }
-            : { kind: "error", tone: "cancelled", text: settledText(model, block, children, agentCancelledFallback) }
+      : (() => {
+          if (block.status === "failed") {
+            return { kind: "error", tone: "failed", text: settledText(model, block, children, agentFailureFallback) }
+          }
+          return block.status === "complete"
+            ? (() => {
+                if (answer !== undefined) {
+                  return { kind: "answer", entry: answer }
+                }
+                return { kind: "error", tone: "info", text: settledText(model, block, children, agentEmptyFallback) }
+              })()
+            : (() => {
+                if (answer !== undefined) {
+                  return { kind: "answer", entry: answer }
+                }
+                return {
+                  kind: "error",
+                  tone: "cancelled",
+                  text: settledText(model, block, children, agentCancelledFallback),
+                }
+              })()
+        })()
   },
 )
 
@@ -485,4 +509,11 @@ export const transcriptUnitId: {
 })
 
 export const unitToggleTargets = (unit: TranscriptUnit): ReadonlyArray<number> =>
-  unit.kind === "tool" ? unit.blocks : unit.kind === "reasoning" || unit.kind === "diff" ? [unit.block] : []
+  unit.kind === "tool"
+    ? unit.blocks
+    : (() => {
+        if (unit.kind === "reasoning" || unit.kind === "diff") {
+          return [unit.block]
+        }
+        return []
+      })()

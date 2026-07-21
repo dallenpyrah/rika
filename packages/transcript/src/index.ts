@@ -116,7 +116,14 @@ const unifiedFiles = (callId: string, diff: string, failed: boolean): ReadonlyAr
     const deleted = newPath === "/dev/null" || /deleted file mode/m.test(patch)
     const path = normalizedDiffPath(deleted ? oldPath! : newPath!)
     const previousPath = oldPath === undefined || oldPath === "/dev/null" ? undefined : normalizedDiffPath(oldPath)
-    const kind = created ? "add" : deleted ? "delete" : previousPath !== path ? "move" : "update"
+    const kind = created
+      ? "add"
+      : (() => {
+          if (deleted) {
+            return "delete"
+          }
+          return previousPath !== path ? "move" : "update"
+        })()
     return [
       {
         key: `${callId}:${ordinal}`,
@@ -338,9 +345,12 @@ const agentPresentationFor = (name: string): Presentation => {
   return Catalog.resolvePresentation(
     profile === "task" || profile === "child" || profile === "subagent"
       ? "task"
-      : profile === "oracle" || profile === "librarian"
-        ? profile
-        : `transfer_to_${profile}`,
+      : (() => {
+          if (profile === "oracle" || profile === "librarian") {
+            return profile
+          }
+          return `transfer_to_${profile}`
+        })(),
   )
 }
 
@@ -518,9 +528,12 @@ const applyChild = (projection: Projection, turnId: string, event: SourceEvent):
         : Catalog.resolvePresentation(
             profile === "task" || profile === "child" || profile === "subagent"
               ? "task"
-              : profile === "oracle" || profile === "librarian"
-                ? profile
-                : `transfer_to_${profile}`,
+              : (() => {
+                  if (profile === "oracle" || profile === "librarian") {
+                    return profile
+                  }
+                  return `transfer_to_${profile}`
+                })(),
           )
     const updated = updateTool(projection, id, event.sequence, (tool) => ({
       ...tool,
@@ -568,7 +581,15 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
       kind: "tool-approval",
       title: string(value.tool_name, "Permission required"),
       detail: encodeInput(value.input),
-      status: event.type === "tool.approval.requested" ? "pending" : value.approved === false ? "denied" : "approved",
+      status:
+        event.type === "tool.approval.requested"
+          ? "pending"
+          : (() => {
+              if (value.approved === false) {
+                return "denied"
+              }
+              return "approved"
+            })(),
     }
   if (event.type === "permission.ask.requested" || event.type === "permission.ask.resolved")
     return {
@@ -577,7 +598,15 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
       kind: "permission",
       title: string(value.title ?? value.tool_name ?? value.name, "Permission required"),
       detail: encodeInput(value.input),
-      status: event.type === "permission.ask.requested" ? "pending" : value.approved === false ? "denied" : "approved",
+      status:
+        event.type === "permission.ask.requested"
+          ? "pending"
+          : (() => {
+              if (value.approved === false) {
+                return "denied"
+              }
+              return "approved"
+            })(),
     }
   if (event.type.includes("diff"))
     return { _tag: "Diff", path: string(value.path, "diff"), patch: event.text ?? string(value.patch ?? value.diff) }
@@ -611,11 +640,12 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
       step: event.text ?? string(value.step ?? value.status),
       status: event.type.includes("failed")
         ? "failed"
-        : event.type.includes("completed")
-          ? "complete"
-          : event.type.includes("wait")
-            ? "waiting"
-            : "running",
+        : (() => {
+            if (event.type.includes("completed")) {
+              return "complete"
+            }
+            return event.type.includes("wait") ? "waiting" : "running"
+          })(),
     }
   if (event.type.includes("error") || event.type.includes("failed") || event.type === "budget.exceeded")
     return {
@@ -738,7 +768,14 @@ const applyToolResult = (projection: Projection, turnId: string, event: SourceEv
   const diff = string(record(output).diff)
   const updated = updateTool(projection, id, event.sequence, (tool) => ({
     ...tool,
-    status: failed ? "failed" : cancelled ? "cancelled" : process?.running === true ? "running" : "complete",
+    status: failed
+      ? "failed"
+      : (() => {
+          if (cancelled) {
+            return "cancelled"
+          }
+          return process?.running === true ? "running" : "complete"
+        })(),
     output: resultText,
     ...(process === undefined ? {} : { process: { ...tool.process, ...process } }),
     files:

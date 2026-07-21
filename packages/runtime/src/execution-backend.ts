@@ -536,9 +536,12 @@ export const resolveChildResult = (events: ReadonlyArray<Execution.ExecutionEven
     status:
       terminal?.type === "execution.completed" || recovered
         ? ("completed" as const)
-        : terminal?.type === "execution.cancelled"
-          ? ("cancelled" as const)
-          : ("failed" as const),
+        : (() => {
+            if (terminal?.type === "execution.cancelled") {
+              return "cancelled" as const
+            }
+            return "failed" as const
+          })(),
     output: failure === undefined ? primary : [...primary, { type: "text", text: failure }],
   }
 }
@@ -556,9 +559,12 @@ const awaitChildResult = (client: Client.Interface, childId: string) => {
 const workflowExecutionId = (runId: string, ownerTurnId?: string, workspace?: string) =>
   Ids.ExecutionId.make(
     ownerTurnId === undefined
-      ? workspace === undefined
-        ? `workflow:${runId}`
-        : `workflow:workspace:${encodeURIComponent(workspace)}:run:${encodeURIComponent(runId)}`
+      ? (() => {
+          if (workspace === undefined) {
+            return `workflow:${runId}`
+          }
+          return `workflow:workspace:${encodeURIComponent(workspace)}:run:${encodeURIComponent(runId)}`
+        })()
       : `workflow:turn:${encodeURIComponent(ownerTurnId)}:run:${encodeURIComponent(runId)}`,
   )
 const attachedWorkflow = (value: string) => {
@@ -826,11 +832,12 @@ const followExecution = (
               const terminal =
                 mapped.type === "execution.completed"
                   ? Status.make("completed")
-                  : mapped.type === "execution.failed"
-                    ? Status.make("failed")
-                    : mapped.type === "execution.cancelled"
-                      ? Status.make("cancelled")
-                      : undefined
+                  : (() => {
+                      if (mapped.type === "execution.failed") {
+                        return Status.make("failed")
+                      }
+                      return mapped.type === "execution.cancelled" ? Status.make("cancelled") : undefined
+                    })()
               const inspectActionable =
                 stopAtActionableWait && isActionableWait(mapped) && typeof mapped.data?.wait_id === "string"
                   ? client.executions
@@ -939,9 +946,12 @@ const followExecution = (
         turnId,
         status:
           status === "running" || status === "queued"
-            ? stoppedAtActionableWait
-              ? Status.make("waiting")
-              : status
+            ? (() => {
+                if (stoppedAtActionableWait) {
+                  return Status.make("waiting")
+                }
+                return status
+              })()
             : status,
         events,
       }
@@ -1180,9 +1190,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               const selected =
                 requested?.selection ??
                 (profileRoute === undefined
-                  ? profile === "Oracle"
-                    ? (options.oracleSelection ?? options.selection)
-                    : options.selection
+                  ? (() => {
+                      if (profile === "Oracle") {
+                        return options.oracleSelection ?? options.selection
+                      }
+                      return options.selection
+                    })()
                   : pinnedSelection(profileRoute))
               const selectedRoute = requested === undefined ? profileRoute : routeForSelection(routePin, selected)
               const preset = resolve(profile, selected).preset
@@ -1530,9 +1543,12 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               direction,
               ...(cursor === undefined
                 ? {}
-                : direction === "forward"
-                  ? { after_cursor: cursor }
-                  : { before_cursor: cursor }),
+                : (() => {
+                    if (direction === "forward") {
+                      return { after_cursor: cursor }
+                    }
+                    return { before_cursor: cursor }
+                  })()),
               ...(limit === undefined ? {} : { limit }),
             })
             .pipe(
@@ -1754,16 +1770,19 @@ export const layer = <
               const selected =
                 profile === "Task"
                   ? resolveSpawnModel(routePin, parentSelection, childCall.model)
-                  : options.modelVariantPolicy === "fixed-selection"
-                    ? {
-                        selection:
-                          profile === "Oracle" ? (options.oracleSelection ?? options.selection) : options.selection,
-                        effort: routeForProfile(routePin, profile).effort,
+                  : (() => {
+                      if (options.modelVariantPolicy === "fixed-selection") {
+                        return {
+                          selection:
+                            profile === "Oracle" ? (options.oracleSelection ?? options.selection) : options.selection,
+                          effort: routeForProfile(routePin, profile).effort,
+                        }
                       }
-                    : {
+                      return {
                         selection: pinnedSelection(routeForProfile(routePin, profile)),
                         effort: routeForProfile(routePin, profile).effort,
                       }
+                    })()
               if (selected === undefined) {
                 return Effect.fail(
                   AgentTools.AgentToolError.make({
@@ -1929,9 +1948,12 @@ export const layer = <
                   status:
                     terminal?.type === "execution.completed"
                       ? ("completed" as const)
-                      : terminal?.type === "execution.cancelled"
-                        ? ("cancelled" as const)
-                        : ("failed" as const),
+                      : (() => {
+                          if (terminal?.type === "execution.cancelled") {
+                            return "cancelled" as const
+                          }
+                          return "failed" as const
+                        })(),
                   output:
                     terminal?.content === undefined || terminal.content.length === 0
                       ? (modelOutput?.content ?? [])

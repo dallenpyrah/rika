@@ -107,7 +107,8 @@ test("rejects hardlinks, wrong mode, corrupt data, and oversized data", () =>
       Effect.gen(function* () {
         const { root, parent, filename } = yield* setup
         yield* io(() => fs.mkdir(parent, { mode: 0o700 }))
-        const contents = form === "oversize" ? "x".repeat(33) : form === "corrupt" ? "{" : yield* encodeJson(fixture)
+        const contents =
+          form === "oversize" ? "x".repeat(33) : [form === "corrupt" ? "{" : yield* encodeJson(fixture)][0]
         yield* io(() => fs.writeFile(filename, contents, { mode: 0o600 }))
         if (form === "hardlink") yield* io(() => fs.link(filename, join(root, "copy")))
         if (form === "mode") yield* io(() => fs.chmod(filename, 0o644))

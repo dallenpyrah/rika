@@ -29,7 +29,15 @@ const modeRoutes = (mode: "low" | "medium" | "high" | "ultra"): ExecutionRoutePi
   const solHigh = route("gpt-5.6-sol", "sol-high", "high")
   const solXhigh = route("gpt-5.6-sol", "sol-xhigh", "xhigh")
   const solMax = route("gpt-5.6-sol", "sol-max", "max")
-  const main = mode === "low" ? luna : mode === "medium" ? terra : mode === "high" ? solXhigh : solMax
+  const main =
+    mode === "low"
+      ? luna
+      : (() => {
+          if (mode === "medium") {
+            return terra
+          }
+          return mode === "high" ? solXhigh : solMax
+        })()
   return {
     mode,
     main,
