@@ -14,8 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14, target: darwin-arm64 }
-          - { runner: macos-13, target: darwin-x64 }
+          - { runner: blacksmith-6vcpu-macos-15, target: darwin-arm64 }
+          - { runner: blacksmith-6vcpu-macos-15, target: darwin-x64 }
           - { runner: blacksmith-4vcpu-ubuntu-2404-arm, target: linux-arm64 }
           - { runner: blacksmith-4vcpu-ubuntu-2404, target: linux-x64 }
     runs-on: ${{ matrix.runner }}
