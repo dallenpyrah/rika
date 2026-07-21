@@ -2,141 +2,20 @@ import { StyledText, bold, dim, fg, italic, link, strikethrough, underline, type
 import { Function } from "effect"
 import { Lexer, type Token, type Tokens } from "marked"
 import stringWidth from "string-width"
+import {
+  hardWrapStyledLine as hardWrapChunkLine,
+  splitStyledChunks as splitChunks,
+  styledCellsWidth as cellsWidth,
+  styledChunkCells as styledCells,
+  wrapStyledChunks as wrapChunks,
+  wrapStyledLine as wrapChunkLine,
+  type StyledLines as Lines,
+} from "./styled-text"
 import { highlightLines } from "./syntax-highlight"
 import { colors } from "./theme"
 
-type Lines = Array<Array<TextChunk>>
-
-type StyledCell = {
-  readonly chunk: TextChunk
-  readonly text: string
-  readonly width: number
-}
-
-type WordPart = {
-  readonly cells: Array<StyledCell>
-  readonly whitespace: boolean
-}
-
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
-
 const terminalSafeText = (text: string): string =>
   text.replaceAll("\r\n", "\n").replace(/\p{Cc}/gu, (character) => (character === "\n" ? character : "�"))
-
-const splitChunks = (chunks: ReadonlyArray<TextChunk>): Lines => {
-  const lines: Lines = [[]]
-  for (const chunk of chunks) {
-    chunk.text.split("\n").forEach((piece, index) => {
-      if (index > 0) lines.push([])
-      if (piece.length > 0) lines[lines.length - 1]!.push({ ...chunk, text: piece })
-    })
-  }
-  return lines
-}
-
-const sameStyle = (left: TextChunk, right: TextChunk): boolean =>
-  left.fg === right.fg &&
-  left.bg === right.bg &&
-  left.attributes === right.attributes &&
-  left.link?.url === right.link?.url
-
-const styledCells = (chunks: ReadonlyArray<TextChunk>): Array<StyledCell> => {
-  const cells: Array<StyledCell> = []
-  for (const chunk of chunks) {
-    if (/^[\x20-\x7e]*$/u.test(chunk.text)) {
-      for (const text of chunk.text) cells.push({ chunk, text, width: 1 })
-      continue
-    }
-    for (const { segment } of graphemeSegmenter.segment(chunk.text)) {
-      cells.push({ chunk, text: segment, width: stringWidth(segment) })
-    }
-  }
-  return cells
-}
-
-const cellsToChunks = (cells: ReadonlyArray<StyledCell>): Array<TextChunk> => {
-  const chunks: Array<TextChunk> = []
-  for (const cell of cells) {
-    const previous = chunks[chunks.length - 1]
-    if (previous !== undefined && sameStyle(previous, cell.chunk)) previous.text += cell.text
-    else chunks.push({ ...cell.chunk, text: cell.text })
-  }
-  return chunks
-}
-
-const wordParts = (cells: ReadonlyArray<StyledCell>): Array<WordPart> => {
-  const parts: Array<WordPart> = []
-  for (const cell of cells) {
-    const whitespace = /^\s+$/u.test(cell.text)
-    const previous = parts[parts.length - 1]
-    if (previous !== undefined && previous.whitespace === whitespace) {
-      previous.cells.push(cell)
-    } else parts.push({ cells: [cell], whitespace })
-  }
-  return parts
-}
-
-const cellsWidth = (cells: ReadonlyArray<StyledCell>): number => cells.reduce((total, cell) => total + cell.width, 0)
-
-const wrapChunkLine = (chunks: ReadonlyArray<TextChunk>, width: number): Lines => {
-  const lines: Array<Array<StyledCell>> = []
-  let current: Array<StyledCell> = []
-  let currentWidth = 0
-  let pendingWhitespace: ReadonlyArray<StyledCell> = []
-
-  const pushCurrent = (): void => {
-    lines.push(current)
-    current = []
-    currentWidth = 0
-  }
-
-  const appendWord = (cells: ReadonlyArray<StyledCell>): void => {
-    for (const cell of cells) {
-      if (current.length > 0 && currentWidth + cell.width > width) pushCurrent()
-      current.push(cell)
-      currentWidth += cell.width
-    }
-  }
-
-  for (const part of wordParts(styledCells(chunks))) {
-    if (part.whitespace) {
-      pendingWhitespace = part.cells
-      continue
-    }
-    const partWidth = cellsWidth(part.cells)
-    const whitespaceWidth = cellsWidth(pendingWhitespace)
-    if (current.length > 0 && currentWidth + whitespaceWidth + partWidth <= width) {
-      current.push(...pendingWhitespace, ...part.cells)
-      currentWidth += whitespaceWidth + partWidth
-    } else {
-      if (current.length > 0) pushCurrent()
-      appendWord(part.cells)
-    }
-    pendingWhitespace = []
-  }
-  if (current.length > 0 || lines.length === 0) lines.push(current)
-  return lines.map(cellsToChunks)
-}
-
-const wrapChunks = (chunks: ReadonlyArray<TextChunk>, width: number): Lines =>
-  splitChunks(chunks).flatMap((line) => wrapChunkLine(line, width))
-
-const hardWrapChunkLine = (chunks: ReadonlyArray<TextChunk>, width: number): Lines => {
-  const lines: Array<Array<StyledCell>> = []
-  let current: Array<StyledCell> = []
-  let currentWidth = 0
-  for (const cell of styledCells(chunks)) {
-    if (current.length > 0 && currentWidth + cell.width > width) {
-      lines.push(current)
-      current = []
-      currentWidth = 0
-    }
-    current.push(cell)
-    currentWidth += cell.width
-  }
-  if (current.length > 0 || lines.length === 0) lines.push(current)
-  return lines.map(cellsToChunks)
-}
 
 const trailingBlankLines = (raw: string): number => {
   const match = /\n+$/.exec(raw)

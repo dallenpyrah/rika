@@ -23,6 +23,7 @@ export {
 } from "./transcript-presenter/window"
 export {
   agentOutputText,
+  agentToolSummary,
   agentTerminal,
   escapePathTarget,
   expandableRowIds,
@@ -42,6 +43,7 @@ export {
   type ToolGroupKind,
   type ToolKind,
   type ToolTranscriptUnit,
+  type ToolSummary,
   type TranscriptUnit,
   type TranscriptUnitId,
 } from "./transcript-presenter/rows"

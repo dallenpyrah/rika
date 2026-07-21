@@ -376,7 +376,7 @@
           "width": 1
         },
         {
-          "text": " Subagent cancelled",
+          "text": " Subagent",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -394,10 +394,10 @@
             }
           },
           "attributes": 0,
-          "width": 19
+          "width": 9
         },
         {
-          "text": " ▾",
+          "text": " cancelled ▾",
           "fg": {
             "buffer": {
               "0": 2176,
@@ -415,7 +415,7 @@
             }
           },
           "attributes": 0,
-          "width": 2
+          "width": 12
         },
         {
           "text": "                                                         ",

@@ -1955,7 +1955,12 @@ test("renders a subagent tool tree and expands each child independently", () =>
               string,
               {
                 readonly renderable: {
-                  readonly content: { readonly chunks: ReadonlyArray<{ readonly text: string }> }
+                  readonly content: {
+                    readonly chunks: ReadonlyArray<{
+                      readonly text: string
+                      readonly fg?: { readonly equals: (other: unknown) => boolean }
+                    }>
+                  }
                   readonly screenX: number
                   readonly screenY: number
                 }
@@ -1978,6 +1983,12 @@ test("renders a subagent tool tree and expands each child independently", () =>
         expect(collapsed).not.toContain("**")
         expect(collapsed).not.toContain("read child output")
         expect(collapsed).not.toContain("shell child output")
+        const oracleChunks = records().get("tool:oracle-parent:header")!.renderable.content.chunks
+        expect(oracleChunks.find((chunk) => chunk.text.includes("Oracle"))!.fg?.equals(colors.text)).toBe(true)
+        expect(oracleChunks.find((chunk) => chunk.text === " has spoken")!.fg?.equals(colors.muted)).toBe(true)
+        const readChunks = records().get("tool:child-read:header")!.renderable.content.chunks
+        expect(readChunks.find((chunk) => chunk.text.includes("Read"))!.fg?.equals(colors.text)).toBe(true)
+        expect(readChunks.find((chunk) => chunk.text === " src/a.ts L2-4")!.fg?.equals(colors.muted)).toBe(true)
         const collapsedLines = collapsed.split("\n")
         const shellRow = collapsedLines.findIndex((line) => line.includes("$ bun test"))
         const responseRow = collapsedLines.findIndex((line) => line.includes("Review complete"))

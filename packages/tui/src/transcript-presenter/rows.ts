@@ -44,7 +44,42 @@ export interface PathTarget {
 export interface ToolDetail {
   readonly block: number
   readonly label: string
+  readonly summary: ToolSummary
   readonly target?: PathTarget
+}
+
+export interface ToolSummary {
+  readonly primary: string
+  readonly secondary?: string
+}
+
+const summary = (primary: string, secondary?: string): ToolSummary => ({
+  primary,
+  ...(secondary === undefined || secondary.length === 0 ? {} : { secondary: ` ${secondary}` }),
+})
+
+const withLabel = (block: number, value: ToolSummary): Pick<ToolDetail, "block" | "label" | "summary"> => ({
+  block,
+  label: value.primary + (value.secondary ?? ""),
+  summary: value,
+})
+
+export const agentToolSummary = (label: string): ToolSummary => {
+  const suffixes = [
+    " has spoken",
+    " is researching",
+    " researching",
+    " researched",
+    " exploring",
+    " working",
+    " finished",
+    " failed",
+    " cancelled",
+    " codebase",
+    " code",
+  ]
+  const suffix = suffixes.find((candidate) => label.endsWith(candidate))
+  return suffix === undefined ? summary(label) : { primary: label.slice(0, -suffix.length), secondary: suffix }
 }
 
 export const escapePathTarget = (path: string): string =>
@@ -72,7 +107,11 @@ export const toolDetail: {
   (block: number, call: Extract<TranscriptBlock, { _tag: "ToolCall" }>): ToolDetail
 } = Function.dual(2, (block: number, call: Extract<TranscriptBlock, { _tag: "ToolCall" }>): ToolDetail => {
   const input = inputValue(call.input)
-  const kind = toolKind(call.name, undefined)
+  const kind =
+    call.presentation.family === "explore" &&
+    (call.presentation.action === "read" || call.presentation.action === "media")
+      ? "read"
+      : toolKind(call.name, call.presentation.family)
   const path = call.files[0]?.path ?? stringValue(input, ["path", "file_path", "file"])
   const offset =
     typeof input.offset === "number" && Number.isFinite(input.offset)
@@ -91,32 +130,33 @@ export const toolDetail: {
     const location = path === undefined ? undefined : call.detail.match(/\s+L\d+(?:-\d+)?$/)?.[0]
     const detail = path === undefined ? call.detail : `${displayPath}${location ?? ""}`
     return {
-      block,
-      label: `${verb} ${detail || displayPath || call.name}`,
+      ...withLabel(block, summary(verb, detail || displayPath || call.name)),
       ...(target === undefined ? {} : { target }),
     }
   }
   if (kind === "search") {
     const query = stringValue(input, ["pattern", "query", "glob", "path"])
     return {
-      block,
-      label: `${call.presentation.action === "grep" ? "Grep" : "Searched"} ${call.detail || query || "workspace"}`,
+      ...withLabel(
+        block,
+        summary(call.presentation.action === "grep" ? "Grep" : "Searched", call.detail || query || "workspace"),
+      ),
       ...(target === undefined ? {} : { target }),
     }
   }
   if (kind === "edit")
     return {
-      block,
-      label: `Edit ${displayPath ?? call.detail}`.trimEnd(),
+      ...withLabel(block, summary("Edit", displayPath ?? call.detail)),
       ...(target === undefined ? {} : { target }),
     }
   if (kind === "shell") {
     const command = call.detail || stringValue(input, ["command", "cmd", "script"]) || ""
-    return { block, label: `$ ${command || (call.input.trimStart().startsWith("{") ? "" : call.input)}`.trimEnd() }
+    return withLabel(block, summary("$", command || (call.input.trimStart().startsWith("{") ? "" : call.input)))
   }
+  const label = call.status === "running" ? call.presentation.activeLabel : call.presentation.completeLabel
+  const value = call.presentation.family === "agent" ? agentToolSummary(label) : summary(label, call.detail)
   return {
-    block,
-    label: `${call.status === "running" ? call.presentation.activeLabel : call.presentation.completeLabel}${call.detail.length === 0 ? "" : ` ${call.detail}`}`,
+    ...withLabel(block, value),
   }
 })
 

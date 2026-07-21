@@ -82,8 +82,10 @@ import { renderMarkdown, renderMarkdownLines, renderMarkdownStyled } from "./mar
 import { renderDiff, renderDiffStyled, renderPartialDiffStyled } from "./diff-renderer"
 import { renderPierreDiff } from "./pierre-diff"
 import { highlightShellCommand } from "./syntax-highlight"
+import { renderToolSummary } from "./tool-summary"
 import { renderTool } from "./tool-renderer"
 import {
+  agentToolSummary,
   escapePathTarget,
   isExpandableUnit,
   isToolOutputDisplayed,
@@ -928,8 +930,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       )
     else {
       append(statusIcon(failed, running, cancelled))
-      append(fg(colors.text)(running ? " Exploring" : " Explored"))
-      append(dim(fg(colors.text)(` ${counts.length > 0 ? counts : "workspace"}`)))
+      for (const chunk of renderToolSummary(
+        { primary: running ? "Exploring" : "Explored", secondary: ` ${counts.length > 0 ? counts : "workspace"}` },
+        { leading: " " },
+      )[0]!)
+        append(chunk)
       append(marker(expanded))
     }
     if (expanded)
@@ -943,20 +948,18 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
             unit.block.status === "cancelled",
           ),
         )
-        const label = exploreChildLabel(unit)
+        const detail = toolDetails(model, { kind: "tool", group: "explore", blocks: [unit.index], diffs: [] })[0]!
+        let summary = detail.summary
+        if (unit.block.presentation.action === "skill") summary = { primary: exploreChildLabel(unit) }
+        else if (unit.block.presentation.action === "git-status")
+          summary = { primary: "Checked", secondary: ` ${unit.block.detail || "workspace"}` }
         const childId = `tool-child:${unit.block.id}`
-        const verbEnd = label.indexOf(" ")
-        if (verbEnd === -1) append(fg(colors.text)(` ${label}`))
-        else {
-          append(fg(colors.text)(` ${label.slice(0, verbEnd)}`))
-          append(dim(fg(colors.text)(label.slice(verbEnd))))
-        }
+        for (const chunk of renderToolSummary(summary, { leading: " " })[0]!) append(chunk)
         const output =
           unit.block.status === "failed" && isToolOutputDisplayed(unit.block)
             ? unit.block.output?.split("\n").find((value) => value.length > 0)
             : undefined
         if (output !== undefined) append(dim(fg(colors.text)(` ${output}`)))
-        const detail = toolDetails(model, { kind: "tool", group: "explore", blocks: [unit.index], diffs: [] })[0]
         nestedRanges.push({
           start,
           end: line,
@@ -1012,8 +1015,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       )
     else {
       append(statusIcon(failed, running, cancelled))
-      append(fg(colors.text)(` ${verb}`))
-      append(dim(fg(colors.text)(` ${label}`)))
+      for (const chunk of renderToolSummary({ primary: verb, secondary: ` ${label}` }, { leading: " " })[0]!)
+        append(chunk)
       if (added > 0) append(fg(colors.green)(` +${added}`))
       if (removed > 0) append(fg(colors.red)(` -${removed}`))
       append(marker(expanded))
@@ -1038,7 +1041,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
           const childExpanded = rowExpanded(childId) || running
           const fileRunning = running && file.status === "running"
           append(statusIcon(file.status === "failed", fileRunning, cancelled && file.status === "running"))
-          append(fg(colors.text)(` ${file.kind === "add" ? "Create" : "Edit"} ${file.path}`))
+          for (const chunk of renderToolSummary(
+            { primary: file.kind === "add" ? "Create" : "Edit", secondary: ` ${file.path}` },
+            { leading: " " },
+          )[0]!)
+            append(chunk)
           if (file.additions > 0) append(fg(colors.green)(` +${file.additions}`))
           if (file.deletions > 0) append(fg(colors.red)(` -${file.deletions}`))
           append(marker(childExpanded))
@@ -1132,8 +1139,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       )
     else {
       append(statusIcon(failedCount > 0, running, cancelledCount > 0))
-      append(fg(colors.text)(running ? " Running" : " Ran"))
-      append(fg(colors.text)(` ${plural(units.length, "command")}`))
+      for (const chunk of renderToolSummary(
+        { primary: running ? "Running" : "Ran", secondary: ` ${plural(units.length, "command")}` },
+        { leading: " " },
+      )[0]!)
+        append(chunk)
       if (failedCount > 0) append(fg(colors.muted)(`, ${failedCount} failed`))
       if (cancelledCount > 0) append(fg(colors.muted)(`, ${cancelledCount} cancelled`))
       append(marker(expanded))
@@ -1192,8 +1202,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       )
     else {
       append(statusIcon(failed, running, cancelled))
-      append(fg(colors.text)(` ${label}`))
-      if (!agent && detail.length > 0) append(dim(fg(colors.text)(detail)))
+      const baseSummary = toolDetail(unit.index, {
+        ...unit.block,
+        presentation: { ...unit.block.presentation, activeLabel: label, completeLabel: label },
+      }).summary
+      for (const chunk of renderToolSummary(baseSummary, { leading: " " })[0]!) append(chunk)
       if (expandable) append(marker(expanded))
     }
     if (expanded && agent && unit.block.detail.length > 0) {
@@ -1235,17 +1248,27 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       append(italic(fg(colors.amber)(" (cancelled)")))
     } else {
       append(statusIcon(failed, running, cancelled))
-      const labelLines = wrapTextToWidth(
-        detail.label,
-        rowWidth - stringWidth(continuationPrefix) - (expandable ? 2 : 0),
-      )
-      for (const [labelIndex, labelLine] of labelLines.entries()) {
-        if (labelIndex > 0) {
-          append(fg(colors.text)("\n"))
-          append(dim(fg(colors.subtle)(continuationPrefix)))
-        } else append(fg(colors.text)(" "))
-        append(fg(colors.text)(labelLine))
-      }
+      const nestedSummary =
+        agent && block.detail.length > 0
+          ? {
+              primary: detail.summary.primary,
+              secondary: `${detail.summary.secondary ?? ""} ${block.detail}`,
+            }
+          : detail.summary
+      if (block.presentation.family === "shell") {
+        append(fg(colors.text)(" "))
+        append(dim(fg(colors.text)("$ ")))
+        for (const chunk of highlightShellCommand(detail.summary.secondary?.slice(1) ?? "")[0] ?? []) append(chunk)
+      } else
+        for (const [labelIndex, labelLine] of renderToolSummary(nestedSummary, {
+          width: rowWidth - stringWidth(continuationPrefix) - (expandable ? 2 : 0),
+        }).entries()) {
+          if (labelIndex > 0) {
+            append(fg(colors.text)("\n"))
+            append(dim(fg(colors.subtle)(continuationPrefix)))
+          } else append(fg(colors.text)(" "))
+          for (const chunk of labelLine) append(chunk)
+        }
     }
     if (expandable) append(marker(expanded))
     const headerEnd = line
@@ -1306,7 +1329,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       phrase = `${display} ${status}`
     }
     append(statusIcon(block.status === "failed", running, block.status === "cancelled"))
-    append(fg(colors.text)(` ${phrase}`))
+    for (const chunk of renderToolSummary(agentToolSummary(phrase), { leading: " " })[0]!) append(chunk)
     append(marker(expanded))
     if (expanded) {
       if (block.summary.length > 0) append(dim(fg(colors.text)(`\n  ${block.summary}`)))

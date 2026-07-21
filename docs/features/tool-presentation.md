@@ -2,6 +2,8 @@
 
 The transcript names tools by what the user sees, never by transport method or internal tool name. Calls stay in source order. A call appears once while running and is updated in place when it completes.
 
+Unselected summaries show the action or agent identity as primary text and mute statuses, targets, counts, and context at every nesting depth.
+
 | Calls                                | Running                          | Complete                        | Expanded detail        |
 | ------------------------------------ | -------------------------------- | ------------------------------- | ---------------------- |
 | `read`                               | `Exploring`                      | `Explored`                      | `Read <path>`          |

@@ -426,7 +426,7 @@
           "width": 1
         },
         {
-          "text": " Review working",
+          "text": " Review",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -444,10 +444,10 @@
             }
           },
           "attributes": 0,
-          "width": 15
+          "width": 7
         },
         {
-          "text": " ▸",
+          "text": " working ▸",
           "fg": {
             "buffer": {
               "0": 2176,
@@ -465,7 +465,7 @@
             }
           },
           "attributes": 0,
-          "width": 2
+          "width": 10
         },
         {
           "text": "                                                             ",

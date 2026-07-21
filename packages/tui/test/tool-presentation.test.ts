@@ -3,6 +3,7 @@ import { project } from "@rika/transcript"
 import { describe, expect, test } from "vitest"
 import { buildTranscript } from "../src/adapter"
 import { colors } from "../src/theme"
+import { renderToolSummary } from "../src/tool-summary"
 import { expandableRowIds, toolDetail, rows as transcriptUnits } from "../src/transcript-presenter"
 import { initial, type Model, type TranscriptBlock } from "../src/view-state"
 
@@ -44,6 +45,15 @@ const chunkFor = (chunks: ReadonlyArray<TextChunk>, snippet: string): TextChunk 
   return chunk
 }
 
+const expectForeground = (chunks: ReadonlyArray<TextChunk>, expectedText: string, color: typeof colors.text): void => {
+  const chunk = chunks.find(
+    (candidate) =>
+      candidate.text === expectedText || (expectedText.startsWith(" ") && candidate.text === expectedText.slice(1)),
+  )
+  expect(chunk, `missing summary chunk ${JSON.stringify(expectedText)}`).toBeDefined()
+  expect(chunk!.fg?.equals(color), `foreground for ${JSON.stringify(expectedText)}`).toBe(true)
+}
+
 const hasAttribute = (chunk: TextChunk, attribute: number): boolean =>
   ((chunk.attributes ?? TextAttributes.NONE) & attribute) === attribute
 
@@ -66,6 +76,138 @@ const explore = (
 })
 
 describe("tool presentation", () => {
+  test("styles tool actions as primary and paths and aggregate counts as muted", () => {
+    const read = call("read", "read", { path: "src/a.ts" }, explore("read", "file"), { detail: "src/a.ts" })
+    const edit = call(
+      "edit",
+      "edit",
+      { path: "src/b.ts" },
+      { family: "edit", action: "edit", activeLabel: "Editing", completeLabel: "Edited" },
+      {
+        files: [
+          {
+            key: "b",
+            path: "src/b.ts",
+            kind: "update",
+            status: "complete",
+            additions: 1,
+            deletions: 0,
+            patch: "",
+            preview: false,
+          },
+        ],
+      },
+    )
+    const shells = ["one", "two", "three"].map((command) =>
+      call(`shell-${command}`, "bash", { command }, shellPresentation, { detail: command }),
+    )
+    const chunks = buildTranscript(model([read, edit, ...shells], ["tool:read"])).styled.chunks
+
+    expectForeground(chunks, " Read", colors.text)
+    expectForeground(chunks, " src/a.ts", colors.muted)
+    expectForeground(chunks, " Edited", colors.text)
+    expectForeground(chunks, " src/b.ts", colors.muted)
+    expectForeground(chunks, " Ran", colors.text)
+    expectForeground(chunks, " 3 commands", colors.muted)
+  })
+
+  test.each([
+    ["running", "Oracle", " exploring"],
+    ["complete", "Oracle", " has spoken"],
+    ["running", "Librarian", " researching"],
+    ["complete", "Librarian", " researched"],
+    ["failed", "Oracle", " failed"],
+    ["cancelled", "Oracle", " cancelled"],
+    ["complete", "Subagent", " finished"],
+    ["complete", "Reviewing", " code"],
+    ["complete", "Custom Research Agent", " finished"],
+  ] as const)("styles %s agent identity %s separately from lifecycle", (status, primary, secondary) => {
+    let labels = {
+      action: "custom",
+      activeLabel: "Custom Research Agent working",
+      completeLabel: "Custom Research Agent finished",
+    }
+    if (primary === "Reviewing")
+      labels = { action: "review", activeLabel: "Reviewing code", completeLabel: "Reviewing code" }
+    else if (primary === "Oracle")
+      labels = { action: "oracle", activeLabel: "Oracle exploring", completeLabel: "Oracle has spoken" }
+    else if (primary === "Librarian")
+      labels = { action: "librarian", activeLabel: "Librarian researching", completeLabel: "Librarian researched" }
+    else if (primary === "Subagent")
+      labels = { action: "task", activeLabel: "Subagent working", completeLabel: "Subagent finished" }
+    const agent = call("agent", "task", {}, { family: "agent", ...labels }, { status })
+    const chunks = buildTranscript(model([agent])).styled.chunks
+
+    expectForeground(chunks, ` ${primary}`, colors.text)
+    expectForeground(chunks, secondary, colors.muted)
+  })
+
+  test("preserves primary and muted roles in nested agent tools", () => {
+    const parent = call(
+      "parent",
+      "task",
+      {},
+      { family: "agent", action: "task", activeLabel: "Subagent working", completeLabel: "Subagent finished" },
+    )
+    const child = call("child", "read", { path: "src/nested path.ts" }, explore("read", "file"), {
+      detail: "src/nested path.ts",
+    })
+    const value = {
+      ...model([parent, child], ["tool:parent"]),
+      items: [
+        { _tag: "Block" as const, index: 0, id: "item:parent", turnId: "turn" },
+        { _tag: "Block" as const, index: 1, id: "item:child", turnId: "child", parentId: "parent" },
+      ],
+    }
+    const chunks = buildTranscript(value).styled.chunks
+
+    expectForeground(chunks, "Read", colors.text)
+    expectForeground(chunks, " src/nested path.ts", colors.muted)
+  })
+
+  test("preserves the Checked copy and semantic roles for expanded git status calls", () => {
+    const gitStatus = call(
+      "git-status",
+      "git_status",
+      {},
+      { family: "explore", action: "git-status", activeLabel: "Checking", completeLabel: "Checked" },
+      { detail: "working tree" },
+    )
+    const chunks = buildTranscript(model([gitStatus], ["tool:git-status"])).styled.chunks
+
+    expectForeground(chunks, " Checked", colors.text)
+    expectForeground(chunks, " working tree", colors.muted)
+    expect(chunks.map((chunk) => chunk.text).join("")).not.toContain("Searched working tree")
+  })
+
+  test("keeps wrapped secondary summary text muted", () => {
+    const lines = renderToolSummary({ primary: "Read", secondary: " src/a very long nested path.ts" }, { width: 10 })
+
+    expect(lines.length).toBeGreaterThan(1)
+    expect(
+      lines
+        .flat()
+        .find((chunk) => chunk.text === "Read")!
+        .fg?.equals(colors.text),
+    ).toBe(true)
+    for (const chunk of lines.flat().filter((candidate) => candidate.text !== "Read"))
+      expect(chunk.fg?.equals(colors.muted)).toBe(true)
+  })
+
+  test("keeps a selected agent row uniformly bold blue", () => {
+    const agent = call(
+      "agent",
+      "oracle",
+      {},
+      { family: "agent", action: "oracle", activeLabel: "Oracle exploring", completeLabel: "Oracle has spoken" },
+      { detail: "Review the code" },
+    )
+    const chunks = buildTranscript({ ...model([agent]), detailSelection: "tool:agent" }).styled.chunks
+    const row = chunkFor(chunks, "Oracle has spoken")
+
+    expect(hasAttribute(row, TextAttributes.BOLD)).toBe(true)
+    expect(row.fg?.equals(colors.blue)).toBe(true)
+  })
   test("keeps a completed Explore group successful while showing its failed tool", () => {
     const blocks = [
       call("read", "read", { path: "missing.ts" }, explore("read", "file"), {
