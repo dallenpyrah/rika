@@ -221,8 +221,9 @@ test(
           workspaceFiles: { "fixture.txt": "steer fixture body" },
           script: [
             TuiApp.model.turn([TuiApp.model.toolCall("read", { path: "fixture.txt" }, "steer-read")], {
-              delay: "3000 millis",
+              delay: "10000 millis",
             }),
+            TuiApp.model.text("ACTIVE_STEER_COMPLETE"),
             TuiApp.model.text("ACTIVE_STEER_COMPLETE"),
             TuiApp.model.text("ACTIVE_STEER_COMPLETE"),
           ],
