@@ -236,24 +236,37 @@ const settledText = (
   (isToolOutputDisplayed(block) ? agentOutputText(block.output) : undefined) ??
   fallback
 
-export const agentTerminal = (
-  model: Model,
-  block: Extract<TranscriptBlock, { _tag: "ToolCall" }>,
-  children: ReadonlyArray<TranscriptItem>,
-): AgentTerminal | undefined => {
-  const answer = lastAnswerEntry(model, children)
-  return block.status === "running"
-    ? undefined
-    : block.status === "failed"
-      ? { kind: "error", tone: "failed", text: settledText(model, block, children, agentFailureFallback) }
-      : block.status === "complete"
-        ? answer !== undefined
-          ? { kind: "answer", entry: answer }
-          : { kind: "error", tone: "info", text: settledText(model, block, children, agentEmptyFallback) }
-        : answer !== undefined
-          ? { kind: "answer", entry: answer }
-          : { kind: "error", tone: "cancelled", text: settledText(model, block, children, agentCancelledFallback) }
-}
+export const agentTerminal: {
+  (
+    model: Model,
+    block: Extract<TranscriptBlock, { _tag: "ToolCall" }>,
+    children: ReadonlyArray<TranscriptItem>,
+  ): AgentTerminal | undefined
+  (
+    block: Extract<TranscriptBlock, { _tag: "ToolCall" }>,
+    children: ReadonlyArray<TranscriptItem>,
+  ): (model: Model) => AgentTerminal | undefined
+} = Function.dual(
+  3,
+  (
+    model: Model,
+    block: Extract<TranscriptBlock, { _tag: "ToolCall" }>,
+    children: ReadonlyArray<TranscriptItem>,
+  ): AgentTerminal | undefined => {
+    const answer = lastAnswerEntry(model, children)
+    return block.status === "running"
+      ? undefined
+      : block.status === "failed"
+        ? { kind: "error", tone: "failed", text: settledText(model, block, children, agentFailureFallback) }
+        : block.status === "complete"
+          ? answer !== undefined
+            ? { kind: "answer", entry: answer }
+            : { kind: "error", tone: "info", text: settledText(model, block, children, agentEmptyFallback) }
+          : answer !== undefined
+            ? { kind: "answer", entry: answer }
+            : { kind: "error", tone: "cancelled", text: settledText(model, block, children, agentCancelledFallback) }
+  },
+)
 
 export const orderedTranscriptItems = (model: Model): ReadonlyArray<TranscriptItem> =>
   model.items.length > 0
@@ -391,7 +404,10 @@ const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
 export const isToolOutputDisplayed = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): boolean =>
   block.presentation.outputDisplay !== "hidden"
 
-export const isExpandableUnit = (model: Model, unit: TranscriptUnit): boolean => {
+export const isExpandableUnit: {
+  (model: Model, unit: TranscriptUnit): boolean
+  (unit: TranscriptUnit): (model: Model) => boolean
+} = Function.dual(2, (model: Model, unit: TranscriptUnit): boolean => {
   if (unit.kind !== "tool") return unit.kind === "reasoning" || unit.kind === "diff" || unit.kind === "childAgent"
   if ((unit.children?.length ?? 0) > 0 || unit.terminal !== undefined) return true
   if (unit.group === "explore" || unit.group === "edit" || (unit.group === "shell" && unit.blocks.length > 1))
@@ -403,7 +419,7 @@ export const isExpandableUnit = (model: Model, unit: TranscriptUnit): boolean =>
       (isToolOutputDisplayed(block) && block.output !== undefined && block.output.length > 0)
     )
   })
-}
+})
 
 export const expandableUnits = (model: Model): ReadonlyArray<TranscriptUnit> =>
   transcriptUnits(model).filter((unit) => isExpandableUnit(model, unit))

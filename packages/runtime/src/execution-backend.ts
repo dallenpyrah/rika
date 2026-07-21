@@ -1872,7 +1872,12 @@ export const layer = <
           const rikaToolRuntimeLayer =
             options.toolRuntimeLayerForWorkspace !== undefined && options.resolveWorkspace !== undefined
               ? routedToolRuntimeLayer(options.toolRuntimeLayerForWorkspace, options.resolveWorkspace)
-              : (options.toolRuntimeLayer ?? RikaToolRuntime.layer(options.workspace))
+              : (options.toolRuntimeLayer ??
+                RikaToolRuntime.layer(options.workspace).pipe(
+                  Layer.catchCause((cause) =>
+                    Layer.effectContext(Effect.fail(BackendError.make({ message: Cause.pretty(cause) }))),
+                  ),
+                ))
           const credentials = options.webSearchCredentials ?? {}
           const search = webSearchFactories(credentials)
           const readPageCredential = WebSearch.configuredReadPageCredential(credentials)

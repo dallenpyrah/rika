@@ -9,6 +9,7 @@ import {
   Layer,
   Path,
   Ref,
+  Runtime,
   Schema,
   Scope,
   Semaphore,
@@ -205,6 +206,19 @@ export class ResidentServiceError extends Schema.TaggedErrorClass<ResidentServic
   message: Schema.String,
 }) {}
 
+export const runtimeRestartExitCode = 75
+
+export class ResidentRestartRequired extends Schema.TaggedErrorClass<ResidentRestartRequired>()(
+  "ResidentRestartRequired",
+  {
+    message: Schema.String,
+    threadId: Schema.optionalKey(Schema.String),
+  },
+) {
+  override readonly [Runtime.errorExitCode] = runtimeRestartExitCode
+  override readonly [Runtime.errorReported] = false
+}
+
 export interface Connection {
   readonly role: "owner" | "attached"
   readonly endpoint: string
@@ -220,7 +234,7 @@ export interface Connection {
         session: InteractiveSession,
       ) => Effect.Effect<void, OperationUnavailable>
     },
-  ) => Effect.Effect<void, OperationUnavailable | ResidentServiceError>
+  ) => Effect.Effect<void, OperationUnavailable | ResidentServiceError | ResidentRestartRequired>
   readonly closed: Effect.Effect<void>
   readonly close: Effect.Effect<void>
 }
@@ -242,6 +256,7 @@ export interface Interface {
     readonly dataRoot: string
     readonly clientKind: Handshake["clientKind"]
     readonly graceMilliseconds?: number
+    readonly allowSupersede?: boolean
     readonly startHost?: () => Effect.Effect<
       StartedHost,
       ResidentServiceError,
@@ -249,7 +264,7 @@ export interface Interface {
     >
   }) => Effect.Effect<
     Connection,
-    ResidentServiceError,
+    ResidentServiceError | ResidentRestartRequired,
     Crypto.Crypto | FileSystem.FileSystem | Path.Path | Scope.Scope | ChildProcessSpawner.ChildProcessSpawner
   >
 }

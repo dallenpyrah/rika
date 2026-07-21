@@ -1052,6 +1052,17 @@ describe("ViewState", () => {
     expect(model.input).toBe("@thread-2 ")
   })
 
+  test("surfaces workspace file index failures and clears them on the next load", () => {
+    let model = ViewState.update(ViewState.initial("/work"), { _tag: "FilesRequested" })
+    expect(model.filePicker.items).toEqual({ _tag: "Loading" })
+    model = ViewState.update(model, { _tag: "FilesFailed", message: "fff native library not found" })
+    expect(model.filePicker.items).toEqual({ _tag: "Idle" })
+    expect(model.filePicker.error).toBe("fff native library not found")
+    model = ViewState.update(model, { _tag: "FilesReplaced", files: ["a.ts"] })
+    expect(model.filePicker.items).toEqual({ _tag: "Ready", value: ["a.ts"] })
+    expect(model.filePicker.error).toBeUndefined()
+  })
+
   test("removes a complete Unicode query character and keeps file completion open", () => {
     let model = ViewState.update(ViewState.initial("/work"), {
       _tag: "FilesReplaced",

@@ -310,25 +310,28 @@ export interface ChildParentCandidate {
   readonly family: Presentation["family"]
 }
 
-export const childParentMatch = <A extends ChildParentCandidate>(
-  candidates: Iterable<A>,
-  childExecutionId: string,
-): A | undefined => {
-  const childKey = executionKey(childExecutionId)
-  const list = [...candidates]
-  for (const candidate of list)
-    if (candidate.childId !== undefined && executionKey(candidate.childId) === childKey) return candidate
-  const parsed = childScopeAndCallId(childExecutionId)
-  if (parsed === undefined) return undefined
-  for (const candidate of list)
-    if (
-      candidate.family === "agent" &&
-      executionKey(candidate.scope) === parsed.scope &&
-      candidateCallId(candidate) === parsed.callId
-    )
-      return candidate
-  return undefined
-}
+export const childParentMatch: {
+  <A extends ChildParentCandidate>(candidates: Iterable<A>, childExecutionId: string): A | undefined
+  (childExecutionId: string): <A extends ChildParentCandidate>(candidates: Iterable<A>) => A | undefined
+} = Function.dual(
+  2,
+  <A extends ChildParentCandidate>(candidates: Iterable<A>, childExecutionId: string): A | undefined => {
+    const childKey = executionKey(childExecutionId)
+    const list = [...candidates]
+    for (const candidate of list)
+      if (candidate.childId !== undefined && executionKey(candidate.childId) === childKey) return candidate
+    const parsed = childScopeAndCallId(childExecutionId)
+    if (parsed === undefined) return undefined
+    for (const candidate of list)
+      if (
+        candidate.family === "agent" &&
+        executionKey(candidate.scope) === parsed.scope &&
+        candidateCallId(candidate) === parsed.callId
+      )
+        return candidate
+    return undefined
+  },
+)
 
 const agentPresentationFor = (name: string): Presentation => {
   const profile = name.toLowerCase()
@@ -341,32 +344,48 @@ const agentPresentationFor = (name: string): Presentation => {
   )
 }
 
-export const ensureChildTool = (
-  projection: Projection,
-  childExecutionId: string,
-  name: string,
-): { readonly projection: Projection; readonly tool: Extract<Block, { _tag: "ToolCall" }> } => {
-  const existing = childToolAt(projection, childExecutionId)
-  if (existing !== undefined) return { projection, tool: existing }
-  const id = executionKey(childExecutionId)
-  const block: Extract<Block, { _tag: "ToolCall" }> = {
-    _tag: "ToolCall",
-    id,
-    name,
-    input: "",
-    status: "running",
-    presentation: agentPresentationFor(name),
-    detail: "",
-    files: [],
-    childId: childExecutionId,
+export const ensureChildTool: {
+  (
+    projection: Projection,
+    childExecutionId: string,
+    name: string,
+  ): { readonly projection: Projection; readonly tool: Extract<Block, { _tag: "ToolCall" }> }
+  (
+    childExecutionId: string,
+    name: string,
+  ): (projection: Projection) => {
+    readonly projection: Projection
+    readonly tool: Extract<Block, { _tag: "ToolCall" }>
   }
-  const turnId = projection.units[0]?.turnId ?? ""
-  const next = upsertUnit(
-    projection,
-    unit(`tool:${id}`, turnId, projection.revision, 0, projection.revision, { _tag: "Block", block }),
-  )
-  return { projection: next, tool: block }
-}
+} = Function.dual(
+  3,
+  (
+    projection: Projection,
+    childExecutionId: string,
+    name: string,
+  ): { readonly projection: Projection; readonly tool: Extract<Block, { _tag: "ToolCall" }> } => {
+    const existing = childToolAt(projection, childExecutionId)
+    if (existing !== undefined) return { projection, tool: existing }
+    const id = executionKey(childExecutionId)
+    const block: Extract<Block, { _tag: "ToolCall" }> = {
+      _tag: "ToolCall",
+      id,
+      name,
+      input: "",
+      status: "running",
+      presentation: agentPresentationFor(name),
+      detail: "",
+      files: [],
+      childId: childExecutionId,
+    }
+    const turnId = projection.units[0]?.turnId ?? ""
+    const next = upsertUnit(
+      projection,
+      unit(`tool:${id}`, turnId, projection.revision, 0, projection.revision, { _tag: "Block", block }),
+    )
+    return { projection: next, tool: block }
+  },
+)
 
 const updateTool = (
   projection: Projection,
@@ -397,9 +416,7 @@ const processResult = (output: unknown): ToolProcess | undefined => {
   return Object.keys(process).length === 0 ? undefined : process
 }
 
-const usageCost = (value: Record<string, unknown>): number | undefined => {
-  return usageCostUsd(value)
-}
+const usageCost = (value: Record<string, unknown>): number | undefined => usageCostUsd(value)
 
 const applyUsage = (projection: Projection, event: SourceEvent): Projection => {
   if ((projection.usageCursors ?? []).includes(event.cursor)) return projection

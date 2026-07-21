@@ -804,11 +804,15 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
           yield* Effect.logInfo("resident.connection.acquiring").pipe(
             Effect.annotateLogs("rika.resident.client.kind", input.clientKind),
           )
-          const acquire = Effect.fn("ResidentTransport.acquireConnection")(function* () {
+          const acquire = Effect.fn("ResidentTransport.acquireConnection")(function* (policy: "launch" | "reattach") {
+            const yieldToIncompatible = (failure: ResidentService.ResidentServiceError) =>
+              ResidentService.ResidentRestartRequired.make({ message: failure.message })
             const startedAt = yield* Clock.currentTimeMillis
             const deadline = startedAt + 30_000
             const first = yield* Effect.result(attach("attached"))
             if (first._tag === "Success") return first.success
+            if (policy === "reattach" && first.failure.reason === "incompatible-resident")
+              return yield* yieldToIncompatible(first.failure)
             if (
               first.failure.reason !== "resident-absent" &&
               first.failure.reason !== "resident-draining" &&
@@ -828,6 +832,8 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                   return connected.success
                 }
                 lastFailure = connected.failure
+                if (policy === "reattach" && lastFailure.reason === "incompatible-resident")
+                  return yield* yieldToIncompatible(lastFailure)
                 if (
                   lastFailure.reason !== "resident-absent" &&
                   lastFailure.reason !== "resident-draining" &&
@@ -846,6 +852,10 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                       return existing.success
                     }
                     lastFailure = existing.failure
+                    if (policy === "reattach" && lastFailure.reason === "incompatible-resident") {
+                      yield* claim.release
+                      return yield* yieldToIncompatible(lastFailure)
+                    }
                     if (lastFailure.reason === "resident-absent" || lastFailure.reason === "incompatible-resident") {
                       if (yield* ResidentProcessStartup.listenerIsLive(endpoint.port)) {
                         const protocolVerified =
@@ -864,10 +874,15 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                             (yield* ResidentProcessStartup.processIsAlive(resident.pid))
                           )
                             alive.push(resident)
-                        const listeners = yield* ResidentProcessStartup.listenerProcessIds(
+                        let listeners = yield* ResidentProcessStartup.listenerProcessIds(
                           endpoint.port,
                           alive.map((resident) => resident.pid),
                         )
+                        if (listeners.length !== 1 && lastFailure.reason === "incompatible-resident") {
+                          const unrestricted = yield* ResidentProcessStartup.listenerProcessIds(endpoint.port, "any")
+                          const foreign = unrestricted.filter((pid) => pid !== process.pid)
+                          if (foreign.length === 1) listeners = foreign
+                        }
                         if (listeners.length !== 1 || !protocolVerified) {
                           yield* claim.release
                           return yield* transportError(
@@ -912,19 +927,26 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                       if (attached._tag === "Failure") {
                         yield* spawned.success.abort
                         yield* claim.release
-                        return yield* attached.failure
-                      }
-                      const detached = yield* Effect.result(spawned.success.detach)
-                      if (detached._tag === "Failure") {
-                        yield* spawned.success.abort
+                        lastFailure = attached.failure
+                        yield* Effect.logWarning("resident.startup.attach_retry").pipe(
+                          Effect.annotateLogs({
+                            "rika.failure.kind": attached.failure._tag,
+                            "rika.failure.reason": attached.failure.reason,
+                          }),
+                        )
+                      } else {
+                        const detached = yield* Effect.result(spawned.success.detach)
+                        if (detached._tag === "Failure") {
+                          yield* spawned.success.abort
+                          yield* claim.release
+                          return yield* detached.failure
+                        }
                         yield* claim.release
-                        return yield* detached.failure
+                        yield* Effect.logInfo("resident.startup.ready").pipe(
+                          Effect.annotateLogs("rika.duration.ms", (yield* Clock.currentTimeMillis) - startedAt),
+                        )
+                        return attached.success
                       }
-                      yield* claim.release
-                      yield* Effect.logInfo("resident.startup.ready").pipe(
-                        Effect.annotateLogs("rika.duration.ms", (yield* Clock.currentTimeMillis) - startedAt),
-                      )
-                      return attached.success
                     } else {
                       yield* claim.release
                       if (lastFailure.reason !== "resident-draining") return yield* lastFailure
@@ -945,31 +967,39 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
             }
             return yield* first.failure
           })
-          const acquireReady = acquire().pipe(
-            Effect.timeoutOrElse({
-              duration: "30 seconds",
-              orElse: () =>
-                Effect.fail(transportError("Resident acquisition exceeded its 30-second deadline", "transport-failed")),
-            }),
-            Scope.provide(connectionScope),
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-            Effect.provideService(Crypto.Crypto, crypto),
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.provideService(Path.Path, path),
-            Effect.mapError((error) =>
-              Schema.is(ResidentService.ResidentServiceError)(error) ? error : transportError(String(error)),
-            ),
-            Effect.tapError((error) =>
-              Effect.logWarning("resident.connection.failed").pipe(
-                Effect.annotateLogs({
-                  "rika.failure.kind": error._tag,
-                  "rika.failure.reason": error.reason,
-                  "rika.resident.client.kind": input.clientKind,
-                }),
+          const acquireReady = (policy: "launch" | "reattach") =>
+            acquire(policy).pipe(
+              Effect.timeoutOrElse({
+                duration: "30 seconds",
+                orElse: () =>
+                  Effect.fail(
+                    transportError("Resident acquisition exceeded its 30-second deadline", "transport-failed"),
+                  ),
+              }),
+              Scope.provide(connectionScope),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+              Effect.provideService(Crypto.Crypto, crypto),
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+              Effect.mapError((error) =>
+                Schema.is(ResidentService.ResidentServiceError)(error) ||
+                Schema.is(ResidentService.ResidentRestartRequired)(error)
+                  ? error
+                  : transportError(String(error)),
               ),
-            ),
-          )
-          const initial = yield* acquireReady
+              Effect.tapError((error) =>
+                Effect.logWarning("resident.connection.failed").pipe(
+                  Effect.annotateLogs({
+                    "rika.failure.kind": error._tag,
+                    "rika.failure.reason": Schema.is(ResidentService.ResidentServiceError)(error)
+                      ? error.reason
+                      : "restart-required",
+                    "rika.resident.client.kind": input.clientKind,
+                  }),
+                ),
+              ),
+            )
+          const initial = yield* acquireReady(input.allowSupersede === false ? "reattach" : "launch")
           const logicalClosed = yield* Deferred.make<void>()
           const supervise = Effect.fn("ResidentTransport.superviseInteractive")(function* (
             operationInput: ResidentService.InteractiveInput,
@@ -1145,10 +1175,15 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
               connection: ResidentService.Connection | undefined,
               first: boolean,
               consecutiveFailures: number,
-            ): Effect.Effect<void, ResidentService.ResidentServiceError | Operation.OperationUnavailable> =>
+            ): Effect.Effect<
+              void,
+              | ResidentService.ResidentServiceError
+              | ResidentService.ResidentRestartRequired
+              | Operation.OperationUnavailable
+            > =>
               Effect.gen(function* () {
                 const acquired = yield* Effect.exit(
-                  connection === undefined ? acquireReady : Effect.succeed(connection),
+                  connection === undefined ? acquireReady("reattach") : Effect.succeed(connection),
                 )
                 if (acquired._tag === "Failure")
                   return yield* recover(acquired.cause, undefined, first, consecutiveFailures)
@@ -1159,15 +1194,35 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                 return yield* recover(outcome.cause, duration, first, consecutiveFailures, acquired.value.connectionId)
               })
             const recover = (
-              cause: Cause.Cause<ResidentService.ResidentServiceError | Operation.OperationUnavailable>,
+              cause: Cause.Cause<
+                | ResidentService.ResidentServiceError
+                | ResidentService.ResidentRestartRequired
+                | Operation.OperationUnavailable
+              >,
               duration: number | undefined,
               first: boolean,
               consecutiveFailures: number,
               connectionId?: string,
-            ): Effect.Effect<void, ResidentService.ResidentServiceError | Operation.OperationUnavailable> =>
+            ): Effect.Effect<
+              void,
+              | ResidentService.ResidentServiceError
+              | ResidentService.ResidentRestartRequired
+              | Operation.OperationUnavailable
+            > =>
               Effect.gen(function* () {
                 if (Cause.hasInterruptsOnly(cause)) return yield* Effect.failCause(cause)
                 const failure = Cause.squash(cause)
+                if (
+                  Schema.is(ResidentService.ResidentRestartRequired)(failure) ||
+                  (Schema.is(ResidentService.ResidentServiceError)(failure) &&
+                    failure.reason === "incompatible-resident")
+                ) {
+                  const selection = yield* Ref.get(selected)
+                  return yield* ResidentService.ResidentRestartRequired.make({
+                    message: failure.message,
+                    ...(selection?._tag === "thread" ? { threadId: selection.threadId } : {}),
+                  })
+                }
                 if (!isDisconnectedOperation(failure) && !isReconnectableTransport(failure))
                   return yield* Effect.failCause(cause)
                 const current = (yield* Ref.get(sessions)).session
@@ -1227,7 +1282,10 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
           } satisfies ResidentService.Connection
         }).pipe(
           Effect.mapError((cause) =>
-            Schema.is(ResidentService.ResidentServiceError)(cause) ? cause : transportError(String(cause)),
+            Schema.is(ResidentService.ResidentServiceError)(cause) ||
+            Schema.is(ResidentService.ResidentRestartRequired)(cause)
+              ? cause
+              : transportError(String(cause)),
           ),
         ),
     }),

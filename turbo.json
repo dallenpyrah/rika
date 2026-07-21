@@ -75,14 +75,10 @@
         "packages/**",
         "scripts/**",
         "test/**",
-        "!**/dist/**",
-        "!test/journey/**"
+        "!**/dist/**"
       ]
     },
-    "//#test-scene": {
-      "inputs": ["vitest.config.ts", "tsconfig.json", "bun.lock", "apps/**", "packages/**", "!**/dist/**"]
-    },
-    "//#test-journey": {
+    "//#test-tui": {
       "inputs": [
         "vitest.config.ts",
         "tsconfig.json",
@@ -90,7 +86,7 @@
         "apps/**",
         "packages/**",
         "scripts/**",
-        "test/journey/**",
+        "test/**",
         "!**/dist/**"
       ]
     }

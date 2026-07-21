@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Crypto, Deferred, Effect, Exit, Fiber, FiberSet, Layer, Ref, Schema } from "effect"
+import { Cause, Crypto, Deferred, Effect, Exit, Fiber, FiberSet, Layer, Ref, Runtime, Schema } from "effect"
 import { provideLayer } from "./layer"
 import {
   canonicalServiceIdentity,
@@ -7,6 +7,8 @@ import {
   ClientMessage,
   makeLifecycle,
   protocolVersion,
+  ResidentRestartRequired,
+  runtimeRestartExitCode,
   ServerMessage,
   serverProof,
   validateHandshake,
@@ -210,6 +212,23 @@ describe("resident service protocol", () => {
         command: { _tag: "OldCommand" },
       }),
     ).toThrow()
+  })
+
+  it("marks a restart-required failure with the dedicated runtime exit code", () => {
+    expect(runtimeRestartExitCode).toBe(75)
+    const restart = ResidentRestartRequired.make({ message: "resident upgraded", threadId: "thread-1" })
+    expect(restart[Runtime.errorExitCode]).toBe(runtimeRestartExitCode)
+    expect(Schema.is(ResidentRestartRequired)(restart)).toBe(true)
+    const decoded = Schema.decodeUnknownSync(ResidentRestartRequired)({
+      _tag: "ResidentRestartRequired",
+      message: "resident upgraded",
+    })
+    expect(decoded.threadId).toBeUndefined()
+    expect(Schema.encodeSync(ResidentRestartRequired)(restart)).toMatchObject({
+      _tag: "ResidentRestartRequired",
+      message: "resident upgraded",
+      threadId: "thread-1",
+    })
   })
 
   it("rejects sequence values outside the current resident contract", () => {

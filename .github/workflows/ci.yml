@@ -33,3 +33,5 @@ jobs:
         run: find node_modules/.bun -path '*/@effect/tsgo-linux-*/lib/tsc' -exec chmod +x {} +
       - name: Check
         run: bun run check
+      - name: TUI app tests
+        run: bun run test-tui

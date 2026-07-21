@@ -18,3 +18,4 @@ ignores:
   - "repos/effect/**"
   - "scripts/capture-tui-visuals.ts"
   - "scripts/package.ts"
+  - "scripts/release-smoke.ts"

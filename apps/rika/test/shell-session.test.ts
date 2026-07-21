@@ -187,6 +187,7 @@ test("drives bypassed recorded and incognito shell commands through Operation an
               Layer.merge(WebSearch.factoryLayer([]), ReadWebPage.layer({})).pipe(Layer.provide(FetchHttpClient.layer)),
             ),
             Layer.provide(BunServices.layer),
+            Layer.orDie,
           ),
         defaultWorkspace: workspace,
         shellPermission: "allow",

@@ -2393,9 +2393,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           yield* Ref.set(transcriptHasOlder, hasOlder)
           const observedThreadCostUsd = usageCosts.threadCostUsd.get(thread.id)
           const threadCostUsd =
-            observedThreadCostUsd === undefined || !usageCosts.complete
-              ? page.threadCostUsd
-              : observedThreadCostUsd
+            observedThreadCostUsd === undefined || !usageCosts.complete ? page.threadCostUsd : observedThreadCostUsd
           if (before === undefined) {
             const queue = yield* turns.readQueue(thread.id)
             const activeTurn = yield* turns.findActive(thread.id)
@@ -3584,7 +3582,13 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 yield* backend.registerWorkflows()
                 yield* Console.log(
                   encodeJson(
-                    yield* backend.startWorkflow(input.name, input.runId, input.revision, undefined, input.clientWorkspace),
+                    yield* backend.startWorkflow(
+                      input.name,
+                      input.runId,
+                      input.revision,
+                      undefined,
+                      input.clientWorkspace,
+                    ),
                   ),
                 )
                 return

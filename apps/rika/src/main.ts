@@ -4,7 +4,6 @@ import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { AiError, Compaction, ModelRegistry, Response as AiResponse } from "@batonfx/core"
 import type { TestModel as TestModelTypes } from "@batonfx/test"
-import { FileFinder } from "@ff-labs/fff-node"
 import {
   ConfigOperations,
   ContextFileSystem,
@@ -27,7 +26,7 @@ import * as Turn from "@rika/persistence/turn"
 import * as Transcript from "@rika/transcript"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
-import { MediaView, ReadWebPage, Runtime as ToolRuntime, ThreadTools, WebSearch } from "@rika/tools"
+import { MediaView, ReadWebPage, Runtime as ToolRuntime, ThreadTools, WebSearch, WorkspaceIndex } from "@rika/tools"
 import { Palette, Session, ViewState } from "@rika/tui"
 import { create as createTui } from "@rika/tui/adapter"
 import type { PathTarget } from "@rika/tui"
@@ -51,6 +50,7 @@ import {
   Redacted,
   Ref,
   References,
+  Runtime,
   Schema,
   Semaphore,
   Stream,
@@ -89,8 +89,14 @@ const terminalTitleText = (value: string) =>
     .replace(/\s+/g, " ")
     .trim()
 
-export const terminalTitleSequence = (title: string, workspace: string) =>
-  `\u001b]0;${terminalTitleText(title)} - rika - ${terminalTitleText(workspace.replace(/^\/Users\/[^/]+/, "~"))}\u0007`
+export const terminalTitleSequence: {
+  (title: string, workspace: string): string
+  (workspace: string): (title: string) => string
+} = Function.dual(
+  2,
+  (title: string, workspace: string): string =>
+    `\u001b]0;${terminalTitleText(title)} - rika - ${terminalTitleText(workspace.replace(/^\/Users\/[^/]+/, "~"))}\u0007`,
+)
 
 const tuiTraceEventTypes = new Set([
   "model.reasoning.delta",
@@ -151,29 +157,9 @@ const fffError = (workspace: string, method: string, cause: unknown) =>
   })
 
 const fffGlob = (workspace: string, pattern: string, maximumFiles: number) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const created = yield* Effect.try({
-        try: () => FileFinder.create({ basePath: workspace, aiMode: true }),
-        catch: (cause) => fffError(workspace, "initialize", cause),
-      })
-      if (!created.ok) return yield* Effect.fail(fffError(workspace, "initialize", created.error))
-      const finder = yield* Effect.acquireRelease(Effect.succeed(created.value), (finder) =>
-        Effect.sync(() => finder.destroy()).pipe(Effect.ignore),
-      )
-      const scanned = yield* Effect.tryPromise({
-        try: () => finder.waitForScan(10_000),
-        catch: (cause) => fffError(workspace, "scan", cause),
-      })
-      if (!scanned.ok) return yield* Effect.fail(fffError(workspace, "scan", scanned.error))
-      if (!scanned.value) return yield* Effect.fail(fffError(workspace, "scan", "Initial workspace scan timed out"))
-      const result = yield* Effect.try({
-        try: () => finder.glob(pattern, { pageSize: maximumFiles }),
-        catch: (cause) => fffError(workspace, "glob", cause),
-      })
-      if (!result.ok) return yield* Effect.fail(fffError(workspace, "glob", result.error))
-      return result.value.items.map((item) => item.relativePath)
-    }),
+  WorkspaceIndex.globOnce({ workspace, pattern, options: { pageSize: maximumFiles } }).pipe(
+    Effect.map((result) => result.items.map((item) => item.relativePath)),
+    Effect.mapError((error) => fffError(workspace, error.operation, error)),
   )
 
 const imageMediaType = (path: string) => {
@@ -1650,130 +1636,19 @@ export const settleTuiInitialization: {
   ): Effect.Effect<T | undefined, E | E2>
 } = Function.dual(3, settleTuiInitializationImpl)
 
-if (import.meta.main) {
-  const environment = Effect.runSync(
-    Config.all({
-      hostDataRoot: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_DATA_ROOT")),
-      home: Config.option(Config.string("HOME")),
-      database: Config.option(Config.string("RIKA_DATABASE")),
-      relayDatabase: Config.option(Config.string("RIKA_RELAY_DATABASE")),
-      visual: Config.option(Config.string("VISUAL")),
-      editor: Config.option(Config.string("EDITOR")),
-      testModelResponse: Config.option(Config.string("RIKA_TEST_MODEL_RESPONSE")),
-      testModelScript: Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT")),
-      testMediaAnalyzerResponse: Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_RESPONSE")),
-      testMediaAnalyzerError: Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_ERROR")),
-      residentProfile: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_PROFILE")),
-      residentGrace: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_GRACE")),
-      residentStartupHold: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_STARTUP_HOLD")),
-      residentHost: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_HOST")),
-    }),
-  )
-  const hostDataRoot = environment.hostDataRoot._tag === "Some" ? environment.hostDataRoot.value : undefined
-  const home = environment.home._tag === "Some" ? environment.home.value : process.cwd()
-  const defaultDataRoot = `${home}/.rika`
-  const database =
-    hostDataRoot === undefined
-      ? environment.database._tag === "Some"
-        ? environment.database.value
-        : `${defaultDataRoot}/rika.db`
-      : join(hostDataRoot, "rika.db")
-  const relayDatabase =
-    hostDataRoot === undefined
-      ? environment.relayDatabase._tag === "Some"
-        ? environment.relayDatabase.value
-        : `${defaultDataRoot}/relay.db`
-      : join(hostDataRoot, "relay.db")
-  const globalConfig = `${home}/.config/rika/settings.json`
-  const workspaceConfig = `${process.cwd()}/.rika/settings.json`
-  const extensionLayer = Layer.mergeAll(
-    ExtensionOperations.layer({
-      globalRoot: `${home}/.config/rika/skills`,
-      workspaceRoot: `${process.cwd()}/.rika/skills`,
-      configPath: `${process.cwd()}/.rika/mcp.json`,
-      trustPath: `${home}/.config/rika/mcp-trust.json`,
-      generationsPath: `${process.cwd()}/.rika/extensions.json`,
-    }),
-    SkillRegistry.fileSystemLayer,
-    McpOAuth.layer.pipe(
-      Layer.provide(McpOAuth.hostLayer),
-      Layer.provide(McpOAuth.tokenStoreLayer(`${home}/.config/rika/mcp-oauth.json`)),
-    ),
-  ).pipe(Layer.provide(BunServices.layer), Layer.merge(BunServices.layer), Layer.merge(FetchHttpClient.layer))
-  const profile = environment.residentProfile._tag === "Some" ? environment.residentProfile.value : "default"
-  const profileIdentity = createHash("sha256").update(profile).digest("hex")
-  const openAiAuthLayer = OpenAiAuthAdapter.layer.pipe(
-    Layer.provide(
-      OpenAiCredentialStore.layer(join(dirname(database), "auth", profileIdentity, "openai.json"), {
-        trustedRoot: dirname(database),
-        ...(typeof process.getuid === "function" ? { currentUid: process.getuid() } : {}),
-      }),
-    ),
-    Layer.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)),
-  )
-  const authOperations: Operation.AuthOperationOptions = {
-    layer: openAiAuthLayer,
-    assertOpenAiDirect: (workspace) =>
-      Effect.gen(function* () {
-        const globalSettings = yield* loadSettingsFile(globalConfig)
-        const settings = yield* loadSettingsFile(`${workspace}/.rika/settings.json`)
-        const workspaceConfigLayer = ConfigService.liveEnvironmentLayer({
-          webProviders: WebSearch.providerRegistry,
-          global: globalSettings,
-          workspace: settings,
-        })
-        const resolved = yield* ConfigService.effective().pipe(provideLayerScoped(workspaceConfigLayer))
-        if (resolved.settings.providers.openai?.baseUrl !== ConfigContract.defaults.providers.openai?.baseUrl) {
-          return yield* OperationProductError.make({
-            message:
-              "OpenAI account login cannot be used while providers.openai.baseUrl is customized; remove the override first",
-          })
-        }
-      }).pipe(
-        provideLayerScoped(BunServices.layer),
-        Effect.mapError((error) =>
-          Schema.is(OperationProductError)(error) ? error : OperationProductError.make({ message: String(error) }),
-        ),
-      ),
-  }
-  const editor =
-    environment.visual._tag === "Some"
-      ? environment.visual.value
-      : environment.editor._tag === "Some"
-        ? environment.editor.value
-        : undefined
-  const productDatabase = Layer.unwrap(
-    Effect.gen(function* () {
-      yield* Effect.all(
-        [mkdir(dirname(database), { recursive: true }), mkdir(dirname(relayDatabase), { recursive: true })],
-        { concurrency: 2 },
-      )
-      return Database.layer(database)
-    }),
-  )
-  const repositoryLayer = ThreadRepository.layer.pipe(Layer.provide(productDatabase), Layer.provide(BunServices.layer))
-  const turnRepositoryLayer = TurnRepository.layer.pipe(
-    Layer.provide(productDatabase),
-    Layer.provide(BunServices.layer),
-  )
-  const threadSummaryRepositoryLayer = ThreadSummaryRepository.layer.pipe(
-    Layer.provide(productDatabase),
-    Layer.provide(BunServices.layer),
-  )
-  const transcriptRepositoryLayer = TranscriptRepository.layer.pipe(
-    Layer.provide(productDatabase),
-    Layer.provide(BunServices.layer),
-  )
-  const resolvedContextLayer = ResolvedContext.layer(fffGlob).pipe(
-    Layer.provide(ContextFileSystem.liveLayer),
-    Layer.provide(BunServices.layer),
-  )
-  const clientOwnedInteractiveFunction = (
+export interface InteractiveTuiOptions {
+  readonly editor?: string | undefined
+  readonly makeRenderer?: NonNullable<Parameters<typeof createTui>[0]["makeRenderer"]>
+}
+
+export const interactiveTui =
+  (options: InteractiveTuiOptions) =>
+  (
     input: ResidentService.InteractiveInput,
     session: Operation.InteractiveSession,
   ): Effect.Effect<void, Operation.OperationUnavailable> =>
     Effect.gen(function* () {
-      if (!process.stdin.isTTY || !process.stdout.isTTY) return
+      if (options.makeRenderer === undefined && (!process.stdin.isTTY || !process.stdout.isTTY)) return
       const context = yield* Effect.context<never>()
       const fork = Effect.runForkWith(context)
       return yield* Effect.callback<void, Operation.OperationUnavailable>((resume) => {
@@ -2284,7 +2159,7 @@ if (import.meta.main) {
             Effect.flatMap((now) =>
               Effect.gen(function* () {
                 const fileSystem = yield* FileSystem.FileSystem
-                if (editor === undefined) {
+                if (options.editor === undefined) {
                   renderer?.surface.showToast("Set VISUAL or EDITOR to edit the prompt", "#e06c75")
                   return
                 }
@@ -2293,7 +2168,7 @@ if (import.meta.main) {
                 yield* mkdir(`${model.workspace}/.rika`, { recursive: true })
                 yield* fileSystem.writeFileString(file, ViewState.displayInput(model))
                 const resumeTerminal = pauseTerminal()
-                yield* childExit("run editor", [editor, file], {
+                yield* childExit("run editor", [options.editor, file], {
                   stdin: "inherit",
                   stdout: "inherit",
                   stderr: "inherit",
@@ -2320,7 +2195,7 @@ if (import.meta.main) {
                   }),
                 onSuccess: (path) =>
                   Effect.gen(function* () {
-                    if (editor === undefined) {
+                    if (options.editor === undefined) {
                       const exit = yield* childExit("open file", defaultOpenArguments(path), {
                         stdin: "ignore",
                         stdout: "ignore",
@@ -2333,7 +2208,7 @@ if (import.meta.main) {
                     const resumeTerminal = pauseTerminal()
                     const exit = yield* childExit(
                       "open editor",
-                      editorArguments(editor, path, target.line, target.column),
+                      editorArguments(options.editor, path, target.line, target.column),
                       {
                         stdin: "inherit",
                         stdout: "inherit",
@@ -2385,6 +2260,7 @@ if (import.meta.main) {
         initialization = fork(
           settleTuiInitialization(
             createTui({
+              ...(options.makeRenderer === undefined ? {} : { makeRenderer: options.makeRenderer }),
               openPath,
               scroll: (offset) => {
                 model = ViewState.update(model, { _tag: "ScrollMoved", offset })
@@ -2572,6 +2448,12 @@ if (import.meta.main) {
                         created.surface.update(model)
                       }),
                     ),
+                    Effect.catch((error) =>
+                      Effect.sync(() => {
+                        model = ViewState.update(model, { _tag: "FilesFailed", message: error.message })
+                        created.surface.update(model)
+                      }).pipe(Effect.andThen(Effect.logWarning(`workspace file index failed: ${error.message}`))),
+                    ),
                     Effect.asVoid,
                   ),
                 )
@@ -2635,6 +2517,132 @@ if (import.meta.main) {
         return teardown(false)
       })
     })
+
+if (import.meta.main) {
+  const environment = Effect.runSync(
+    Config.all({
+      hostDataRoot: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_DATA_ROOT")),
+      home: Config.option(Config.string("HOME")),
+      database: Config.option(Config.string("RIKA_DATABASE")),
+      relayDatabase: Config.option(Config.string("RIKA_RELAY_DATABASE")),
+      visual: Config.option(Config.string("VISUAL")),
+      editor: Config.option(Config.string("EDITOR")),
+      testModelResponse: Config.option(Config.string("RIKA_TEST_MODEL_RESPONSE")),
+      testModelScript: Config.option(Config.string("RIKA_TEST_MODEL_SCRIPT")),
+      testMediaAnalyzerResponse: Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_RESPONSE")),
+      testMediaAnalyzerError: Config.option(Config.string("RIKA_TEST_MEDIA_ANALYZER_ERROR")),
+      residentProfile: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_PROFILE")),
+      residentGrace: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_GRACE")),
+      residentStartupHold: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_STARTUP_HOLD")),
+      residentHost: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_HOST")),
+      runtimeRestarted: Config.option(Config.string("RIKA_INTERNAL_RUNTIME_RESTARTED")),
+      restartThread: Config.option(Config.string("RIKA_INTERNAL_RESTART_THREAD")),
+    }),
+  )
+  const runtimeRestarted = environment.runtimeRestarted._tag === "Some" && environment.runtimeRestarted.value === "1"
+  const restartThreadId = environment.restartThread._tag === "Some" ? environment.restartThread.value : undefined
+  let runtimeRestartRequested = false
+  const hostDataRoot = environment.hostDataRoot._tag === "Some" ? environment.hostDataRoot.value : undefined
+  const home = environment.home._tag === "Some" ? environment.home.value : process.cwd()
+  const defaultDataRoot = `${home}/.rika`
+  const database =
+    hostDataRoot === undefined
+      ? environment.database._tag === "Some"
+        ? environment.database.value
+        : `${defaultDataRoot}/rika.db`
+      : join(hostDataRoot, "rika.db")
+  const relayDatabase =
+    hostDataRoot === undefined
+      ? environment.relayDatabase._tag === "Some"
+        ? environment.relayDatabase.value
+        : `${defaultDataRoot}/relay.db`
+      : join(hostDataRoot, "relay.db")
+  const globalConfig = `${home}/.config/rika/settings.json`
+  const workspaceConfig = `${process.cwd()}/.rika/settings.json`
+  const extensionLayer = Layer.mergeAll(
+    ExtensionOperations.layer({
+      globalRoot: `${home}/.config/rika/skills`,
+      workspaceRoot: `${process.cwd()}/.rika/skills`,
+      configPath: `${process.cwd()}/.rika/mcp.json`,
+      trustPath: `${home}/.config/rika/mcp-trust.json`,
+      generationsPath: `${process.cwd()}/.rika/extensions.json`,
+    }),
+    SkillRegistry.fileSystemLayer,
+    McpOAuth.layer.pipe(
+      Layer.provide(McpOAuth.hostLayer),
+      Layer.provide(McpOAuth.tokenStoreLayer(`${home}/.config/rika/mcp-oauth.json`)),
+    ),
+  ).pipe(Layer.provide(BunServices.layer), Layer.merge(BunServices.layer), Layer.merge(FetchHttpClient.layer))
+  const profile = environment.residentProfile._tag === "Some" ? environment.residentProfile.value : "default"
+  const profileIdentity = createHash("sha256").update(profile).digest("hex")
+  const openAiAuthLayer = OpenAiAuthAdapter.layer.pipe(
+    Layer.provide(
+      OpenAiCredentialStore.layer(join(dirname(database), "auth", profileIdentity, "openai.json"), {
+        trustedRoot: dirname(database),
+        ...(typeof process.getuid === "function" ? { currentUid: process.getuid() } : {}),
+      }),
+    ),
+    Layer.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)),
+  )
+  const authOperations: Operation.AuthOperationOptions = {
+    layer: openAiAuthLayer,
+    assertOpenAiDirect: (workspace) =>
+      Effect.gen(function* () {
+        const globalSettings = yield* loadSettingsFile(globalConfig)
+        const settings = yield* loadSettingsFile(`${workspace}/.rika/settings.json`)
+        const workspaceConfigLayer = ConfigService.liveEnvironmentLayer({
+          webProviders: WebSearch.providerRegistry,
+          global: globalSettings,
+          workspace: settings,
+        })
+        const resolved = yield* ConfigService.effective().pipe(provideLayerScoped(workspaceConfigLayer))
+        if (resolved.settings.providers.openai?.baseUrl !== ConfigContract.defaults.providers.openai?.baseUrl) {
+          return yield* OperationProductError.make({
+            message:
+              "OpenAI account login cannot be used while providers.openai.baseUrl is customized; remove the override first",
+          })
+        }
+      }).pipe(
+        provideLayerScoped(BunServices.layer),
+        Effect.mapError((error) =>
+          Schema.is(OperationProductError)(error) ? error : OperationProductError.make({ message: String(error) }),
+        ),
+      ),
+  }
+  const editor =
+    environment.visual._tag === "Some"
+      ? environment.visual.value
+      : environment.editor._tag === "Some"
+        ? environment.editor.value
+        : undefined
+  const productDatabase = Layer.unwrap(
+    Effect.gen(function* () {
+      yield* Effect.all(
+        [mkdir(dirname(database), { recursive: true }), mkdir(dirname(relayDatabase), { recursive: true })],
+        { concurrency: 2 },
+      )
+      return Database.layer(database)
+    }),
+  )
+  const repositoryLayer = ThreadRepository.layer.pipe(Layer.provide(productDatabase), Layer.provide(BunServices.layer))
+  const turnRepositoryLayer = TurnRepository.layer.pipe(
+    Layer.provide(productDatabase),
+    Layer.provide(BunServices.layer),
+  )
+  const threadSummaryRepositoryLayer = ThreadSummaryRepository.layer.pipe(
+    Layer.provide(productDatabase),
+    Layer.provide(BunServices.layer),
+  )
+  const transcriptRepositoryLayer = TranscriptRepository.layer.pipe(
+    Layer.provide(productDatabase),
+    Layer.provide(BunServices.layer),
+  )
+  const resolvedContextLayer = ResolvedContext.layer(fffGlob).pipe(
+    Layer.provide(ContextFileSystem.liveLayer),
+    Layer.provide(BunServices.layer),
+  )
+  const clientOwnedInteractiveFunction = interactiveTui({ editor })
+
   const operationLayer = (
     injectedInteractive: (
       input: ResidentService.InteractiveInput,
@@ -3000,12 +3008,29 @@ if (import.meta.main) {
                 dataRoot,
                 Effect.scoped(
                   Effect.gen(function* () {
-                    const clientInput = withClientWorkspace(input, process.cwd())
+                    const workspaceInput = withClientWorkspace(input, process.cwd())
+                    const clientInput =
+                      workspaceInput._tag === "Interactive" && restartThreadId !== undefined
+                        ? { ...workspaceInput, threadId: restartThreadId, last: false }
+                        : workspaceInput
+                    const requestRuntimeRestart = (error: ResidentService.ResidentRestartRequired) =>
+                      Effect.sync(() => {
+                        runtimeRestartRequested = true
+                      }).pipe(
+                        Effect.andThen(ResidentProcessStartup.signalRuntimeRestart(error.threadId).pipe(Effect.ignore)),
+                        Effect.andThen(
+                          Operation.OperationUnavailable.make({
+                            operation: clientInput._tag,
+                            message: "Rika was upgraded; restarting this session",
+                          }),
+                        ),
+                      )
                     const connected = yield* Effect.result(
                       resident
                         .getOrCreate({
                           profile: "default",
                           dataRoot,
+                          ...(runtimeRestarted ? { allowSupersede: false } : {}),
                           clientKind:
                             clientInput._tag === "Interactive"
                               ? "interactive"
@@ -3061,18 +3086,33 @@ if (import.meta.main) {
                             : {}),
                         })
                         .pipe(
+                          Effect.tapError((error) =>
+                            Schema.is(ResidentService.ResidentRestartRequired)(error)
+                              ? Effect.sync(() => {
+                                  runtimeRestartRequested = true
+                                }).pipe(
+                                  Effect.andThen(
+                                    ResidentProcessStartup.signalRuntimeRestart(error.threadId).pipe(Effect.ignore),
+                                  ),
+                                )
+                              : Effect.void,
+                          ),
                           Effect.mapError((error) =>
                             Schema.is(Operation.OperationUnavailable)(error)
                               ? error
                               : Operation.OperationUnavailable.make({
                                   operation: clientInput._tag,
-                                  message: error.message,
+                                  message: Schema.is(ResidentService.ResidentRestartRequired)(error)
+                                    ? "Rika was upgraded; restarting this session"
+                                    : error.message,
                                 }),
                           ),
                           Effect.ensuring(connection.close),
                         )
                       return
                     }
+                    if (Schema.is(ResidentService.ResidentRestartRequired)(connected.failure))
+                      return yield* requestRuntimeRestart(connected.failure)
                     return yield* Operation.OperationUnavailable.make({
                       operation: clientInput._tag,
                       message: connected.failure.message,
@@ -3135,5 +3175,11 @@ if (import.meta.main) {
         )
   if (environment.residentHost._tag === "Some" && environment.residentHost.value === "1")
     BunRuntime.runMain(observedProgram("resident", hostDataRoot ?? defaultDataRoot, hostProgram))
-  else BunRuntime.runMain(clientProgram)
+  else
+    BunRuntime.runMain(clientProgram, {
+      teardown: (exit, onExit) => {
+        if (runtimeRestartRequested) return onExit(ResidentService.runtimeRestartExitCode)
+        Runtime.defaultTeardown(exit, onExit)
+      },
+    })
 }

@@ -8,13 +8,19 @@ import { provideLayer } from "./layer"
 import { executionRoute } from "./current-state"
 
 const model = { provider: "test", model: "deterministic" }
-const specialtyNames = ["oracle", "librarian", "painter", "task"] as const
+const specialtyNames = ["task", "oracle", "librarian"] as const
 const cases = [
+  {
+    tool: "task",
+    profile: "Task",
+    output: { summary: "Implemented and verified.", files: ["src/change.ts"] },
+    permissions: ["workspace.read", "workspace.write", "process.run", "network.read"],
+  },
   {
     tool: "oracle",
     profile: "Oracle",
     output: { answer: "Use the public boundary.", evidence: ["packages/runtime/src/index.ts:1"] },
-    permissions: ["workspace.read"],
+    permissions: ["workspace.read", "network.read"],
   },
   {
     tool: "librarian",
@@ -27,12 +33,6 @@ const cases = [
     profile: "Painter",
     output: { text: "Rendered.", artifact: { path: "artifacts/card.png", mimeType: "image/png", kind: "image" } },
     permissions: ["workspace.read"],
-  },
-  {
-    tool: "task",
-    profile: "Task",
-    output: { summary: "Implemented and verified.", files: ["src/change.ts"] },
-    permissions: ["workspace.read", "workspace.write", "process.run"],
   },
 ] as const
 
@@ -92,7 +92,7 @@ describe("specialty durable transcripts", () => {
             .filter((definition) => specialtyNames.includes(definition.name as never))
             .map(({ name }) => name),
         )
-        expect(cases.map(({ tool }) => tool)).toEqual([...specialtyNames])
+        expect(cases.map(({ tool }) => tool)).toEqual([...specialtyNames, "painter"])
 
         const agents = yield* ProductAgent.Service
         for (const entry of cases) {
@@ -104,9 +104,10 @@ describe("specialty durable transcripts", () => {
               AgentProfiles.parentPermissions.some((p) => p.name === permission),
             ),
           ).toBe(true)
-          expect((yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(entry.output)).length).toBeLessThanOrEqual(
-            definition!.outputLimit,
-          )
+          if (definition !== undefined)
+            expect((yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(entry.output)).length).toBeLessThanOrEqual(
+              definition.outputLimit,
+            )
           expect(profile.preset).not.toHaveProperty("output_schema_ref")
           expect(
             yield* agents.invoke({

@@ -8,17 +8,25 @@ export const targets = {
     bun: "bun-darwin-arm64",
     opentui: "@opentui/core-darwin-arm64",
     fff: "@ff-labs/fff-bin-darwin-arm64",
+    ffiNative: "@yuuang/ffi-rs-darwin-arm64",
   },
-  "darwin-x64": { bun: "bun-darwin-x64", opentui: "@opentui/core-darwin-x64", fff: "@ff-labs/fff-bin-darwin-x64" },
+  "darwin-x64": {
+    bun: "bun-darwin-x64",
+    opentui: "@opentui/core-darwin-x64",
+    fff: "@ff-labs/fff-bin-darwin-x64",
+    ffiNative: "@yuuang/ffi-rs-darwin-x64",
+  },
   "linux-arm64": {
     bun: "bun-linux-arm64",
     opentui: "@opentui/core-linux-arm64",
     fff: "@ff-labs/fff-bin-linux-arm64-gnu",
+    ffiNative: "@yuuang/ffi-rs-linux-arm64-gnu",
   },
   "linux-x64": {
     bun: "bun-linux-x64",
     opentui: "@opentui/core-linux-x64",
     fff: "@ff-labs/fff-bin-linux-x64-gnu",
+    ffiNative: "@yuuang/ffi-rs-linux-x64-gnu",
   },
 }
 
@@ -222,6 +230,7 @@ const program = Effect.scoped(
         const fffSource = yield* locatePackage(root, target.fff, "0.9.6", packageCache)
         const fffNodeSource = yield* locatePackage(root, "@ff-labs/fff-node", "0.9.6", packageCache)
         const ffiSource = yield* locatePackage(root, "ffi-rs", "1.3.2", packageCache)
+        const ffiNativeSource = yield* locatePackage(root, target.ffiNative, "1.3.2", packageCache)
         const resolutionPackage = path.join(root, "node_modules", ...target.opentui.split("/"))
         const resolutionExists = yield* fileSystem
           .exists(resolutionPackage)
@@ -283,6 +292,18 @@ const program = Effect.scoped(
               )
           },
           { concurrency: 4, discard: true },
+        )
+        const ffiDestination = path.join(stage, "bin", "node_modules", "ffi-rs")
+        const ffiNativeEntries = yield* fileSystem
+          .readDirectory(ffiNativeSource)
+          .pipe(mapFailure("scan ffi-rs native package"))
+        yield* Effect.forEach(
+          ffiNativeEntries.filter((entry) => entry.endsWith(".node")),
+          (entry) =>
+            fileSystem
+              .copyFile(path.join(ffiNativeSource, entry), path.join(ffiDestination, entry))
+              .pipe(mapFailure("copy ffi-rs native library")),
+          { discard: true },
         )
         yield* fileSystem
           .writeFileString(

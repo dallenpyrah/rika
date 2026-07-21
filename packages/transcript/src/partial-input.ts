@@ -99,7 +99,11 @@ const readValue = (reader: Reader): Fragment<unknown> | undefined => {
   if (character === "{" || character === "[") return readNested(reader)
   const start = reader.cursor
   const length = reader.input.length
-  while (reader.cursor < length && !isWhitespace(reader.input[reader.cursor]!) && !",}]".includes(reader.input[reader.cursor]!))
+  while (
+    reader.cursor < length &&
+    !isWhitespace(reader.input[reader.cursor]!) &&
+    !",}]".includes(reader.input[reader.cursor]!)
+  )
     reader.cursor += 1
   if (reader.cursor >= length) return undefined
   const parsed = scalar(reader.input.slice(start, reader.cursor))

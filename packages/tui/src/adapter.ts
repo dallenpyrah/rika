@@ -1489,6 +1489,7 @@ export interface Handlers {
   readonly threadPreviewScroll?: (offset: number) => void
   readonly openPath?: (target: PathTarget) => void
   readonly resize: (width: number, height: number) => void
+  readonly makeRenderer?: () => Promise<CliRenderer>
 }
 
 export interface SurfaceOptions {
@@ -3655,7 +3656,14 @@ const filePickerContent = (model: Model, entries: ReadonlyArray<string>, innerWi
     chunks.push(
       dim(
         fg(colors.text)(
-          truncateToWidth(isLoading(model.filePicker.items) ? "Loading files" : "no matches", innerWidth),
+          truncateToWidth(
+            model.filePicker.error !== undefined
+              ? `files unavailable: ${model.filePicker.error}`
+              : isLoading(model.filePicker.items)
+                ? "Loading files"
+                : "no matches",
+            innerWidth,
+          ),
         ),
       ),
     )
@@ -3971,12 +3979,14 @@ const welcomeContent = (width: number, height: number, phase: number, mode: Mode
 export const create = (handlers: Handlers) =>
   Effect.tryPromise({
     try: () =>
-      createCliRenderer({
-        screenMode: "alternate-screen",
-        exitOnCtrlC: false,
-        useMouse: true,
-        enableMouseMovement: true,
-      }),
+      handlers.makeRenderer === undefined
+        ? createCliRenderer({
+            screenMode: "alternate-screen",
+            exitOnCtrlC: false,
+            useMouse: true,
+            enableMouseMovement: true,
+          })
+        : handlers.makeRenderer(),
     catch: adapterError,
   }).pipe(
     Effect.flatMap((renderer) =>

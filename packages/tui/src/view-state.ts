@@ -152,6 +152,7 @@ export interface FilePickerState {
   readonly query: string
   readonly selected: number
   readonly items: Loadable<ReadonlyArray<string>>
+  readonly error?: string
 }
 export interface ThreadSwitcherState {
   readonly open: boolean
@@ -202,6 +203,7 @@ const FilePickerStateSchema = Schema.Struct({
   query: Schema.String,
   selected: Schema.Finite,
   items: WorkspaceFilesSchema,
+  error: Schema.optional(Schema.String),
 })
 const ThreadSwitcherStateSchema = Schema.Struct({
   open: Schema.Boolean,
@@ -364,6 +366,7 @@ export type Message =
   | { readonly _tag: "ChangedFilesRequested" }
   | { readonly _tag: "ChangedFilesReplaced"; readonly files: ReadonlyArray<ChangedFile> }
   | { readonly _tag: "FilesRequested" }
+  | { readonly _tag: "FilesFailed"; readonly message: string }
   | { readonly _tag: "ThreadPreviewRequested" }
   | { readonly _tag: "ThreadOpenRequested" }
   | { readonly _tag: "ThreadOpenCompleted" }
@@ -936,9 +939,14 @@ export const update: {
     case "FilesRequested":
       return model.filePicker.items._tag === "Ready"
         ? model
-        : { ...model, filePicker: { ...model.filePicker, items: loading } }
+        : { ...model, filePicker: { ...model.filePicker, items: loading, error: undefined } }
+    case "FilesFailed":
+      return { ...model, filePicker: { ...model.filePicker, items: idle, error: message.message } }
     case "FilesReplaced": {
-      const replacedFiles = { ...model, filePicker: { ...model.filePicker, items: ready([...message.files]) } }
+      const replacedFiles = {
+        ...model,
+        filePicker: { ...model.filePicker, items: ready([...message.files]), error: undefined },
+      }
       return {
         ...replacedFiles,
         filePicker: {
@@ -1660,7 +1668,16 @@ export const update: {
           shortcutsOpen: false,
         }
       }
-      if (key.ctrl && key.name === "c" && model.busy)
+      if (
+        key.ctrl &&
+        key.name === "c" &&
+        (model.busy ||
+          model.blocks.some(
+            (block) =>
+              (block as TranscriptBlock)._tag === "Permission" &&
+              (block as Extract<TranscriptBlock, { _tag: "Permission" }>).status === "pending",
+          ))
+      )
         return { ...model, activity: { _tag: "Waiting" }, pendingAction: { _tag: "Cancel" } }
       if (key.ctrl && key.name === "s" && model.busy && model.input.length > 0)
         return { ...model, pendingAction: { _tag: "Steer", prompt: model.input }, input: "", cursor: 0 }

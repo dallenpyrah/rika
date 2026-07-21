@@ -682,7 +682,12 @@ test("handoff children resolve real workspace tools through their parent Rika tu
         registration: fixture.registration,
         selection: fixture.selection,
         modelVariantPolicy: "fixed-selection",
-        toolRuntimeLayerForWorkspace: Runtime.layerWithProcessRegistry,
+        toolRuntimeLayerForWorkspace: (runtimeWorkspace) =>
+          Runtime.layerWithProcessRegistry(runtimeWorkspace).pipe(
+            Layer.catch((error) =>
+              Layer.effectContext(Effect.fail(ExecutionBackend.BackendError.make({ message: String(error) }))),
+            ),
+          ),
         resolveWorkspace: (executionId) => {
           const turnId = RelayExecutionBackend.turnIdFromExecutionId(executionId)
           const resolved = turnId === undefined ? undefined : workspaces.get(turnId)
@@ -763,7 +768,11 @@ test("handoff child approval asks surface through the parent and resume after ap
         registration: fixture.registration,
         selection: fixture.selection,
         modelVariantPolicy: "fixed-selection",
-        toolRuntimeLayer: Runtime.layer(directory),
+        toolRuntimeLayer: Runtime.layer(directory).pipe(
+          Layer.catch((error) =>
+            Layer.effectContext(Effect.fail(ExecutionBackend.BackendError.make({ message: String(error) }))),
+          ),
+        ),
         toolNeedsApproval: (name) => name === "read",
       })
       const backendContext = yield* Layer.build(backendLayer)
@@ -824,7 +833,11 @@ test("parent and handoff child may reuse a model tool-call identifier", () => {
         registration: fixture.registration,
         selection: fixture.selection,
         modelVariantPolicy: "fixed-selection",
-        toolRuntimeLayer: Runtime.layer(directory),
+        toolRuntimeLayer: Runtime.layer(directory).pipe(
+          Layer.catch((error) =>
+            Layer.effectContext(Effect.fail(ExecutionBackend.BackendError.make({ message: String(error) }))),
+          ),
+        ),
         toolNeedsApproval: () => false,
         permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
         compaction: {

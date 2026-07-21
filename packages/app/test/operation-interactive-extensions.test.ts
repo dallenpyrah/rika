@@ -107,7 +107,15 @@ describe("interactive session extensions", () => {
         })
         const registration = yield* Deferred.make<Operation.InteractiveSession>()
         const context = yield* Layer.build(
-          interactiveLayer(repository, turns, backend, registration, Effect.die("unused"), Effect.die("unused"), transcripts),
+          interactiveLayer(
+            repository,
+            turns,
+            backend,
+            registration,
+            Effect.die("unused"),
+            Effect.die("unused"),
+            transcripts,
+          ),
         )
         const operation = Context.get(context, Operation.Service)
         const operationFiber = yield* Effect.forkChild(
@@ -274,7 +282,13 @@ describe("interactive session extensions", () => {
             createdAt: 2,
             data: { tool_call_id: "read", tool_name: "read", input: { path: "src/a.ts" } },
           },
-          { cursor: "child-answer", sequence: 1, type: "model.output.completed", createdAt: 3, text: "Child finished." },
+          {
+            cursor: "child-answer",
+            sequence: 1,
+            type: "model.output.completed",
+            createdAt: 3,
+            text: "Child finished.",
+          },
         ]
         const registration = yield* Deferred.make<Operation.InteractiveSession>()
         const backend = ExecutionBackend.Service.of({

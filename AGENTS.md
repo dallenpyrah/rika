@@ -29,9 +29,7 @@ Rika is a local coding-agent CLI and OpenTUI app written in Effect TypeScript. R
 - Do not add colon-named aliases, dispatchers that hide old aliases, or wrappers for Git, Docker, status, logs, watch, coverage, vendor, or upstream commands.
 - Use `bun run package -- --target <target>` for target packaging.
 - Unit tests are the default and use `*.test.ts` for one owned behavior or interface. They may use real SQLite, filesystem, process, or OpenTUI adapters.
-- Scene tests use `*.scene.test.ts` and `apps/rika/test/scene.ts` for user-visible interactive behavior with the real local stack and a scripted model.
-- Journey tests use `*.journey.test.ts` under `test/journey/` and exercise the packaged product through real processes or user paths.
-- Stress and live are profiles, not separate test levels. Stress Journeys use `*.stress.journey.test.ts`; runtime and adapter needs do not change a test's level.
-- `bun run test` owns deterministic Unit, Scene, and Journey checks. Use `@effect/vitest` and `TestClock` for Effect behavior and time; use `bun:test` only when a Bun API or packaged process requires it.
-- `bun run stress` owns packaged CLI load, endurance, and live-process timing. Do not put stress cycles or real-time waits in `bun run test`.
+- User-visible interactive behavior is tested in-process with `apps/rika/test/tui-app.ts` (`*.tui.test.ts`, run by `bun run test-tui` in CI): the real Surface on the OpenTUI test renderer, the real interactive loop, and the real product stack with a scripted model. `bun run check` and `bun run test` stay fast for local verification and exclude the TUI app suite. Child processes appear only where process lifecycle or transport is the behavior under test; packaged binaries never run in tests.
+- `bun run test` owns all deterministic checks. Use `@effect/vitest` and `TestClock` for Effect behavior and time; use `bun:test` only when a Bun API requires it.
+- Packaged-product verification lives in `bun run release-smoke` (after `bun run package`) and runs in the release workflow, not per push. Manual TUI acceptance uses the pilotty and agent-tty skills.
 - Run focused tests while working, then `bun run check` when the risk and time budget permit. Report what ran and what did not.

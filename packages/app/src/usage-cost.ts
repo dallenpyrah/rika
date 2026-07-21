@@ -85,7 +85,7 @@ export const collect = Effect.fn("UsageCost.collect")(function* (
     seenExecutions.add(current.executionId)
     const inspection = yield* readExecution(reader.inspect(current.executionId), current.executionId)
     if (inspection === undefined) {
-      if (!current.optional) Object.assign(snapshot, { complete: false })
+      if (current.optional !== true) Object.assign(snapshot, { complete: false })
       continue
     }
     const replay = yield* readExecution(reader.replay(current.executionId), current.executionId)

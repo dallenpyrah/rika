@@ -535,7 +535,7 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
               if (result._tag !== "Accepted") {
                 const incompatible = result._tag === "ProtocolMismatch" || result._tag === "BuildMismatch"
                 const reason = incompatible
-                  ? `Incompatible Rika resident PID ${process.pid}; Rika can replace it after other clients disconnect`
+                  ? `Incompatible Rika resident PID ${process.pid}; the newly launched Rika replaces it`
                   : `Rika resident PID ${process.pid} rejected this credential; close other Rika clients, stop PID ${process.pid}, then run rika again`
                 yield* Effect.logWarning("resident.connection.rejected").pipe(
                   Effect.annotateLogs({

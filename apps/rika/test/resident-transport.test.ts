@@ -330,6 +330,90 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
+    "launching client supersedes an incompatible resident while another client stays attached",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const mismatched = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              script: "test/fixtures/resident-mismatched-client.ts",
+              environment: {
+                RIKA_TEST_RESIDENT_HOST_SCRIPT: "test/fixtures/resident-mismatched-host.ts",
+                RIKA_TEST_BUILD_IDENTITY: "rika-test-other-build",
+              },
+            })
+            const oldAttached = yield* attachedEffect(mismatched)
+            yield* mismatched.send("upgrade-interactive")
+            expect((yield* mismatched.nextEffect).type).toBe("interactive-callback")
+            expect((yield* mismatched.nextEffect).type).toBe("initial-read")
+
+            const current = yield* start(root, 1_000)
+            expect(yield* current.nextEffect).toEqual({ type: "resident-status", callbacks: 1 })
+            const newAttached = yield* attachedEffect(current)
+            expect(newAttached.hostPid).not.toBe(oldAttached.hostPid)
+            yield* waitUntil(
+              Effect.sync(() => !alive(oldAttached.hostPid!)),
+              3_000,
+            )
+
+            let event = yield* mismatched.nextEffect
+            while (event.type !== "restart-required") {
+              expect(event.type).not.toBe("resident-status")
+              event = yield* mismatched.nextEffect
+            }
+            expect(event.tag).toBe("ResidentRestartRequired")
+
+            yield* Effect.sleep("750 millis")
+            expect(alive(newAttached.hostPid!)).toBe(true)
+            yield* current.send("ping")
+            expect((yield* current.nextEffect).type).toBe("pong")
+            yield* mismatched.kill
+            yield* current.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    20_000,
+  )
+
+  test(
+    "a client without supersede rights yields to an incompatible resident",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const mismatched = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              script: "test/fixtures/resident-mismatched-client.ts",
+              environment: {
+                RIKA_TEST_RESIDENT_HOST_SCRIPT: "test/fixtures/resident-mismatched-host.ts",
+                RIKA_TEST_BUILD_IDENTITY: "rika-test-other-build",
+              },
+            })
+            const oldAttached = yield* attachedEffect(mismatched)
+
+            const restarted = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              environment: { RIKA_TEST_RESIDENT_NO_SUPERSEDE: "1" },
+            })
+            expect(yield* restarted.nextEffect).toMatchObject({
+              type: "rejected",
+              tag: "ResidentRestartRequired",
+            })
+            expect(alive(oldAttached.hostPid!)).toBe(true)
+            yield* mismatched.send("ping")
+            expect((yield* mismatched.nextEffect).type).toBe("pong")
+            yield* mismatched.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
     "reports an interactive operation failure before the client callback starts",
     () =>
       run(

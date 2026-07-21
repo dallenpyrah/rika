@@ -299,7 +299,11 @@ test(
               modelVariantPolicy: "fixed-selection",
               toolRuntimeLayerForWorkspace: (workspace) => {
                 runtimeBuilds += 1
-                return RikaToolRuntime.layerWithProcessRegistry(workspace)
+                return RikaToolRuntime.layerWithProcessRegistry(workspace).pipe(
+                  Layer.catch((error) =>
+                    Layer.effectContext(Effect.fail(ExecutionBackend.BackendError.make({ message: String(error) }))),
+                  ),
+                )
               },
               resolveWorkspace: (executionId) => {
                 const workspace = workspaceByExecution.get(executionId)
@@ -369,7 +373,12 @@ test(
               registration: fixture.registration,
               selection: fixture.selection,
               modelVariantPolicy: "fixed-selection",
-              toolRuntimeLayerForWorkspace: RikaToolRuntime.layerWithProcessRegistry,
+              toolRuntimeLayerForWorkspace: (runtimeWorkspace) =>
+                RikaToolRuntime.layerWithProcessRegistry(runtimeWorkspace).pipe(
+                  Layer.catch((error) =>
+                    Layer.effectContext(Effect.fail(ExecutionBackend.BackendError.make({ message: String(error) }))),
+                  ),
+                ),
               resolveWorkspace: (executionId) => {
                 const resolved = RelayExecutionBackend.workspaceFromExecutionId(executionId)
                 return resolved === undefined

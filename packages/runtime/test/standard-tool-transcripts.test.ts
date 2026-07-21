@@ -2,7 +2,7 @@ import * as BunServices from "@effect/platform-bun/BunServices"
 import { TestModel } from "@batonfx/test"
 import { Catalog, Runtime, ThreadTools } from "@rika/tools"
 import { expect, test } from "vitest"
-import { Effect, FileSystem, Layer, Schema } from "effect"
+import { Effect, FileSystem, Layer, Redacted, Schema } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
 import { start } from "./current-execution-route"
@@ -63,6 +63,7 @@ for (const [name, parameters, malformedField] of cases) {
           registration: fixture.registration,
           selection: fixture.selection,
           modelVariantPolicy: "fixed-selection",
+          webSearchCredentials: { parallel: Redacted.make("web-test-key") },
           additionalToolkit: ThreadTools.toolkit,
           additionalHandlerLayer: threadHandlers,
           toolRuntimeLayer: runtimeLayer,
@@ -135,6 +136,7 @@ for (const [name, parameters, malformedField] of cases) {
                     registration: fixture.registration,
                     selection: fixture.selection,
                     modelVariantPolicy: "fixed-selection",
+                    webSearchCredentials: { parallel: Redacted.make("web-test-key") },
                     additionalToolkit: ThreadTools.toolkit,
                     additionalHandlerLayer: threadHandlers,
                     toolRuntimeLayer: Runtime.testLayer(() => Effect.succeed({ text: "unexpected", truncated: false })),

@@ -13,10 +13,12 @@ import {
   Exit,
   FileSystem,
   Layer,
+  Option,
   Path,
   Runtime,
   Schema,
   Stdio,
+  Stream,
 } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Command } from "effect/unstable/cli"
@@ -64,8 +66,43 @@ const operationFailure = (input: Operation.Input, error: unknown) =>
 
 export const cleanInteractiveRuntimeExit = (exitCode: number): boolean => exitCode === 0 || exitCode === 130
 
+export const interactiveRuntimeRestartLimit = 3
+
+export type InteractiveRuntimeRestartDecision =
+  | { readonly _tag: "respawn"; readonly environment: Record<string, string> }
+  | { readonly _tag: "fail"; readonly message: string }
+  | { readonly _tag: "done" }
+
+export const interactiveRuntimeRestartPlan = (input: {
+  readonly exitCode: number
+  readonly restart: ResidentProcessStartup.RuntimeRestartMessage | undefined
+  readonly attempt: number
+  readonly limit: number
+}): InteractiveRuntimeRestartDecision => {
+  if (input.exitCode === ResidentService.runtimeRestartExitCode && input.restart !== undefined) {
+    if (input.attempt >= input.limit)
+      return {
+        _tag: "fail",
+        message: `Rika interactive runtime restarted ${input.limit} times without becoming compatible; rebuild or reinstall Rika`,
+      }
+    return {
+      _tag: "respawn",
+      environment: {
+        RIKA_INTERNAL_RUNTIME_RESTARTED: "1",
+        ...(input.restart.threadId === undefined ? {} : { RIKA_INTERNAL_RESTART_THREAD: input.restart.threadId }),
+      },
+    }
+  }
+  if (cleanInteractiveRuntimeExit(input.exitCode)) return { _tag: "done" }
+  return { _tag: "fail", message: `Rika interactive runtime exited with code ${input.exitCode}` }
+}
+
+let interactiveSigintObserved = false
+
 const privateRuntime = Effect.fn("ClientMain.privateRuntime")(function* () {
   const path = yield* Path.Path
+  const testExecutable = yield* Config.option(Config.string("RIKA_TEST_RUNTIME_EXECUTABLE"))
+  if (Option.isSome(testExecutable)) return { executable: testExecutable.value, prefixArguments: [] }
   return import.meta.path.startsWith("/$bunfs/")
     ? { executable: path.join(path.dirname(process.execPath), ".rika-runtime"), prefixArguments: [] }
     : { executable: process.execPath, prefixArguments: [path.join(import.meta.dir, "main.ts")] }
@@ -95,22 +132,59 @@ const dispatcherLayer = (argv?: ReadonlyArray<string>) =>
               Effect.gen(function* () {
                 const runtime = yield* privateRuntime()
                 if (input._tag === "Interactive") {
-                  const exitCode = yield* spawner.exitCode(
-                    ChildProcess.make(runtime.executable, [...runtime.prefixArguments, ...forwardedArguments], {
-                      detached: false,
-                      stdin: "inherit",
-                      stdout: "inherit",
-                      stderr: "inherit",
-                      extendEnv: true,
-                      env: { RIKA_INTERNAL_CLIENT_RUNTIME: "1" },
-                    }),
-                  )
-                  if (!cleanInteractiveRuntimeExit(Number(exitCode)))
-                    return yield* Operation.OperationUnavailable.make({
-                      operation: "Interactive",
-                      message: `Rika interactive runtime exited with code ${exitCode}`,
+                  let attempt = 0
+                  let restartEnvironment: Record<string, string> = {}
+                  while (true) {
+                    const handle = yield* spawner.spawn(
+                      ChildProcess.make(runtime.executable, [...runtime.prefixArguments, ...forwardedArguments], {
+                        detached: false,
+                        stdin: "inherit",
+                        stdout: "inherit",
+                        stderr: "inherit",
+                        additionalFds: { fd3: { type: "output" } },
+                        extendEnv: true,
+                        env: {
+                          RIKA_INTERNAL_CLIENT_RUNTIME: "1",
+                          [ResidentProcessStartup.runtimeRestartFdEnvironment]: String(
+                            ResidentProcessStartup.runtimeRestartFd,
+                          ),
+                          ...restartEnvironment,
+                        },
+                      }),
+                    )
+                    const exitCode = Number(yield* handle.exitCode)
+                    const restartLine = yield* Stream.runFold(
+                      Stream.splitLines(Stream.decodeText(handle.getOutputFd(ResidentProcessStartup.runtimeRestartFd))),
+                      () => Option.none<string>(),
+                      (first, text) => (Option.isSome(first) ? first : Option.some(text)),
+                    ).pipe(
+                      Effect.timeoutOrElse({
+                        duration: "1 second",
+                        orElse: () => Effect.succeed(Option.none<string>()),
+                      }),
+                      Effect.orElseSucceed(() => Option.none<string>()),
+                    )
+                    const restart = Option.isSome(restartLine)
+                      ? Option.getOrUndefined(
+                          yield* ResidentProcessStartup.decodeRuntimeRestart(restartLine.value).pipe(Effect.option),
+                        )
+                      : undefined
+                    const decision = interactiveRuntimeRestartPlan({
+                      exitCode,
+                      restart,
+                      attempt,
+                      limit: interactiveRuntimeRestartLimit,
                     })
-                  return
+                    if (decision._tag === "done") return
+                    if (decision._tag === "fail")
+                      return yield* Operation.OperationUnavailable.make({
+                        operation: "Interactive",
+                        message: decision.message,
+                      })
+                    if (interactiveSigintObserved) return
+                    attempt += 1
+                    restartEnvironment = decision.environment
+                  }
                 }
                 const connected = yield* resident.getOrCreate({
                   profile: "default",
@@ -193,6 +267,7 @@ if (import.meta.main) {
   let interruptedBySigint = false
   const markSigint = () => {
     interruptedBySigint = true
+    interactiveSigintObserved = true
   }
   process.once("SIGINT", markSigint)
   BunRuntime.runMain(run().pipe(provideLayerScoped(BunServices.layer)), {

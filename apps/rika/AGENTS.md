@@ -4,6 +4,6 @@ Thin Effect CLI shell and process composition root. Leaf command modules export 
 
 Do not initialize SQL, Relay, models, MCP, plugins, or OpenTUI before command parsing selects an operation that needs them.
 
-Use `*.test.ts` for Unit tests of one owned behavior or interface, even when they need real process or OpenTUI adapters. Use `*.journey.test.ts` under the root `test/journey/` only for packaged product paths through real processes.
+Use `*.test.ts` for Unit tests of one owned behavior or interface, even when they need real OpenTUI adapters.
 
-For user-visible interactive behavior, add or update a `*.scene.test.ts` test using `test/scene.ts`. Keep the real TUI, controller, resident transport, Relay, SQLite, and tools in a Scene; script only the language model. Provider models and network calls are forbidden in Scenes. Use reducer or renderer tests as narrower support, not as a substitute for a Scene.
+For user-visible interactive behavior, add or update an in-process `*.tui.test.ts` on `test/tui-app.ts`: the real Surface on the OpenTUI test renderer, the real interactive loop, and the real product stack with a scripted model. The TUI app suite runs through `bun run test-tui` in CI, not in `bun run check`; prefer extending an existing app instance over adding one. Provider models, network calls, and PTYs are forbidden. Use reducer or renderer tests as narrower support, not as a substitute for a TUI app test.

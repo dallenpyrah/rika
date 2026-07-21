@@ -246,7 +246,8 @@ describe("InteractiveSession controls", () => {
         cancelWorkflow: () => Effect.die("unused"),
         inspect: () => Effect.void.pipe(Effect.as(undefined)),
         start: (input) => Effect.succeed({ turnId: input.turnId, status: "completed" as const, events: [] }),
-        replay: () => Effect.die("unused"),
+        replay: (turnId, cursor) =>
+          Effect.succeed({ turnId, status: "completed" as const, events: [], lastCursor: cursor }),
         steer: () => Effect.die("unused"),
         cancel: () => Effect.die("unused"),
         listApprovals: () => Effect.succeed([]),

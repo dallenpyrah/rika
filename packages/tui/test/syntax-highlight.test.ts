@@ -54,7 +54,7 @@ describe("shell command highlighting", () => {
   })
 
   test("mutes heredoc bodies and terminators while keeping the line count", () => {
-    const command = 'python3 - <<\'PY\'\nimport sys\nprint("hi && bye")\nPY'
+    const command = "python3 - <<'PY'\nimport sys\nprint(\"hi && bye\")\nPY"
     const lines = highlightShellCommand(command)
     expect(lines).toHaveLength(command.split("\n").length)
     const chunks = lines.flat()

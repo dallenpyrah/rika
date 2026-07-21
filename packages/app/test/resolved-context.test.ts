@@ -43,6 +43,7 @@ const layerFor = (
   ResolvedContext.layer(globFor(fixtureFiles)).pipe(
     Layer.provide(ContextFileSystem.testLayer(fixtureFiles, fixtureDirectories).pipe(Layer.provide(Path.layer))),
     Layer.provide(Path.layer),
+    Layer.provide(FileSystem.layerNoop({})),
   )
 const contextLayer = layerFor(files, directories)
 
@@ -106,6 +107,7 @@ describe("ResolvedContext", () => {
             }),
           ),
           Layer.provide(Path.layer),
+          Layer.provide(FileSystem.layerNoop({})),
         ),
       ),
     ),

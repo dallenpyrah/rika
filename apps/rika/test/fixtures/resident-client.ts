@@ -53,6 +53,11 @@ const program = Effect.gen(function* () {
     Effect.scoped,
     Effect.orDie,
   )
+  const hostScript = yield* Config.string("RIKA_TEST_RESIDENT_HOST_SCRIPT").pipe(
+    Config.withDefault("test/fixtures/resident-host.ts"),
+  )
+  const buildIdentity = yield* Config.string("RIKA_TEST_BUILD_IDENTITY").pipe(Config.withDefault(""))
+  const noSupersede = (yield* Config.string("RIKA_TEST_RESIDENT_NO_SUPERSEDE").pipe(Config.withDefault("0"))) === "1"
   const service = yield* make()
   const connected = yield* Effect.result(
     service.getOrCreate({
@@ -60,10 +65,11 @@ const program = Effect.gen(function* () {
       dataRoot,
       clientKind: "run",
       graceMilliseconds: Number(grace),
+      ...(noSupersede ? { allowSupersede: false } : {}),
       startHost: () =>
         ResidentProcessStartup.spawn({
           executable: "bun",
-          arguments: ["test/fixtures/resident-host.ts"],
+          arguments: [hostScript],
           cwd: path.dirname(path.dirname(import.meta.dir)),
           environment: {
             RIKA_TEST_RESIDENT_DATA_ROOT: dataRoot,
@@ -72,12 +78,13 @@ const program = Effect.gen(function* () {
             RIKA_TEST_RESIDENT_DELAYED_WORK: delayedWork,
             RIKA_TEST_RESIDENT_STARTUP_HOLD: startupHold,
             RIKA_TEST_RESIDENT_OUTBOUND_CAPACITY: outboundCapacity,
+            ...(buildIdentity === "" ? {} : { RIKA_TEST_BUILD_IDENTITY: buildIdentity }),
           },
         }),
     }),
   )
   if (connected._tag === "Failure") {
-    yield* emit({ type: "rejected", error: connected.failure.message })
+    yield* emit({ type: "rejected", tag: connected.failure._tag, error: connected.failure.message })
     return
   }
   const connection = connected.success
@@ -624,6 +631,36 @@ const program = Effect.gen(function* () {
               tags,
             })
           })
+        if (command === "upgrade-interactive")
+          return connection
+            .run(
+              { _tag: "Interactive", prompt: [], ephemeral: false, workspace },
+              {
+                interactive: (_input, session) =>
+                  Effect.gen(function* () {
+                    yield* emit({ type: "interactive-callback" })
+                    const events = yield* Queue.unbounded<string>()
+                    const feed = yield* Effect.forkChild(
+                      session.events((event) => Queue.offerUnsafe(events, event._tag)),
+                    )
+                    yield* emit({ type: "initial-read", tag: yield* Queue.take(events) })
+                    return yield* Effect.never
+                    yield* Fiber.interrupt(feed)
+                  }),
+              },
+            )
+            .pipe(
+              Effect.catch((error) =>
+                emit({
+                  type: "restart-required",
+                  tag: error._tag,
+                  error: error.message,
+                  ...(error._tag === "ResidentRestartRequired" && error.threadId !== undefined
+                    ? { text: error.threadId }
+                    : {}),
+                }),
+              ),
+            )
         if (command === "blocking-interactive")
           return connection
             .run(

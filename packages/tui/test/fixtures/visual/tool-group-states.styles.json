@@ -669,7 +669,7 @@
           "width": 7
         },
         {
-          "text": " edit",
+          "text": " ",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -687,7 +687,7 @@
             }
           },
           "attributes": 2,
-          "width": 10
+          "width": 1
         },
         {
           "text": " ▸",
@@ -711,7 +711,7 @@
           "width": 2
         },
         {
-          "text": "                                                           ",
+          "text": "                                                                    ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -729,7 +729,7 @@
             }
           },
           "attributes": 0,
-          "width": 59
+          "width": 68
         }
       ]
     },

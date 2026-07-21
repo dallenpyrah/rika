@@ -30,9 +30,15 @@ export const processIsAlive = (pid: number) =>
 
 const linuxListenerProcessIds = Effect.fn("ResidentProcessStartup.linuxListenerProcessIds")(function* (
   port: number,
-  candidates: ReadonlyArray<number>,
+  requested: ReadonlyArray<number> | "any",
 ) {
   const fs = yield* FileSystem.FileSystem
+  const candidates =
+    requested === "any"
+      ? (yield* fs.readDirectory("/proc").pipe(Effect.orElseSucceed(() => [])))
+          .map(Number)
+          .filter((pid) => Number.isSafeInteger(pid) && pid > 0)
+      : requested
   const portHex = port.toString(16).toUpperCase().padStart(4, "0")
   const inodes = new Set<string>()
   for (const filename of ["/proc/net/tcp", "/proc/net/tcp6"]) {
@@ -79,7 +85,7 @@ const listenerCommand = Effect.fn("ResidentProcessStartup.listenerCommand")(func
 
 export const listenerProcessIds = Effect.fn("ResidentProcessStartup.listenerProcessIds")(function* (
   port: number,
-  candidates: ReadonlyArray<number>,
+  candidates: ReadonlyArray<number> | "any",
 ) {
   if (process.platform === "linux") return yield* linuxListenerProcessIds(port, candidates)
   const inspected = yield* Effect.result(
@@ -102,8 +108,8 @@ export const listenerProcessIds = Effect.fn("ResidentProcessStartup.listenerProc
           .split(/\s+/)
           .filter((value) => value.length > 0)
           .map(Number)
-  const allowed = new Set(candidates)
-  return [...new Set(pids.filter((pid) => Number.isSafeInteger(pid) && allowed.has(pid)))]
+  const allowed = candidates === "any" ? undefined : new Set(candidates)
+  return [...new Set(pids.filter((pid) => Number.isSafeInteger(pid) && (allowed === undefined || allowed.has(pid))))]
 })
 
 export const listenerIsLive = (port: number) =>
@@ -182,6 +188,27 @@ const signal = (message: typeof StartupMessage.Type) =>
 
 export const signalReady = signal({ _tag: "ready" })
 export const signalFailure = (message: string) => signal({ _tag: "failed", message })
+
+export const runtimeRestartFdEnvironment = "RIKA_INTERNAL_RUNTIME_RESTART_FD"
+export const runtimeRestartFd = 3
+const RuntimeRestartMessage = Schema.Struct({
+  _tag: Schema.tag("restart"),
+  threadId: Schema.optionalKey(Schema.String),
+})
+export type RuntimeRestartMessage = typeof RuntimeRestartMessage.Type
+const decodeRuntimeRestartMessage = Schema.decodeUnknownEffect(Schema.fromJsonString(RuntimeRestartMessage))
+export const decodeRuntimeRestart = (input: unknown) => decodeRuntimeRestartMessage(input)
+let restartSignalled = false
+
+export const signalRuntimeRestart = (threadId?: string) =>
+  Effect.gen(function* () {
+    const configured = yield* Config.option(Config.string(runtimeRestartFdEnvironment))
+    if (Option.isNone(configured) || restartSignalled) return
+    restartSignalled = true
+    const descriptor = Number(configured.value)
+    const message: RuntimeRestartMessage = { _tag: "restart", ...(threadId === undefined ? {} : { threadId }) }
+    yield* writeDescriptor(descriptor, `${encode(message)}\n`).pipe(Effect.ensuring(closeDescriptor(descriptor)))
+  }).pipe(Effect.mapError((cause) => error("startup-failed", `Could not report runtime restart: ${String(cause)}`)))
 
 const awaitStartup = <E>(output: Stream.Stream<Uint8Array, E>) =>
   Stream.runFold(

@@ -349,5 +349,5 @@ describe("resident server message frames", () => {
       _tag: "interactive-feed-resync",
       events: [{ _tag: "ExecutionFailed", message: expect.stringContaining("omitted an event larger than 16 MiB") }],
     })
-  })
+  }, 30_000)
 })

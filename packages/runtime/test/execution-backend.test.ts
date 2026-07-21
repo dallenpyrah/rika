@@ -2046,9 +2046,7 @@ describe("defaultModelResilience", () => {
       const failure = new Error("terminal")
       const model = {
         streamText: () =>
-          Stream.unwrap(
-            Ref.updateAndGet(attempts, (count) => count + 1).pipe(Effect.map(() => Stream.fail(failure))),
-          ),
+          Stream.unwrap(Ref.updateAndGet(attempts, (count) => count + 1).pipe(Effect.map(() => Stream.fail(failure)))),
       }
       const resilient = ModelResilience.apply(
         model as never,

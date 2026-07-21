@@ -1,7 +1,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect } from "vitest"
 import { fileURLToPath } from "node:url"
-import { Config, Effect, FileSystem, Layer, Schema, Scope, Stream } from "effect"
+import { Config, Effect, FileSystem, Function, Layer, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 export const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices | Scope.Scope>) =>
@@ -9,15 +9,21 @@ export const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices | 
     Effect.scoped(Layer.build(BunServices.layer).pipe(Effect.flatMap((context) => Effect.provide(effect, context)))),
   )
 
-export const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 10_000) =>
-  Effect.gen(function* () {
-    const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
-    while (!(yield* condition)) {
-      const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
-      if (now - started >= timeout) return yield* Effect.die("condition timed out")
-      yield* Effect.sleep("20 millis")
-    }
-  })
+export const waitUntil: {
+  <E, R>(condition: Effect.Effect<boolean, E, R>, timeout?: number): Effect.Effect<undefined, E, R>
+  (timeout?: number): <E, R>(condition: Effect.Effect<boolean, E, R>) => Effect.Effect<undefined, E, R>
+} = Function.dual(
+  (args) => Effect.isEffect(args[0]),
+  <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 10_000): Effect.Effect<undefined, E, R> =>
+    Effect.gen(function* () {
+      const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+      while (!(yield* condition)) {
+        const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+        if (now - started >= timeout) return yield* Effect.die("condition timed out")
+        yield* Effect.sleep("20 millis")
+      }
+    }),
+)
 
 export const PtyResult = Schema.fromJsonString(
   Schema.Struct({

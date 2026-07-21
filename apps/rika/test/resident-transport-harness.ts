@@ -1,9 +1,8 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect } from "vitest"
 import { fileURLToPath } from "node:url"
-import { Cause, Clock, Config, Data, Effect, Fiber, FileSystem, Layer, Queue, Ref, Schema, Scope, Stream } from "effect"
+import { Cause, Config, Data, Effect, FileSystem, Function, Layer, Queue, Ref, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { resolve } from "../src/resident-endpoint"
 
 export type Event = {
   type: string
@@ -24,13 +23,27 @@ export class FixtureFailure extends Data.TaggedError("FixtureFailure")<{
   readonly cause: unknown
 }> {}
 
-export const provide = <A, E, R, ROut, E2, RIn>(effect: Effect.Effect<A, E, R>, layer: Layer.Layer<ROut, E2, RIn>) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const context = yield* Layer.build(layer)
-      return yield* Effect.provide(effect, context)
-    }),
-  )
+export const provide: {
+  <A, E, R, ROut, E2, RIn>(
+    effect: Effect.Effect<A, E, R>,
+    layer: Layer.Layer<ROut, E2, RIn>,
+  ): Effect.Effect<A, E | E2, Exclude<RIn | Exclude<R, ROut>, Scope.Scope>>
+  <ROut, E2, RIn>(
+    layer: Layer.Layer<ROut, E2, RIn>,
+  ): <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E | E2, Exclude<RIn | Exclude<R, ROut>, Scope.Scope>>
+} = Function.dual(
+  2,
+  <A, E, R, ROut, E2, RIn>(
+    effect: Effect.Effect<A, E, R>,
+    layer: Layer.Layer<ROut, E2, RIn>,
+  ): Effect.Effect<A, E | E2, Exclude<RIn | Exclude<R, ROut>, Scope.Scope>> =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const context = yield* Layer.build(layer)
+        return yield* Effect.provide(effect, context)
+      }),
+    ),
+)
 
 export const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices | Scope.Scope>) =>
   Effect.runPromise(provide(effect, BunServices.layer))
@@ -49,7 +62,8 @@ export const EventSchema = Schema.Struct({
   outcome: Schema.optional(Schema.String),
 })
 
-export const decodeEvent = Schema.decodeUnknownEffect(Schema.fromJsonString(EventSchema))
+const decodeEventLine = Schema.decodeUnknownEffect(Schema.fromJsonString(EventSchema))
+export const decodeEvent = (input: unknown) => decodeEventLine(input)
 
 export const hostPids = new Set<number>()
 
@@ -62,15 +76,21 @@ export const alive = (pid: number) => {
   }
 }
 
-export const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 2_000) =>
-  Effect.gen(function* () {
-    const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
-    while (!(yield* condition)) {
-      const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
-      if (now - started >= timeout) return yield* Effect.die("condition timed out")
-      yield* Effect.sleep("20 millis")
-    }
-  })
+export const waitUntil: {
+  <E, R>(condition: Effect.Effect<boolean, E, R>, timeout?: number): Effect.Effect<undefined, E, R>
+  (timeout?: number): <E, R>(condition: Effect.Effect<boolean, E, R>) => Effect.Effect<undefined, E, R>
+} = Function.dual(
+  (args) => Effect.isEffect(args[0]),
+  <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 2_000): Effect.Effect<undefined, E, R> =>
+    Effect.gen(function* () {
+      const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+      while (!(yield* condition)) {
+        const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+        if (now - started >= timeout) return yield* Effect.die("condition timed out")
+        yield* Effect.sleep("20 millis")
+      }
+    }),
+)
 
 export const makeRoot = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem
@@ -149,6 +169,10 @@ export const start = Effect.fn("ResidentTransportTest.start")(function* (
   uninterruptibleOwner: boolean = false,
   ownerDrainMilliseconds?: number,
   ownerStartupDelay: number = 0,
+  options: {
+    readonly script?: string
+    readonly environment?: Readonly<Record<string, string>>
+  } = {},
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const input = yield* Queue.bounded<string, Cause.Done>(32)
@@ -156,7 +180,7 @@ export const start = Effect.fn("ResidentTransportTest.start")(function* (
   const errors = yield* Ref.make<ReadonlyArray<string>>([])
   const client = yield* spawner
     .spawn(
-      ChildProcess.make("bun", ["test/fixtures/resident-client.ts"], {
+      ChildProcess.make("bun", [options.script ?? "test/fixtures/resident-client.ts"], {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         stdin: { stream: Stream.fromQueue(input).pipe(Stream.encodeText), endOnDone: true },
         stdout: "pipe",
@@ -173,6 +197,7 @@ export const start = Effect.fn("ResidentTransportTest.start")(function* (
           ...(ownerDrainMilliseconds === undefined
             ? {}
             : { RIKA_INTERNAL_RESIDENT_OWNER_DRAIN: String(ownerDrainMilliseconds) }),
+          ...options.environment,
         },
         extendEnv: true,
       }),
@@ -249,11 +274,17 @@ export const attachedEffect = (client: ResidentClient) =>
     return event
   })
 
-export const nextTypeEffect = (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure> =>
-  Effect.gen(function* () {
-    const event = yield* client.nextEffect
-    return event.type === type ? event : yield* nextTypeEffect(client, type)
-  })
+export const nextTypeEffect: {
+  (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure>
+  (type: string): (client: ResidentClient) => Effect.Effect<Event, FixtureFailure>
+} = Function.dual(
+  2,
+  (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure> =>
+    Effect.gen(function* () {
+      const event = yield* client.nextEffect
+      return event.type === type ? event : yield* nextTypeEffect(client, type)
+    }),
+)
 
 export const killTrackedHosts = () => {
   for (const pid of hostPids) {

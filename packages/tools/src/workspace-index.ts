@@ -7,7 +7,7 @@ import type {
   SearchOptions,
   SearchResult,
 } from "@ff-labs/fff-node"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Path, Schema } from "effect"
 
 export interface GlobOptions {
   readonly maxThreads?: number
@@ -45,28 +45,57 @@ const call = <A>(operation: Operation, evaluate: () => FffResult<A>) =>
     Effect.flatMap((result) => unwrap(operation, result)),
   )
 
+const PackagedManifest = Schema.fromJsonString(Schema.Struct({ main: Schema.optional(Schema.String) }))
+
+const executableAdjacentFileFinder = Effect.gen(function* () {
+  const fileSystem = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const packageDir = path.join(path.dirname(process.execPath), "node_modules", "@ff-labs", "fff-node")
+  const source = yield* fileSystem.readFileString(path.join(packageDir, "package.json"))
+  const manifest = yield* Schema.decodeUnknownEffect(PackagedManifest)(source)
+  const entry = yield* path.toFileUrl(path.join(packageDir, manifest.main ?? "dist/src/index.js"))
+  const loaded = yield* Effect.tryPromise({
+    try: () => import(entry.href) as Promise<{ readonly FileFinder: typeof FileFinder }>,
+    catch: (cause) => indexError("initialize", cause),
+  })
+  return loaded.FileFinder
+}).pipe(Effect.mapError((cause) => indexError("initialize", cause)))
+
+const fileFinderFactory: Effect.Effect<typeof FileFinder, WorkspaceIndexError, FileSystem.FileSystem | Path.Path> =
+  import.meta.url.includes("/$bunfs/") ? executableAdjacentFileFinder : Effect.succeed(FileFinder)
+
 const fromFinder = (finder: FileFinderApi): Interface => ({
   fileSearch: (query, options) => call("fileSearch", () => finder.fileSearch(query, options)),
   glob: (pattern, options) => call("glob", () => finder.glob(pattern, options)),
   grep: (query, options) => call("grep", () => finder.grep(query, options)),
 })
 
-export const layer = (workspace: string, scanTimeoutMillis = 10_000) =>
-  Layer.effect(
-    Service,
-    Effect.gen(function* () {
-      const finder = yield* Effect.acquireRelease(
-        call("initialize", () => FileFinder.create({ basePath: workspace, aiMode: true })),
-        (acquired) => Effect.sync(() => acquired.destroy()).pipe(Effect.ignore),
-      )
-      const scanned = yield* Effect.tryPromise({
-        try: () => finder.waitForScan(scanTimeoutMillis),
-        catch: (cause) => indexError("scan", cause),
-      }).pipe(Effect.flatMap((result) => unwrap("scan", result)))
-      if (!scanned)
-        return yield* Effect.fail(indexError("scan", `Initial workspace scan timed out after ${scanTimeoutMillis}ms`))
-      return Service.of(fromFinder(finder))
-    }),
+const scanTimeoutMillis = 10_000
+
+const acquireIndex = (workspace: string) =>
+  Effect.gen(function* () {
+    const factory = yield* fileFinderFactory
+    const finder = yield* Effect.acquireRelease(
+      call("initialize", () => factory.create({ basePath: workspace, aiMode: true })),
+      (acquired) => Effect.sync(() => acquired.destroy()).pipe(Effect.ignore),
+    )
+    const scanned = yield* Effect.tryPromise({
+      try: () => finder.waitForScan(scanTimeoutMillis),
+      catch: (cause) => indexError("scan", cause),
+    }).pipe(Effect.flatMap((result) => unwrap("scan", result)))
+    if (!scanned) return yield* indexError("scan", `Initial workspace scan timed out after ${scanTimeoutMillis}ms`)
+    return fromFinder(finder)
+  })
+
+export const layer = (workspace: string) => Layer.effect(Service, Effect.map(acquireIndex(workspace), Service.of))
+
+export const globOnce = (request: {
+  readonly workspace: string
+  readonly pattern: string
+  readonly options?: GlobOptions
+}) =>
+  Effect.scoped(
+    Effect.flatMap(acquireIndex(request.workspace), (index) => index.glob(request.pattern, request.options)),
   )
 
 export const testLayer = (implementation: Interface) => Layer.succeed(Service, Service.of(implementation))

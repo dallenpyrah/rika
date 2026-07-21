@@ -5,5 +5,13 @@
     "perf": "error",
     "suspicious": "error"
   },
+  "overrides": [
+    {
+      "files": ["**/test/**"],
+      "rules": {
+        "no-await-in-loop": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["dist", "node_modules", ".turbo", "repos"]
 }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { Context, Effect, Layer, Path, PlatformError, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Path, PlatformError, Schema } from "effect"
 import * as ContextFileSystem from "./context-file-system"
 
 export const Diagnostic = Schema.Struct({
@@ -31,7 +31,7 @@ export type GlobLookup = (
   workspace: string,
   pattern: string,
   maximumFiles: number,
-) => Effect.Effect<ReadonlyArray<string>, PlatformError.PlatformError>
+) => Effect.Effect<ReadonlyArray<string>, PlatformError.PlatformError, FileSystem.FileSystem | Path.Path>
 export interface Interface {
   readonly resolve: (input: Input) => Effect.Effect<Result, PlatformError.PlatformError>
 }
@@ -46,6 +46,7 @@ export const layer = (glob: GlobLookup) =>
     Effect.gen(function* () {
       const fileSystem = yield* ContextFileSystem.Service
       const path = yield* Path.Path
+      const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path>()
       const resolve = Effect.fn("ResolvedContext.resolve")(function* (input: Input) {
         const root = yield* fileSystem.realPath(path.resolve(input.workspace))
         const contained = (candidate: string) =>
@@ -90,7 +91,7 @@ export const layer = (glob: GlobLookup) =>
         const globCandidates = new Set<string>()
         for (const reference of [...(input.references ?? [])].toSorted()) {
           const candidates = globPattern(reference)
-            ? (yield* glob(root, reference, maximumReferenceFiles))
+            ? (yield* glob(root, reference, maximumReferenceFiles).pipe(Effect.provideContext(platform)))
                 .map((candidate) => path.resolve(root, candidate))
                 .filter((candidate) => {
                   if (globCandidates.has(candidate)) return true

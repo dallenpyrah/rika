@@ -1,4 +1,5 @@
 import { childParentMatch, type Unit } from "@rika/transcript"
+import { Function } from "effect"
 import type { Model, TranscriptBlock, TranscriptItem } from "../view-state"
 import { projectChildUnits } from "./projection"
 
@@ -30,34 +31,49 @@ const childParent = (
   return childParentMatch(candidates, turnId)?.tool
 }
 
-export const attachChildProjections = (
-  model: Model,
-  replayTurns: { readonly has: (turnId: string) => boolean },
-  availableProjections: ReadonlyMap<string, ChildProjection>,
-  attachments: ReadonlyMap<string, number> = emptyAttachments,
-): AttachmentResult => {
-  let next = model
-  let nextAttachments: Map<string, number> | undefined
-  let advanced = true
-  while (advanced) {
-    advanced = false
+export const attachChildProjections: {
+  (
+    model: Model,
+    replayTurns: { readonly has: (turnId: string) => boolean },
+    availableProjections: ReadonlyMap<string, ChildProjection>,
+    attachments?: ReadonlyMap<string, number>,
+  ): AttachmentResult
+  (
+    replayTurns: { readonly has: (turnId: string) => boolean },
+    availableProjections: ReadonlyMap<string, ChildProjection>,
+    attachments?: ReadonlyMap<string, number>,
+  ): (model: Model) => AttachmentResult
+} = Function.dual(
+  (args) => args.length >= 3 && typeof args[0] === "object" && args[0] !== null && "blocks" in args[0],
+  (
+    model: Model,
+    replayTurns: { readonly has: (turnId: string) => boolean },
+    availableProjections: ReadonlyMap<string, ChildProjection>,
+    attachments: ReadonlyMap<string, number> = emptyAttachments,
+  ): AttachmentResult => {
+    let next = model
+    let nextAttachments: Map<string, number> | undefined
+    let advanced = true
+    while (advanced) {
+      advanced = false
+      for (const [turnId, projection] of availableProjections) {
+        if (replayTurns.has(turnId)) continue
+        if ((nextAttachments ?? attachments).get(turnId) === projection.revision) continue
+        const parent = childParent(next, turnId)
+        if (parent === undefined) continue
+        next = projectChildUnits(next, parent.id, projection.units)
+        nextAttachments ??= new Map(attachments)
+        nextAttachments.set(turnId, projection.revision)
+        advanced = true
+      }
+    }
+    const settledAttachments = nextAttachments ?? attachments
+    const unattached: Array<string> = []
     for (const [turnId, projection] of availableProjections) {
       if (replayTurns.has(turnId)) continue
-      if ((nextAttachments ?? attachments).get(turnId) === projection.revision) continue
-      const parent = childParent(next, turnId)
-      if (parent === undefined) continue
-      next = projectChildUnits(next, parent.id, projection.units)
-      nextAttachments ??= new Map(attachments)
-      nextAttachments.set(turnId, projection.revision)
-      advanced = true
+      if (settledAttachments.get(turnId) === projection.revision) continue
+      if (childParent(next, turnId) === undefined) unattached.push(turnId)
     }
-  }
-  const settledAttachments = nextAttachments ?? attachments
-  const unattached: Array<string> = []
-  for (const [turnId, projection] of availableProjections) {
-    if (replayTurns.has(turnId)) continue
-    if (settledAttachments.get(turnId) === projection.revision) continue
-    if (childParent(next, turnId) === undefined) unattached.push(turnId)
-  }
-  return { model: next, attachments: settledAttachments, unattached }
-}
+    return { model: next, attachments: settledAttachments, unattached }
+  },
+)

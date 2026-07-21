@@ -1,4 +1,5 @@
 import { createTestRenderer } from "@opentui/core/testing"
+import { Effect } from "effect"
 import * as Transcript from "@rika/transcript"
 import { Surface, maxMountedTranscriptRows } from "../src/adapter"
 import { TranscriptPresenter, ViewState } from "../src"
@@ -58,12 +59,12 @@ const percentile = (samples: ReadonlyArray<number>, ratio: number): number => {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))] ?? 0
 }
 
-export const runTranscriptRenderStress = async (options: {
+const transcriptRenderStress = Effect.fnUntraced(function* (options: {
   readonly childCount: number
   readonly toolsPerChild: number
   readonly streamedUpdates: number
-}): Promise<TranscriptRenderStressResult> => {
-  const setup = await createTestRenderer({ width: 120, height: 40 })
+}) {
+  const setup = yield* Effect.promise(() => createTestRenderer({ width: 120, height: 40 }))
   let projections = new Map(
     Array.from(
       { length: options.childCount },
@@ -81,9 +82,9 @@ export const runTranscriptRenderStress = async (options: {
     expandedRowKeys: [...TranscriptPresenter.expandableRowIds(attached.model)],
   }
   const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
-  try {
+  return yield* Effect.gen(function* () {
     surface.update(model)
-    await setup.renderOnce()
+    yield* Effect.promise(() => setup.renderOnce())
     const state = surface as unknown as { readonly transcriptChildren: ReadonlyArray<unknown> }
     const mountedAfterLoad = state.transcriptChildren.length
     const updateLatencies: Array<number> = []
@@ -107,11 +108,11 @@ export const runTranscriptRenderStress = async (options: {
       updateLatencies.push(performance.now() - startedAt)
       if (step % 10 === 9) {
         const renderStartedAt = performance.now()
-        await setup.renderOnce()
+        yield* Effect.promise(() => setup.renderOnce())
         renderLatencies.push(performance.now() - renderStartedAt)
       }
     }
-    await setup.renderOnce()
+    yield* Effect.promise(() => setup.renderOnce())
     const stats = setup.renderer.getStats()
     return {
       items: model.items.length,
@@ -125,8 +126,18 @@ export const runTranscriptRenderStress = async (options: {
       renderP95Milliseconds: percentile(renderLatencies, 0.95),
       averageFrameTimeMilliseconds: stats.averageFrameTime,
     }
-  } finally {
-    surface.destroy()
-    setup.renderer.destroy()
-  }
-}
+  }).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        surface.destroy()
+        setup.renderer.destroy()
+      }),
+    ),
+  )
+})
+
+export const runTranscriptRenderStress = (options: {
+  readonly childCount: number
+  readonly toolsPerChild: number
+  readonly streamedUpdates: number
+}): Promise<TranscriptRenderStressResult> => Effect.runPromise(transcriptRenderStress(options))

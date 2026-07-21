@@ -13,5 +13,6 @@ bun.lockb
 .logs
 .rika
 /artifacts/
+/repos/
 __pycache__/
 *.py[cod]
