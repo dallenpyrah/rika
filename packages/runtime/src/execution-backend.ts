@@ -888,7 +888,9 @@ const followExecution = (
             root
               ? Queue.offer(updates, {
                   _tag: "failed",
-                  error: BackendError.make({ message: Cause.pretty(cause) }),
+                  error: BackendError.make({
+                    message: isExecutionNotFound(Cause.squash(cause)) ? "ExecutionNotFound" : Cause.pretty(cause),
+                  }),
                 }).pipe(Effect.asVoid)
               : Effect.logWarning("execution.child.follow.failed").pipe(
                   Effect.annotateLogs({
@@ -960,7 +962,9 @@ const followExecution = (
     }),
   ).pipe(
     Effect.tapCause((cause) =>
-      Effect.logError("execution.follow.failed").pipe(Effect.annotateLogs("rika.failure.kind", failureKind(cause))),
+      reference !== undefined && String(Cause.squash(cause)).includes("ExecutionNotFound")
+        ? Effect.logInfo("execution.follow.missing")
+        : Effect.logError("execution.follow.failed").pipe(Effect.annotateLogs("rika.failure.kind", failureKind(cause))),
     ),
     Effect.annotateLogs({
       "rika.execution.id": String(executionId(turnId, reference)),

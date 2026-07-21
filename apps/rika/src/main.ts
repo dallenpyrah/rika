@@ -1714,6 +1714,7 @@ export const interactiveTui =
             event._tag === "TranscriptPatched" ||
             event._tag === "TranscriptResyncRequired"
           ) {
+            const selectionStartedAt = event._tag === "SelectionLoaded" ? performance.now() : undefined
             const previousThreadId = model.currentThreadId
             const previousThreadTitle = model.currentThreadTitle
             const controlled = InteractiveController.update(
@@ -1756,6 +1757,16 @@ export const interactiveTui =
                       event.event.type === "execution.cancelled" ||
                       event.event.type === "permission.ask.requested" ||
                       event.event.type === "tool.approval.requested")),
+              )
+            if (selectionStartedAt !== undefined && event._tag === "SelectionLoaded")
+              fork(
+                Effect.logInfo("tui.selection.applied").pipe(
+                  Effect.annotateLogs({
+                    "rika.thread.id": String(event.thread.id),
+                    "rika.transcript.page.units": event.entries.length,
+                    "rika.duration.ms": Math.round(performance.now() - selectionStartedAt),
+                  }),
+                ),
               )
             return
           }
@@ -2932,12 +2943,27 @@ if (import.meta.main) {
       Effect.flatMap((scope) =>
         Effect.gen(function* () {
           const loadProduct = yield* Effect.cached(
-            Layer.buildWithScope(
-              operationLayer(interactive).pipe(
-                Layer.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)),
+            Clock.currentTimeMillis.pipe(
+              Effect.flatMap((startedAt) =>
+                Layer.buildWithScope(
+                  operationLayer(interactive).pipe(
+                    Layer.provide(Layer.mergeAll(BunServices.layer, BunCrypto.layer, FetchHttpClient.layer)),
+                  ),
+                  scope,
+                ).pipe(
+                  Effect.map((context) => Context.get(context, Operation.Service)),
+                  Effect.tap(() =>
+                    Clock.currentTimeMillis.pipe(
+                      Effect.flatMap((completedAt) =>
+                        Effect.logInfo("resident.product.loaded").pipe(
+                          Effect.annotateLogs("rika.duration.ms", completedAt - startedAt),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-              scope,
-            ).pipe(Effect.map((context) => Context.get(context, Operation.Service))),
+            ),
           )
           return Operation.Service.of({
             run: (input) => {
@@ -3150,7 +3176,7 @@ if (import.meta.main) {
             profile: environment.residentProfile._tag === "Some" ? environment.residentProfile.value : "default",
             dataRoot: hostDataRoot,
             graceMilliseconds: Number(
-              environment.residentGrace._tag === "Some" ? environment.residentGrace.value : "500",
+              environment.residentGrace._tag === "Some" ? environment.residentGrace.value : "900000",
             ),
             startupHoldMilliseconds: Number(
               environment.residentStartupHold._tag === "Some" ? environment.residentStartupHold.value : "10000",

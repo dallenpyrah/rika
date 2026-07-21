@@ -1818,11 +1818,15 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               childFollowerSelection === job.selection
                 ? followChildExecution(job).pipe(
                     Effect.catch((error) =>
-                      Effect.logError("child-execution.follow.failed").pipe(
+                      (String(error).includes("ExecutionNotFound")
+                        ? Effect.logInfo("child-execution.absent")
+                        : Effect.logError("child-execution.follow.failed").pipe(
+                            Effect.annotateLogs("rika.failure.kind", String(error)),
+                          )
+                      ).pipe(
                         Effect.annotateLogs({
                           "rika.execution.id": job.executionId,
                           "rika.thread.id": String(job.threadId),
-                          "rika.failure.kind": String(error),
                         }),
                       ),
                     ),
