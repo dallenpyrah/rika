@@ -13,6 +13,9 @@ jobs:
   check:
     name: check
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      ENV: /dev/null
+      BASH_ENV: /dev/null
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -32,9 +35,7 @@ jobs:
       - name: Make Effect TypeScript binary executable
         run: find node_modules/.bun -path '*/@effect/tsgo-linux-*/lib/tsc' -exec chmod +x {} +
       - name: Prepare login shells for tool runs
-        run: |
-          sudo chmod a+r /run/blacksmith/job.env 2>/dev/null || true
-          echo "export PATH=$HOME/.bun/bin:\$PATH" | sudo tee /etc/profile.d/zz-bun.sh >/dev/null
+        run: echo "export PATH=$HOME/.bun/bin:\$PATH" | sudo tee /etc/profile.d/zz-bun.sh >/dev/null
       - name: Check
         run: bun run check
       - name: TUI app tests
