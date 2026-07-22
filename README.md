@@ -1,7 +1,5 @@
 # Rika
 
-# Rika
-
 Rika is a local coding-agent CLI and terminal application. It uses Baton for the agent loop, Relay for durable execution, Effect SQL for local product state, and OpenTUI for rendering.
 
 ## Setup
@@ -16,16 +14,15 @@ The standard repository commands are `build`, `check`, `dev`, `format`, `test`, 
 
 ## Package and install
 
-Build the current host package, or pass an explicit target:
+Build and install an explicit host target:
 
 ```bash
-bun run package
 bun run package -- --target linux-x64
 bun run install-local
 rika --version
 ```
 
-`install-local` restores the pinned registry dependencies, packages the current working tree, and installs it under `~/.local/share/rika/current` with a command at `~/.local/bin/rika`. Set `RIKA_INSTALL_ROOT` or `RIKA_BIN_DIR` to override those locations. `uninstall-local` removes the installed program but keeps Rika state and configuration.
+`install-local` installs the existing versioned host archive under `~/.local/share/rika/current` with a command at `~/.local/bin/rika`. Set `RIKA_PACKAGE_TARGET`, `RIKA_INSTALL_ROOT`, or `RIKA_BIN_DIR` to override the target or locations. `uninstall-local` removes the installed program but keeps Rika state and configuration.
 
 ## Configuration
 

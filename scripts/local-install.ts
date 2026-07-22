@@ -1,5 +1,6 @@
-import { Config, Console, Data, Effect, FileSystem, Option, Path } from "effect"
+import { Config, Console, Data, Effect, FileSystem, Option, Path, Schema } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { validatePackageArchive } from "./archive-contract"
 
 export class LocalInstallError extends Data.TaggedError("LocalInstallError")<{
   readonly operation: string
@@ -10,6 +11,8 @@ const installFailure = (operation: string, message: string) => new LocalInstallE
 
 const mapInstallError = (operation: string) =>
   Effect.mapError((error: { readonly message: string }) => installFailure(operation, error.message))
+
+const PackageManifestJson = Schema.fromJsonString(Schema.Struct({ version: Schema.String }))
 
 export const installPaths = Effect.fn("LocalInstall.installPaths")(() =>
   Effect.gen(function* () {
@@ -105,7 +108,13 @@ export const installLocal = Effect.fn("LocalInstall.installLocal")(() =>
       }
       const root = yield* path.fromFileUrl(new URL("..", import.meta.url)).pipe(mapInstallError("resolve project root"))
       const platform = yield* packageTarget()
-      const archive = path.join(root, "artifacts", `rika-${platform}.tar.gz`)
+      const manifest = yield* fileSystem
+        .readFileString(path.join(root, "apps", "rika", "package.json"))
+        .pipe(mapInstallError("read package version"))
+      const parsed = yield* Schema.decodeUnknownEffect(PackageManifestJson)(manifest).pipe(
+        mapInstallError("read package version"),
+      )
+      const archive = path.join(root, "artifacts", `rika-${parsed.version}-${platform}.tar.gz`)
       if (!(yield* fileSystem.exists(archive).pipe(mapInstallError("check host archive")))) {
         return yield* installFailure(
           "check host archive",
@@ -117,17 +126,25 @@ export const installLocal = Effect.fn("LocalInstall.installLocal")(() =>
       const staging = yield* fileSystem
         .makeTempDirectoryScoped({ directory: parent, prefix: ".rika-install-" })
         .pipe(mapInstallError("create staging directory"))
+      const archiveRoot = `rika-${parsed.version}-${platform}`
+      const [inventory, headers] = yield* Effect.all(
+        [
+          spawner.string(ChildProcess.make("tar", ["-tzf", archive])),
+          spawner.string(ChildProcess.make("tar", ["-tvzf", archive])),
+        ],
+        { concurrency: 2 },
+      ).pipe(mapInstallError("inspect host archive"))
+      yield* Effect.try({
+        try: () => validatePackageArchive(archiveRoot, inventory, headers),
+        catch: (cause) => installFailure("validate package payload", String(cause)),
+      })
       const exitCode = yield* spawner
         .exitCode(ChildProcess.make("tar", ["-xzf", archive, "-C", staging]))
         .pipe(mapInstallError("extract host archive"))
       if (Number(exitCode) !== 0) {
         return yield* installFailure("extract host archive", `tar exited with code ${exitCode}`)
       }
-      const payload = path.join(staging, `rika-${platform}`)
-      const payloadBinary = path.join(payload, "bin", "rika")
-      if (!(yield* fileSystem.exists(payloadBinary).pipe(mapInstallError("validate package payload")))) {
-        return yield* installFailure("validate package payload", `Package does not contain bin/rika: ${archive}`)
-      }
+      const payload = path.join(staging, archiveRoot)
       yield* fileSystem
         .makeDirectory(path.dirname(command), { recursive: true })
         .pipe(mapInstallError("create bin directory"))

@@ -2,6 +2,7 @@ import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { Data, Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { validatePackageArchive } from "./archive-contract"
 
 class ReleaseSmokeError extends Data.TaggedError("ReleaseSmokeError")<{
   readonly step: string
@@ -15,6 +16,7 @@ const mapFailure = (step: string) =>
 const NamedItemsJson = Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String })))
 const ThreadsJson = Schema.fromJsonString(Schema.Array(Schema.Struct({ id: Schema.String })))
 const UnknownJson = Schema.UnknownFromJsonString
+const PackageManifestJson = Schema.fromJsonString(Schema.Struct({ version: Schema.String }))
 
 const program = Effect.scoped(
   Effect.gen(function* () {
@@ -26,9 +28,26 @@ const program = Effect.scoped(
     const kernel = process.platform === "darwin" ? "darwin" : "linux"
     const architecture = process.arch === "x64" ? "x64" : "arm64"
     const target = targetIndex < 0 ? `${kernel}-${architecture}` : (Bun.argv[targetIndex + 1] ?? "")
-    const archive = path.join(root, "artifacts", `rika-${target}.tar.gz`)
+    const manifestText = yield* fileSystem
+      .readFileString(path.join(root, "apps", "rika", "package.json"))
+      .pipe(mapFailure("read package version"))
+    const manifest = yield* Schema.decodeUnknownEffect(PackageManifestJson)(manifestText).pipe(
+      mapFailure("read package version"),
+    )
+    const archiveRoot = `rika-${manifest.version}-${target}`
+    const archive = path.join(root, "artifacts", `${archiveRoot}.tar.gz`)
     if (!(yield* fileSystem.exists(archive).pipe(mapFailure("check archive"))))
       return yield* failure("check archive", `Archive not found: ${archive}. Run bun run package first.`)
+    const inventory = yield* spawner
+      .string(ChildProcess.make("tar", ["-tzf", archive]))
+      .pipe(mapFailure("inspect archive"))
+    const headers = yield* spawner
+      .string(ChildProcess.make("tar", ["-tvzf", archive]))
+      .pipe(mapFailure("inspect archive headers"))
+    yield* Effect.try({
+      try: () => validatePackageArchive(archiveRoot, inventory, headers),
+      catch: (cause) => failure("inspect archive", String(cause)),
+    })
     const temporary = yield* fileSystem
       .makeTempDirectoryScoped({ prefix: "rika-release-smoke-" })
       .pipe(mapFailure("create smoke directory"))
@@ -36,7 +55,8 @@ const program = Effect.scoped(
       .exitCode(ChildProcess.make("tar", ["-xzf", archive, "-C", temporary]))
       .pipe(mapFailure("extract archive"))
     if (Number(extracted) !== 0) return yield* failure("extract archive", `tar exited with code ${extracted}`)
-    const binary = path.join(temporary, `rika-${target}`, "bin", "rika")
+    const binary = path.join(temporary, archiveRoot, "bin", "rika")
+    const runtime = path.join(temporary, archiveRoot, "bin", ".rika-runtime")
     const workspace = path.join(temporary, "workspace")
     const home = path.join(temporary, "home")
     const state = path.join(temporary, "state")
@@ -61,16 +81,20 @@ const program = Effect.scoped(
       RIKA_INTERNAL_RESIDENT_GRACE: "0",
       RIKA_TEST_MODEL_SCRIPT: grepScript,
     }
-    const output = (command: ReadonlyArray<string>, extraEnvironment: Readonly<Record<string, string>> = {}) =>
+    const output = (
+      command: ReadonlyArray<string>,
+      extraEnvironment: Readonly<Record<string, string>> = {},
+      executable = binary,
+    ) =>
       Effect.scoped(
         Effect.gen(function* () {
           const step = `run ${command.join(" ")}`
           const handle = yield* spawner
             .spawn(
-              ChildProcess.make(binary, command, {
+              ChildProcess.make(executable, command, {
                 cwd: workspace,
-                extendEnv: true,
-                env: { ...environment, ...extraEnvironment },
+                extendEnv: false,
+                env: { ...environment, PATH: "/usr/bin:/bin", TERM: "xterm-256color", ...extraEnvironment },
                 stdin: "ignore",
                 stdout: "pipe",
                 stderr: "pipe",
@@ -91,7 +115,8 @@ const program = Effect.scoped(
         }),
       )
     const version = yield* output(["--version"])
-    if (!version.includes("rika")) return yield* failure("version", `Unexpected --version output: ${version}`)
+    if (!version.includes(manifest.version))
+      return yield* failure("version", `Expected version ${manifest.version}, received: ${version}`)
     if (Bun.argv.includes("--boot-only")) {
       yield* Effect.log(`Release boot smoke passed for ${target}`)
       return
@@ -100,6 +125,9 @@ const program = Effect.scoped(
     const tools = yield* Schema.decodeUnknownEffect(NamedItemsJson)(listed).pipe(mapFailure("decode tools list"))
     if (!tools.some((tool) => tool.name === "read"))
       return yield* failure("tools list", "Catalog does not contain the read tool")
+    const nativeProbe = yield* output([], { RIKA_INTERNAL_OPENTUI_NATIVE_PROBE: "1" }, runtime)
+    if (!nativeProbe.includes("RIKA_OPENTUI_NATIVE_OK"))
+      return yield* failure("OpenTUI native probe", `Missing native proof marker: ${nativeProbe}`)
     const executed = yield* output(["run", "find the needle"])
     if (!executed.includes("SMOKE_COMPLETE"))
       return yield* failure(

@@ -1,360 +1,233 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { Data, Effect, FileSystem, Layer, Path, Schema } from "effect"
+import { dual } from "effect/Function"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 export const targets = {
-  "darwin-arm64": {
-    bun: "bun-darwin-arm64",
-    opentui: "@opentui/core-darwin-arm64",
-    fff: "@ff-labs/fff-bin-darwin-arm64",
-    ffiNative: "@yuuang/ffi-rs-darwin-arm64",
-  },
-  "darwin-x64": {
-    bun: "bun-darwin-x64",
-    opentui: "@opentui/core-darwin-x64",
-    fff: "@ff-labs/fff-bin-darwin-x64",
-    ffiNative: "@yuuang/ffi-rs-darwin-x64",
-  },
-  "linux-arm64": {
-    bun: "bun-linux-arm64",
-    opentui: "@opentui/core-linux-arm64",
-    fff: "@ff-labs/fff-bin-linux-arm64-gnu",
-    ffiNative: "@yuuang/ffi-rs-linux-arm64-gnu",
-  },
-  "linux-x64": {
-    bun: "bun-linux-x64",
-    opentui: "@opentui/core-linux-x64",
-    fff: "@ff-labs/fff-bin-linux-x64-gnu",
-    ffiNative: "@yuuang/ffi-rs-linux-x64-gnu",
-  },
+  "darwin-arm64": { bun: "bun-darwin-arm64", opentuiLibc: "", fffLibc: "gnu" },
+  "darwin-x64": { bun: "bun-darwin-x64", opentuiLibc: "", fffLibc: "gnu" },
+  "linux-arm64": { bun: "bun-linux-arm64", opentuiLibc: "glibc", fffLibc: "gnu" },
+  "linux-x64": { bun: "bun-linux-x64", opentuiLibc: "glibc", fffLibc: "gnu" },
+} as const
+
+export type PackageTarget = keyof typeof targets
+
+export const targetNames = Object.keys(targets) as ReadonlyArray<PackageTarget>
+export const archiveName: {
+  (version: string, target: PackageTarget): string
+  (target: PackageTarget): (version: string) => string
+} = dual(2, (version: string, target: PackageTarget) => `rika-${version}-${target}.tar.gz`)
+export const archiveRoot: {
+  (version: string, target: PackageTarget): string
+  (target: PackageTarget): (version: string) => string
+} = dual(2, (version: string, target: PackageTarget) => `rika-${version}-${target}`)
+export const expectedArchiveNames = (version: string) => targetNames.map((target) => archiveName(version, target))
+export const isPackageTarget = (value: string): value is PackageTarget => Object.hasOwn(targets, value)
+export const ownedTargetEntries: {
+  (version: string, target: PackageTarget): ReadonlyArray<string>
+  (target: PackageTarget): (version: string) => ReadonlyArray<string>
+} = dual(2, (version: string, target: PackageTarget) => [archiveRoot(version, target), archiveName(version, target)])
+
+export interface ReleaseArtifact {
+  readonly target: PackageTarget
+  readonly archive: string
+  readonly sha256: string
+  readonly bytes: number
 }
 
-const platformPackages = [
-  "@opentui/core-darwin-arm64",
-  "@opentui/core-darwin-x64",
-  "@opentui/core-linux-arm64",
-  "@opentui/core-linux-arm64-musl",
-  "@opentui/core-linux-x64",
-  "@opentui/core-linux-x64-musl",
-  "@opentui/core-win32-arm64",
-  "@opentui/core-win32-x64",
-]
+export interface ReleaseEvidence {
+  readonly schemaVersion: 1
+  readonly version: string
+  readonly revision: string
+  readonly bun: string
+  readonly artifacts: ReadonlyArray<ReleaseArtifact>
+}
 
-const PackageManifest = Schema.Struct({ name: Schema.String, version: Schema.String })
-const RootPackageManifest = Schema.Struct({
-  workspaces: Schema.Struct({ catalog: Schema.Record(Schema.String, Schema.String) }),
+export const validateArchiveSet: {
+  (version: string, names: ReadonlyArray<string>): ReadonlyArray<string>
+  (names: ReadonlyArray<string>): (version: string) => ReadonlyArray<string>
+} = dual(2, (version: string, names: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const expected = expectedArchiveNames(version)
+  const actual = names.filter((name) => name.endsWith(".tar.gz")).toSorted()
+  if (actual.join("\n") !== expected.toSorted().join("\n"))
+    throw new Error(`Expected exact archive set: ${expected.join(", ")}; found: ${actual.join(", ")}`)
+  return expected
 })
-const Sha256Output = Schema.String.pipe(Schema.check(Schema.isPattern(/^[a-f0-9]{64}$/)))
-const JsonString = Schema.fromJsonString(Schema.String)
 
-const targetByName = (name: string) => {
-  switch (name) {
-    case "darwin-arm64":
-      return targets["darwin-arm64"]
-    case "darwin-x64":
-      return targets["darwin-x64"]
-    case "linux-arm64":
-      return targets["linux-arm64"]
-    case "linux-x64":
-      return targets["linux-x64"]
-    default:
-      return undefined
-  }
-}
+const PackageManifestJson = Schema.fromJsonString(Schema.Struct({ version: Schema.String }))
 
-export const isManagedPackagingEntry = (name: string) =>
-  name === "SHA256SUMS" ||
-  name === "release-evidence.json" ||
-  name.startsWith(".platform-packages-") ||
-  Object.keys(targets).some((target) => name === `rika-${target}` || name === `rika-${target}.tar.gz`)
-
-class PackagingError extends Data.TaggedError("PackagingError")<{
+class PackageError extends Data.TaggedError("PackageError")<{
   readonly operation: string
   readonly message: string
+  readonly cause?: unknown
 }> {}
 
-const failure = (operation: string, message: string) => new PackagingError({ operation, message })
-const mapFailure = (operation: string) =>
-  Effect.mapError((error: { readonly message: string }) => failure(operation, error.message))
+const packageError = (operation: string, message: string, cause?: unknown) =>
+  new PackageError({ operation, message, cause })
 
-const run = Effect.fn("Package.run")((command: string, args: ReadonlyArray<string>, operation: string) =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    const exitCode = yield* spawner
-      .exitCode(ChildProcess.make(command, args, { stdout: "inherit", stderr: "inherit" }))
-      .pipe(mapFailure(operation))
-    if (Number(exitCode) !== 0) return yield* failure(operation, `${command} exited with code ${exitCode}`)
-  }),
-)
+const program = Effect.gen(function* () {
+  const fileSystem = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+  const root = yield* path.fromFileUrl(new URL("..", import.meta.url))
+  const artifacts = path.join(root, "artifacts")
+  const manifest = yield* fileSystem
+    .readFileString(path.join(root, "apps/rika/package.json"))
+    .pipe(Effect.flatMap(Schema.decodeUnknownEffect(PackageManifestJson)))
 
-const sha256 = Effect.fn("Package.sha256")((file: string) =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    const output = yield* spawner.string(ChildProcess.make("sha256sum", [file])).pipe(mapFailure("hash archive"))
-    const digest = output.trim().split(/\s+/, 1)[0]
-    if (digest === undefined) return yield* failure("hash archive", `sha256sum returned no digest for ${file}`)
-    return yield* Schema.decodeUnknownEffect(Sha256Output)(digest).pipe(
-      Effect.mapError((error) => failure("hash archive", error.message)),
-    )
-  }),
-)
-
-const locatePackage = Effect.fn("Package.locatePackage")((root: string, name: string, version: string, cache: string) =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem
-    const path = yield* Path.Path
-    const exact = path.join(root, "node_modules", ...name.split("/"))
-    if (yield* fileSystem.exists(exact).pipe(mapFailure("locate installed package"))) return exact
-    const bunModules = path.join(root, "node_modules", ".bun")
-    const prefix = name.replace("/", "+") + "@"
-    const entries = yield* fileSystem.readDirectory(bunModules).pipe(mapFailure("scan Bun package store"))
-    const found = entries.toSorted().find((entry) => entry.startsWith(prefix))
-    if (found !== undefined) return path.join(bunModules, found, "node_modules", ...name.split("/"))
-    const destination = path.join(cache, name.replace("/", "+"))
-    yield* fileSystem.makeDirectory(destination, { recursive: true }).pipe(mapFailure("create package cache"))
-    yield* run(
-      "npm",
-      ["pack", `${name}@${version}`, "--ignore-scripts", "--pack-destination", destination],
-      `fetch pinned optional package ${name}@${version}`,
-    )
-    const archives = yield* fileSystem.readDirectory(destination).pipe(mapFailure("find downloaded package"))
-    const archive = archives.find((entry) => entry.endsWith(".tgz"))
-    if (archive === undefined)
-      return yield* failure("find downloaded package", `npm did not produce an archive for ${name}@${version}`)
-    yield* run("tar", ["-xzf", path.join(destination, archive), "-C", destination], "extract downloaded package")
-    const source = yield* fileSystem
-      .readFileString(path.join(destination, "package", "package.json"))
-      .pipe(mapFailure("read downloaded package manifest"))
-    const manifest = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(PackageManifest))(source).pipe(
-      Effect.mapError((error) => failure("validate downloaded package manifest", error.message)),
-    )
-    if (manifest.name !== name || manifest.version !== version) {
-      return yield* failure(
-        "validate downloaded package manifest",
-        `Fetched optional package did not match ${name}@${version}`,
+  const buildIdentity = Effect.fn("Package.buildIdentity")(() =>
+    Effect.gen(function* () {
+      const [revision, changes] = yield* Effect.all(
+        [
+          spawner.string(ChildProcess.make("git", ["rev-parse", "HEAD"], { cwd: root })),
+          spawner.string(
+            ChildProcess.make(
+              "git",
+              ["diff", "--binary", "HEAD", "--", "apps", "packages", "scripts", "package.json", "bun.lock"],
+              { cwd: root },
+            ),
+          ),
+        ],
+        { concurrency: 2 },
       )
-    }
-    return path.join(destination, "package")
-  }),
-)
+      const normalizedRevision = revision.trim()
+      return {
+        revision: normalizedRevision,
+        identity: new Bun.CryptoHasher("sha256").update(`${normalizedRevision}\0${changes}`).digest("hex"),
+      }
+    }),
+  )
 
-const pythonArchive = `
-import gzip, os, tarfile, sys
-root, name, output = sys.argv[1:]
-with open(output, "wb") as raw:
-  with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped:
-    with tarfile.open(fileobj=zipped, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-      for base, dirs, files in os.walk(os.path.join(root, name)):
-        dirs.sort(); files.sort()
-        for entry in dirs + files:
-          path = os.path.join(base, entry); info = archive.gettarinfo(path, os.path.relpath(path, root))
-          info.uid = info.gid = 0; info.uname = info.gname = ""; info.mtime = 0
-          if info.isfile():
-            with open(path, "rb") as source: archive.addfile(info, source)
-          else: archive.addfile(info)
-`
-
-const program = Effect.scoped(
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem
-    const path = yield* Path.Path
-    const root = yield* path.fromFileUrl(new URL("..", import.meta.url)).pipe(mapFailure("resolve project root"))
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    const revision = yield* spawner
-      .string(ChildProcess.make("git", ["rev-parse", "HEAD"], { cwd: root }))
-      .pipe(mapFailure("read source revision"))
-    const changes = yield* spawner
-      .string(
-        ChildProcess.make(
-          "git",
-          ["diff", "--binary", "HEAD", "--", "apps", "packages", "scripts", "package.json", "bun.lock"],
-          { cwd: root },
-        ),
-      )
-      .pipe(mapFailure("read source changes"))
-    const buildIdentity = new Bun.CryptoHasher("sha256").update(`${revision.trim()}\0${changes}`).digest("hex")
-    const rootManifest = yield* fileSystem.readFileString(path.join(root, "package.json")).pipe(
-      mapFailure("read root package manifest"),
-      Effect.flatMap(
-        Schema.decodeUnknownEffect(Schema.fromJsonString(RootPackageManifest), {
-          errors: "all",
+  const checkedBuild = Effect.fn("Package.checkedBuild")(
+    (entrypoint: string, outfile: string, target: PackageTarget, identity: string) =>
+      Effect.tryPromise({
+        try: () => {
+          const metadata = targets[target]
+          return Bun.build({
+            entrypoints: [path.join(root, "apps/rika/src", entrypoint)],
+            compile: { target: metadata.bun, outfile },
+            minify: true,
+            loader: { ".txt": "text" },
+            define: {
+              RIKA_VERSION: `"${manifest.version}"`,
+              RIKA_BUILD_IDENTITY: `"${identity}"`,
+              FFF_LIBC: `"${metadata.fffLibc}"`,
+              "process.env.OPENTUI_LIBC": `"${metadata.opentuiLibc}"`,
+            },
+          })
+        },
+        catch: (cause) =>
+          packageError("build", `build ${target} ${path.basename(outfile)} failed: ${String(cause)}`, cause),
+      }).pipe(
+        Effect.flatMap((result) => {
+          if (!result.success)
+            return Effect.fail(
+              packageError(
+                "build",
+                `build ${target} ${path.basename(outfile)} failed:\n${result.logs.map(String).join("\n")}`,
+              ),
+            )
+          if (result.outputs.length !== 1)
+            return Effect.fail(
+              packageError("build", `build ${target} ${path.basename(outfile)} emitted unexpected assets`),
+            )
+          return Effect.void
         }),
       ),
-      Effect.mapError((error) => failure("decode root package manifest", String(error))),
-    )
-    const platformPackageVersion = rootManifest.workspaces.catalog["@opentui/core"]
-    if (platformPackageVersion === undefined)
-      return yield* failure("read OpenTUI version", "The root catalog does not define @opentui/core")
-    for (const packageName of platformPackages)
-      if (rootManifest.workspaces.catalog[packageName] !== platformPackageVersion)
-        return yield* failure(
-          "validate OpenTUI versions",
-          `${packageName} must match @opentui/core@${platformPackageVersion}`,
-        )
-    const output = path.join(root, "artifacts")
-    const targetIndex = Bun.argv.indexOf("--target")
-    const selected = targetIndex < 0 ? Object.keys(targets) : [Bun.argv[targetIndex + 1] ?? ""]
-    yield* Effect.forEach(
-      selected,
-      (name) =>
-        targetByName(name) === undefined ? failure("validate target", `Unsupported target: ${name}`) : Effect.void,
-      { discard: true },
-    )
-    yield* fileSystem.makeDirectory(output, { recursive: true }).pipe(mapFailure("create artifact directory"))
-    const outputEntries = yield* fileSystem.readDirectory(output).pipe(mapFailure("scan artifact directory"))
-    yield* Effect.forEach(
-      outputEntries.filter(isManagedPackagingEntry),
-      (entry) =>
-        fileSystem
-          .remove(path.join(output, entry), { recursive: true, force: true })
-          .pipe(mapFailure("clear managed package output")),
-      { concurrency: 4, discard: true },
-    )
-    const packageCache = yield* fileSystem
-      .makeTempDirectoryScoped({ directory: output, prefix: ".platform-packages-" })
-      .pipe(mapFailure("create package cache"))
-    const buildTarget = Effect.fn("Package.buildTarget")((name: string) =>
-      Effect.gen(function* () {
-        const target = targetByName(name)
-        if (target === undefined) return yield* failure("validate target", `Unsupported target: ${name}`)
-        const stageName = `rika-${name}`
-        const stage = path.join(output, stageName)
-        yield* Effect.acquireRelease(
-          fileSystem
-            .makeDirectory(path.join(stage, "bin"), { recursive: true })
-            .pipe(mapFailure("create staging directory")),
-          () => fileSystem.remove(stage, { recursive: true, force: true }).pipe(Effect.ignore),
-        )
-        const packageSource = yield* locatePackage(root, target.opentui, platformPackageVersion, packageCache)
-        const fffSource = yield* locatePackage(root, target.fff, "0.9.6", packageCache)
-        const fffNodeSource = yield* locatePackage(root, "@ff-labs/fff-node", "0.9.6", packageCache)
-        const ffiSource = yield* locatePackage(root, "ffi-rs", "1.3.2", packageCache)
-        const ffiNativeSource = yield* locatePackage(root, target.ffiNative, "1.3.2", packageCache)
-        const resolutionPackage = path.join(root, "node_modules", ...target.opentui.split("/"))
-        const resolutionExists = yield* fileSystem
-          .exists(resolutionPackage)
-          .pipe(mapFailure("check resolution package"))
-        if (!resolutionExists) {
-          yield* Effect.acquireRelease(
-            Effect.gen(function* () {
-              yield* fileSystem
-                .makeDirectory(resolutionPackage, { recursive: true })
-                .pipe(mapFailure("create resolution package"))
-              yield* fileSystem.copy(packageSource, resolutionPackage).pipe(mapFailure("copy resolution package"))
-            }),
-            () => fileSystem.remove(resolutionPackage, { recursive: true, force: true }).pipe(Effect.ignore),
-          )
-        }
-        const compile = (entry: string, outputName: string) =>
-          run(
-            "bun",
-            [
-              "build",
-              "--compile",
-              `--target=${target.bun}`,
-              "--define",
-              `RIKA_BUILD_IDENTITY=${JSON.stringify(buildIdentity)}`,
-              "--loader",
-              ".txt:text",
-              "--external",
-              "msgpackr-extract",
-              ...platformPackages
-                .filter((packageName) => packageName !== target.opentui)
-                .flatMap((packageName) => ["--external", packageName]),
-              "--outfile",
-              path.join(stage, "bin", outputName),
-              path.join(root, "apps/rika/src", entry),
-            ],
-            `build ${name} ${outputName}`,
-          )
-        yield* compile("client-main.ts", "rika")
-        yield* compile("main.ts", ".rika-runtime")
-        yield* Effect.forEach(
-          ["rika", ".rika-runtime"],
-          (executable) =>
-            fileSystem
-              .chmod(path.join(stage, "bin", executable), 0o755)
-              .pipe(mapFailure(`make ${executable} executable`)),
-          { discard: true },
-        )
-        const packages = [
-          { name: target.opentui, source: packageSource },
-          { name: target.fff, source: fffSource },
-          { name: "@ff-labs/fff-node", source: fffNodeSource },
-          { name: "ffi-rs", source: ffiSource },
-        ]
-        yield* Effect.forEach(
-          packages,
-          (packageToCopy) => {
-            const destination = path.join(stage, "bin", "node_modules", ...packageToCopy.name.split("/"))
-            return fileSystem
-              .makeDirectory(destination, { recursive: true })
-              .pipe(
-                Effect.andThen(fileSystem.copy(packageToCopy.source, destination)),
-                mapFailure(`copy ${packageToCopy.name}`),
-              )
-          },
-          { concurrency: 4, discard: true },
-        )
-        const ffiDestination = path.join(stage, "bin", "node_modules", "ffi-rs")
-        const ffiNativeEntries = yield* fileSystem
-          .readDirectory(ffiNativeSource)
-          .pipe(mapFailure("scan ffi-rs native package"))
-        yield* Effect.forEach(
-          ffiNativeEntries.filter((entry) => entry.endsWith(".node")),
-          (entry) =>
-            fileSystem
-              .copyFile(path.join(ffiNativeSource, entry), path.join(ffiDestination, entry))
-              .pipe(mapFailure("copy ffi-rs native library")),
-          { discard: true },
-        )
-        yield* fileSystem
-          .writeFileString(
-            path.join(stage, "INSTALL"),
-            "Install bin/rika on PATH. Keep node_modules adjacent to bin.\n",
-          )
-          .pipe(mapFailure("write install instructions"))
-        const archive = path.join(output, `${stageName}.tar.gz`)
-        yield* run("python3", ["-c", pythonArchive, output, stageName, archive], `archive ${name}`)
-        return {
-          target: name,
-          archive: path.basename(archive),
-          sha256: yield* sha256(archive),
-          opentui: target.opentui,
-        }
-      }),
-    )
-    const evidence = yield* Effect.forEach(selected, buildTarget, { concurrency: 1 })
-    const bunVersion = yield* Schema.encodeEffect(JsonString)(Bun.version).pipe(
-      Effect.mapError((error) => failure("encode release evidence", error.message)),
-    )
-    const artifactJson = yield* Effect.forEach(evidence, (item) =>
-      Effect.gen(function* () {
-        const target = yield* Schema.encodeEffect(JsonString)(item.target)
-        const archive = yield* Schema.encodeEffect(JsonString)(item.archive)
-        const sha = yield* Schema.encodeEffect(JsonString)(item.sha256)
-        const opentui = yield* Schema.encodeEffect(JsonString)(item.opentui)
-        return `    {\n      "target": ${target},\n      "archive": ${archive},\n      "sha256": ${sha},\n      "opentui": ${opentui}\n    }`
-      }).pipe(Effect.mapError((error) => failure("encode release evidence", error.message))),
-    )
-    yield* fileSystem
-      .writeFileString(
-        path.join(output, "release-evidence.json"),
-        `{\n  "schemaVersion": 1,\n  "bun": ${bunVersion},\n  "artifacts": [\n${artifactJson.join(",\n")}\n  ]\n}\n`,
-      )
-      .pipe(mapFailure("write release evidence"))
-    yield* fileSystem
-      .writeFileString(
-        path.join(output, "SHA256SUMS"),
-        evidence.map((item) => `${item.sha256}  ${item.archive}`).join("\n") + "\n",
-      )
-      .pipe(mapFailure("write checksums"))
-  }),
-)
+  )
 
-if (import.meta.main) {
+  const buildTarget = Effect.fn("Package.buildTarget")((target: PackageTarget) =>
+    Effect.gen(function* () {
+      yield* fileSystem.makeDirectory(artifacts, { recursive: true })
+      yield* Effect.forEach(
+        ownedTargetEntries(manifest.version, target),
+        (entry) => fileSystem.remove(path.join(artifacts, entry), { recursive: true, force: true }),
+        { concurrency: "unbounded", discard: true },
+      )
+      const stageName = archiveRoot(manifest.version, target)
+      const stage = path.join(artifacts, stageName)
+      const bin = path.join(stage, "bin")
+      yield* fileSystem.makeDirectory(bin, { recursive: true })
+      yield* Effect.acquireUseRelease(
+        Effect.succeed(stage),
+        () =>
+          Effect.gen(function* () {
+            const { identity } = yield* buildIdentity()
+            yield* checkedBuild("client-main.ts", path.join(bin, "rika"), target, identity)
+            yield* checkedBuild("main.ts", path.join(bin, ".rika-runtime"), target, identity)
+            yield* fileSystem.writeFileString(
+              path.join(stage, "INSTALL"),
+              "Install bin/rika on PATH. Keep bin/.rika-runtime beside it.\n",
+            )
+            const exitCode = yield* spawner.exitCode(
+              ChildProcess.make(
+                "tar",
+                ["-czf", path.join(artifacts, archiveName(manifest.version, target)), stageName],
+                {
+                  cwd: artifacts,
+                },
+              ),
+            )
+            if (Number(exitCode) !== 0)
+              return yield* packageError("archive", `archive ${target}: tar exited with code ${exitCode}`)
+          }),
+        () => fileSystem.remove(stage, { recursive: true, force: true }),
+      )
+    }),
+  )
+
+  const aggregate = Effect.fn("Package.aggregate")(() =>
+    Effect.gen(function* () {
+      validateArchiveSet(manifest.version, yield* fileSystem.readDirectory(artifacts))
+      const { revision } = yield* buildIdentity()
+      const releaseArtifacts = yield* Effect.forEach(
+        targetNames,
+        (target) =>
+          Effect.gen(function* () {
+            const archive = archiveName(manifest.version, target)
+            const archivePath = path.join(artifacts, archive)
+            const contents = yield* fileSystem.readFile(archivePath)
+            const info = yield* fileSystem.stat(archivePath)
+            return {
+              target,
+              archive,
+              sha256: new Bun.CryptoHasher("sha256").update(contents).digest("hex"),
+              bytes: Number(info.size),
+            }
+          }),
+        { concurrency: "unbounded" },
+      )
+      const evidence: ReleaseEvidence = {
+        schemaVersion: 1,
+        version: manifest.version,
+        revision,
+        bun: Bun.version,
+        artifacts: releaseArtifacts,
+      }
+      yield* fileSystem.writeFileString(
+        path.join(artifacts, "SHA256SUMS"),
+        releaseArtifacts.map((item) => `${item.sha256}  ${item.archive}`).join("\n") + "\n",
+      )
+      const encodedEvidence = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(evidence)
+      yield* fileSystem.writeFileString(path.join(artifacts, "release-evidence.json"), encodedEvidence + "\n")
+    }),
+  )
+
+  const targetIndex = Bun.argv.indexOf("--target")
+  const aggregateRequested = Bun.argv.includes("--aggregate")
+  if (aggregateRequested && targetIndex >= 0)
+    return yield* packageError("select mode", "Use either --target or --aggregate")
+  if (aggregateRequested) yield* aggregate()
+  else {
+    const selected = targetIndex < 0 ? undefined : Bun.argv[targetIndex + 1]
+    if (selected === undefined) return yield* packageError("select target", "Explicit --target <target> is required")
+    if (!isPackageTarget(selected)) return yield* packageError("select target", `Unsupported target: ${selected}`)
+    yield* buildTarget(selected)
+  }
+})
+
+if (import.meta.main)
   BunRuntime.runMain(
     Effect.scoped(Effect.flatMap(Layer.build(BunServices.layer), (context) => Effect.provide(program, context))),
   )
-}

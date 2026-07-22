@@ -8,12 +8,12 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir dist --target bun --format esm --external effect --external 'effect/*' --external '@effect/*' --external '@ff-labs/fff-node'",
+    "build": "bun build ./src/index.ts --outdir dist --target bun --format esm --external effect --external 'effect/*' --external '@effect/*' --external '@ff-labs/fff-bun'",
     "lint": "bun --cwd ../.. node_modules/oxlint/dist/cli.js packages/tools/src packages/tools/test",
     "typecheck": "bun ../../node_modules/typescript/lib/tsc.js --noEmit"
   },
   "dependencies": {
-    "@ff-labs/fff-node": "0.9.6",
+    "@ff-labs/fff-bun": "0.9.6",
     "effect": "catalog:",
     "parallel-web": "1.1.0"
   },

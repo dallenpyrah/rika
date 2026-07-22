@@ -16,7 +16,6 @@
   "dependencies": {
     "@batonfx/providers": "catalog:",
     "@effect/platform-bun": "catalog:",
-    "@ff-labs/fff-node": "^0.9.6",
     "@opentui/core": "catalog:",
     "@rika/app": "workspace:*",
     "@rika/config": "workspace:*",

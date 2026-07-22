@@ -53,7 +53,11 @@ export default defineConfig({
         test: {
           name: "proc",
           setupFiles: ["test/unit/setup-relay-polling.ts"],
-          include: ["packages/*/test/**/*.proc.test.ts", "apps/*/test/**/*.proc.test.ts"],
+          include: [
+            "packages/*/test/**/*.proc.test.ts",
+            "apps/*/test/**/*.proc.test.ts",
+            "test/scripts/**/*.proc.test.ts",
+          ],
           fileParallelism: false,
         },
       },
