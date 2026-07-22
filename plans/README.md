@@ -26,6 +26,7 @@ Each plan is tracked by a GitHub issue. Plans 004 and 008 were **not** filed as 
 | 008  | Spike: wire plugin-registry contributions into execution             | P2       | M (spike) | direction | 002 (soft)           | #145 (existing, + #141) | TODO                                                                                                 |
 | 011  | Transcript viewport: one scroll owner, collapse rendering, windowing | P1       | L         | bug       | —                    | —                       | DONE (steps 1-5; collapse repro `test.fails` pending upstream OpenTUI buffer-clear; step 6 deferred) |
 | 012  | Subagents return free-form text only; all output schemas removed     | P1       | M         | bug       | —                    | —                       | DONE                                                                                                 |
+| 018  | Subagent transcripts survive restart (self-healing additive backfill) | P1       | M         | bug       | —                    | —                       | DONE (deterministic suites; pilotty acceptance pending)                                              |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale). Issues are in `dallenpyrah/rika` (private).
 

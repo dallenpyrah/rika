@@ -610,21 +610,38 @@ const toolForChild = (projection: Transcript.Projection, childExecutionId: strin
     childExecutionId,
   )?.tool
 
-const hasMissingNestedProjection = (projection: Transcript.Projection): boolean =>
-  projection.units.some((unit) => {
-    if (unit.content._tag !== "Block" || unit.content.block._tag !== "ToolCall") return false
-    const childId = unit.content.block.childId
-    if (childId === undefined) return false
-    const parentId = unit.content.block.id
-    return !projection.units.some(
-      (candidate) =>
-        candidate.parentId === parentId &&
-        normalizeChildExecutionId(candidate.turnId) === normalizeChildExecutionId(childId) &&
-        candidate.revision >= 0,
-    )
-  })
+const realChildUnit = (unit: Transcript.Unit): boolean =>
+  unit.content._tag === "Block" || (unit.content._tag === "Entry" && unit.content.text.length > 0)
 
-const replayProjection = Effect.fn("Operation.replayProjection")(function* (
+const storedChildUnits = (projection: Transcript.Projection): ReadonlyMap<string, ReadonlyArray<Transcript.Unit>> => {
+  const groups = new Map<string, Array<Transcript.Unit>>()
+  for (const unit of projection.units) {
+    if (unit.parentId === undefined) continue
+    const key = normalizeChildExecutionId(unit.turnId)
+    const group = groups.get(key)
+    if (group === undefined) groups.set(key, [unit])
+    else group.push(unit)
+  }
+  return groups
+}
+
+const recordedChildIds = (projection: Transcript.Projection): ReadonlySet<string> => {
+  const ids = new Set<string>()
+  for (const unit of projection.units) {
+    if (unit.content._tag !== "Block") continue
+    const block = unit.content.block
+    if (block._tag === "ToolCall" && block.childId !== undefined) ids.add(normalizeChildExecutionId(block.childId))
+    else if (block._tag === "ChildAgent") ids.add(normalizeChildExecutionId(block.id))
+  }
+  return ids
+}
+
+const hasChildrenAwaitingBackfill = (projection: Transcript.Projection): boolean => {
+  const stored = storedChildUnits(projection)
+  return [...recordedChildIds(projection)].some((childId) => !(stored.get(childId) ?? []).some(realChildUnit))
+}
+
+const replayChildTranscript = Effect.fn("Operation.replayChildTranscript")(function* (
   backend: ExecutionBackend.Interface,
   executionId: string,
 ) {
@@ -657,12 +674,36 @@ const settledChildStatus = (
   return undefined
 }
 
-const projectExecutionTree = Effect.fn("Operation.projectExecutionTree")(function* (
+const storedChildProjection = (units: ReadonlyArray<Transcript.Unit>): Transcript.Projection => ({
+  units,
+  revision: units.reduce((latest, unit) => Math.max(latest, unit.revision), -1),
+  modelPhase: 0,
+})
+
+const withoutSynthesizedTwins = (
+  projection: Transcript.Projection,
+  parents: ReadonlyMap<string, string>,
+): Transcript.Projection => ({
+  ...projection,
+  units: projection.units.filter((unit) => {
+    if (unit.parentId !== undefined || unit.content._tag !== "Block" || unit.content.block._tag !== "ToolCall")
+      return true
+    const block = unit.content.block
+    if (block.childId === undefined) return true
+    const childKey = normalizeChildExecutionId(block.childId)
+    const parent = parents.get(childKey)
+    return block.id !== childKey || parent === undefined || parent === block.id
+  }),
+})
+
+const backfillChildTranscripts = Effect.fn("Operation.backfillChildTranscripts")(function* (
   backend: ExecutionBackend.Interface,
   rootExecutionId: string,
   root: Transcript.Projection,
 ) {
+  const stored = storedChildUnits(root)
   const nested: Array<Transcript.NestedProjection> = []
+  const parents = new Map<string, string>()
   let rootProjection = root
   const pending: Array<{
     readonly executionId: string
@@ -684,9 +725,26 @@ const projectExecutionTree = Effect.fn("Operation.projectExecutionTree")(functio
       else nested[current.nestedIndex] = { ...nested[current.nestedIndex]!, projection }
     }
     for (const child of inspection.children) {
-      const childId = normalizeChildExecutionId(child.executionId)
-      if (seen.has(childId)) continue
-      seen.add(childId)
+      const childKey = normalizeChildExecutionId(child.executionId)
+      if (seen.has(childKey)) continue
+      seen.add(childKey)
+      const replayed = yield* replayChildTranscript(backend, child.executionId)
+      if (replayed.revision < 0)
+        yield* Effect.logWarning("execution.child.replay_empty").pipe(
+          Effect.annotateLogs({
+            "rika.execution.parent": current.executionId,
+            "rika.execution.child": child.executionId,
+          }),
+        )
+      const storedUnits = stored.get(childKey) ?? []
+      const storedTranscript = storedUnits.some(realChildUnit) ? storedChildProjection(storedUnits) : undefined
+      const projection =
+        storedTranscript !== undefined && storedTranscript.revision > replayed.revision
+          ? storedTranscript
+          : replayed.revision < 0
+            ? undefined
+            : replayed
+      if (projection === undefined) continue
       let parent = toolForChild(parentProjection(), child.executionId)
       if (parent === undefined) {
         const ensured = Transcript.ensureChildTool(parentProjection(), child.executionId, "task")
@@ -699,17 +757,25 @@ const projectExecutionTree = Effect.fn("Operation.projectExecutionTree")(functio
           }),
         )
       }
-      const projection = yield* replayProjection(backend, child.executionId)
       const settled = settledChildStatus(child.status)
       if (settled !== undefined)
         settleParent(
           Transcript.settleChild(parentProjection(), child.executionId, settled, parentProjection().revision),
         )
+      parents.set(childKey, parent.id)
       nested.push({ parentId: parent.id, projection })
       pending.push({ executionId: child.executionId, nestedIndex: nested.length - 1, reference: true })
     }
   }
-  return nested.length === 0 ? rootProjection : Transcript.withNestedProjections(rootProjection, nested)
+  for (const [childKey, units] of stored) {
+    if (parents.has(childKey) || !units.some(realChildUnit)) continue
+    const parentId = units[0]!.parentId
+    if (parentId === undefined) continue
+    parents.set(childKey, parentId)
+    nested.push({ parentId, projection: storedChildProjection(units) })
+  }
+  if (nested.length === 0) return rootProjection
+  return Transcript.withNestedProjections(withoutSynthesizedTwins(rootProjection, parents), nested)
 })
 
 const activeDescendantExecutionIds = Effect.fn("Operation.activeDescendantExecutionIds")(function* (
@@ -843,14 +909,17 @@ const sessionOwnershipRejected = (failure: unknown): boolean => {
   return String(failure).includes(sessionOwnershipMarker)
 }
 
-const persistExecutionTree = Effect.fn("Operation.persistExecutionTree")(function* (turn: Turn.Turn, force: boolean) {
+const backfillTranscriptTree = Effect.fn("Operation.backfillTranscriptTree")(function* (
+  turn: Turn.Turn,
+  force: boolean,
+) {
   const transcripts = yield* TranscriptRepository.Service
   const current = yield* transcripts.get(turn.id)
   if (current === undefined) return
   const root = sourceProjection(current)
-  if (!force && !hasMissingNestedProjection(root)) return
+  if (!force && !hasChildrenAwaitingBackfill(root)) return
   const backend = yield* ExecutionBackend.Service
-  const tree = yield* projectExecutionTree(backend, turn.id, root)
+  const tree = yield* backfillChildTranscripts(backend, turn.id, root)
   if (tree === root) return
   yield* transcripts.replace(turn, tree)
 })
@@ -1647,8 +1716,8 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
         const transcriptHasUnprojectedTurns = yield* Ref.make(false)
         const transcriptHasOlder = yield* Ref.make(false)
         const projectionAdmission = yield* Semaphore.make(1)
-        const persistProjectionTree = (turn: Turn.Turn, force: boolean) =>
-          projectionAdmission.withPermits(1)(persistExecutionTree(turn, force))
+        const backfillTree = (turn: Turn.Turn, force: boolean) =>
+          projectionAdmission.withPermits(1)(backfillTranscriptTree(turn, force))
         const appendProjection = (turn: Turn.Turn, events: ReadonlyArray<ExecutionBackend.Event>) =>
           projectionAdmission.withPermits(1)(
             Effect.gen(function* () {
@@ -2033,7 +2102,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                       )
                       yield* projectExecutionResult(thread.id, result)
                       yield* appendProjection(updatedTurn, result.events)
-                      yield* persistProjectionTree(updatedTurn, true)
+                      yield* backfillTree(updatedTurn, true)
                       if (result.status === "completed") {
                         yield* settleThread(thread, dispatch)
                         if (isFirstTurn)
@@ -2347,7 +2416,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             )
             yield* projectExecutionResult(thread.id, result)
             yield* appendProjection(updatedTurn, result.events)
-            yield* persistProjectionTree(updatedTurn, true)
+            yield* backfillTree(updatedTurn, true)
             return isTerminalStatus(result.status)
           })
           const runNext = Effect.fn("Operation.interactive.runNextQueued")(function* () {
@@ -2495,7 +2564,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           )
           yield* projectExecutionResult(turn.threadId, result)
           yield* appendProjection(updatedTurn, result.events)
-          yield* persistProjectionTree(updatedTurn, true)
+          yield* backfillTree(updatedTurn, true)
           if (isTerminalStatus(result.status)) {
             yield* settleThread(thread, dispatch)
             if (result.status === "completed" && (yield* turns.list(thread.id))[0]?.id === updatedTurn.id)
@@ -2636,7 +2705,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           const current = yield* transcripts.get(turn.id)
           if (current === undefined) return
           if (Transcript.hasRunningBlocks(sourceProjection(current))) {
-            yield* persistProjectionTree(turn, true)
+            yield* backfillTree(turn, true)
             const settled = yield* transcripts.get(turn.id)
             if (settled !== undefined) {
               const source = sourceProjection(settled)
@@ -2687,7 +2756,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   isTerminalStatus(turn.status) &&
                   projected.checkpointCursor === turn.lastCursor
                 ) {
-                  yield* persistProjectionTree(turn, false)
+                  yield* backfillTree(turn, false)
                   yield* healTerminalTurn(turn)
                   return
                 }
@@ -2696,13 +2765,15 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                 }
                 const execution = yield* backend.inspect(turn.id)
                 if (execution === undefined) {
-                  yield* projectionAdmission.withPermits(1)(
-                    transcripts.replace(turn, Transcript.empty(turn.id, turn.prompt)),
-                  )
+                  if (projected === undefined)
+                    yield* projectionAdmission.withPermits(1)(
+                      transcripts.replace(turn, Transcript.empty(turn.id, turn.prompt)),
+                    )
+                  else if (isTerminalStatus(turn.status)) yield* healTerminalTurn(turn)
                   return
                 }
                 yield* projectExecutionPages(backend, turn, execution.status)
-                yield* persistProjectionTree({ ...turn, status: execution.status }, true)
+                yield* backfillTree({ ...turn, status: execution.status }, true)
                 yield* healTerminalTurn({ ...turn, status: execution.status })
               }),
             { concurrency: 4, discard: true },
@@ -3740,7 +3811,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                     updated,
                     rootExecutionEvents(updated.id, result.events),
                   )
-                  yield* persistExecutionTree(updated, true)
+                  yield* backfillTranscriptTree(updated, true)
                 }
                 return result
               })

@@ -1178,3 +1178,234 @@ describe("InteractiveSession controls", () => {
     }),
   )
 })
+
+const subagentToolId = "done:call_1"
+const subagentChildId = "child:execution%3Adone:call_1"
+
+const subagentRootEvents: ReadonlyArray<ExecutionBackend.Event> = [
+  {
+    cursor: "done-call",
+    sequence: 1,
+    type: "tool.call.requested",
+    createdAt: 1,
+    data: { tool_call_id: "call_1", tool_name: "oracle", input: { prompt: "Review the plan." } },
+  },
+  {
+    cursor: `execution:done:child:${subagentChildId}`,
+    sequence: 2,
+    type: "child_run.spawned",
+    createdAt: 2,
+    data: { child_execution_id: subagentChildId, preset_name: "Oracle" },
+  },
+  {
+    cursor: `execution:done:child:${subagentChildId}:completed`,
+    sequence: 3,
+    type: "child_run.event",
+    createdAt: 3,
+    data: { child_execution_id: subagentChildId, status: "completed" },
+  },
+  {
+    cursor: "done-result",
+    sequence: 4,
+    type: "tool.result.received",
+    createdAt: 4,
+    data: { tool_call_id: "call_1", output: { output: [{ type: "text", text: "**All tests pass.**" }] } },
+  },
+  { cursor: "done-final", sequence: 5, type: "execution.completed", createdAt: 5 },
+]
+
+const subagentChildEvents: ReadonlyArray<ExecutionBackend.Event> = [
+  {
+    cursor: `${subagentChildId}:tool`,
+    sequence: 1,
+    type: "tool.call.requested",
+    createdAt: 1,
+    data: { tool_call_id: "child-call", tool_name: "bash", input: { command: "bun test" } },
+  },
+  {
+    cursor: `${subagentChildId}:result`,
+    sequence: 2,
+    type: "tool.result.received",
+    createdAt: 2,
+    data: { tool_call_id: "child-call", output: { text: "ok" } },
+  },
+  {
+    cursor: `${subagentChildId}:answer`,
+    sequence: 3,
+    type: "model.output.completed",
+    createdAt: 3,
+    text: "**All tests pass.**",
+  },
+  { cursor: `${subagentChildId}:completed`, sequence: 4, type: "execution.completed", createdAt: 4 },
+]
+
+const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagentReloadHarness")(function* (options: {
+  readonly storedTree: Transcript.Projection
+  readonly turnLastCursor: string
+  readonly childReplayEvents: ReadonlyArray<ExecutionBackend.Event>
+}) {
+  const subagentThread = thread("subagent-thread", 1)
+  const doneTurn: Turn.Turn = {
+    id: Turn.TurnId.make("done"),
+    threadId: subagentThread.id,
+    prompt: "delegate",
+    executionRoute: executionRoute(),
+    status: "completed",
+    createdAt: 1,
+    updatedAt: 1,
+    lastCursor: options.turnLastCursor,
+  }
+  const repositories = yield* ThreadRepository.makeMemory([subagentThread])
+  const turns = yield* TurnRepository.makeMemory([doneTurn])
+  const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
+  const transcripts = Context.get(yield* Layer.build(TranscriptRepository.memoryLayer), TranscriptRepository.Service)
+  yield* transcripts.replace(doneTurn, options.storedTree)
+  const inspection = (turnId: string): ExecutionBackend.Inspection =>
+    turnId === "done"
+      ? {
+          turnId,
+          status: "completed",
+          lastCursor: "done-final",
+          waits: [],
+          pendingTools: [],
+          children: [{ executionId: subagentChildId, status: "completed" }],
+        }
+      : { turnId, status: "completed", waits: [], pendingTools: [], children: [] }
+  const eventsFor = (turnId: string): ReadonlyArray<ExecutionBackend.Event> =>
+    turnId === subagentChildId ? options.childReplayEvents : []
+  const backend = ExecutionBackend.Service.of({
+    invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
+    createFanOut: () => Effect.die("unused"),
+    inspectFanOut: () => Effect.die("unused"),
+    cancelFanOut: () => Effect.die("unused"),
+    registerWorkflows: () => Effect.die("unused"),
+    startWorkflow: () => Effect.die("unused"),
+    inspectWorkflow: () => Effect.die("unused"),
+    cancelWorkflow: () => Effect.die("unused"),
+    start: () => Effect.die("unused"),
+    inspect: (turnId) => Effect.succeed(inspection(turnId)),
+    steer: () => Effect.die("unused"),
+    cancel: () => Effect.die("unused"),
+    replay: (turnId) => Effect.succeed({ turnId, status: "completed" as const, events: eventsFor(turnId) }),
+    pageEvents: (turnId, _direction, cursor) => {
+      const events = eventsFor(turnId)
+      const boundary = cursor === undefined ? -1 : events.findIndex((event) => event.cursor === cursor)
+      return Effect.succeed({
+        events: events.slice(boundary + 1),
+        hasMore: false,
+        ...(events.at(-1) === undefined ? {} : { newestCursor: events.at(-1)!.cursor }),
+      })
+    },
+    listApprovals: () => Effect.succeed([]),
+    resolveToolApproval: () => Effect.void,
+    resolvePermission: () => Effect.void,
+  })
+  const layer = Operation.productLayer({
+    repositoryLayer: Layer.succeed(ThreadRepository.Service, repositories),
+    turnRepositoryLayer: Layer.succeed(TurnRepository.Service, turns),
+    transcriptRepositoryLayer: Layer.succeed(TranscriptRepository.Service, transcripts),
+    backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
+    defaultWorkspace: "/work",
+    makeThreadId: Effect.die("unused"),
+    makeTurnId: Effect.die("unused"),
+    interactive: (_, session) =>
+      Ref.update(sessions, (values) => [...values, session]).pipe(Effect.andThen(Effect.never)),
+  })
+  const context = yield* Layer.build(layer)
+  const operation = Context.get(context, Operation.Service)
+  yield* Effect.forkChild(operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }))
+  yield* waitForSessions(sessions)
+  const session = (yield* Ref.get(sessions))[0]
+  if (session === undefined) return yield* Effect.die("Missing interactive session")
+  return { session, subagentThread, transcripts }
+})
+
+const selectionEntriesFor = (
+  session: Operation.InteractiveSession,
+  threadId: Thread.ThreadId,
+): Effect.Effect<ReadonlyArray<TranscriptRepository.Entry>, Operation.OperationUnavailable> =>
+  Effect.gen(function* () {
+    const events: Array<Operation.InteractiveEvent> = []
+    yield* collectEvents(session, events)
+    yield* session.selectThread(threadId, 1)
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const loaded = events.find((event) => event._tag === "SelectionLoaded")
+      if (loaded !== undefined) return loaded._tag === "SelectionLoaded" ? loaded.entries : []
+      yield* Effect.yieldNow
+    }
+    return []
+  })
+
+const nestedSubagentExpectations = (entries: ReadonlyArray<TranscriptRepository.Entry>) => {
+  const nested = entries.filter((entry) => entry.unit.parentId === subagentToolId)
+  const nestedTool = nested.some(
+    (entry) =>
+      entry.unit.content._tag === "Block" &&
+      entry.unit.content.block._tag === "ToolCall" &&
+      entry.unit.content.block.name === "bash",
+  )
+  const nestedAnswer = nested.some(
+    (entry) =>
+      entry.unit.content._tag === "Entry" &&
+      entry.unit.content.role === "assistant" &&
+      entry.unit.content.text.includes("All tests pass."),
+  )
+  return { nestedTool, nestedAnswer }
+}
+
+describe("InteractiveSession subagent reload", () => {
+  it.effect("repairs a persisted subagent tree whose child transcript is empty", () =>
+    Effect.gen(function* () {
+      const rootProjection = Transcript.project("done", "delegate", subagentRootEvents)
+      const brokenTree = Transcript.withNestedProjections(rootProjection, [
+        { parentId: subagentToolId, projection: Transcript.empty(subagentChildId, "") },
+      ])
+      const { session, subagentThread } = yield* makeSubagentReloadHarness({
+        storedTree: { ...brokenTree, pricingVersion: Transcript.pricingVersion },
+        turnLastCursor: "done-final",
+        childReplayEvents: subagentChildEvents,
+      })
+      const entries = yield* selectionEntriesFor(session, subagentThread.id)
+      const { nestedTool, nestedAnswer } = nestedSubagentExpectations(entries)
+      expect(nestedTool).toBe(true)
+      expect(nestedAnswer).toBe(true)
+    }),
+  )
+
+  it.effect("keeps persisted subagent transcripts when the backend can no longer replay the child", () =>
+    Effect.gen(function* () {
+      const rootProjection = Transcript.project("done", "delegate", subagentRootEvents)
+      const linkedRoot: Transcript.Projection = {
+        ...rootProjection,
+        units: rootProjection.units.flatMap((unit) => {
+          if (unit.content._tag !== "Block") return [unit]
+          if (unit.content.block._tag === "ChildAgent") return []
+          if (unit.content.block._tag === "ToolCall" && unit.content.block.id === subagentToolId)
+            return [
+              {
+                ...unit,
+                content: {
+                  _tag: "Block" as const,
+                  block: { ...unit.content.block, childId: subagentChildId, status: "complete" as const },
+                },
+              },
+            ]
+          return [unit]
+        }),
+      }
+      const childProjection = Transcript.project(subagentChildId, "", subagentChildEvents)
+      const richTree = Transcript.withNestedProjections(linkedRoot, [
+        { parentId: subagentToolId, projection: childProjection },
+      ])
+      const { session, subagentThread } = yield* makeSubagentReloadHarness({
+        storedTree: { ...richTree, pricingVersion: Transcript.pricingVersion },
+        turnLastCursor: "done-later",
+        childReplayEvents: [],
+      })
+      const entries = yield* selectionEntriesFor(session, subagentThread.id)
+      const { nestedTool, nestedAnswer } = nestedSubagentExpectations(entries)
+      expect(nestedTool).toBe(true)
+      expect(nestedAnswer).toBe(true)
+    }),
+  )
+})

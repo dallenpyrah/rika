@@ -506,6 +506,54 @@ describe("Transcript projection", () => {
     })
   })
 
+  it("links a child spawn with a percent-encoded parent execution id to the requesting tool", () => {
+    const childId = "child:execution%3Aturn-a:call_1"
+    const projection = project("turn-a", "delegate", [
+      {
+        cursor: "call",
+        sequence: 1,
+        type: "tool.call.requested",
+        createdAt: 1,
+        data: {
+          tool_call_id: "call_1",
+          tool_name: "oracle",
+          input: { prompt: "Review the plan." },
+        },
+      },
+      {
+        cursor: `execution:turn-a:child:${childId}`,
+        sequence: 2,
+        type: "child_run.spawned",
+        createdAt: 2,
+        data: { child_execution_id: childId, preset_name: "Oracle" },
+      },
+      {
+        cursor: `execution:turn-a:child:${childId}:completed`,
+        sequence: 3,
+        type: "child_run.event",
+        createdAt: 3,
+        data: { child_execution_id: childId, status: "completed" },
+      },
+    ])
+
+    expect(projection.units).toHaveLength(2)
+    expect(projection.units[1]).toMatchObject({
+      key: "tool:turn-a:call_1",
+      content: {
+        _tag: "Block",
+        block: {
+          _tag: "ToolCall",
+          childId,
+          status: "complete",
+          presentation: { activeLabel: "Oracle exploring", completeLabel: "Oracle has spoken" },
+        },
+      },
+    })
+    expect(
+      projection.units.some((unit) => unit.content._tag === "Block" && unit.content.block._tag === "ChildAgent"),
+    ).toBe(false)
+  })
+
   it("keeps a process wait as its own row and names it from the parent command", () => {
     const projection = project("turn-a", "run tests", [
       {

@@ -246,22 +246,6 @@ const toolAt = (projection: Projection, id: string): Extract<Block, { _tag: "Too
   return content?._tag === "Block" && content.block._tag === "ToolCall" ? content.block : undefined
 }
 
-const childToolAt = (projection: Projection, childId: string): Extract<Block, { _tag: "ToolCall" }> | undefined =>
-  projection.units
-    .map((candidate) => (candidate.content._tag === "Block" ? candidate.content.block : undefined))
-    .find(
-      (block): block is Extract<Block, { readonly _tag: "ToolCall" }> =>
-        block?._tag === "ToolCall" &&
-        block.childId !== undefined &&
-        executionKey(block.childId) === executionKey(childId),
-    )
-
-const childToolCallId = (childId: string): string | undefined => {
-  const marker = ":child:"
-  const index = childId.lastIndexOf(marker)
-  return index < 0 ? undefined : childId.slice(index + marker.length)
-}
-
 const durableToolCallPrefix = /^rika:([^:]+):/
 
 const providerCallId = (id: string): string => {
@@ -279,14 +263,16 @@ const providerCallId = (id: string): string => {
 
 const childScopeAndCallId = (
   childExecutionId: string,
-): { readonly scope: string; readonly callId: string } | undefined => {
+): { readonly scope: string; readonly callId: string; readonly rawCallId: string } | undefined => {
   if (childExecutionId.startsWith("child:")) {
     const separator = childExecutionId.indexOf(":", "child:".length)
     if (separator < 0) return undefined
     try {
+      const rawCallId = childExecutionId.slice(separator + 1)
       return {
         scope: executionKey(decodeURIComponent(childExecutionId.slice("child:".length, separator))),
-        callId: providerCallId(childExecutionId.slice(separator + 1)),
+        callId: providerCallId(rawCallId),
+        rawCallId,
       }
     } catch {
       return undefined
@@ -295,9 +281,9 @@ const childScopeAndCallId = (
   const key = executionKey(childExecutionId)
   const marker = ":child:"
   const index = key.lastIndexOf(marker)
-  return index < 0
-    ? undefined
-    : { scope: key.slice(0, index), callId: providerCallId(key.slice(index + marker.length)) }
+  if (index < 0) return undefined
+  const rawCallId = key.slice(index + marker.length)
+  return { scope: key.slice(0, index), callId: providerCallId(rawCallId), rawCallId }
 }
 
 const candidateCallId = (candidate: ChildParentCandidate): string => {
@@ -321,20 +307,52 @@ export const childParentMatch: {
   <A extends ChildParentCandidate>(candidates: Iterable<A>, childExecutionId: string): A | undefined => {
     const childKey = executionKey(childExecutionId)
     const list = [...candidates]
-    for (const candidate of list)
-      if (candidate.childId !== undefined && executionKey(candidate.childId) === childKey) return candidate
+    const linked = list.filter(
+      (candidate) => candidate.childId !== undefined && executionKey(candidate.childId) === childKey,
+    )
+    const requesting = linked.find((candidate) => executionKey(candidate.id) !== childKey)
+    if (requesting !== undefined) return requesting
     const parsed = childScopeAndCallId(childExecutionId)
-    if (parsed === undefined) return undefined
-    for (const candidate of list)
-      if (
-        candidate.family === "agent" &&
-        executionKey(candidate.scope) === parsed.scope &&
-        candidateCallId(candidate) === parsed.callId
-      )
-        return candidate
-    return undefined
+    if (parsed !== undefined)
+      for (const candidate of list)
+        if (
+          candidate.family === "agent" &&
+          executionKey(candidate.scope) === parsed.scope &&
+          candidateCallId(candidate) === parsed.callId
+        )
+          return candidate
+    return linked[0]
   },
 )
+
+const toolCandidates = (projection: Projection) =>
+  projection.units.flatMap((unit) =>
+    unit.content._tag === "Block" && unit.content.block._tag === "ToolCall"
+      ? [
+          {
+            id: unit.content.block.id,
+            scope: unit.turnId,
+            childId: unit.content.block.childId,
+            family: unit.content.block.presentation.family,
+            block: unit.content.block,
+          },
+        ]
+      : [],
+  )
+
+const linkedToolFor = (
+  projection: Projection,
+  turnId: string,
+  childId: string,
+  correlatedToolId: string,
+): Extract<Block, { _tag: "ToolCall" }> | undefined => {
+  const correlated = correlatedToolId.length > 0 ? toolAt(projection, eventId(turnId, correlatedToolId)) : undefined
+  if (correlated !== undefined) return correlated
+  const matched = childParentMatch(toolCandidates(projection), childId)?.block
+  if (matched !== undefined) return matched
+  const parsed = childScopeAndCallId(childId)
+  return parsed === undefined ? undefined : toolAt(projection, eventId(turnId, parsed.rawCallId))
+}
 
 const agentPresentationFor = (name: string): Presentation => {
   const profile = name.toLowerCase()
@@ -363,7 +381,7 @@ export const ensureChildTool: {
     childExecutionId: string,
     name: string,
   ): { readonly projection: Projection; readonly tool: Extract<Block, { _tag: "ToolCall" }> } => {
-    const existing = childToolAt(projection, childExecutionId)
+    const existing = childParentMatch(toolCandidates(projection), childExecutionId)?.block
     if (existing !== undefined) return { projection, tool: existing }
     const id = executionKey(childExecutionId)
     const block: Extract<Block, { _tag: "ToolCall" }> = {
@@ -501,12 +519,7 @@ const applyChild = (projection: Projection, turnId: string, event: SourceEvent):
     event.cursor,
   )
   const correlatedToolId = string(value.tool_call_id ?? value.parent_tool_call_id)
-  const encodedToolId = childToolCallId(childId)
-  const linkedTool =
-    correlatedToolId.length > 0
-      ? toolAt(projection, eventId(turnId, correlatedToolId))
-      : (childToolAt(projection, childId) ??
-        (encodedToolId === undefined ? undefined : toolAt(projection, eventId(turnId, encodedToolId))))
+  const linkedTool = linkedToolFor(projection, turnId, childId, correlatedToolId)
   if (linkedTool !== undefined) {
     const id = linkedTool.id
     const childState = childStatus(event, value)
@@ -806,10 +819,7 @@ const settleChildImpl = (
   sequence: number,
 ): Projection => {
   const turnId = projection.units[0]?.turnId ?? ""
-  const encodedToolId = childToolCallId(childId)
-  const linkedTool =
-    childToolAt(projection, childId) ??
-    (encodedToolId === undefined ? undefined : toolAt(projection, eventId(turnId, encodedToolId)))
+  const linkedTool = linkedToolFor(projection, turnId, childId, "")
   const settledTool =
     linkedTool === undefined || linkedTool.status !== "running"
       ? projection
