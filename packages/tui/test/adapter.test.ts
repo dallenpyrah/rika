@@ -656,7 +656,7 @@ describe("Surface", () => {
 
     const bounded = boundedTranscriptModel(state)
 
-    expect(bounded.items).toHaveLength(maxMountedTranscriptEntries)
+    expect(bounded.items).toHaveLength(206)
     expect(bounded.blocks[0]).toMatchObject({ _tag: "ToolCall", id: "agent" })
     expect(bounded.items[0]).toMatchObject({ _tag: "Block", index: 0, id: "tool:agent" })
   })
@@ -688,6 +688,7 @@ describe("Surface", () => {
           ? { _tag: "Block" as const, index, id: `tool:${entry.id}`, turnId: "turn" }
           : { _tag: "Block" as const, index, id: `tool:${entry.id}`, turnId: "child", parentId: entry.parentId },
       ),
+      expandedRowKeys: ["tool:agent", "tool:nested"],
     })
 
     const bounded = boundedTranscriptModel(state)

@@ -3,7 +3,13 @@ import { createTestRenderer, ManualClock } from "@opentui/core/testing"
 import { expect, test } from "vitest"
 import { Data, Effect } from "effect"
 import stringWidth from "string-width"
-import { Surface, boundedTranscriptModel, maxMountedTranscriptEntries, maxMountedTranscriptRows } from "../src/adapter"
+import {
+  Surface,
+  boundedTranscriptModel,
+  maxBoundedTranscriptItems,
+  maxMountedTranscriptEntries,
+  maxMountedTranscriptRows,
+} from "../src/adapter"
 import { colors } from "../src/theme"
 import {
   applyQueueDelta,
@@ -458,6 +464,97 @@ const giantSubagentModel = (childCount: number): Model => {
     scrollFollow: false,
   }
 }
+
+const collapsedSubagentModel = (answerCount: number, childCount: number): Model => {
+  const entries = Array.from({ length: answerCount }, (_, index) => ({
+    role: "assistant" as const,
+    text: `answer ${index}`,
+    turnId: "turn-1",
+  }))
+  const rootBlock = {
+    _tag: "ToolCall" as const,
+    id: "root-tool",
+    name: "task",
+    input: "{}",
+    status: "running" as const,
+    presentation: {
+      family: "agent" as const,
+      action: "task",
+      activeLabel: "Subagent working",
+      completeLabel: "Subagent finished",
+    },
+    detail: "delegated task",
+    files: [],
+  }
+  const childBlocks = Array.from({ length: childCount }, (_, index) => ({
+    _tag: "ToolCall" as const,
+    id: `child-${index}`,
+    name: "bash",
+    input: "{}",
+    status: "complete" as const,
+    presentation: {
+      family: "shell" as const,
+      action: "shell",
+      activeLabel: "Running",
+      completeLabel: "Ran",
+    },
+    detail: `cmd-${index}`,
+    files: [],
+  }))
+  const blocks = [rootBlock, ...childBlocks]
+  const items = [
+    ...entries.map((_, index) => ({
+      _tag: "Entry" as const,
+      index,
+      id: `answer-${index}`,
+      turnId: "turn-1",
+    })),
+    ...blocks.map((block, index) => ({
+      _tag: "Block" as const,
+      index,
+      id: `block-${block.id}`,
+      turnId: "turn-1",
+      ...(index === 0 ? {} : { parentId: "root-tool" }),
+    })),
+  ]
+  return {
+    ...initial("/work", "high"),
+    entries,
+    blocks,
+    items,
+    expandedRowKeys: [],
+    scrollFollow: true,
+  }
+}
+
+test("bounded transcript keeps visible entries when a collapsed subagent overflows the entry budget", () => {
+  const model = collapsedSubagentModel(30, maxMountedTranscriptEntries + 60)
+  const bounded = boundedTranscriptModel(model)
+  expect(bounded.items.length).toBeLessThanOrEqual(maxBoundedTranscriptItems)
+  expect(bounded.items.some((item) => item._tag === "Entry")).toBe(true)
+})
+
+test("keeps the older transcript visible while a collapsed subagent streams children", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(collapsedSubagentModel(30, 150))
+        yield* openTui(() => setup.flush())
+        expect(setup.captureCharFrame()).toContain("answer 29")
+
+        surface.update(collapsedSubagentModel(30, 260))
+        yield* openTui(() => setup.flush())
+        const frame = setup.captureCharFrame()
+        expect(frame).toContain("Subagent working")
+        expect(frame).toContain("answer 29")
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
 
 test("keeps mounted renderables bounded inside one giant expanded subagent tree", () =>
   Effect.runPromise(

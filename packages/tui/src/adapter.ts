@@ -596,6 +596,8 @@ export interface UnitLineRange {
 
 export const maxMountedTranscriptEntries = 200
 
+export const maxBoundedTranscriptItems = 2000
+
 export { maxMountedTranscriptRows } from "./transcript-presenter"
 
 type BoundedTranscriptModel = Omit<Model, "items"> & { readonly items: ReadonlyArray<TranscriptItem> }
@@ -682,17 +684,45 @@ export const boundedTranscriptModel: {
       }
       members.push(position)
     }
+    const expandedRows = new Set(model.expandedRowKeys)
+    const visibleByPosition = new Map<number, boolean>()
+    const isVisiblePosition = (position: number): boolean => {
+      const cached = visibleByPosition.get(position)
+      if (cached !== undefined) return cached
+      let visible = true
+      const seen = new Set<number>()
+      let current = position
+      while (!seen.has(current)) {
+        seen.add(current)
+        const parentId = allItems[current]?.parentId
+        if (parentId === undefined) break
+        if (!expandedRows.has(`tool:${parentId}`)) {
+          visible = false
+          break
+        }
+        const parent = itemPositionByBlockId.get(parentId)
+        if (parent === undefined) break
+        current = parent
+      }
+      visibleByPosition.set(position, visible)
+      return visible
+    }
     const orderedRoots = unitRoots.toSorted((left, right) => left - right)
     const selectedPositions = new Set<number>()
+    let visibleSelected = 0
     for (let unitIndex = orderedRoots.length - 1; unitIndex >= 0; unitIndex -= 1) {
       const members = unitMembers.get(orderedRoots[unitIndex]!)!
-      const remaining = limit - selectedPositions.size
-      if (remaining <= 0) break
-      if (members.length <= remaining) {
+      const remainingVisible = limit - visibleSelected
+      const remainingMounted = maxBoundedTranscriptItems - selectedPositions.size
+      if (remainingVisible <= 0 || remainingMounted <= 0) break
+      const visibleMembers = members.reduce((count, position) => count + (isVisiblePosition(position) ? 1 : 0), 0)
+      if (visibleMembers <= remainingVisible && members.length <= remainingMounted) {
         for (const position of members) selectedPositions.add(position)
+        visibleSelected += visibleMembers
         continue
       }
       const required = new Set<number>()
+      let requiredVisible = 0
       const ancestorsOf = (position: number): ReadonlyArray<number> => {
         const ancestors: Array<number> = []
         const seen = new Set<number>()
@@ -708,14 +738,21 @@ export const boundedTranscriptModel: {
         }
         return ancestors
       }
-      for (let position = members.length - 1; position >= 0 && required.size < remaining; position -= 1) {
+      for (let position = members.length - 1; position >= 0; position -= 1) {
         const member = members[position]!
         const additions = [...ancestorsOf(member), member].filter((candidate) => !required.has(candidate))
-        if (required.size + additions.length > remaining) break
+        if (required.size + additions.length > remainingMounted) break
+        const additionsVisible = additions.reduce(
+          (count, candidate) => count + (isVisiblePosition(candidate) ? 1 : 0),
+          0,
+        )
+        if (requiredVisible + additionsVisible > remainingVisible) break
         for (const addition of additions) required.add(addition)
+        requiredVisible += additionsVisible
       }
       for (const position of required) selectedPositions.add(position)
-      break
+      visibleSelected += requiredVisible
+      if (requiredVisible < visibleMembers) break
     }
     const source = [...selectedPositions].toSorted((left, right) => left - right).map((position) => allItems[position]!)
     const entries: Array<Model["entries"][number]> = []
