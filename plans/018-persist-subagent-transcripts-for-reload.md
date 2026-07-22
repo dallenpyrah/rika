@@ -151,6 +151,22 @@ only complexity.
    backfill fires for old rows (husk-only children, `childId: null` tools with
    `ChildAgent` units), re-replays from `relay.db`, attaches under the real
    tools, and removes the synthesized duplicates.
+4. **The root cause of the empty replays was the lazy backend facade**
+   (`apps/rika/src/main.ts`): it dropped the optional `reference` parameter on
+   `replay`/`inspect`/`cancel`/`steer`/`listApprovals` and did not expose
+   `pageEvents`, so child ids were re-prefixed to `execution:child:...` and
+   every child replay returned zero events in the installed app — while tests,
+   which wire the backend without the facade, stayed green. The facade now
+   forwards the full contract and a regression test
+   (`apps/rika/test/lazy-backend.test.ts`) drives it against a recording
+   backend.
+5. **Backfill runs off the selection load.** With real replays restored, a
+   first load after upgrade would otherwise replay thousands of events before
+   `SelectionLoaded` could dispatch. `projectTurnPage` now defers backfill and
+   terminal-turn healing to a forked session task; when the backfill writes,
+   it dispatches `TranscriptResyncRequired` and the client re-selects.
+   `recordedChildIds` only considers root-level units so a healed tree with
+   unreplayable grandchildren cannot re-trigger the backfill forever.
 
 The `execution.child.replay_empty` diagnostic answers the one open question
 (why a resident-start replay returned zero events for children whose events

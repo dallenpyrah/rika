@@ -1327,13 +1327,25 @@ const selectionEntriesFor = (
   Effect.gen(function* () {
     const events: Array<Operation.InteractiveEvent> = []
     yield* collectEvents(session, events)
-    yield* session.selectThread(threadId, 1)
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      const loaded = events.find((event) => event._tag === "SelectionLoaded")
-      if (loaded !== undefined) return loaded._tag === "SelectionLoaded" ? loaded.entries : []
+    let epoch = 1
+    yield* session.selectThread(threadId, epoch)
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const resync = events.findLast(
+        (event) => event._tag === "TranscriptResyncRequired" && event.selectionEpoch === epoch,
+      )
+      if (resync !== undefined) {
+        epoch += 1
+        yield* session.selectThread(threadId, epoch)
+      }
+      const loaded = events.findLast(
+        (event) => event._tag === "SelectionLoaded" && event.selectionEpoch === epoch,
+      )
+      if (loaded !== undefined && resync === undefined && attempt > 100)
+        return loaded._tag === "SelectionLoaded" ? loaded.entries : []
       yield* Effect.yieldNow
     }
-    return []
+    const loaded = events.findLast((event) => event._tag === "SelectionLoaded")
+    return loaded?._tag === "SelectionLoaded" ? loaded.entries : []
   })
 
 const nestedSubagentExpectations = (entries: ReadonlyArray<TranscriptRepository.Entry>) => {
