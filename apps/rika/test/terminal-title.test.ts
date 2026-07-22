@@ -1,5 +1,7 @@
 import { expect, test } from "vitest"
-import { terminalTitleSequence } from "../src/main"
+import { internal } from "../src/terminal-title"
+
+const { terminalTitleSequence } = internal
 
 test("formats safe terminal titles with the active thread and compact workspace", () => {
   expect(terminalTitleSequence("Prompt\u0007\u001b]0;spoof\n title", "/Users/rika/project")).toBe(

@@ -5,18 +5,21 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ViewState } from "@rika/tui"
 import {
-  defaultOpenArguments,
+  ClipboardExtractionError,
   initialSubmitAction,
   imagePasteBlockedNotice,
   materializePromptParts,
-  parseChangedFiles,
   pasteClipboardPng,
   pastedImagePath,
   persistPastedImage,
+} from "../src/prompt-attachments"
+import { resolveWorkspaceFile } from "../src/main"
+import {
+  defaultOpenArguments,
+  parseChangedFiles,
   readChangedFiles,
   refreshChangedFilesOn,
-  resolveWorkspaceFile,
-} from "../src/main"
+} from "../src/workspace-actions"
 
 class TestFailure extends Data.TaggedError("TestFailure")<{ readonly operation: string; readonly cause: unknown }> {}
 
@@ -380,7 +383,10 @@ test("extracts a clipboard image in a fresh workspace with the path passed outsi
         (script, destination) => {
           receivedScript = script
           receivedPath = destination
-          return fileSystem.writeFile(destination, Uint8Array.from([1, 2, 3])).pipe(Effect.as(0))
+          return fileSystem.writeFile(destination, Uint8Array.from([1, 2, 3])).pipe(
+            Effect.as(0),
+            Effect.mapError((error) => ClipboardExtractionError.make({ message: error.message })),
+          )
         },
       )
       expect(relative).toBe(".rika/pasted/paste-42.png")
@@ -443,7 +449,11 @@ test.each([
       const relative = yield* pasteClipboardPng(
         root,
         () => 7,
-        (_script, destination) => fileSystem.writeFile(destination, output).pipe(Effect.as(exit)),
+        (_script, destination) =>
+          fileSystem.writeFile(destination, output).pipe(
+            Effect.as(exit),
+            Effect.mapError((error) => ClipboardExtractionError.make({ message: error.message })),
+          ),
       )
       expect(relative).toBeUndefined()
       expect(yield* fileSystem.exists(absolute)).toBe(false)
@@ -461,7 +471,7 @@ test("removes clipboard output when extraction throws", () =>
       const relative = yield* pasteClipboardPng(
         root,
         () => 9,
-        () => Effect.fail(new TestFailure({ operation: "extract clipboard", cause: "unavailable" })),
+        () => Effect.fail(ClipboardExtractionError.make({ message: "unavailable" })),
       )
       expect(relative).toBeUndefined()
       expect(yield* fileSystem.exists(absolute)).toBe(false)

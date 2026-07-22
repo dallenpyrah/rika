@@ -70,7 +70,7 @@ test(
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Cancel a process tool.\r"),
-        Scene.action.writeAfter("bun -e", "\u0003", 100),
+        Scene.action.writeAfterDelay("\u0003", 1_000),
         Scene.action.writeAfter("cancelled", "\u0003", 100),
         Scene.action.writeAfterDelay("\u0003", 1_000),
       ],

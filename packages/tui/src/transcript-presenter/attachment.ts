@@ -1,5 +1,5 @@
 import { childParentMatch, type Unit } from "@rika/transcript"
-import type { Model, TranscriptBlock, TranscriptItem } from "../view-state"
+import type { Model, TranscriptBlock, TranscriptItem } from "../view-state/model"
 import { projectChildUnits } from "./projection"
 
 export interface ChildProjection {
@@ -30,7 +30,7 @@ const childParent = (
   return childParentMatch(candidates, turnId)?.tool
 }
 
-export const attachChildProjections = (
+const attachChildProjections = (
   model: Model,
   replayTurns: { readonly has: (turnId: string) => boolean },
   availableProjections: ReadonlyMap<string, ChildProjection>,
@@ -61,3 +61,5 @@ export const attachChildProjections = (
   }
   return { model: next, attachments: settledAttachments, unattached }
 }
+
+export const internal = { attachChildProjections }

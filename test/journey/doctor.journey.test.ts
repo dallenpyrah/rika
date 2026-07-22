@@ -13,7 +13,7 @@ const DoctorReport = Schema.fromJsonString(
       global: Status,
       workspace: Status,
     }),
-    credentials: Schema.Struct({ parallel: Status }),
+    credentials: Schema.Struct({ webSearch: Schema.Record(Schema.String, Status) }),
     model: Schema.Struct({
       route: Schema.Struct({ alias: Schema.String, providerId: Schema.String, model: Schema.String }),
       apiKey: CredentialStatus,
@@ -107,10 +107,10 @@ describe("packaged local installation doctor", () => {
             expect(report.config.workspace).toBe("present")
             expect(report.config.diagnostics.map((diagnostic) => diagnostic.path)).toEqual([
               "providers",
-              "parallelApiKey",
+              "webSearchCredentials.parallel",
               "providerCredentials.DOCTOR_MODEL_KEY",
             ])
-            expect(report.credentials.parallel).toBe("present")
+            expect(report.credentials.webSearch.parallel).toBe("present")
             expect(report.model).toMatchObject({
               route: { alias: "terra", providerId: "openai", model: "gpt-5.6-terra" },
               apiKey: "present",

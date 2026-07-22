@@ -40,9 +40,11 @@ const totalInput = (
   uncached: number | undefined,
   cacheRead: number | undefined,
   cacheWrite: number | undefined,
-): number | undefined => total ?? (uncached !== undefined && cacheRead !== undefined && cacheWrite !== undefined
-  ? uncached + cacheRead + cacheWrite
-  : undefined)
+): number | undefined =>
+  total ??
+  (uncached !== undefined && cacheRead !== undefined && cacheWrite !== undefined
+    ? uncached + cacheRead + cacheWrite
+    : undefined)
 
 export const usageCostUsd = (value: Record<string, unknown>): number | undefined => {
   for (const key of ["cost_usd", "costUsd"]) {
@@ -64,10 +66,7 @@ export const usageCostUsd = (value: Record<string, unknown>): number | undefined
   const cacheRead = token(value, "input_tokens_cache_read")
   const cacheWrite = token(value, "input_tokens_cache_write")
   const output = token(value, "output_tokens")
-  const accountedInput = [reportedUncached, cacheRead, cacheWrite].reduce<number>(
-    (sum, count) => sum + (count ?? 0),
-    0,
-  )
+  const accountedInput = [reportedUncached, cacheRead, cacheWrite].reduce<number>((sum, count) => sum + (count ?? 0), 0)
   if (input !== undefined && accountedInput > input) return undefined
   if (
     input !== undefined &&
@@ -99,7 +98,6 @@ export const usageCostUsd = (value: Record<string, unknown>): number | undefined
   if (uncached === undefined && cacheRead === undefined && output === undefined) return undefined
 
   return (
-    ((uncached ?? 0) * cost.input + (cacheRead ?? 0) * (cost.cache_read ?? 0) + (output ?? 0) * cost.output) /
-    1_000_000
+    ((uncached ?? 0) * cost.input + (cacheRead ?? 0) * (cost.cache_read ?? 0) + (output ?? 0) * cost.output) / 1_000_000
   )
 }

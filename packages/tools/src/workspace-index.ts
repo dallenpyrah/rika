@@ -1,4 +1,3 @@
-import { FileFinder } from "@ff-labs/fff-node"
 import type {
   FileFinderApi,
   GrepOptions,
@@ -7,7 +6,7 @@ import type {
   SearchOptions,
   SearchResult,
 } from "@ff-labs/fff-node"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Function, Layer, Path, Schema } from "effect"
 
 export interface GlobOptions {
   readonly maxThreads?: number
@@ -45,16 +44,40 @@ const call = <A>(operation: Operation, evaluate: () => FffResult<A>) =>
     Effect.flatMap((result) => unwrap(operation, result)),
   )
 
+type FffModule = typeof import("@ff-labs/fff-node")
+
+const importFffModule = (specifier: string) =>
+  Effect.tryPromise({
+    try: () => import(specifier) as Promise<FffModule>,
+    catch: (cause) => indexError("initialize", cause),
+  })
+
+const loadFileFinder = Effect.gen(function* () {
+  const path = yield* Path.Path
+  const modulePath = path.join(
+    path.dirname(process.execPath),
+    "node_modules",
+    "@ff-labs",
+    "fff-node",
+    "dist",
+    "src",
+    "index.js",
+  )
+  const moduleUrl = yield* path.toFileUrl(modulePath).pipe(Effect.mapError((cause) => indexError("initialize", cause)))
+  return yield* importFffModule(moduleUrl.href).pipe(Effect.catch(() => importFffModule("@ff-labs/fff-node")))
+})
+
 const fromFinder = (finder: FileFinderApi): Interface => ({
   fileSearch: (query, options) => call("fileSearch", () => finder.fileSearch(query, options)),
   glob: (pattern, options) => call("glob", () => finder.glob(pattern, options)),
   grep: (query, options) => call("grep", () => finder.grep(query, options)),
 })
 
-export const layer = (workspace: string, scanTimeoutMillis = 10_000) =>
+const makeLayer = (workspace: string, scanTimeoutMillis: number) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
+      const { FileFinder } = yield* loadFileFinder
       const finder = yield* Effect.acquireRelease(
         call("initialize", () => FileFinder.create({ basePath: workspace, aiMode: true })),
         (acquired) => Effect.sync(() => acquired.destroy()).pipe(Effect.ignore),
@@ -63,10 +86,18 @@ export const layer = (workspace: string, scanTimeoutMillis = 10_000) =>
         try: () => finder.waitForScan(scanTimeoutMillis),
         catch: (cause) => indexError("scan", cause),
       }).pipe(Effect.flatMap((result) => unwrap("scan", result)))
-      if (!scanned)
-        return yield* Effect.fail(indexError("scan", `Initial workspace scan timed out after ${scanTimeoutMillis}ms`))
+      if (!scanned) return yield* indexError("scan", `Initial workspace scan timed out after ${scanTimeoutMillis}ms`)
       return Service.of(fromFinder(finder))
     }),
   )
+
+export const layer: {
+  (workspace: string): Layer.Layer<Service, WorkspaceIndexError>
+  (scanTimeoutMillis: number): (workspace: string) => Layer.Layer<Service, WorkspaceIndexError>
+  (workspace: string, scanTimeoutMillis: number): Layer.Layer<Service, WorkspaceIndexError>
+} = Function.dual(
+  (args) => args.length === 1 && typeof args[0] === "string",
+  (workspace: string, scanTimeoutMillis = 10_000) => makeLayer(workspace, scanTimeoutMillis),
+)
 
 export const testLayer = (implementation: Interface) => Layer.succeed(Service, Service.of(implementation))

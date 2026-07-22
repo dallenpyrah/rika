@@ -11,7 +11,7 @@ import { MediaView, ReadWebPage, Runtime as ToolRuntime, WebSearch } from "@rika
 import { ViewState } from "@rika/tui"
 import { Surface } from "@rika/tui/adapter"
 import { expect, test } from "vitest"
-import { Clock, Config, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue } from "effect"
+import { Clock, Config, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Schema } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import {
   interruptAndClearTrackedFiber,
@@ -19,7 +19,11 @@ import {
   refreshThreadsOnSwitcherOpen,
   settleTuiInitialization,
   tuiSignalExitCode,
-} from "../src/main"
+} from "../src/tui-lifecycle"
+
+class ShellToolRuntimeError extends Schema.TaggedErrorClass<ShellToolRuntimeError>()("OperationError", {
+  message: Schema.String,
+}) {}
 
 test("maps TUI signals to numeric process exit codes", () => {
   expect(tuiSignalExitCode("SIGINT")).toBe(130)
@@ -178,6 +182,9 @@ test("drives bypassed recorded and incognito shell commands through Operation an
         backendLayer: Layer.succeed(ExecutionBackend.Service, backend),
         toolRuntimeLayer: (directory) =>
           ToolRuntime.layer(directory).pipe(
+            Layer.catchCause((cause) =>
+              Layer.effectContext(Effect.fail(ShellToolRuntimeError.make({ message: String(cause) }))),
+            ),
             Layer.provide(
               MediaView.analyzerTestLayer(() =>
                 Effect.fail(MediaView.MediaAnalysisError.make({ message: "Media analysis is unavailable" })),

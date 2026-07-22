@@ -2,7 +2,7 @@ import * as BunServices from "@effect/platform-bun/BunServices"
 import { TestModel } from "@batonfx/test"
 import { Catalog, Runtime, ThreadTools } from "@rika/tools"
 import { expect, test } from "vitest"
-import { Effect, FileSystem, Layer, Schema } from "effect"
+import { Effect, FileSystem, Layer, Redacted, Schema } from "effect"
 import * as ExecutionBackend from "../src/execution-contract"
 import * as RelayExecutionBackend from "../src/execution-backend"
 import { start } from "./current-execution-route"
@@ -68,6 +68,7 @@ for (const [name, parameters, malformedField] of cases) {
           toolRuntimeLayer: runtimeLayer,
           toolNeedsApproval: () => false,
           permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
+          webSearchCredentials: { parallel: Redacted.make("test") },
         })
         const backendContext = yield* Layer.build(backendLayer)
         return yield* Effect.gen(function* () {
@@ -140,6 +141,7 @@ for (const [name, parameters, malformedField] of cases) {
                     toolRuntimeLayer: Runtime.testLayer(() => Effect.succeed({ text: "unexpected", truncated: false })),
                     toolNeedsApproval: () => false,
                     permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
+                    webSearchCredentials: { parallel: Redacted.make("test") },
                   }),
                 )
                 return yield* Effect.gen(function* () {

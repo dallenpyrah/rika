@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Function, Schema } from "effect"
 
 export const Permission = Schema.Literals(["allow", "ask"])
 export type Permission = typeof Permission.Type
@@ -51,11 +51,21 @@ export interface Registration {
   readonly policy: Policy
 }
 
-export const allow = (
-  idempotency: Idempotency,
-  timeoutMillis: number,
-  outputLimit: number,
-  presentation: Presentation,
-): Policy => ({ permission: "allow", idempotency, timeoutMillis, outputLimit, presentation })
+export const allow: {
+  (timeoutMillis: number, outputLimit: number, presentation: Presentation): (idempotency: Idempotency) => Policy
+  (idempotency: Idempotency, timeoutMillis: number, outputLimit: number, presentation: Presentation): Policy
+} = Function.dual(
+  4,
+  (idempotency: Idempotency, timeoutMillis: number, outputLimit: number, presentation: Presentation) => ({
+    permission: "allow",
+    idempotency,
+    timeoutMillis,
+    outputLimit,
+    presentation,
+  }),
+)
 
-export const register = (tool: RegisteredTool, policy: Policy): Registration => ({ tool, policy })
+export const register: {
+  (policy: Policy): (tool: RegisteredTool) => Registration
+  (tool: RegisteredTool, policy: Policy): Registration
+} = Function.dual(2, (tool: RegisteredTool, policy: Policy): Registration => ({ tool, policy }))

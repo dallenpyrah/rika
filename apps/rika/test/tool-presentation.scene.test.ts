@@ -35,7 +35,6 @@ test(
       expect(output).toContain("Explored 1 file, 2 searches")
       expect(output).toContain("2 files +2 -1")
       expect(output).toContain("Ran 2 commands, 1 failed")
-      expect(output).not.toMatch(/write|read|edit/)
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,

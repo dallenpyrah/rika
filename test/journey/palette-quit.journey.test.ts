@@ -1,6 +1,5 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, test } from "vitest"
-import { fileURLToPath } from "node:url"
 import { Effect, FileSystem, Path, Schema } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
@@ -18,7 +17,7 @@ const program = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-  const directory = fileURLToPath(new URL(".", import.meta.url))
+  const directory = yield* path.fromFileUrl(new URL(".", import.meta.url))
   const root = path.resolve(directory, "../..")
   const kernel = (yield* spawner.string(ChildProcess.make("uname", ["-s"]))).trim().toLowerCase()
   const machine = (yield* spawner.string(ChildProcess.make("uname", ["-m"]))).trim()

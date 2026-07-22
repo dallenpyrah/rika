@@ -8,7 +8,7 @@ const webp = Uint8Array.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x
 test(
   "preserves dropped, bracketed, and file URL images in order through submission and durable replay",
   () =>
-    Scene.run({
+    Scene.runWarm({
       files: [
         { path: "assets/dropped image.png", bytes: png },
         { path: "assets/bracket.gif", bytes: gif },
@@ -29,7 +29,7 @@ test(
       expect(result.output).toContain("[Image #1]")
       expect(result.output).toContain("[Image #2]")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
-      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script"')
+      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
       expect(result.turns).toHaveLength(1)
       expect(result.turns[0]?.prompt).toBe("before [Image #1] middle [assets/bracket.gif] after [Image #2] done")
       expect(JSON.parse(result.persistedTurns[0]?.prompt_parts_json ?? "null")).toEqual([
@@ -63,7 +63,7 @@ test(
 test(
   "accepts a clipboard image and removes only an image that fails to materialize",
   () =>
-    Scene.run({
+    Scene.runWarm({
       files: [
         {
           path: "bin/osascript",
@@ -116,7 +116,7 @@ test(
       expect(result.pastedFiles).toHaveLength(1)
       expect(result.pastedFiles[0]).toMatch(/^paste-.*\.png$/)
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
-      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script"')
+      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
     }),
   45_000,
 )
@@ -124,7 +124,7 @@ test(
 test("submits an image larger than one wire frame without disconnecting the resident transport", () => {
   const bigPng = new Uint8Array(1_500_000)
   bigPng.set(png)
-  return Scene.run({
+  return Scene.runWarm({
     files: [{ path: "big.png", bytes: bigPng }],
     script: [Scene.model.text("Large image received.")],
     actions: [
@@ -145,14 +145,14 @@ test("submits an image larger than one wire frame without disconnecting the resi
       { type: "text", text: " large" },
     ])
     expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
-    expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script"')
+    expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
   })
 }, 45_000)
 
 test(
   "rejects an over-limit image with a composer message and keeps the session healthy",
   () =>
-    Scene.run({
+    Scene.runWarm({
       files: [{ path: "huge.png", bytes: new Uint8Array(6_000_000) }],
       script: [Scene.model.text("Recovered without the image.")],
       actions: [
@@ -166,7 +166,7 @@ test(
       expect(result.output).not.toContain("Resident transport disconnected")
       expect(result.turns.map((turn) => turn.prompt)).toEqual([" too big"])
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
-      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script"')
+      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
     }),
   45_000,
 )
@@ -174,9 +174,13 @@ test(
 test(
   "blocks clipboard and path images while editing a queued prompt",
   () =>
-    Scene.run({
+    Scene.runWarm({
       files: [{ path: "blocked.png", bytes: png }],
-      script: [Scene.model.text("First turn complete.", 8_000), Scene.model.text("Edited queue complete.")],
+      script: [
+        Scene.model.text("First turn complete.", 8_000),
+        Scene.model.text("Queue title"),
+        Scene.model.text("Edited queue complete."),
+      ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "hold the queue\r"),
         Scene.action.writeAfter("hold the queue", "queued text\r", 100),
@@ -194,7 +198,7 @@ test(
       expect(result.persistedTurns[1]?.prompt_parts_json).toBeNull()
       expect(result.pastedFiles).toEqual([])
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
-      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script"')
+      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
     }),
   45_000,
 )

@@ -1,8 +1,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, test } from "vitest"
 import { Database as NativeDatabase } from "bun:sqlite"
-import { fileURLToPath } from "node:url"
-import { Effect, FileSystem, Layer, Schema, Stream } from "effect"
+import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { claimStartup } from "../src/resident-startup"
 
@@ -145,6 +144,7 @@ test("reports an incompatible product database through resident startup without 
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-startup-database-" })
         const databasePath = `${root}/rika.db`
@@ -157,7 +157,7 @@ test("reports an incompatible product database through resident startup without 
         const before = yield* fs.readFile(databasePath)
         const handle = yield* spawner.spawn(
           ChildProcess.make("bun", ["src/client-main.ts", "doctor"], {
-            cwd: fileURLToPath(new URL("..", import.meta.url)),
+            cwd: yield* path.fromFileUrl(new URL("..", import.meta.url)),
             stdin: "ignore",
             stdout: "pipe",
             stderr: "pipe",

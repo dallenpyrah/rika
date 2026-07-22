@@ -1,6 +1,5 @@
 import { expect, test } from "vitest"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { fileURLToPath } from "node:url"
 import { Effect, FileSystem, Layer, Path } from "effect"
 import { captureVisuals, scenarios } from "./visual.capture"
 
@@ -16,7 +15,8 @@ test(
           const fileSystem = yield* FileSystem.FileSystem
           const path = yield* Path.Path
           const actual = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-visual-" })
-          const approved = path.join(fileURLToPath(new URL(".", import.meta.url)), "fixtures", "visual")
+          const directory = yield* path.fromFileUrl(new URL(".", import.meta.url))
+          const approved = path.join(directory, "fixtures", "visual")
           yield* captureVisuals(actual)
           const names = (yield* fileSystem.readDirectory(approved)).toSorted()
           expect((yield* fileSystem.readDirectory(actual)).toSorted()).toEqual(names)
@@ -59,7 +59,7 @@ test(
           const styledMarkdown = yield* fileSystem.readFileString(path.join(actual, "markdown.styles.json"))
           expect(styledMarkdown).toContain('"attributes": 1')
           expect(yield* fileSystem.readFileString(path.join(actual, "cancelled-subagent.frame.txt"))).toContain(
-            "⊘ Subagent cancelled ▾\n │   Wait then run the checks\n │   └ $ sleep 60 (cancelled)",
+            "⊘ Subagent cancelled ▾\n │   Wait then run the checks\n │   ├ $ sleep 60 (cancelled)\n │   │\n │   │\n │   ╰   The subagent was cancelled.",
           )
           const colorScenarios = ["mode-picker", "permission", "diff-complex", "tool-group-states"]
           const colorStyles = yield* Effect.forEach(colorScenarios, (scenario) =>

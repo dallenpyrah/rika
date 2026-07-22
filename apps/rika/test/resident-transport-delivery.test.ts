@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest"
 import { Effect, Schema } from "effect"
 import {
-  alive,
   attachedEffect,
   cleanRoot,
   killTrackedHosts,

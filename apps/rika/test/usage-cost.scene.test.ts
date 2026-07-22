@@ -2,7 +2,7 @@ import { expect, test } from "vitest"
 import { Scene } from "./scene"
 
 test(
-  "estimates token-only Relay usage in the real TUI",
+  "leaves token-only test-model usage unpriced in the real TUI",
   () =>
     Scene.run({
       script: [
@@ -16,14 +16,15 @@ test(
         Scene.action.writeAfter("Usage converted.", "\u0003", 500),
       ],
     }).then((result) => {
-      expect(result.output).toContain("$11.25")
+      expect(result.output).toContain("0.00")
+      expect(result.diagnostics).toContain('"rika.event.type":"model.usage.reported"')
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,
 )
 
 test(
-  "sums parent and child token estimates across durable replay",
+  "replays parent and child token reports without inventing test-model pricing",
   () =>
     Scene.run({
       script: [
@@ -48,7 +49,7 @@ test(
       expect(result.output).toContain("Parent usage complete.")
       expect(result.diagnostics).toContain('"rika.event.type":"model.usage.reported"')
       expect(result.childExecutions).toHaveLength(3)
-      expect(result.output).toContain("$24.13")
+      expect(result.output).toContain("$0.00")
       expect(result.diagnostics.match(/resident\.connection\.accepted/g)?.length ?? 0).toBe(2)
       expect(result.diagnostics).toContain("usage-alpha")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')

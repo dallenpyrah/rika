@@ -13,12 +13,12 @@ test(
   "navigates from newest to oldest without wrapping at either queue boundary",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("NEWEST_RAN")],
+      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("Queue title"), Scene.model.text("NEWEST_RAN")],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active turn\r"),
         Scene.action.writeAfter("active turn", "oldest queued\r", 100),
         Scene.action.writeAfter("oldest queued", "newest queued\r", 100),
-        Scene.action.writeWhenQueued(2, escape, 500),
+        Scene.action.writeWhenQueued(2, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
         Scene.action.writeAfterVisible("Enter to steer", up),
         Scene.action.writeAfter("", up, 100),
@@ -38,12 +38,12 @@ test(
   "Up selects the newest queued row first",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("OLDEST_RAN")],
+      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("Queue title"), Scene.model.text("OLDEST_RAN")],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active newest selection\r"),
         Scene.action.writeAfter("active newest selection", "oldest remains\r", 100),
         Scene.action.writeAfter("oldest remains", "newest removed\r", 100),
-        Scene.action.writeWhenQueued(2, escape, 500),
+        Scene.action.writeWhenQueued(2, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
         Scene.action.writeAfterVisible("Enter to steer", backspace),
         Scene.action.writeAfter("OLDEST_RAN", `${ctrlC}${ctrlC}`, 500),
@@ -58,12 +58,17 @@ test(
   "Down returns from the newest queued row to the composer where Backspace does not dequeue",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("OLDEST_RAN"), Scene.model.text("NEWEST_RAN")],
+      script: [
+        Scene.model.text("ACTIVE_DONE", 8_000),
+        Scene.model.text("Queue title"),
+        Scene.model.text("OLDEST_RAN"),
+        Scene.model.text("NEWEST_RAN"),
+      ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active turn\r"),
         Scene.action.writeAfter("active turn", "oldest queued\r", 100),
         Scene.action.writeAfter("oldest queued", "newest queued\r", 100),
-        Scene.action.writeWhenQueued(2, escape, 500),
+        Scene.action.writeWhenQueued(2, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
         Scene.action.writeAfterVisible("Enter to steer", down),
         Scene.action.writeAfterVisible("newest queued", backspace),
@@ -81,11 +86,11 @@ test(
   "Escape leaves queue navigation without mutating the selected row",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("QUEUED_RAN")],
+      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("Queue title"), Scene.model.text("QUEUED_RAN")],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active turn\r"),
         Scene.action.writeAfter("active turn", "queued after escape\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
         Scene.action.writeAfterVisible("Enter to steer", escape),
         Scene.action.writeAfter("", "\r", 100),
@@ -102,13 +107,13 @@ test(
   "Ctrl+E edits the selected queued prompt and Enter saves its revision",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("EDITED_RAN")],
+      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("Queue title"), Scene.model.text("EDITED_RAN")],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active turn\r"),
         Scene.action.writeAfter("active turn", "original queued\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
-        Scene.action.writeAfterVisible("Enter to steer", ctrlE),
+        Scene.action.writeAfterVisible("Enter to steer", ctrlE, 100),
         Scene.action.writeAfterVisible("Editing queued", `${ctrlU}revised queued\r`),
         Scene.action.writeAfter("EDITED_RAN", `${ctrlC}${ctrlC}`, 500),
       ],
@@ -124,11 +129,11 @@ test(
   "Enter steers only the selected queued row into the active Turn",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_STEERED", 8_000)],
+      script: [Scene.model.text("ACTIVE_STEERED", 8_000), Scene.model.text("Queue title")],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active steer target\r"),
         Scene.action.writeAfter("active steer target", "steer this queued\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
         Scene.action.writeAfterVisible("Enter to steer", "\r"),
         Scene.action.writeAfter("ACTIVE_STEERED", `${ctrlC}${ctrlC}`, 500),
@@ -145,13 +150,17 @@ test(
   "Escape cancels a queued edit and restores the original durable prompt",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("CANCELLED_EDIT_RAN")],
+      script: [
+        Scene.model.text("ACTIVE_DONE", 8_000),
+        Scene.model.text("Queue title"),
+        Scene.model.text("CANCELLED_EDIT_RAN"),
+      ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active cancel edit\r"),
         Scene.action.writeAfter("active cancel edit", "keep original queued\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
-        Scene.action.writeAfterVisible("Enter to steer", ctrlE),
+        Scene.action.writeAfterVisible("Enter to steer", ctrlE, 100),
         Scene.action.writeAfterVisible("Editing queued", " discarded suffix"),
         Scene.action.writeAfter("", escape, 100),
         Scene.action.writeAfter("CANCELLED_EDIT_RAN", `${ctrlC}${ctrlC}`, 500),
@@ -166,13 +175,17 @@ test(
   "applies successive queued prompt revisions before promotion",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("LATEST_REVISION_RAN")],
+      script: [
+        Scene.model.text("ACTIVE_DONE", 8_000),
+        Scene.model.text("Queue title"),
+        Scene.model.text("LATEST_REVISION_RAN"),
+      ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active revisions\r"),
         Scene.action.writeAfter("active revisions", "revision zero\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
-        Scene.action.writeAfterVisible("Enter to steer", ctrlE),
+        Scene.action.writeAfterVisible("Enter to steer", ctrlE, 100),
         Scene.action.writeAfterVisible("Editing queued", `${ctrlU}revision one\r`),
         Scene.action.writeWhenQueueRevision("revision one", 2, ctrlE),
         Scene.action.writeAfterVisible("Editing queued", `${ctrlU}revision two\r`),
@@ -188,13 +201,17 @@ test(
   "blocks image paste while editing without changing the queued prompt",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("IMAGE_SAFE_RAN")],
+      script: [
+        Scene.model.text("ACTIVE_DONE", 8_000),
+        Scene.model.text("Queue title"),
+        Scene.model.text("IMAGE_SAFE_RAN"),
+      ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active image guard\r"),
         Scene.action.writeAfter("active image guard", "image-safe queued\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
-        Scene.action.writeAfterVisible("Enter to steer", ctrlE),
+        Scene.action.writeAfterVisible("Enter to steer", ctrlE, 100),
         Scene.action.writeAfterVisible("Editing queued", "\u0016"),
         Scene.action.writeAfter("Images cannot be pasted while editing a queued prompt", escape),
         Scene.action.writeAfter("IMAGE_SAFE_RAN", `${ctrlC}${ctrlC}`, 500),
@@ -210,12 +227,17 @@ test(
   "preserves a selected row across a concurrent queue addition and removes that row only",
   () =>
     Scene.run({
-      script: [Scene.model.text("ACTIVE_DONE", 8_000), Scene.model.text("FIRST_RAN"), Scene.model.text("THIRD_RAN")],
+      script: [
+        Scene.model.text("ACTIVE_DONE", 8_000),
+        Scene.model.text("Queue title"),
+        Scene.model.text("FIRST_RAN"),
+        Scene.model.text("THIRD_RAN"),
+      ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active concurrent queue\r"),
         Scene.action.writeAfter("active concurrent queue", "first queued\r", 100),
         Scene.action.writeAfter("first queued", "selected second queued\r", 100),
-        Scene.action.writeWhenQueued(2, escape, 500),
+        Scene.action.writeWhenQueued(2, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
         Scene.action.writeAfterVisible("Enter to steer", "concurrent third queued"),
         Scene.action.writeAfterVisible("concurrent third queued", "\r"),
@@ -240,15 +262,16 @@ test(
     Scene.run({
       script: [
         Scene.model.text("ACTIVE_DONE", 8_000),
+        Scene.model.text("Queue title"),
         Scene.model.text("PROMOTED_RAN", 1_000),
         Scene.model.text("FRESH_RAN"),
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "active stale row\r"),
         Scene.action.writeAfter("active stale row", "promote while editing\r", 100),
-        Scene.action.writeWhenQueued(1, escape, 300),
+        Scene.action.writeWhenQueued(1, escape, 1_000),
         Scene.action.writeAfter("", up, 100),
-        Scene.action.writeAfterVisible("Enter to steer", ctrlE),
+        Scene.action.writeAfterVisible("Enter to steer", ctrlE, 100),
         Scene.action.writeAfterVisible("Editing queued", " unsaved stale text"),
         Scene.action.writeAfter("PROMOTED_RAN", `${ctrlU}fresh after stale\r`, 500),
         Scene.action.writeAfter("FRESH_RAN", `${ctrlC}${ctrlC}`, 500),

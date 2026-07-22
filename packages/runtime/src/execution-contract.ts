@@ -62,6 +62,7 @@ export interface ExecutionRoutePin {
 
 export interface StartInput {
   readonly threadId: string
+  readonly sessionKey?: string
   readonly turnId: string
   readonly prompt: string
   readonly promptParts?: ReadonlyArray<PromptPart>

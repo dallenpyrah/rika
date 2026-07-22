@@ -89,7 +89,7 @@ test(
         Scene.action.writeAfter("Welcome to Rika", "Run three commands.\r"),
         Scene.action.writeAfter("COMMAND_GROUP_COMPLETE", "\t", 100),
         Scene.action.writeAfter("Ran 3 commands", "\r", 100),
-        ...quitAfter("$ printf FIRST_OUTPUT"),
+        Scene.action.writeAfterDelay("\u0003", 500),
       ],
     }).then((result) => {
       expect(result.output).toContain("Ran 3 commands")
@@ -189,7 +189,7 @@ test(
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Start a long command.\r"),
-        Scene.action.writeAfter("printf STARTED_CHUNK", "\u0003", 100),
+        Scene.action.writeAfterDelay("\u0003", 1_000),
         ...quitAfter("cancelled"),
       ],
     }).then((result) => {
@@ -241,7 +241,7 @@ test(
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Show Markdown and process output.\r"),
         Scene.action.writeAfter("MARKDOWN_COMPLETE", "\t", 100),
-        Scene.action.writeAfter("printf # PROCESS_HEADING", "\r", 100),
+        Scene.action.writeAfterVisible("# PROCESS_HEADING", "\r", 100),
         ...quitAfter("PROCESS_ITEM"),
       ],
     }).then((result) => {

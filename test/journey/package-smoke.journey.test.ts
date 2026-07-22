@@ -1,7 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { Database } from "bun:sqlite"
 import { test } from "vitest"
-import { fileURLToPath } from "node:url"
 import { Data, Effect, FileSystem, Layer, Path } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
@@ -14,7 +13,8 @@ const program = Effect.gen(function* () {
   const path = yield* Path.Path
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const platform = `${process.platform}-${process.arch === "x64" ? "x64" : "arm64"}`
-  const root = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..")
+  const directory = yield* path.fromFileUrl(new URL(".", import.meta.url))
+  const root = path.resolve(directory, "../..")
   const temporary = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-artifact-" })
   const home = path.join(temporary, "home")
   const state = path.join(temporary, "state")

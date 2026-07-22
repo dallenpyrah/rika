@@ -1,6 +1,6 @@
 import { partialInputRecord } from "@rika/transcript"
 import { Function, Option, Schema } from "effect"
-import type { Model, TranscriptBlock, TranscriptItem } from "../view-state"
+import type { Model, TranscriptBlock, TranscriptItem } from "../view-state/model"
 
 export type ToolGroupKind = "explore" | "edit" | "shell" | "other"
 
@@ -78,16 +78,18 @@ export const toolDetail: {
   const input = inputValue(call.input)
   const kind = toolKind(call.name, undefined)
   const path = call.files[0]?.path ?? stringValue(input, ["path", "file_path", "file"])
-  const offset =
-    typeof input.offset === "number" && Number.isFinite(input.offset)
-      ? Math.max(0, Math.trunc(input.offset))
-      : undefined
+  const line =
+    Array.isArray(input.read_range) && typeof input.read_range[0] === "number" && Number.isFinite(input.read_range[0])
+      ? Math.max(1, Math.trunc(input.read_range[0]))
+      : typeof input.offset === "number" && Number.isFinite(input.offset)
+        ? Math.max(0, Math.trunc(input.offset)) + 1
+        : undefined
   const target =
     path === undefined
       ? undefined
       : {
           path,
-          ...(offset === undefined ? {} : { line: offset + 1, column: 1 }),
+          ...(line === undefined ? {} : { line, column: 1 }),
         }
   const displayPath = path === undefined ? undefined : escapePathTarget(path)
   if (kind === "read") {
@@ -236,7 +238,7 @@ const settledText = (
   (isToolOutputDisplayed(block) ? agentOutputText(block.output) : undefined) ??
   fallback
 
-export const agentTerminal = (
+const agentTerminal = (
   model: Model,
   block: Extract<TranscriptBlock, { _tag: "ToolCall" }>,
   children: ReadonlyArray<TranscriptItem>,
@@ -391,7 +393,7 @@ const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
 export const isToolOutputDisplayed = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): boolean =>
   block.presentation.outputDisplay !== "hidden"
 
-export const isExpandableUnit = (model: Model, unit: TranscriptUnit): boolean => {
+const isExpandableUnit = (model: Model, unit: TranscriptUnit): boolean => {
   if (unit.kind !== "tool") return unit.kind === "reasoning" || unit.kind === "diff" || unit.kind === "childAgent"
   if ((unit.children?.length ?? 0) > 0 || unit.terminal !== undefined) return true
   if (unit.group === "explore" || unit.group === "edit" || (unit.group === "shell" && unit.blocks.length > 1))
@@ -470,3 +472,5 @@ export const transcriptUnitId: {
 
 export const unitToggleTargets = (unit: TranscriptUnit): ReadonlyArray<number> =>
   unit.kind === "tool" ? unit.blocks : unit.kind === "reasoning" || unit.kind === "diff" ? [unit.block] : []
+
+export const internal = { agentTerminal, isExpandableUnit }

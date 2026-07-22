@@ -15,7 +15,7 @@ test(
       expect(result.output).toContain("high")
       expect(result.diagnostics).toContain("tui.renderer.started")
       expect(result.diagnostics).toContain("operation.completed")
-      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-response"')
+      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
     }),
   40_000,
 )

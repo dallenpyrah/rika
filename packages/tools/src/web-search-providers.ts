@@ -96,7 +96,7 @@ const makeParallel = (_client: HttpClient.HttpClient, options: ProviderOptions):
         timeout: 30_000,
         ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       })
-      const response = yield* Effect.callback<Parallel.SearchResult, unknown>((resume) => {
+      const response = yield* Effect.callback<Parallel.SearchResult, WebSearch.ProviderFailure>((resume) => {
         const controller = new AbortController()
         client
           .search(
@@ -110,10 +110,10 @@ const makeParallel = (_client: HttpClient.HttpClient, options: ProviderOptions):
           )
           .then(
             (result) => resume(Effect.succeed(result)),
-            (cause) => resume(Effect.fail(cause)),
+            (cause: unknown) => resume(Effect.fail(mapSdkFailure("parallel", cause))),
           )
         return Effect.sync(() => controller.abort())
-      }).pipe(Effect.mapError((cause) => mapSdkFailure("parallel", cause)))
+      })
       return {
         results: response.results.map((result) => ({
           url: result.url,

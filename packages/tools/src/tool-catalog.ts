@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Function, Schema } from "effect"
 import * as AgentTools from "./agent-tools"
 import * as ThreadTools from "./thread-tools"
 import * as Runtime from "./tool-runtime"
@@ -29,7 +29,7 @@ const registrations: ReadonlyArray<ToolPolicy.Registration> = [
   ...ThreadTools.registrations,
 ]
 
-export const makeDefinitions = (
+const makeDefinitionsImpl = (
   registeredTools: ReadonlyArray<ToolPolicy.RegisteredTool>,
   registered: ReadonlyArray<ToolPolicy.Registration>,
 ): ReadonlyArray<Definition> => {
@@ -68,6 +68,16 @@ export const makeDefinitions = (
       .join("; "),
   )
 }
+
+export const makeDefinitions: {
+  (
+    registered: ReadonlyArray<ToolPolicy.Registration>,
+  ): (registeredTools: ReadonlyArray<ToolPolicy.RegisteredTool>) => ReadonlyArray<Definition>
+  (
+    registeredTools: ReadonlyArray<ToolPolicy.RegisteredTool>,
+    registered: ReadonlyArray<ToolPolicy.Registration>,
+  ): ReadonlyArray<Definition>
+} = Function.dual(2, makeDefinitionsImpl)
 
 export const definitions = makeDefinitions(tools, registrations)
 

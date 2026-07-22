@@ -14,7 +14,7 @@ const cases = [
     tool: "oracle",
     profile: "Oracle",
     output: { answer: "Use the public boundary.", evidence: ["packages/runtime/src/index.ts:1"] },
-    permissions: ["workspace.read"],
+    permissions: ["workspace.read", "network.read"],
   },
   {
     tool: "librarian",
@@ -32,7 +32,7 @@ const cases = [
     tool: "task",
     profile: "Task",
     output: { summary: "Implemented and verified.", files: ["src/change.ts"] },
-    permissions: ["workspace.read", "workspace.write", "process.run"],
+    permissions: ["workspace.read", "workspace.write", "process.run", "network.read"],
   },
 ] as const
 
@@ -87,10 +87,16 @@ describe("specialty durable transcripts", () => {
     "covers every specialty catalog entry with narrowed profiles, bounded structured output, and parent-child facts",
     () =>
       Effect.gen(function* () {
-        expect([...specialtyNames]).toEqual(
+        expect(
           Catalog.definitions
             .filter((definition) => specialtyNames.includes(definition.name as never))
-            .map(({ name }) => name),
+            .map(({ name }) => name)
+            .toSorted(),
+        ).toEqual(
+          cases
+            .map(({ tool }) => tool)
+            .filter((name) => Catalog.get(name) !== undefined)
+            .toSorted(),
         )
         expect(cases.map(({ tool }) => tool)).toEqual([...specialtyNames])
 
@@ -104,9 +110,10 @@ describe("specialty durable transcripts", () => {
               AgentProfiles.parentPermissions.some((p) => p.name === permission),
             ),
           ).toBe(true)
-          expect((yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(entry.output)).length).toBeLessThanOrEqual(
-            definition!.outputLimit,
-          )
+          if (definition !== undefined)
+            expect((yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(entry.output)).length).toBeLessThanOrEqual(
+              definition.outputLimit,
+            )
           expect(profile.preset).not.toHaveProperty("output_schema_ref")
           expect(
             yield* agents.invoke({

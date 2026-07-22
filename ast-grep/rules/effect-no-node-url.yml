@@ -1,0 +1,21 @@
+id: effect-no-node-url
+language: TypeScript
+severity: error
+message: Use the Effect Path service for file URL conversion instead of importing node:url directly.
+rule:
+  any:
+    - kind: import_statement
+      has:
+        field: source
+        regex: '^[''"]node:url[''"]$'
+    - pattern: require("node:url")
+    - pattern: import("node:url")
+files:
+  - "**/*.ts"
+  - "**/*.tsx"
+ignores:
+  - "**/dist/**"
+  - "**/coverage/**"
+  - "**/generated/**"
+  - "node_modules/**"
+  - "repos/**"

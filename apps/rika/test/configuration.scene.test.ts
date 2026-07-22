@@ -13,11 +13,11 @@ test(
       ],
       actions: [
         Scene.action.writeAfter("Welcome to Rika", "Check the configured shell permission.\r"),
-        Scene.action.writeAfter("shell [pending]", "\r"),
+        Scene.action.writeAfter("bash [pending]", "\r"),
         Scene.action.writeWhenTurnStatus("Check the configured shell permission.", "completed", "\u0003", 100),
       ],
     }).then((result) => {
-      expect(result.output).toContain("shell [pending]")
+      expect(result.output).toContain("bash [pending]")
       expect(result.output).toContain("configured-shell")
       expect(result.clientLogs).toContain('"rika.event.type":"tool.result.received"')
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')

@@ -1,7 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect } from "vitest"
-import { fileURLToPath } from "node:url"
-import { Config, Effect, FileSystem, Layer, Schema, Scope, Stream } from "effect"
+import { Config, Effect, FileSystem, Function, Layer, Path, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 export const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices | Scope.Scope>) =>
@@ -9,7 +8,7 @@ export const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices | 
     Effect.scoped(Layer.build(BunServices.layer).pipe(Effect.flatMap((context) => Effect.provide(effect, context)))),
   )
 
-export const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 10_000) =>
+const waitUntilImpl = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 10_000) =>
   Effect.gen(function* () {
     const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
     while (!(yield* condition)) {
@@ -18,6 +17,10 @@ export const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout
       yield* Effect.sleep("20 millis")
     }
   })
+export const waitUntil: {
+  (timeout?: number): <E, R>(condition: Effect.Effect<boolean, E, R>) => Effect.Effect<undefined, E, R>
+  <E, R>(condition: Effect.Effect<boolean, E, R>, timeout?: number): Effect.Effect<undefined, E, R>
+} = Function.dual((args) => Effect.isEffect(args[0]), waitUntilImpl)
 
 export const PtyResult = Schema.fromJsonString(
   Schema.Struct({
@@ -50,13 +53,14 @@ export const interactivePty = Effect.fn("ClientMainTest.interactivePty")(functio
   toolApprovals?: ReadonlyArray<string>,
 ) {
   const fs = yield* FileSystem.FileSystem
+  const pathService = yield* Path.Path
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const root = yield* fs.makeTempDirectoryScoped({ prefix: "rika-client-main-" })
   const home = `${root}/home`
   const workspace = `${root}/workspace`
   const state = `${root}/state`
   yield* Effect.forEach([home, workspace, state], (directory) => fs.makeDirectory(directory))
-  const directory = fileURLToPath(new URL(".", import.meta.url))
+  const directory = yield* pathService.fromFileUrl(new URL(".", import.meta.url))
   const helper = `${directory}/fixtures/interactive-pty.py`
   const path = yield* Config.string("PATH").pipe(
     Config.withDefault("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"),

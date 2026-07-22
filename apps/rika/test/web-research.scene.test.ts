@@ -2,7 +2,7 @@ import { expect, test } from "vitest"
 import { Scene } from "./scene"
 
 test(
-  "presents web research calls and typed unavailable results without a provider or network",
+  "does not expose web research tools without a configured provider",
   () =>
     Scene.run({
       script: [
@@ -27,13 +27,9 @@ test(
         Scene.action.writeAfter("Don", "\u0003", 500),
       ],
     }).then((result) => {
-      expect(result.output).toContain("Web Search")
-      expect(result.output).toContain("https://example.com")
       expect(result.output).toContain("Don")
-      expect(result.clientLogs).toContain(":web-search:requested")
-      expect(result.clientLogs).toContain(":web-search:result")
-      expect(result.clientLogs).toContain(":read-page:requested")
-      expect(result.clientLogs).toContain(":read-page:result")
+      expect(result.clientLogs).not.toContain(":web-search:requested")
+      expect(result.clientLogs).not.toContain(":read-page:requested")
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,

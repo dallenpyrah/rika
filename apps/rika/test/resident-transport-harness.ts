@@ -1,9 +1,21 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect } from "vitest"
-import { fileURLToPath } from "node:url"
-import { Cause, Clock, Config, Data, Effect, Fiber, FileSystem, Layer, Queue, Ref, Schema, Scope, Stream } from "effect"
+import {
+  Cause,
+  Config,
+  Data,
+  Effect,
+  FileSystem,
+  Function,
+  Layer,
+  Path,
+  Queue,
+  Ref,
+  Schema,
+  Scope,
+  Stream,
+} from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
-import { resolve } from "../src/resident-endpoint"
 
 export type Event = {
   type: string
@@ -24,7 +36,7 @@ export class FixtureFailure extends Data.TaggedError("FixtureFailure")<{
   readonly cause: unknown
 }> {}
 
-export const provide = <A, E, R, ROut, E2, RIn>(effect: Effect.Effect<A, E, R>, layer: Layer.Layer<ROut, E2, RIn>) =>
+const provide = <A, E, R, ROut, E2, RIn>(effect: Effect.Effect<A, E, R>, layer: Layer.Layer<ROut, E2, RIn>) =>
   Effect.scoped(
     Effect.gen(function* () {
       const context = yield* Layer.build(layer)
@@ -49,7 +61,7 @@ export const EventSchema = Schema.Struct({
   outcome: Schema.optional(Schema.String),
 })
 
-export const decodeEvent = Schema.decodeUnknownEffect(Schema.fromJsonString(EventSchema))
+const decodeEvent = Schema.decodeUnknownEffect(Schema.fromJsonString(EventSchema))
 
 export const hostPids = new Set<number>()
 
@@ -62,7 +74,7 @@ export const alive = (pid: number) => {
   }
 }
 
-export const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 2_000) =>
+const waitUntilImpl = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout = 2_000) =>
   Effect.gen(function* () {
     const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
     while (!(yield* condition)) {
@@ -71,6 +83,10 @@ export const waitUntil = <E, R>(condition: Effect.Effect<boolean, E, R>, timeout
       yield* Effect.sleep("20 millis")
     }
   })
+export const waitUntil: {
+  (timeout?: number): <E, R>(condition: Effect.Effect<boolean, E, R>) => Effect.Effect<undefined, E, R>
+  <E, R>(condition: Effect.Effect<boolean, E, R>, timeout?: number): Effect.Effect<undefined, E, R>
+} = Function.dual((args) => Effect.isEffect(args[0]), waitUntilImpl)
 
 export const makeRoot = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem
@@ -111,9 +127,10 @@ export const startOldResident = Effect.fn("ResidentTransportTest.startOldResiden
   mode: "legacy" | "schema-reject" = "legacy",
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+  const path = yield* Path.Path
   const old = yield* spawner.spawn(
     ChildProcess.make("bun", ["test/fixtures/resident-old-host.ts"], {
-      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      cwd: yield* path.fromFileUrl(new URL("..", import.meta.url)),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "pipe",
@@ -151,13 +168,14 @@ export const start = Effect.fn("ResidentTransportTest.start")(function* (
   ownerStartupDelay: number = 0,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+  const path = yield* Path.Path
   const input = yield* Queue.bounded<string, Cause.Done>(32)
   const events = yield* Queue.bounded<Event, FixtureFailure>(2_048)
   const errors = yield* Ref.make<ReadonlyArray<string>>([])
   const client = yield* spawner
     .spawn(
       ChildProcess.make("bun", ["test/fixtures/resident-client.ts"], {
-        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        cwd: yield* path.fromFileUrl(new URL("..", import.meta.url)),
         stdin: { stream: Stream.fromQueue(input).pipe(Stream.encodeText), endOnDone: true },
         stdout: "pipe",
         stderr: "pipe",
@@ -249,11 +267,15 @@ export const attachedEffect = (client: ResidentClient) =>
     return event
   })
 
-export const nextTypeEffect = (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure> =>
+const nextTypeEffectImpl = (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure> =>
   Effect.gen(function* () {
     const event = yield* client.nextEffect
     return event.type === type ? event : yield* nextTypeEffect(client, type)
   })
+export const nextTypeEffect: {
+  (type: string): (client: ResidentClient) => Effect.Effect<Event, FixtureFailure>
+  (client: ResidentClient, type: string): Effect.Effect<Event, FixtureFailure>
+} = Function.dual(2, nextTypeEffectImpl)
 
 export const killTrackedHosts = () => {
   for (const pid of hostPids) {

@@ -1,0 +1,455 @@
+import { Effect, Layer, Schema } from "effect"
+import { SqlClient } from "effect/unstable/sql/SqlClient"
+import { TurnId } from "../turn-schema"
+import { QueueFull, RepositoryError, Service } from "./contract"
+import {
+  cursorFor,
+  ExtensionPinJson,
+  PromptPartsJson,
+  ExecutionRouteJson,
+  decode,
+  decodeQueueState,
+  encodeExtensionPin,
+  missing,
+  pageSize,
+  queuedTurnUnavailable,
+  repositoryError,
+  submissionError,
+  takeQueuedError,
+} from "./codec"
+
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const sql = yield* SqlClient
+    const get = Effect.fn("TurnRepository.get")(function* (id: TurnId) {
+      const rows = yield* sql`SELECT * FROM rika_turns WHERE id = ${id}`.pipe(Effect.mapError(repositoryError))
+      return rows[0] === undefined ? undefined : yield* decode(rows[0])
+    })
+    return Service.of({
+      createForSubmission: Effect.fn("TurnRepository.createForSubmission")(function* (input) {
+        const promptParts =
+          input.promptParts === undefined
+            ? null
+            : yield* Schema.encodeEffect(PromptPartsJson)(input.promptParts).pipe(Effect.mapError(repositoryError))
+        const executionRoute = yield* Schema.encodeEffect(ExecutionRouteJson)(input.executionRoute).pipe(
+          Effect.mapError(repositoryError),
+        )
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`INSERT INTO rika_turns (id, thread_id, prompt, prompt_parts_json, execution_route_json, review_fan_out_id, status, created_at, updated_at)
+                VALUES (${input.id}, ${input.threadId}, ${input.prompt}, ${promptParts}, ${executionRoute}, ${input.reviewFanOutId ?? null},
+                  CASE WHEN EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${input.threadId} AND status IN ('queued', 'accepted', 'running', 'waiting')) THEN 'queued' ELSE 'accepted' END,
+                  ${input.now}, ${input.now})`
+              const rows = yield* sql`SELECT * FROM rika_turns WHERE id = ${input.id}`
+              if (rows[0] === undefined) return yield* missing(input.id)
+              const turn = yield* decode(rows[0])
+              if (turn.status !== "queued") return turn
+              yield* sql`INSERT INTO rika_thread_queue_state (thread_id) VALUES (${input.threadId}) ON CONFLICT (thread_id) DO NOTHING`
+              const queueRows = yield* sql`UPDATE rika_thread_queue_state
+                SET revision = revision + 1, queued_count = queued_count + 1
+                WHERE thread_id = ${input.threadId} AND queued_count < ${input.queueCapacity}
+                RETURNING *`
+              if (queueRows[0] === undefined) {
+                const stateRows = yield* sql`SELECT * FROM rika_thread_queue_state WHERE thread_id = ${input.threadId}`
+                if (stateRows[0] === undefined)
+                  return yield* repositoryError(`Queue state ${input.threadId} does not exist`)
+                const state = yield* decodeQueueState(stateRows[0])
+                return yield* QueueFull.make({
+                  threadId: input.threadId,
+                  capacity: input.queueCapacity,
+                  count: state.queued_count,
+                })
+              }
+              const state = yield* decodeQueueState(queueRows[0])
+              return {
+                ...turn,
+                queue: {
+                  threadId: input.threadId,
+                  revision: state.revision,
+                  queuedCount: state.queued_count,
+                  becameNonempty: state.queued_count === 1,
+                  change: { _tag: "Added" as const, turn },
+                },
+              }
+            }),
+          )
+          .pipe(Effect.mapError(submissionError))
+      }),
+      copy: Effect.fn("TurnRepository.copy")(function* (turn, queueCapacity) {
+        const promptParts =
+          turn.promptParts === undefined
+            ? null
+            : yield* Schema.encodeEffect(PromptPartsJson)(turn.promptParts).pipe(Effect.mapError(repositoryError))
+        const extensionPin =
+          turn.extensionPin === undefined
+            ? null
+            : yield* Schema.encodeEffect(ExtensionPinJson)(turn.extensionPin).pipe(Effect.mapError(repositoryError))
+        const executionRoute = yield* Schema.encodeEffect(ExecutionRouteJson)(turn.executionRoute).pipe(
+          Effect.mapError(repositoryError),
+        )
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`INSERT INTO rika_turns (id, thread_id, prompt, prompt_parts_json, status, last_cursor, extension_pin_json, execution_route_json, review_fan_out_id, created_at, updated_at)
+                VALUES (${turn.id}, ${turn.threadId}, ${turn.prompt}, ${promptParts}, ${turn.status}, ${turn.lastCursor ?? null}, ${extensionPin}, ${executionRoute}, ${turn.reviewFanOutId ?? null}, ${turn.createdAt}, ${turn.updatedAt})`
+              if (turn.status !== "queued") return turn
+              yield* sql`INSERT INTO rika_thread_queue_state (thread_id) VALUES (${turn.threadId}) ON CONFLICT (thread_id) DO NOTHING`
+              const queueRows = yield* sql`UPDATE rika_thread_queue_state
+                SET revision = revision + 1, queued_count = queued_count + 1
+                WHERE thread_id = ${turn.threadId} AND queued_count < ${queueCapacity}
+                RETURNING *`
+              if (queueRows[0] === undefined) {
+                const stateRows = yield* sql`SELECT * FROM rika_thread_queue_state WHERE thread_id = ${turn.threadId}`
+                if (stateRows[0] === undefined)
+                  return yield* repositoryError(`Queue state ${turn.threadId} does not exist`)
+                const state = yield* decodeQueueState(stateRows[0])
+                return yield* QueueFull.make({
+                  threadId: turn.threadId,
+                  capacity: queueCapacity,
+                  count: state.queued_count,
+                })
+              }
+              const state = yield* decodeQueueState(queueRows[0])
+              return {
+                ...turn,
+                queue: {
+                  threadId: turn.threadId,
+                  revision: state.revision,
+                  queuedCount: state.queued_count,
+                  becameNonempty: state.queued_count === 1,
+                  change: { _tag: "Added" as const, turn },
+                },
+              }
+            }),
+          )
+          .pipe(Effect.mapError(submissionError))
+      }),
+      get,
+      list: Effect.fn("TurnRepository.list")(function* (threadId) {
+        const rows =
+          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} ORDER BY created_at ASC, rowid ASC`.pipe(
+            Effect.mapError(repositoryError),
+          )
+        return yield* Effect.all(rows.map(decode))
+      }),
+      page: Effect.fn("TurnRepository.page")(function* (threadId, options = {}) {
+        const limit = pageSize(options.limit)
+        const rows =
+          options.before === undefined
+            ? yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`.pipe(
+                Effect.mapError(repositoryError),
+              )
+            : yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND (created_at < ${options.before.createdAt} OR (created_at = ${options.before.createdAt} AND id < ${options.before.id})) ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`.pipe(
+                Effect.mapError(repositoryError),
+              )
+        const turns = (yield* Effect.all(rows.slice(0, limit).map(decode))).toReversed()
+        return {
+          turns,
+          hasOlder: rows.length > limit,
+          oldestCursor: cursorFor(turns[0]),
+          newestCursor: cursorFor(turns.at(-1)),
+        }
+      }),
+      findActive: Effect.fn("TurnRepository.findActive")(function* (threadId) {
+        const rows =
+          yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND status IN ('accepted', 'running', 'waiting') ORDER BY created_at ASC, rowid ASC LIMIT 1`.pipe(
+            Effect.mapError(repositoryError),
+          )
+        return rows[0] === undefined ? undefined : yield* decode(rows[0])
+      }),
+      readQueue: Effect.fn("TurnRepository.readQueue")(function* (threadId) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const stateRows = yield* sql`SELECT * FROM rika_thread_queue_state WHERE thread_id = ${threadId}`
+              const state = stateRows[0] === undefined ? undefined : yield* decodeQueueState(stateRows[0])
+              const rows =
+                yield* sql`SELECT * FROM rika_turns WHERE thread_id = ${threadId} AND status = 'queued' ORDER BY created_at ASC, rowid ASC`
+              const turns = yield* Effect.all(rows.map(decode))
+              return {
+                threadId,
+                revision: state?.revision ?? 0,
+                queuedCount: state?.queued_count ?? 0,
+                turns,
+              }
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
+      }),
+      listNonterminal: Effect.gen(function* () {
+        const rows =
+          yield* sql`SELECT * FROM rika_turns WHERE status IN ('queued', 'accepted', 'running', 'waiting') ORDER BY created_at ASC, rowid ASC`.pipe(
+            Effect.mapError(repositoryError),
+          )
+        return yield* Effect.all(rows.map(decode))
+      }).pipe(Effect.withSpan("TurnRepository.listNonterminal")),
+      claimNextQueued: Effect.fn("TurnRepository.claimNextQueued")(function* (threadId, _now) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const rows = yield* sql`UPDATE rika_turns SET queue_claim_token = hex(randomblob(16))
+                WHERE id = (SELECT id FROM rika_turns WHERE thread_id = ${threadId} AND status = 'queued' AND queue_claim_token IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1)
+                AND NOT EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${threadId} AND status IN ('accepted', 'running', 'waiting'))
+                AND NOT EXISTS (SELECT 1 FROM rika_turns WHERE thread_id = ${threadId} AND queue_claim_token IS NOT NULL)
+                RETURNING *`
+              if (rows[0] === undefined) return undefined
+              const turn = yield* decode(rows[0])
+              return { turn, token: String((rows[0] as { queue_claim_token: unknown }).queue_claim_token) }
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
+      }),
+      finishQueuedClaim: Effect.fn("TurnRepository.finishQueuedClaim")(
+        function* (claim, status, lastCursor, extensionPin, now) {
+          const encodedPin = extensionPin === undefined ? undefined : yield* encodeExtensionPin(extensionPin)
+          return yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const rows = yield* sql`UPDATE rika_turns
+            SET status = ${status}, last_cursor = ${lastCursor ?? null}, extension_pin_json = COALESCE(extension_pin_json, ${encodedPin ?? null}), updated_at = ${now}, queue_claim_token = NULL
+            WHERE id = ${claim.turn.id} AND status = 'queued' AND queue_claim_token = ${claim.token} RETURNING *`
+                if (rows[0] === undefined) return { _tag: "Unavailable" as const }
+                const turn = yield* decode(rows[0])
+                const queueRows = yield* sql`UPDATE rika_thread_queue_state
+            SET revision = revision + 1, queued_count = MAX(queued_count - 1, 0)
+            WHERE thread_id = ${turn.threadId} RETURNING *`
+                if (queueRows[0] === undefined)
+                  return yield* repositoryError(`Queue state ${turn.threadId} does not exist`)
+                const state = yield* decodeQueueState(queueRows[0])
+                return {
+                  _tag: "Transitioned" as const,
+                  turn,
+                  queue: {
+                    threadId: turn.threadId,
+                    revision: state.revision,
+                    queuedCount: state.queued_count,
+                    becameNonempty: false,
+                    change: { _tag: "Removed" as const, turnId: turn.id },
+                  },
+                }
+              }),
+            )
+            .pipe(Effect.mapError(repositoryError))
+        },
+      ),
+      releaseQueuedClaim: Effect.fn("TurnRepository.releaseQueuedClaim")(function* (claim) {
+        yield* sql`UPDATE rika_turns SET queue_claim_token = NULL
+          WHERE id = ${claim.turn.id} AND status = 'queued' AND queue_claim_token = ${claim.token}`.pipe(
+          Effect.asVoid,
+          Effect.mapError(repositoryError),
+        )
+      }),
+      resetQueueClaims: sql`UPDATE rika_turns SET queue_claim_token = NULL WHERE queue_claim_token IS NOT NULL`.pipe(
+        Effect.asVoid,
+        Effect.mapError(repositoryError),
+      ),
+      editQueued: Effect.fn("TurnRepository.editQueued")(function* (id, prompt, now) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const rows =
+                yield* sql`UPDATE rika_turns SET prompt = ${prompt}, prompt_parts_json = NULL, updated_at = ${now}, queue_claim_token = NULL WHERE id = ${id} AND status = 'queued' RETURNING *`
+              if (rows[0] === undefined) return yield* RepositoryError.make({ message: `Turn ${id} is not queued` })
+              const turn = yield* decode(rows[0])
+              const queueRows = yield* sql`UPDATE rika_thread_queue_state
+                SET revision = revision + 1
+                WHERE thread_id = ${turn.threadId}
+                RETURNING *`
+              if (queueRows[0] === undefined)
+                return yield* repositoryError(`Queue state ${turn.threadId} does not exist`)
+              const state = yield* decodeQueueState(queueRows[0])
+              return {
+                ...turn,
+                queue: {
+                  threadId: turn.threadId,
+                  revision: state.revision,
+                  queuedCount: state.queued_count,
+                  becameNonempty: false,
+                  change: { _tag: "Updated" as const, turn },
+                },
+              }
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
+      }),
+      takeQueued: Effect.fn("TurnRepository.takeQueued")(function* (id) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const rows = yield* sql`DELETE FROM rika_turns WHERE id = ${id} AND status = 'queued' RETURNING *`
+              if (rows[0] === undefined) return yield* queuedTurnUnavailable(id)
+              const turn = yield* decode(rows[0])
+              const queueRows = yield* sql`UPDATE rika_thread_queue_state
+                SET revision = revision + 1, queued_count = MAX(queued_count - 1, 0)
+                WHERE thread_id = ${turn.threadId}
+                RETURNING *`
+              if (queueRows[0] === undefined)
+                return yield* repositoryError(`Queue state ${turn.threadId} does not exist`)
+              const state = yield* decodeQueueState(queueRows[0])
+              return {
+                turn,
+                queue: {
+                  threadId: turn.threadId,
+                  revision: state.revision,
+                  queuedCount: state.queued_count,
+                  becameNonempty: false,
+                  change: { _tag: "Removed" as const, turnId: turn.id },
+                },
+              }
+            }),
+          )
+          .pipe(Effect.mapError(takeQueuedError))
+      }),
+      dequeue: Effect.fn("TurnRepository.dequeue")(function* (id) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const rows = yield* sql`DELETE FROM rika_turns WHERE id = ${id} AND status = 'queued' RETURNING *`
+              if (rows[0] === undefined) return yield* RepositoryError.make({ message: `Turn ${id} is not queued` })
+              const turn = yield* decode(rows[0])
+              const queueRows = yield* sql`UPDATE rika_thread_queue_state
+                SET revision = revision + 1, queued_count = MAX(queued_count - 1, 0)
+                WHERE thread_id = ${turn.threadId}
+                RETURNING *`
+              if (queueRows[0] === undefined)
+                return yield* repositoryError(`Queue state ${turn.threadId} does not exist`)
+              const state = yield* decodeQueueState(queueRows[0])
+              return {
+                threadId: turn.threadId,
+                revision: state.revision,
+                queuedCount: state.queued_count,
+                becameNonempty: false,
+                change: { _tag: "Removed" as const, turnId: turn.id },
+              }
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
+      }),
+      requeueAccepted: Effect.fn("TurnRepository.requeueAccepted")(function* (id, queueCapacity, now) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const currentRows = yield* sql`SELECT * FROM rika_turns WHERE id = ${id} AND status = 'accepted'`
+              if (currentRows[0] === undefined)
+                return yield* RepositoryError.make({ message: `Turn ${id} is not an unowned accepted turn` })
+              const current = yield* decode(currentRows[0])
+              const otherActive = yield* sql`SELECT id FROM rika_turns
+                WHERE thread_id = ${current.threadId} AND id != ${id} AND status IN ('accepted', 'running', 'waiting') LIMIT 1`
+              if (otherActive[0] !== undefined)
+                return yield* RepositoryError.make({ message: `Turn ${id} is not an unowned accepted turn` })
+              yield* sql`INSERT INTO rika_thread_queue_state (thread_id) VALUES (${current.threadId}) ON CONFLICT (thread_id) DO NOTHING`
+              const queueRows = yield* sql`UPDATE rika_thread_queue_state
+                SET revision = revision + 1, queued_count = queued_count + 1
+                WHERE thread_id = ${current.threadId} AND queued_count < ${queueCapacity}
+                RETURNING *`
+              if (queueRows[0] === undefined) {
+                const stateRows =
+                  yield* sql`SELECT * FROM rika_thread_queue_state WHERE thread_id = ${current.threadId}`
+                if (stateRows[0] === undefined)
+                  return yield* repositoryError(`Queue state ${current.threadId} does not exist`)
+                const state = yield* decodeQueueState(stateRows[0])
+                return yield* QueueFull.make({
+                  threadId: current.threadId,
+                  capacity: queueCapacity,
+                  count: state.queued_count,
+                })
+              }
+              const updatedRows = yield* sql`UPDATE rika_turns SET status = 'queued', updated_at = ${now}
+                WHERE id = ${id} AND status = 'accepted' RETURNING *`
+              if (updatedRows[0] === undefined)
+                return yield* RepositoryError.make({ message: `Turn ${id} is not an unowned accepted turn` })
+              const turn = yield* decode(updatedRows[0])
+              const state = yield* decodeQueueState(queueRows[0])
+              return {
+                ...turn,
+                queue: {
+                  threadId: turn.threadId,
+                  revision: state.revision,
+                  queuedCount: state.queued_count,
+                  becameNonempty: state.queued_count === 1,
+                  change: { _tag: "Added" as const, turn },
+                },
+              }
+            }),
+          )
+          .pipe(Effect.mapError(submissionError))
+      }),
+      requestQueueWake: Effect.fn("TurnRepository.requestQueueWake")(function* (threadId) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`INSERT INTO rika_thread_queue_state (thread_id) VALUES (${threadId}) ON CONFLICT (thread_id) DO NOTHING`
+              const existingRows = yield* sql`SELECT * FROM rika_thread_queue_state WHERE thread_id = ${threadId}`
+              if (existingRows[0] === undefined) return yield* repositoryError(`Queue state ${threadId} does not exist`)
+              const existing = yield* decodeQueueState(existingRows[0])
+              if (existing.queued_count === 0) return undefined
+              if (existing.wake_pending === 1)
+                return { threadId, generation: existing.wake_generation, queueRevision: existing.revision }
+              const rows = yield* sql`UPDATE rika_thread_queue_state
+                SET wake_generation = wake_generation + 1, wake_pending = 1
+                WHERE thread_id = ${threadId} AND queued_count > 0 AND wake_pending = 0
+                RETURNING *`
+              if (rows[0] === undefined) return undefined
+              const state = yield* decodeQueueState(rows[0])
+              return { threadId, generation: state.wake_generation, queueRevision: state.revision }
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
+      }),
+      consumeQueueWake: Effect.fn("TurnRepository.consumeQueueWake")(function* (threadId, generation) {
+        const rows = yield* sql`UPDATE rika_thread_queue_state SET wake_pending = 0
+          WHERE thread_id = ${threadId} AND wake_pending = 1 AND wake_generation = ${generation}
+          RETURNING thread_id`.pipe(Effect.mapError(repositoryError))
+        return rows[0] !== undefined
+      }),
+      setExtensionPin: Effect.fn("TurnRepository.setExtensionPin")(function* (id, pin) {
+        const encoded = yield* Schema.encodeEffect(ExtensionPinJson)(pin).pipe(Effect.mapError(repositoryError))
+        const rows = yield* sql`UPDATE rika_turns SET extension_pin_json = ${encoded}
+          WHERE id = ${id} AND (extension_pin_json IS NULL OR extension_pin_json = ${encoded}) RETURNING *`.pipe(
+          Effect.mapError(repositoryError),
+        )
+        if (rows[0] === undefined)
+          return yield* RepositoryError.make({
+            message: `Turn ${id} extension pin is immutable or turn does not exist`,
+          })
+        return yield* decode(rows[0])
+      }),
+      setStatus: Effect.fn("TurnRepository.setStatus")(function* (id, status, lastCursor, now) {
+        if (status === "queued")
+          return yield* RepositoryError.make({
+            message: `Turn ${id} cannot transition into 'queued' via setStatus`,
+          })
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const before = yield* sql`SELECT * FROM rika_turns WHERE id = ${id}`
+              if (before[0] === undefined) return yield* missing(id)
+              const wasQueued = String((before[0] as { status?: unknown }).status) === "queued"
+              if (wasQueued)
+                return yield* RepositoryError.make({
+                  message: `Turn ${id} cannot transition into or out of 'queued' via setStatus`,
+                })
+              const rows =
+                yield* sql`UPDATE rika_turns SET status = ${status}, last_cursor = ${lastCursor ?? null}, updated_at = ${now}
+                WHERE id = ${id} AND status NOT IN ('completed', 'failed', 'cancelled')
+                RETURNING *`
+              if (rows[0] === undefined) return yield* decode(before[0])
+              const turn = yield* decode(rows[0])
+              return turn
+            }),
+          )
+          .pipe(Effect.mapError(repositoryError))
+      }),
+      repairCursor: Effect.fn("TurnRepository.repairCursor")(function* (id, status, expectedCursor, cursor) {
+        const rows = yield* sql`UPDATE rika_turns SET last_cursor = ${cursor ?? null}
+          WHERE id = ${id}
+            AND status = ${status}
+            AND (last_cursor = ${expectedCursor ?? null} OR (last_cursor IS NULL AND ${expectedCursor ?? null} IS NULL))
+          RETURNING id`.pipe(Effect.mapError(repositoryError))
+        return rows[0] !== undefined
+      }),
+    })
+  }),
+)

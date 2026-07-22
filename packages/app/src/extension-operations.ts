@@ -1,6 +1,6 @@
 import { McpConfig, McpOAuth, SkillRegistry } from "@rika/extensions"
 import { Console, Context, Effect, FileSystem, Layer, Path, PlatformError, Schema, Semaphore } from "effect"
-import type * as Operation from "./operation"
+import type * as Operation from "./operation-contract"
 
 export interface Options {
   readonly globalRoot: string

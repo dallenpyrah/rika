@@ -1,6 +1,6 @@
 import { childParentMatch, type Block, type Unit } from "@rika/transcript"
 import { Function } from "effect"
-import type { Model, TranscriptItem } from "../view-state"
+import type { Model, TranscriptItem } from "../view-state/model"
 
 export interface Event {
   readonly turnId?: string
@@ -535,20 +535,24 @@ const projectUnitsImpl = (model: Model, units: ReadonlyArray<Unit>, parentId?: s
 }
 
 export const projectUnits: {
-  (model: import("../view-state").Model, units: ReadonlyArray<Unit>): import("../view-state").Model
-  (units: ReadonlyArray<Unit>): (model: import("../view-state").Model) => import("../view-state").Model
+  (model: import("../view-state/model").Model, units: ReadonlyArray<Unit>): import("../view-state/model").Model
+  (units: ReadonlyArray<Unit>): (model: import("../view-state/model").Model) => import("../view-state/model").Model
 } = Function.dual(
   2,
-  (model: import("../view-state").Model, units: ReadonlyArray<Unit>): import("../view-state").Model =>
+  (model: import("../view-state/model").Model, units: ReadonlyArray<Unit>): import("../view-state/model").Model =>
     projectUnitsImpl(model, units),
 )
 
 export const projectChildUnits: {
-  (model: import("../view-state").Model, parentId: string, units: ReadonlyArray<Unit>): import("../view-state").Model
+  (
+    model: import("../view-state/model").Model,
+    parentId: string,
+    units: ReadonlyArray<Unit>,
+  ): import("../view-state/model").Model
   (
     parentId: string,
     units: ReadonlyArray<Unit>,
-  ): (model: import("../view-state").Model) => import("../view-state").Model
-} = Function.dual(3, (model: import("../view-state").Model, parentId: string, units: ReadonlyArray<Unit>) =>
+  ): (model: import("../view-state/model").Model) => import("../view-state/model").Model
+} = Function.dual(3, (model: import("../view-state/model").Model, parentId: string, units: ReadonlyArray<Unit>) =>
   projectUnitsImpl(model, units, parentId),
 )

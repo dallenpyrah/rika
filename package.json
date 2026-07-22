@@ -51,9 +51,13 @@
       "vitest": "4.0.16"
     }
   },
+  "resolutions": {
+    "@batonfx/core": "0.7.1",
+    "@batonfx/providers": "0.7.1"
+  },
   "scripts": {
     "build": "bun turbo build",
-    "check": "bun turbo run build typecheck \"//#test-unit\" \"//#test-scene\" \"//#test-journey\" \"//#dependency-check\" \"//#diagnostics\" \"//#effect-check\" \"//#format-check\" \"//#lint\" \"//#pattern-check\"",
+    "check": "bun turbo run --concurrency=1 build typecheck \"//#test-unit\" \"//#test-scene\" \"//#test-journey\" \"//#dependency-check\" \"//#diagnostics\" \"//#effect-check\" \"//#format-check\" \"//#lint\" \"//#pattern-check\"",
     "dependency-check": "bun run scripts/check-dependencies.ts",
     "dev": "bun --cwd apps/rika start",
     "diagnostics": "bun node_modules/@effect/tsgo/dist/effect-tsgo.js diagnostics --project ./tsconfig.json --format pretty --strict",

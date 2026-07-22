@@ -21,7 +21,7 @@ test(
     Scene.run({
       script: [
         Scene.model.text("CURRENT_ROUTE_COMPLETE", 3_000),
-        Scene.model.text("Current route title"),
+        Scene.model.text("QUEUED_ROUTE_COMPLETE"),
         Scene.model.text("QUEUED_ROUTE_COMPLETE"),
       ],
       actions: [

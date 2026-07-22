@@ -29,7 +29,7 @@ test(
       expect(result.output).toContain("+2")
       expect(result.output.lastIndexOf(" ○ Edit file")).toBeGreaterThanOrEqual(0)
       expect(result.output.lastIndexOf("   Edit file")).toBeGreaterThan(result.output.lastIndexOf(" ○ Edit file"))
-      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script"')
+      expect(result.diagnostics).toContain('"rika.model.backend.kind":"test-script-file"')
       expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
     }),
   45_000,

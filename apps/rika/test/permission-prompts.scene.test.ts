@@ -47,7 +47,7 @@ test(
 test(
   "wraps left from allow to deny without executing the command",
   () =>
-    Scene.runWarm({
+    Scene.run({
       workspaceSettings: shellAsk,
       inspectPaths: ["denied.txt"],
       actions: [
@@ -210,7 +210,7 @@ test(
 test(
   "ignores a stale cancelled permission ID when a new shell request arrives",
   () =>
-    Scene.runWarm({
+    Scene.run({
       workspaceSettings: shellAsk,
       inspectPaths: ["stale.txt"],
       script: [

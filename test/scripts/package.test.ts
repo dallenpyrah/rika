@@ -1,5 +1,4 @@
 import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
 import { isManagedPackagingEntry, targets } from "../../scripts/package"
 
@@ -21,7 +20,7 @@ const resolveSource = async (path: string) => {
 }
 
 const clientSourceGraph = async () => {
-  const root = fileURLToPath(new URL("../..", import.meta.url))
+  const root = decodeURIComponent(new URL("../..", import.meta.url).pathname)
   const packages = new Map<string, { readonly root: string; readonly exports: Record<string, string> }>()
   for await (const manifestPath of new Bun.Glob("packages/*/package.json").scan({ cwd: root, absolute: true })) {
     const manifest = (await Bun.file(manifestPath).json()) as {
@@ -67,6 +66,8 @@ describe("release target construction", () => {
     for (const [name, target] of Object.entries(targets)) {
       expect(target.bun).toBe(`bun-${name}`)
       expect(target.opentui).toBe(`@opentui/core-${name}`)
+      expect(target.ffiNative).toBe(`@yuuang/ffi-rs-${name.startsWith("linux-") ? `${name}-gnu` : name}`)
+      expect(target.ffiBinary).toBe(`ffi-rs.${name}${name.startsWith("linux-") ? "-gnu" : ""}.node`)
     }
   })
 
@@ -75,7 +76,7 @@ describe("release target construction", () => {
   })
 
   test("rejects an unsupported command target before touching artifacts", async () => {
-    const root = fileURLToPath(new URL("../..", import.meta.url))
+    const root = decodeURIComponent(new URL("../..", import.meta.url).pathname)
     const artifacts = join(root, "artifacts")
     const sentinel = join(artifacts, "unrelated-command-output")
     await Bun.write(sentinel, "preserve me")

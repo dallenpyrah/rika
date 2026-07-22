@@ -1,7 +1,6 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { expect, test } from "vitest"
-import { fileURLToPath } from "node:url"
-import { Effect, FileSystem, Layer } from "effect"
+import { Effect, FileSystem, Layer, Path } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 
 const run = <A, E>(effect: Effect.Effect<A, E, BunServices.BunServices>) =>
@@ -18,11 +17,12 @@ test("renames the open diagnostics log on a process.exit that bypasses the scope
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
         const dataRoot = yield* fs.makeTempDirectoryScoped({ prefix: "rika-logging-hardexit-" })
         const handle = yield* spawner.spawn(
           ChildProcess.make("bun", ["test/fixtures/logging-hardexit.ts"], {
-            cwd: fileURLToPath(new URL("..", import.meta.url)),
+            cwd: yield* path.fromFileUrl(new URL("..", import.meta.url)),
             stdin: "ignore",
             stdout: "ignore",
             stderr: "ignore",
@@ -45,11 +45,12 @@ test("renames the open diagnostics log before another beforeExit listener tears 
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
         const dataRoot = yield* fs.makeTempDirectoryScoped({ prefix: "rika-logging-beforeexit-" })
         const handle = yield* spawner.spawn(
           ChildProcess.make("bun", ["test/fixtures/logging-beforeexit.ts"], {
-            cwd: fileURLToPath(new URL("..", import.meta.url)),
+            cwd: yield* path.fromFileUrl(new URL("..", import.meta.url)),
             stdin: "ignore",
             stdout: "ignore",
             stderr: "ignore",

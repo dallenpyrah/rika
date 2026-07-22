@@ -3,7 +3,6 @@ import { Scene } from "./scene"
 
 const longTitle = `### "${"Concurrent Sanitized Title ".repeat(5)}"\nignored`
 const sanitizedTitle = [..."Concurrent Sanitized Title ".repeat(5).trim()].slice(0, 80).join("")
-const modelEnvironment = (script: unknown) => ({ RIKA_TEST_MODEL_SCRIPT: JSON.stringify(script) })
 
 test("sets the prompt-derived terminal title before the first assistant response", () => {
   const prompt = "Update the terminal title immediately"
@@ -11,7 +10,6 @@ test("sets the prompt-derived terminal title before the first assistant response
   const script = [Scene.model.text("ASSISTANT_RETURNED", 3_000), Scene.model.text("Delayed Generated Title")] as const
   return Scene.run({
     script,
-    environment: modelEnvironment(script),
     actions: [
       Scene.action.writeAfter("Welcome to Rika", `${prompt}\r`),
       Scene.action.checkRunningAfter(terminalTitle, ""),
@@ -29,7 +27,6 @@ test("titles the first Turn of an explicitly created Thread in the real TUI", ()
   const script = [Scene.model.text("FIRST_TURN_DONE"), Scene.model.text(generatedTitle)] as const
   return Scene.run({
     script,
-    environment: modelEnvironment(script),
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "\u000f"),
       Scene.action.writeAfter("New thread", "\r"),
@@ -51,7 +48,6 @@ test("applies an existing Thread title after selecting it", () => {
   const script = [Scene.model.text("EXISTING_THREAD_READY"), Scene.model.text(generatedTitle)] as const
   return Scene.run({
     script,
-    environment: modelEnvironment(script),
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "Create the existing Thread.\r"),
       Scene.action.writeAfter(generatedTitle, "\u000f"),
@@ -72,7 +68,6 @@ test("keeps a delayed background title from replacing the selected terminal titl
   const script = [Scene.model.text("SWITCH_READY"), Scene.model.text(generatedTitle, 700)] as const
   return Scene.run({
     script,
-    environment: modelEnvironment(script),
     actions: [
       Scene.action.writeAfter("Welcome to Rika", `${backgroundPrompt}\r`),
       Scene.action.writeAfter("SWITCH_READY", "\u000f"),
@@ -93,7 +88,6 @@ test("sanitizes and bounds a generated title", () => {
   const script = [Scene.model.text("LONG_TITLE_READY"), Scene.model.text(longTitle)] as const
   return Scene.run({
     script,
-    environment: modelEnvironment(script),
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "Bound the generated title.\r"),
       Scene.action.writeAfter("LONG_TITLE_READY", "\u0003", 500),
@@ -110,7 +104,6 @@ test("keeps the first-prompt title when the scripted title response sanitizes to
   const script = [Scene.model.text("EMPTY_TITLE_READY"), Scene.model.text('### ""\nignored')] as const
   return Scene.run({
     script,
-    environment: modelEnvironment(script),
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "Keep This Temporary Title\r"),
       Scene.action.writeAfter("EMPTY_TITLE_READY", "\u0003", 500),

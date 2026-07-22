@@ -1,5 +1,4 @@
 # Rika
-# Rika
 
 Rika is a local coding-agent CLI and terminal application. It uses Baton for the agent loop, Relay for durable execution, Effect SQL for local product state, and OpenTUI for rendering.
 

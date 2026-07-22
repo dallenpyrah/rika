@@ -78,7 +78,7 @@ test("model-invoked built-in shell cannot bypass an ask policy", () =>
     ],
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "Use shell to create the marker.\r"),
-      Scene.action.writeAfter("shell [pending]", "\r", 100),
+      Scene.action.writeAfter("bash [pending]", "\r", 100),
       Scene.action.writeAfter("Model shell completed.", "\u0003", 100),
     ],
   }).then((result) => {
@@ -97,7 +97,7 @@ test("model-invoked built-in shell cannot bypass a deny policy", () =>
     ],
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "Try shell despite denial.\r"),
-      Scene.action.writeAfter("Denied model shell handled.", "\u0003", 100),
+      Scene.action.writeAfter("Permission denied", "\u0003", 100),
     ],
   }).then((result) => {
     expect(result.output).not.toContain("Allow once")
@@ -114,14 +114,14 @@ test("restarting at a durable shell wait does not approve or duplicate the comma
     ],
     actions: [
       Scene.action.writeAfter("Welcome to Rika", "Try shell across restart.\r"),
-      Scene.action.restartAfter("shell [pending]", "threads", "continue", "--last"),
-      Scene.action.writeAfter("shell [pending]", "\t\t\r", 100),
-      Scene.action.writeAfter("REFUSED", "\u0003", 100),
+      Scene.action.restartAfter("bash [pending]", "threads", "continue", "--last"),
+      Scene.action.writeAfter("bash [pending]", "\t\t\r", 100),
+      Scene.action.writeAfter("Permission denied", "\u0003", 100),
     ],
   }).then((result) => {
     expect(result.workspaceContents).not.toHaveProperty("restarted.txt")
-    expect(result.output).toContain("shell [pending]")
-    expect(result.output).toContain("shell [denied]")
+    expect(result.output).toContain("bash [pending]")
+    expect(result.output).toContain("bash [denied]")
     expect(result.diagnostics).not.toContain('"rika.model.backend.kind":"provider"')
   }))
 

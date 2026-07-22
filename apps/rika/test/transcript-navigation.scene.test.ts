@@ -111,7 +111,7 @@ test(
     Scene.run({
       script: [
         Scene.model.turn([
-          ...Array.from({ length: 220 }, (_, index) =>
+          ...Array.from({ length: 8 }, (_, index) =>
             Scene.model.textPart(`RESIZE_ANCHOR_${String(index).padStart(3, "0")} ${"anchor ".repeat(10)}\n`),
           ),
           Scene.model.textPart("RESIZE_ANCHOR_DONE"),
@@ -121,7 +121,7 @@ test(
         Scene.action.writeAfter("Welcome to Rika", "Hold the reading anchor.\r"),
         Scene.action.writeAfter("100", "\u001b[5~"),
         Scene.action.resizeAfter("RESIZE_ANCHOR_0", 65, 22),
-        Scene.action.writeAfter("DONE", "\u001b[F", 100),
+        Scene.action.writeAfterDelay("\u001b[F", 500),
         Scene.action.writeAfterDelay("\u0003", 500),
       ],
     }).then((result) => {

@@ -1,5 +1,6 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import * as Transcript from "@rika/transcript"
+import { Effect } from "effect"
 import { Surface, maxMountedTranscriptRows } from "../src/adapter"
 import { TranscriptPresenter, ViewState } from "../src"
 
@@ -58,75 +59,89 @@ const percentile = (samples: ReadonlyArray<number>, ratio: number): number => {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))] ?? 0
 }
 
-export const runTranscriptRenderStress = async (options: {
+export const runTranscriptRenderStress = (options: {
   readonly childCount: number
   readonly toolsPerChild: number
   readonly streamedUpdates: number
-}): Promise<TranscriptRenderStressResult> => {
-  const setup = await createTestRenderer({ width: 120, height: 40 })
-  let projections = new Map(
-    Array.from(
-      { length: options.childCount },
-      (_, child) => [childTurnId(child), childProjection(child, options.toolsPerChild)] as const,
-    ),
-  )
-  const base = TranscriptPresenter.applyTurnUnits(
-    { ...ViewState.initial("/work", "high"), width: 120, height: 40 },
-    parentProjection(options.childCount).units,
-  )
-  const attached = TranscriptPresenter.attachChildProjections(base, new Set<string>(), projections)
-  let attachments = attached.attachments
-  let model: ViewState.Model = {
-    ...attached.model,
-    expandedRowKeys: [...TranscriptPresenter.expandableRowIds(attached.model)],
-  }
-  const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
-  try {
-    surface.update(model)
-    await setup.renderOnce()
-    const state = surface as unknown as { readonly transcriptChildren: ReadonlyArray<unknown> }
-    const mountedAfterLoad = state.transcriptChildren.length
-    const updateLatencies: Array<number> = []
-    const renderLatencies: Array<number> = []
-    for (let step = 0; step < options.streamedUpdates; step += 1) {
-      const child = step % options.childCount
-      const turnId = childTurnId(child)
-      const bumped = Transcript.applyEvent(
-        projections.get(turnId)!,
-        sourceEvent(`stream-${child}-${step}`, options.toolsPerChild * 2 + 1 + step, "model.output.delta", {
-          text: ` delta ${step}`,
-        }),
+}): Promise<TranscriptRenderStressResult> =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* Effect.promise(() => createTestRenderer({ width: 120, height: 40 }))
+      let projections = new Map(
+        Array.from(
+          { length: options.childCount },
+          (_, child) => [childTurnId(child), childProjection(child, options.toolsPerChild)] as const,
+        ),
       )
-      projections = new Map(projections)
-      projections.set(turnId, bumped)
-      const next = TranscriptPresenter.attachChildProjections(model, new Set<string>(), projections, attachments)
-      attachments = next.attachments
-      model = next.model as ViewState.Model
-      const startedAt = performance.now()
-      surface.update(model)
-      updateLatencies.push(performance.now() - startedAt)
-      if (step % 10 === 9) {
-        const renderStartedAt = performance.now()
-        await setup.renderOnce()
-        renderLatencies.push(performance.now() - renderStartedAt)
+      const base = TranscriptPresenter.applyTurnUnits(
+        { ...ViewState.initial("/work", "high"), width: 120, height: 40 },
+        parentProjection(options.childCount).units,
+      )
+      const attached = TranscriptPresenter.attachChildProjections(base, new Set<string>(), projections)
+      let attachments = attached.attachments
+      let model: ViewState.Model = {
+        ...attached.model,
+        expandedRowKeys: [...TranscriptPresenter.expandableRowIds(attached.model)],
       }
-    }
-    await setup.renderOnce()
-    const stats = setup.renderer.getStats()
-    return {
-      items: model.items.length,
-      expandedRows: model.expandedRowKeys.length,
-      mountedAfterLoad,
-      mountedAfterBurst: state.transcriptChildren.length,
-      mountedLimit: maxMountedTranscriptRows * 2,
-      updateP50Milliseconds: percentile(updateLatencies, 0.5),
-      updateP95Milliseconds: percentile(updateLatencies, 0.95),
-      updateWorstMilliseconds: Math.max(...updateLatencies),
-      renderP95Milliseconds: percentile(renderLatencies, 0.95),
-      averageFrameTimeMilliseconds: stats.averageFrameTime,
-    }
-  } finally {
-    surface.destroy()
-    setup.renderer.destroy()
-  }
-}
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => surface),
+        () =>
+          Effect.gen(function* () {
+            surface.update(model)
+            yield* Effect.promise(() => setup.renderOnce())
+            const state = surface as unknown as { readonly transcriptChildren: ReadonlyArray<unknown> }
+            const mountedAfterLoad = state.transcriptChildren.length
+            const updateLatencies: Array<number> = []
+            const renderLatencies: Array<number> = []
+            for (const step of Array.from({ length: options.streamedUpdates }, (_, index) => index)) {
+              const child = step % options.childCount
+              const turnId = childTurnId(child)
+              const bumped = Transcript.applyEvent(
+                projections.get(turnId)!,
+                sourceEvent(`stream-${child}-${step}`, options.toolsPerChild * 2 + 1 + step, "model.output.delta", {
+                  text: ` delta ${step}`,
+                }),
+              )
+              projections = new Map(projections)
+              projections.set(turnId, bumped)
+              const next = TranscriptPresenter.attachChildProjections(
+                model,
+                new Set<string>(),
+                projections,
+                attachments,
+              )
+              attachments = next.attachments
+              model = next.model
+              const startedAt = performance.now()
+              surface.update(model)
+              updateLatencies.push(performance.now() - startedAt)
+              if (step % 10 === 9) {
+                const renderStartedAt = performance.now()
+                yield* Effect.promise(() => setup.renderOnce())
+                renderLatencies.push(performance.now() - renderStartedAt)
+              }
+            }
+            yield* Effect.promise(() => setup.renderOnce())
+            const stats = setup.renderer.getStats()
+            return {
+              items: model.items.length,
+              expandedRows: model.expandedRowKeys.length,
+              mountedAfterLoad,
+              mountedAfterBurst: state.transcriptChildren.length,
+              mountedLimit: maxMountedTranscriptRows * 2,
+              updateP50Milliseconds: percentile(updateLatencies, 0.5),
+              updateP95Milliseconds: percentile(updateLatencies, 0.95),
+              updateWorstMilliseconds: Math.max(...updateLatencies),
+              renderP95Milliseconds: percentile(renderLatencies, 0.95),
+              averageFrameTimeMilliseconds: stats.averageFrameTime,
+            }
+          }),
+        () =>
+          Effect.sync(() => {
+            surface.destroy()
+            setup.renderer.destroy()
+          }),
+      )
+    }),
+  )

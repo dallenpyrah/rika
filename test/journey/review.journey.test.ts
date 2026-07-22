@@ -44,14 +44,11 @@ test(
     runTest(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem
-        const output = { summary: "deterministic response", findings: [] }
-        const reviewRound = () => [
-          ...Array.from({ length: 3 }, () => ({
+        const reviewRound = () =>
+          Array.from({ length: 3 }, () => ({
             parts: [{ type: "text", text: "deterministic response" }],
             delayMs: 100,
-          })),
-          ...Array.from({ length: 3 }, () => ({ object: output })),
-        ]
+          }))
         context.env.RIKA_TEST_MODEL_SCRIPT = Schema.encodeSync(Schema.UnknownFromJsonString)(
           Array.from({ length: 4 }, reviewRound).flat(),
         )
@@ -66,7 +63,7 @@ test(
         expect((yield* review(["review.txt"])).stdout).toBe("No changes to review.")
         yield* fileSystem.writeFileString(`${context.workspace}/review.txt`, "after\n")
         const text = yield* review(["review.txt"], 60_000)
-        const laneOutput = `deterministic response${Schema.encodeSync(Schema.UnknownFromJsonString)({ type: "structured", value: output, schema_ref: "rika.agent.review.v1" })}`
+        const laneOutput = "deterministic response"
         expect(text.exitCode).toBe(0)
         expect(text.stdout).toContain(`## correctness\n${laneOutput}`)
         expect(text.stdout).toContain(`## security\n${laneOutput}`)
@@ -74,7 +71,7 @@ test(
         expect(yield* command("git", ["add", "review.txt", "excluded.txt"], { cwd: context.workspace })).toBe(0)
         expect(yield* command("git", ["commit", "-qm", "changed"], { cwd: context.workspace })).toBe(0)
         const based = yield* review(["--base", "HEAD~1", "--json", "review.txt"], 60_000)
-        expect(based.exitCode).toBe(0)
+        expect(based.exitCode, based.stderr).toBe(0)
         expect(Schema.decodeUnknownSync(ReviewJson)(based.stdout).lanes).toHaveLength(3)
 
         yield* fileSystem.writeFileString(`${context.workspace}/review.txt`, "staged\n")

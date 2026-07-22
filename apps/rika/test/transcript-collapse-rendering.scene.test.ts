@@ -107,7 +107,7 @@ const subagentResponse = `## Child report\n\n${Array.from(
   (_, index) => `- SUBAGENT_LINE_${String(index).padStart(3, "0")} inspected the boundary`,
 ).join("\n")}`
 
-test.fails(
+test(
   "keeps content above a collapsed subagent visible after scrolling up",
   () =>
     Scene.run({

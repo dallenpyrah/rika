@@ -34,7 +34,7 @@ test(
       expect(result.output).toContain("RESIDENT_OWNED_EXECUTION_COMPLETE")
       expect(result.names.filter((name) => name.startsWith("resident-"))).toHaveLength(1)
       expect(result.residentLogs).toContain('"message":"model.backend.configured"')
-      expect(result.residentLogs).toContain('"rika.model.backend.kind":"test-script"')
+      expect(result.residentLogs).toContain('"rika.model.backend.kind":"test-script-file"')
       expect(result.residentLogs).toContain('"message":"resident.listener.ready"')
       expect(result.clientLogs).not.toContain('"message":"model.backend.configured"')
       expect(result.clientLogs).not.toContain('"rika.model.backend.kind"')

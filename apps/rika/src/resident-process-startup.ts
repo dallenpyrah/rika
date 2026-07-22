@@ -190,7 +190,7 @@ const awaitStartup = <E>(output: Stream.Stream<Uint8Array, E>) =>
     (first, text) => (Option.isSome(first) ? first : Option.some(text)),
   ).pipe(
     Effect.timeoutOrElse({
-      duration: "10 seconds",
+      duration: "20 seconds",
       orElse: () => Effect.fail(error("startup-failed", "Resident startup signal timed out")),
     }),
     Effect.flatMap(

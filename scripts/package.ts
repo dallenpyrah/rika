@@ -8,17 +8,29 @@ export const targets = {
     bun: "bun-darwin-arm64",
     opentui: "@opentui/core-darwin-arm64",
     fff: "@ff-labs/fff-bin-darwin-arm64",
+    ffiNative: "@yuuang/ffi-rs-darwin-arm64",
+    ffiBinary: "ffi-rs.darwin-arm64.node",
   },
-  "darwin-x64": { bun: "bun-darwin-x64", opentui: "@opentui/core-darwin-x64", fff: "@ff-labs/fff-bin-darwin-x64" },
+  "darwin-x64": {
+    bun: "bun-darwin-x64",
+    opentui: "@opentui/core-darwin-x64",
+    fff: "@ff-labs/fff-bin-darwin-x64",
+    ffiNative: "@yuuang/ffi-rs-darwin-x64",
+    ffiBinary: "ffi-rs.darwin-x64.node",
+  },
   "linux-arm64": {
     bun: "bun-linux-arm64",
     opentui: "@opentui/core-linux-arm64",
     fff: "@ff-labs/fff-bin-linux-arm64-gnu",
+    ffiNative: "@yuuang/ffi-rs-linux-arm64-gnu",
+    ffiBinary: "ffi-rs.linux-arm64-gnu.node",
   },
   "linux-x64": {
     bun: "bun-linux-x64",
     opentui: "@opentui/core-linux-x64",
     fff: "@ff-labs/fff-bin-linux-x64-gnu",
+    ffiNative: "@yuuang/ffi-rs-linux-x64-gnu",
+    ffiBinary: "ffi-rs.linux-x64-gnu.node",
   },
 }
 
@@ -222,6 +234,7 @@ const program = Effect.scoped(
         const fffSource = yield* locatePackage(root, target.fff, "0.9.6", packageCache)
         const fffNodeSource = yield* locatePackage(root, "@ff-labs/fff-node", "0.9.6", packageCache)
         const ffiSource = yield* locatePackage(root, "ffi-rs", "1.3.2", packageCache)
+        const ffiNativeSource = yield* locatePackage(root, target.ffiNative, "1.3.2", packageCache)
         const resolutionPackage = path.join(root, "node_modules", ...target.opentui.split("/"))
         const resolutionExists = yield* fileSystem
           .exists(resolutionPackage)
@@ -249,6 +262,8 @@ const program = Effect.scoped(
               ...platformPackages
                 .filter((packageName) => packageName !== target.opentui)
                 .flatMap((packageName) => ["--external", packageName]),
+              "--external",
+              "@ff-labs/fff-node",
               "--outfile",
               path.join(stage, "bin", outputName),
               path.join(root, "apps/rika/src", entry),
@@ -270,6 +285,7 @@ const program = Effect.scoped(
           { name: target.fff, source: fffSource },
           { name: "@ff-labs/fff-node", source: fffNodeSource },
           { name: "ffi-rs", source: ffiSource },
+          { name: target.ffiNative, source: ffiNativeSource },
         ]
         yield* Effect.forEach(
           packages,
@@ -284,6 +300,12 @@ const program = Effect.scoped(
           },
           { concurrency: 4, discard: true },
         )
+        yield* fileSystem
+          .copy(
+            path.join(ffiNativeSource, target.ffiBinary),
+            path.join(stage, "bin", "node_modules", "ffi-rs", target.ffiBinary),
+          )
+          .pipe(mapFailure("copy ffi-rs native binding"))
         yield* fileSystem
           .writeFileString(
             path.join(stage, "INSTALL"),
