@@ -5,6 +5,7 @@ import {
   canonicalServiceIdentity,
   clientProof,
   ClientMessage,
+  isValidIncompatibility,
   makeLifecycle,
   protocolVersion,
   ResidentRestartRequired,
@@ -37,6 +38,7 @@ describe("resident service protocol", () => {
       identity: "identity",
       clientNonce: "nonce",
       clientKind: "run" as const,
+      connectRole: "launch" as const,
       protocolVersion,
       buildIdentity: "build-a",
     }
@@ -58,7 +60,11 @@ describe("resident service protocol", () => {
     ).toBe("IdentityMismatch")
     expect(
       validateHandshake(
-        { ...base, protocolVersion: 0 },
+        {
+          ...base,
+          protocolVersion: 0,
+          clientProof: clientProof("token", { ...unsigned, protocolVersion: 0 }),
+        },
         { identity: "identity", token: "token", buildIdentity: "build-a" },
       )._tag,
     ).toBe("ProtocolMismatch")
@@ -72,6 +78,25 @@ describe("resident service protocol", () => {
         { identity: "identity", token: "token", buildIdentity: "build-a" },
       )._tag,
     ).toBe("BuildMismatch")
+    const reattachUnsigned = { ...unsigned, connectRole: "reattach" as const, buildIdentity: "build-b" }
+    expect(
+      validateHandshake(
+        { ...reattachUnsigned, clientProof: clientProof("token", reattachUnsigned) },
+        { identity: "identity", token: "token", buildIdentity: "build-a" },
+      )._tag,
+    ).toBe("Accepted")
+    expect(
+      validateHandshake(
+        { ...base, connectRole: "reattach" },
+        { identity: "identity", token: "token", buildIdentity: "build-a" },
+      )._tag,
+    ).toBe("AuthenticationFailed")
+    expect(
+      validateHandshake(
+        { ...base, protocolVersion: 0, buildIdentity: "build-b" },
+        { identity: "identity", token: "token", buildIdentity: "build-a" },
+      )._tag,
+    ).toBe("AuthenticationFailed")
   })
 
   it("requires an explicit protocol version and bounded non-empty transport identities", () => {
@@ -98,6 +123,15 @@ describe("resident service protocol", () => {
     expect(() =>
       Schema.decodeUnknownSync(ClientMessage)({ ...base, protocolVersion, buildIdentity: "x".repeat(1_025) }),
     ).toThrow()
+    for (const connectRole of ["launch", "reattach"])
+      expect(
+        Schema.decodeUnknownSync(ClientMessage)({
+          ...base,
+          connectRole,
+          protocolVersion,
+          buildIdentity: "build-a",
+        }),
+      ).toMatchObject({ connectRole })
   })
 
   it("authenticates the resident response and binds both nonces and the connection identity", () => {
@@ -105,6 +139,7 @@ describe("resident service protocol", () => {
       identity: "identity",
       clientNonce: "client-nonce",
       clientKind: "run" as const,
+      connectRole: "launch" as const,
       protocolVersion,
       buildIdentity: "build-a",
     }
@@ -118,8 +153,13 @@ describe("resident service protocol", () => {
       protocolVersion,
       buildIdentity: "build-a",
       serverProof: serverProof("token", handshake, {
+        _tag: "accepted",
+        family: "rika-resident",
+        identity: handshake.identity,
+        clientNonce: handshake.clientNonce,
         serviceNonce: "service-nonce",
         connectionId: "connection",
+        protocolVersion,
         buildIdentity: "build-a",
       }),
     })
@@ -130,6 +170,45 @@ describe("resident service protocol", () => {
     expect(verifyServerProof("token", { ...handshake, clientNonce: "reflected" }, accepted)).toBe(false)
     expect(verifyServerProof("token", handshake, { ...accepted, connectionId: "foreign" })).toBe(false)
     expect(verifyServerProof("token", handshake, { ...accepted, buildIdentity: "build-b" })).toBe(false)
+    expect(verifyServerProof("token", handshake, { ...accepted, protocolVersion: protocolVersion + 1 })).toBe(false)
+    expect(verifyServerProof("token", handshake, { ...accepted, serviceNonce: "foreign" })).toBe(false)
+    expect(verifyServerProof("token", handshake, { ...accepted, residentPid: 42 })).toBe(false)
+    expect(verifyServerProof("token", { ...handshake, connectRole: "reattach" }, accepted)).toBe(false)
+
+    const incompatibleFields = {
+      _tag: "incompatible" as const,
+      disposition: "supersede" as const,
+      family: "rika-resident" as const,
+      identity: handshake.identity,
+      clientNonce: handshake.clientNonce,
+      serviceNonce: "service-nonce",
+      connectionId: "connection",
+      protocolVersion,
+      buildIdentity: "build-b",
+      residentPid: 123,
+    }
+    const incompatible = Schema.decodeUnknownSync(ServerMessage)({
+      ...incompatibleFields,
+      serverProof: serverProof("token", handshake, incompatibleFields),
+    })
+    expect(incompatible._tag).toBe("incompatible")
+    if (incompatible._tag !== "incompatible") return
+    expect(verifyServerProof("token", handshake, incompatible)).toBe(true)
+    expect(verifyServerProof("token", handshake, { ...incompatible, disposition: "restart" })).toBe(false)
+    expect(verifyServerProof("token", handshake, { ...incompatible, residentPid: 124 })).toBe(false)
+    expect(verifyServerProof("token", handshake, { ...incompatible, connectionId: "other" })).toBe(false)
+  })
+
+  it("accepts only incompatibility responses justified by the connection role", () => {
+    expect(isValidIncompatibility("launch", { protocolVersion, buildIdentity: "other-build" })).toBe(true)
+    expect(isValidIncompatibility("launch", { protocolVersion, buildIdentity: "rika-development-build" })).toBe(false)
+    expect(isValidIncompatibility("reattach", { protocolVersion, buildIdentity: "other-build" })).toBe(false)
+    expect(
+      isValidIncompatibility("reattach", {
+        protocolVersion: protocolVersion - 1,
+        buildIdentity: "rika-development-build",
+      }),
+    ).toBe(true)
   })
 
   it("round-trips empty and semantic transcript pages without undefined wire fields", () => {

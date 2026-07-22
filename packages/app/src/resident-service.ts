@@ -22,9 +22,11 @@ export type InteractiveInput = Extract<Input, { readonly _tag: "Interactive" }>
 
 declare const RIKA_BUILD_IDENTITY: string | undefined
 
-export const protocolVersion = 3
+export const protocolVersion = 4
 export const buildIdentity = typeof RIKA_BUILD_IDENTITY === "string" ? RIKA_BUILD_IDENTITY : "rika-development-build"
 export const ClientKind = Schema.Literals(["interactive", "run", "review", "workflow", "thread-continue", "product"])
+export const ConnectRole = Schema.Literals(["launch", "reattach"])
+export type ConnectRole = typeof ConnectRole.Type
 const WireIdentifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1_024))
 const Proof = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
 export const Handshake = Schema.Struct({
@@ -32,6 +34,7 @@ export const Handshake = Schema.Struct({
   identity: WireIdentifier,
   clientNonce: WireIdentifier,
   clientKind: ClientKind,
+  connectRole: ConnectRole,
   protocolVersion: Schema.Int,
   buildIdentity: WireIdentifier,
   clientProof: Proof,
@@ -51,6 +54,21 @@ export const HandshakeAccepted = Schema.Struct({
   residentPid: Schema.optionalKey(Schema.Int),
 })
 export type HandshakeAccepted = typeof HandshakeAccepted.Type
+
+export const HandshakeIncompatible = Schema.Struct({
+  _tag: Schema.tag("incompatible"),
+  disposition: Schema.Literals(["supersede", "restart"]),
+  family: Schema.tag("rika-resident"),
+  identity: WireIdentifier,
+  clientNonce: WireIdentifier,
+  serviceNonce: WireIdentifier,
+  connectionId: WireIdentifier,
+  protocolVersion: Schema.Int,
+  buildIdentity: WireIdentifier,
+  serverProof: Proof,
+  residentPid: Schema.optionalKey(Schema.Int),
+})
+export type HandshakeIncompatible = typeof HandshakeIncompatible.Type
 
 export const HandshakeRejected = Schema.Struct({
   _tag: Schema.tag("rejected"),
@@ -176,6 +194,7 @@ export const OperationFailed = Schema.Struct({
 })
 export const ServerMessage = Schema.Union([
   HandshakeAccepted,
+  HandshakeIncompatible,
   HandshakeRejected,
   Pong,
   Output,
@@ -204,6 +223,7 @@ export class ResidentServiceError extends Schema.TaggedErrorClass<ResidentServic
     "unsafe-token",
   ]),
   message: Schema.String,
+  residentPid: Schema.optionalKey(Schema.Int),
 }) {}
 
 export const runtimeRestartExitCode = 75
@@ -299,7 +319,10 @@ const proofMatches = (actual: string, expected: string) => {
   return difference === 0
 }
 
-type ProofHandshake = Pick<Handshake, "identity" | "clientNonce" | "clientKind" | "protocolVersion" | "buildIdentity">
+type ProofHandshake = Pick<
+  Handshake,
+  "identity" | "clientNonce" | "clientKind" | "connectRole" | "protocolVersion" | "buildIdentity"
+>
 
 const clientProofImpl = (token: string, handshake: ProofHandshake) =>
   proof(token, [
@@ -308,6 +331,7 @@ const clientProofImpl = (token: string, handshake: ProofHandshake) =>
     handshake.identity,
     handshake.clientNonce,
     handshake.clientKind,
+    handshake.connectRole,
     handshake.buildIdentity,
   ])
 export const clientProof: {
@@ -315,40 +339,75 @@ export const clientProof: {
   (token: string, handshake: ProofHandshake): string
 } = Function.dual(2, clientProofImpl)
 
-const serverProofImpl = (
-  token: string,
-  handshake: ProofHandshake,
-  accepted: Pick<HandshakeAccepted, "serviceNonce" | "connectionId" | "buildIdentity">,
-) =>
+type ServerProofResponse =
+  | Pick<
+      HandshakeAccepted,
+      | "_tag"
+      | "family"
+      | "identity"
+      | "clientNonce"
+      | "serviceNonce"
+      | "connectionId"
+      | "protocolVersion"
+      | "buildIdentity"
+      | "residentPid"
+    >
+  | Pick<
+      HandshakeIncompatible,
+      | "_tag"
+      | "disposition"
+      | "family"
+      | "identity"
+      | "clientNonce"
+      | "serviceNonce"
+      | "connectionId"
+      | "protocolVersion"
+      | "buildIdentity"
+      | "residentPid"
+    >
+
+const serverProofImpl = (token: string, handshake: ProofHandshake, response: ServerProofResponse) =>
   proof(token, [
     "rika-resident-server",
     handshake.protocolVersion,
     handshake.identity,
     handshake.clientNonce,
     handshake.clientKind,
+    handshake.connectRole,
     handshake.buildIdentity,
-    accepted.serviceNonce,
-    accepted.connectionId,
-    accepted.buildIdentity,
+    response._tag,
+    response._tag === "incompatible" ? response.disposition : "accepted",
+    response.serviceNonce,
+    response.connectionId,
+    response.protocolVersion,
+    response.buildIdentity,
+    response.residentPid ?? "absent",
   ])
 export const serverProof: {
-  (
-    handshake: ProofHandshake,
-    accepted: Pick<HandshakeAccepted, "serviceNonce" | "connectionId" | "buildIdentity">,
-  ): (token: string) => string
-  (
-    token: string,
-    handshake: ProofHandshake,
-    accepted: Pick<HandshakeAccepted, "serviceNonce" | "connectionId" | "buildIdentity">,
-  ): string
+  (handshake: ProofHandshake, response: ServerProofResponse): (token: string) => string
+  (token: string, handshake: ProofHandshake, response: ServerProofResponse): string
 } = Function.dual(3, serverProofImpl)
 
-const verifyServerProofImpl = (token: string, handshake: ProofHandshake, accepted: HandshakeAccepted) =>
-  proofMatches(accepted.serverProof, serverProof(token, handshake, accepted))
+const verifyServerProofImpl = (
+  token: string,
+  handshake: ProofHandshake,
+  response: HandshakeAccepted | HandshakeIncompatible,
+) => proofMatches(response.serverProof, serverProof(token, handshake, response))
 export const verifyServerProof: {
-  (handshake: ProofHandshake, accepted: HandshakeAccepted): (token: string) => boolean
-  (token: string, handshake: ProofHandshake, accepted: HandshakeAccepted): boolean
+  (handshake: ProofHandshake, response: HandshakeAccepted | HandshakeIncompatible): (token: string) => boolean
+  (token: string, handshake: ProofHandshake, response: HandshakeAccepted | HandshakeIncompatible): boolean
 } = Function.dual(3, verifyServerProofImpl)
+
+type IncompatibilityIdentity = Pick<HandshakeIncompatible, "protocolVersion" | "buildIdentity">
+export const isValidIncompatibility: {
+  (response: IncompatibilityIdentity): (connectRole: ConnectRole) => boolean
+  (connectRole: ConnectRole, response: IncompatibilityIdentity): boolean
+} = Function.dual(
+  2,
+  (connectRole: ConnectRole, response: IncompatibilityIdentity) =>
+    response.protocolVersion !== protocolVersion ||
+    (connectRole === "launch" && response.buildIdentity !== buildIdentity),
+)
 
 export type HandshakeResult =
   | { readonly _tag: "Accepted" }
@@ -374,12 +433,48 @@ export const validateHandshake: {
     expected: { readonly identity: string; readonly token: string; readonly buildIdentity: string },
   ): HandshakeResult => {
     if (handshake.identity !== expected.identity) return { _tag: "IdentityMismatch" }
-    if (handshake.protocolVersion !== protocolVersion) return { _tag: "ProtocolMismatch" }
     if (!proofMatches(handshake.clientProof, clientProof(expected.token, handshake)))
       return { _tag: "AuthenticationFailed" }
-    if (handshake.buildIdentity !== expected.buildIdentity) return { _tag: "BuildMismatch" }
+    if (handshake.protocolVersion !== protocolVersion) return { _tag: "ProtocolMismatch" }
+    if (handshake.connectRole === "launch" && handshake.buildIdentity !== expected.buildIdentity)
+      return { _tag: "BuildMismatch" }
     return { _tag: "Accepted" }
   },
+)
+
+export const HandshakeV3 = Schema.Struct({
+  family: Schema.tag("rika-resident"),
+  identity: WireIdentifier,
+  clientNonce: WireIdentifier,
+  clientKind: ClientKind,
+  protocolVersion: Schema.Literal(3),
+  buildIdentity: WireIdentifier,
+  clientProof: Proof,
+})
+export type HandshakeV3 = typeof HandshakeV3.Type
+type ProofHandshakeV3 = Omit<HandshakeV3, "family" | "clientProof">
+export const clientProofV3: {
+  (handshake: ProofHandshakeV3): (token: string) => string
+  (token: string, handshake: ProofHandshakeV3): string
+} = Function.dual(2, (token: string, handshake: ProofHandshakeV3) =>
+  proof(token, [
+    "rika-resident-client",
+    handshake.protocolVersion,
+    handshake.identity,
+    handshake.clientNonce,
+    handshake.clientKind,
+    handshake.buildIdentity,
+  ]),
+)
+type HandshakeV3Expectation = { readonly identity: string; readonly token: string }
+export const validateHandshakeV3: {
+  (expected: HandshakeV3Expectation): (handshake: HandshakeV3) => boolean
+  (handshake: HandshakeV3, expected: HandshakeV3Expectation): boolean
+} = Function.dual(
+  2,
+  (handshake: HandshakeV3, expected: HandshakeV3Expectation) =>
+    handshake.identity === expected.identity &&
+    proofMatches(handshake.clientProof, clientProofV3(expected.token, handshake)),
 )
 
 export type LifecycleState = "starting" | "ready" | "grace" | "draining" | "stopped"

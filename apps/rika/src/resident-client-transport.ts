@@ -24,7 +24,7 @@ import {
 } from "effect"
 import { ChildProcessSpawner } from "effect/unstable/process"
 import * as Socket from "effect/unstable/socket/Socket"
-import { readOrCreateToken, recordedResidentProcesses, resolve } from "./resident-endpoint"
+import { readOrCreateToken, resolve } from "./resident-endpoint"
 import * as ResidentProcessStartup from "./resident-process-startup"
 import { claimStartup } from "./resident-startup"
 import {
@@ -34,7 +34,6 @@ import {
   json,
   makeServerMessageFrameDecoder,
   maxFrameBytes,
-  parse,
   transportError,
 } from "./resident-wire"
 
@@ -70,9 +69,9 @@ const mapResidentSocketFailure = (cause: unknown, accepted: boolean): ResidentSe
       return transportError("Resident service is draining", "resident-draining")
     if (cause.reason.code === 4406)
       return transportError(
-        cause.reason.closeReason ??
-          "An incompatible Rika resident is still running; close other Rika clients, then run rika again",
-        "incompatible-resident",
+        cause.reason.closeReason ||
+          "A listener reported an unsigned resident incompatibility; stop it, then run rika again",
+        "foreign-listener",
       )
     if (cause.reason.code === 4401)
       return transportError(
@@ -110,73 +109,12 @@ const isDisconnectedOperation = (error: unknown) =>
 const isReconnectableTransport = (error: unknown) =>
   Schema.is(ResidentService.ResidentServiceError)(error) &&
   (error.reason === "resident-absent" || error.reason === "resident-draining" || error.reason === "transport-failed")
-const legacyCapabilities = ["ping", "startup-state", "transcript-pages", "interactive-ack"]
-const probeWebSocket = (url: string, handshake: string, matches: (text: string) => boolean) =>
-  Effect.callback<boolean>((resume) => {
-    const socket = new WebSocket(url)
-    let settled = false
-    const finish = (matched: boolean) => {
-      if (settled) return
-      settled = true
-      socket.close()
-      resume(Effect.succeed(matched))
-    }
-    socket.addEventListener("open", () => socket.send(handshake))
-    socket.addEventListener("message", (event) => finish(matches(String(event.data))))
-    socket.addEventListener("close", () => finish(false))
-    socket.addEventListener("error", () => finish(false))
-    return Effect.sync(() => {
-      settled = true
-      socket.close()
-    })
-  }).pipe(Effect.timeoutOrElse({ duration: "750 millis", orElse: () => Effect.succeed(false) }))
-
-const probeLegacyResident = Effect.fn("ResidentTransport.probeLegacyResident")(function* (options: {
-  readonly urls: ReadonlyArray<string>
-  readonly identity: string
-  readonly token: string
-  readonly clientKind: ResidentService.Handshake["clientKind"]
-}) {
-  const crypto = yield* Crypto.Crypto
-  for (const url of options.urls) {
-    const clientNonce = yield* crypto.randomUUIDv4
-    const matched = yield* probeWebSocket(
-      url,
-      json({
-        family: "rika-resident",
-        version: { major: 1, minor: 0 },
-        identity: options.identity,
-        token: options.token,
-        clientNonce,
-        clientKind: options.clientKind,
-        clientVersion: "resident-upgrade",
-        capabilities: legacyCapabilities,
-      }),
-      (text) => {
-        const message = parse(text)
-        return (
-          message !== null &&
-          typeof message === "object" &&
-          "_tag" in message &&
-          message._tag === "accepted" &&
-          "family" in message &&
-          message.family === "rika-resident" &&
-          "identity" in message &&
-          message.identity === options.identity &&
-          "clientNonce" in message &&
-          message.clientNonce === clientNonce
-        )
-      },
-    )
-    if (matched) return true
-  }
-  return false
-})
 const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
   readonly url: string
   readonly identity: string
   readonly token: string
   readonly clientKind: ResidentService.Handshake["clientKind"]
+  readonly connectRole: ResidentService.ConnectRole
   readonly role: ResidentService.Connection["role"]
 }) {
   const crypto = yield* Crypto.Crypto
@@ -246,20 +184,18 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
       }
     >(),
   )
-  const handshake = json({
-    family: "rika-resident",
+  const signedHandshake = {
     identity: options.identity,
     clientNonce,
     clientKind: options.clientKind,
+    connectRole: options.connectRole,
     protocolVersion: ResidentService.protocolVersion,
     buildIdentity: ResidentService.buildIdentity,
-    clientProof: ResidentService.clientProof(options.token, {
-      identity: options.identity,
-      clientNonce,
-      clientKind: options.clientKind,
-      protocolVersion: ResidentService.protocolVersion,
-      buildIdentity: ResidentService.buildIdentity,
-    }),
+  }
+  const handshake = json({
+    family: "rika-resident",
+    ...signedHandshake,
+    clientProof: ResidentService.clientProof(options.token, signedHandshake),
   } satisfies ResidentService.Handshake)
   const decodeFrame = makeServerMessageFrameDecoder()
   yield* socket
@@ -275,9 +211,32 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
           ).pipe(
             Effect.flatMap((message) => {
               if (message === undefined) return Effect.void
-              if (message._tag === "accepted") {
+              if (message._tag === "accepted" || message._tag === "incompatible") {
                 if (message.identity !== options.identity || message.clientNonce !== clientNonce)
                   return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                if (!ResidentService.verifyServerProof(options.token, signedHandshake, message))
+                  return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
+                if (message._tag === "incompatible") {
+                  const expectedDisposition = options.connectRole === "launch" ? "supersede" : "restart"
+                  if (message.disposition !== expectedDisposition)
+                    return Effect.fail(
+                      transportError("Resident returned an invalid upgrade disposition", "foreign-listener"),
+                    )
+                  if (!ResidentService.isValidIncompatibility(options.connectRole, message))
+                    return Effect.fail(
+                      transportError(
+                        "Resident returned an incompatible response for a compatible handshake",
+                        "foreign-listener",
+                      ),
+                    )
+                  return Effect.fail(
+                    ResidentService.ResidentServiceError.make({
+                      reason: "incompatible-resident",
+                      message: `An incompatible Rika resident${message.residentPid === undefined ? "" : ` (PID ${message.residentPid})`} is still running at ${options.url}; close other Rika clients, then run rika again`,
+                      ...(message.residentPid === undefined ? {} : { residentPid: message.residentPid }),
+                    }),
+                  )
+                }
                 if (message.protocolVersion !== ResidentService.protocolVersion)
                   return Effect.fail(
                     transportError(
@@ -285,27 +244,8 @@ const connect = Effect.fn("ResidentTransport.connect")(function* (options: {
                       "incompatible-resident",
                     ),
                   )
-                if (
-                  !ResidentService.verifyServerProof(
-                    options.token,
-                    {
-                      identity: options.identity,
-                      clientNonce,
-                      clientKind: options.clientKind,
-                      protocolVersion: ResidentService.protocolVersion,
-                      buildIdentity: ResidentService.buildIdentity,
-                    },
-                    message,
-                  )
-                )
-                  return Effect.fail(transportError("Foreign resident listener", "foreign-listener"))
-                if (message.buildIdentity !== ResidentService.buildIdentity)
-                  return Effect.fail(
-                    transportError(
-                      `A different Rika build${message.residentPid === undefined ? "" : ` (resident PID ${message.residentPid})`} is still running at ${options.url}; Rika will replace it when no clients are using it`,
-                      "incompatible-resident",
-                    ),
-                  )
+                if (options.connectRole === "launch" && message.buildIdentity !== ResidentService.buildIdentity)
+                  return Effect.fail(transportError("Resident accepted an incompatible launch", "foreign-listener"))
                 return Effect.sync(() => (acceptedConnectionId = message.connectionId)).pipe(
                   Effect.andThen(Deferred.succeed(accepted, message)),
                 )
@@ -779,11 +719,13 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
           const path = yield* Path.Path
           const connectionScope = yield* Scope.make()
           yield* Effect.addFinalizer((exit) => Scope.close(connectionScope, exit))
-          const attach = (role: ResidentService.Connection["role"]) =>
+          const attach = (connectRole: ResidentService.ConnectRole) =>
             Effect.gen(function* () {
               const attemptScope = yield* Scope.fork(connectionScope)
               const result = yield* Effect.exit(
-                connect({ ...endpoint, ...input, token, role }).pipe(Scope.provide(attemptScope)),
+                connect({ ...endpoint, ...input, token, connectRole, role: "attached" }).pipe(
+                  Scope.provide(attemptScope),
+                ),
               )
               if (result._tag === "Failure") {
                 yield* Scope.close(attemptScope, result)
@@ -805,7 +747,7 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
               ResidentService.ResidentRestartRequired.make({ message: failure.message })
             const startedAt = yield* Clock.currentTimeMillis
             const deadline = startedAt + 30_000
-            const first = yield* Effect.result(attach("attached"))
+            const first = yield* Effect.result(attach(policy))
             if (first._tag === "Success") return first.success
             if (policy === "reattach" && first.failure.reason === "incompatible-resident")
               return yield* yieldToIncompatible(first.failure)
@@ -820,7 +762,7 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
               let attempt = 0
               let lastFailure = first.failure
               while (true) {
-                const connected = yield* Effect.result(attach("attached"))
+                const connected = yield* Effect.result(attach(policy))
                 if (connected._tag === "Success") {
                   yield* Effect.logInfo("resident.startup.ready").pipe(
                     Effect.annotateLogs("rika.duration.ms", (yield* Clock.currentTimeMillis) - startedAt),
@@ -839,7 +781,7 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                 if (lastFailure.reason === "resident-absent" || lastFailure.reason === "incompatible-resident") {
                   const claim = yield* claimStartup(endpoint.startupPath, endpoint.identity, deadline)
                   if (claim._tag === "Owner") {
-                    const existing = yield* Effect.result(attach("attached"))
+                    const existing = yield* Effect.result(attach(policy))
                     if (existing._tag === "Success") {
                       yield* claim.release
                       yield* Effect.logInfo("resident.startup.ready").pipe(
@@ -854,37 +796,20 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                     }
                     if (lastFailure.reason === "resident-absent" || lastFailure.reason === "incompatible-resident") {
                       if (yield* ResidentProcessStartup.listenerIsLive(endpoint.port)) {
-                        const protocolVerified =
-                          lastFailure.reason === "incompatible-resident" ||
-                          (yield* probeLegacyResident({
-                            urls: [endpoint.url, endpoint.legacyUrl],
-                            identity: endpoint.identity,
-                            token,
-                            clientKind: input.clientKind,
-                          }))
-                        const recorded = yield* recordedResidentProcesses(endpoint).pipe(Effect.orElseSucceed(() => []))
-                        const alive = [] as Array<(typeof recorded)[number]>
-                        for (const resident of recorded)
-                          if (
-                            resident.pid !== process.pid &&
-                            (yield* ResidentProcessStartup.processIsAlive(resident.pid))
-                          )
-                            alive.push(resident)
-                        let listeners = yield* ResidentProcessStartup.listenerProcessIds(
-                          endpoint.port,
-                          alive.map((resident) => resident.pid),
-                        )
-                        if (listeners.length !== 1 && lastFailure.reason === "incompatible-resident") {
-                          const unrestricted = yield* ResidentProcessStartup.listenerProcessIds(endpoint.port, "any")
-                          const foreign = unrestricted.filter((pid) => pid !== process.pid)
-                          if (foreign.length === 1) listeners = foreign
-                        }
-                        if (listeners.length !== 1 || !protocolVerified) {
+                        if (lastFailure.reason !== "incompatible-resident" || lastFailure.residentPid === undefined) {
                           yield* claim.release
                           return yield* transportError(
-                            protocolVerified
-                              ? `The stale Rika resident on port ${endpoint.port} was authenticated, but its PID could not be verified. Stop it, then run rika again`
-                              : `A process is listening on Rika resident port ${endpoint.port}, but it could not be verified as this profile's resident. Stop that process, then run rika again`,
+                            `A process is listening on Rika resident port ${endpoint.port}, but it could not be authenticated. Stop that process, then run rika again`,
+                            "foreign-listener",
+                          )
+                        }
+                        const listeners = yield* ResidentProcessStartup.listenerProcessIds(endpoint.port, [
+                          lastFailure.residentPid,
+                        ])
+                        if (listeners.length !== 1) {
+                          yield* claim.release
+                          return yield* transportError(
+                            `The stale Rika resident on port ${endpoint.port} was authenticated, but its PID could not be verified. Stop it, then run rika again`,
                             "foreign-listener",
                           )
                         }
@@ -919,7 +844,7 @@ export const make = Effect.fn("ResidentTransport.make")(() =>
                         yield* claim.release
                         return yield* started.failure
                       }
-                      const attached = yield* Effect.result(attach("attached"))
+                      const attached = yield* Effect.result(attach(policy))
                       if (attached._tag === "Failure") {
                         yield* spawned.success.abort
                         yield* claim.release

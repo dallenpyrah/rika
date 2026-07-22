@@ -22,10 +22,10 @@ const program = Effect.gen(function* () {
     port: endpoint.port,
     fetch(request, upgradeServer) {
       const url = new URL(request.url)
-      const acceptedPath =
-        mode === "schema-reject"
-          ? url.pathname === "/resident" || url.pathname === "/resident/v1"
-          : url.pathname === "/resident/v1"
+      let acceptedPath = false
+      if (mode === "legacy") acceptedPath = url.pathname === "/resident/v1"
+      else if (mode === "schema-reject" || mode === "fake-incompatible" || mode === "v3")
+        acceptedPath = url.pathname === "/resident" || url.pathname === "/resident/v1"
       if (!acceptedPath || !upgradeServer.upgrade(request)) return new Response(null, { status: 404 })
       return undefined
     },
@@ -33,6 +33,10 @@ const program = Effect.gen(function* () {
       message(socket, text) {
         if (mode === "schema-reject") {
           socket.close(4400)
+          return
+        }
+        if (mode === "fake-incompatible" || mode === "v3") {
+          socket.close(4406)
           return
         }
         const message = JSON.parse(String(text)) as Record<string, unknown>
