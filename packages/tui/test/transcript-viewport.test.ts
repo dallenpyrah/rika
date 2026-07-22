@@ -8,6 +8,7 @@ import {
   atWindowTop,
   clampScrollTop,
   clampWindow,
+  classifyTranscriptContent,
   contentChanged,
   detach,
   follow,
@@ -91,7 +92,12 @@ const viewportOf = (mode: ViewportState, wheel: WheelPhase = wheelIdle, nextToke
 const wheel = (
   direction: "up" | "down",
   delta: number,
-  facts: { atTrueBottom?: boolean; atMountedBottom?: boolean; anchorPending?: boolean } = {},
+  facts: {
+    atTrueBottom?: boolean
+    atMountedBottom?: boolean
+    anchorPending?: boolean
+    anchor?: ViewportAnchor | undefined
+  } = {},
 ): Extract<ViewportEvent, { _tag: "WheelObserved" }> => ({
   _tag: "WheelObserved",
   direction,
@@ -99,6 +105,7 @@ const wheel = (
   atTrueBottom: facts.atTrueBottom ?? false,
   atMountedBottom: facts.atMountedBottom ?? false,
   anchorPending: facts.anchorPending ?? false,
+  anchor: "anchor" in facts ? facts.anchor : anchor("unit-a", 0),
 })
 
 describe("transcript viewport wheel reducer", () => {
@@ -112,7 +119,7 @@ describe("transcript viewport wheel reducer", () => {
   test("followed wheel-down away from the true bottom schedules one settle", () => {
     const decision = reduceViewport(viewportOf(following), wheel("down", 4))
     expect(decision.viewport.mode).toBe(following)
-    expect(decision.viewport.wheel).toEqual({ _tag: "AwaitingSettle", token: 0, direction: "down", scrollBy: 0 })
+    expect(decision.viewport.wheel).toEqual({ _tag: "AwaitingSettle", token: 0, displacement: 4 })
     expect(decision.viewport.nextToken).toBe(1)
     expect(decision.effects).toEqual([{ _tag: "ScheduleWheelSettle", token: 0 }])
   })
@@ -127,8 +134,22 @@ describe("transcript viewport wheel reducer", () => {
   test("wheel-down at the mounted bottom accumulates settle scroll across events", () => {
     const first = reduceViewport(viewportOf(following), wheel("down", 2, { atMountedBottom: true }))
     const second = reduceViewport(first.viewport, wheel("down", 3, { atMountedBottom: true }))
-    expect(second.viewport.wheel).toEqual({ _tag: "AwaitingSettle", token: 0, direction: "down", scrollBy: 5 })
+    expect(second.viewport.wheel).toEqual({ _tag: "AwaitingSettle", token: 0, displacement: 5 })
     expect(second.effects).toEqual([])
+  })
+
+  test("an upward detach cannot reverse into forward paging before the gesture settles", () => {
+    const upward = reduceViewport(viewportOf(following), wheel("up", 1))
+    const reversed = reduceViewport(upward.viewport, wheel("down", 1, { atMountedBottom: true }))
+    const settled = reduceViewport(reversed.viewport, {
+      _tag: "WheelSettleFired",
+      token: 0,
+      atTrueBottom: false,
+      atMountedBottom: true,
+    })
+
+    expect(isAnchored(settled.viewport.mode)).toBe(true)
+    expect(settled.effects).not.toContainEqual({ _tag: "PageForward", scrollBy: 1 })
   })
 
   test("first wheel-up detaches before notifying and scheduling", () => {
@@ -198,7 +219,7 @@ describe("transcript viewport wheel reducer", () => {
   })
 
   test("an up settle reports settled geometry", () => {
-    const scheduled = reduceViewport(viewportOf(detach()), wheel("up", 2))
+    const scheduled = reduceViewport(viewportOf(detach(anchor("unit-a", 0))), wheel("up", 2))
     const decision = reduceViewport(scheduled.viewport, {
       _tag: "WheelSettleFired",
       token: 0,
@@ -215,41 +236,63 @@ describe("transcript viewport mode transitions", () => {
     const detached = viewportOf(detach(anchor("unit-a", 1)))
     const followed = reduceViewport(detached, { _tag: "BottomSettled" })
     expect(isFollowing(followed.viewport.mode)).toBe(true)
-    expect(followed.effects).toEqual([{ _tag: "NotifyFollowed" }])
+    expect(followed.effects).toEqual([{ _tag: "ProjectState" }, { _tag: "NotifyFollowed" }])
     const repeat = reduceViewport(followed.viewport, { _tag: "BottomSettled" })
     expect(repeat.viewport).toBe(followed.viewport)
     expect(repeat.effects).toEqual([])
   })
 
-  test("an explicit follow command always notifies", () => {
+  test("an explicit follow command is an exact no-op while already following", () => {
     const decision = reduceViewport(viewportOf(following), { _tag: "FollowCommanded" })
     expect(isFollowing(decision.viewport.mode)).toBe(true)
-    expect(decision.effects).toEqual([{ _tag: "NotifyFollowed" }])
+    expect(decision.effects).toEqual([])
   })
 
   test("a detach command anchors and reprojects", () => {
-    const decision = reduceViewport(viewportOf(following), { _tag: "DetachCommanded" })
+    const decision = reduceViewport(viewportOf(following), {
+      _tag: "DetachCommanded",
+      anchor: anchor("unit-a", 3),
+    })
     expect(isAnchored(decision.viewport.mode)).toBe(true)
     expect(decision.effects).toEqual([{ _tag: "ProjectState" }])
   })
 
-  test("model sync anchors when the model stops following", () => {
+  test("an anchorless detach command cannot create an invalid reading state", () => {
     const decision = reduceViewport(viewportOf(following), {
-      _tag: "ModelSynced",
-      scrollFollow: false,
-      followForced: false,
+      _tag: "DetachCommanded",
+      anchor: undefined,
     })
-    expect(isAnchored(decision.viewport.mode)).toBe(true)
+    expect(isFollowing(decision.viewport.mode)).toBe(true)
     expect(decision.effects).toEqual([])
   })
 
-  test("model sync restores follow only when forced", () => {
+  test("an explicit follow command transitions and notifies once", () => {
     const detached = viewportOf(detach(anchor("unit-a", 3)))
-    const kept = reduceViewport(detached, { _tag: "ModelSynced", scrollFollow: true, followForced: false })
-    expect(kept.viewport).toBe(detached)
-    const forced = reduceViewport(detached, { _tag: "ModelSynced", scrollFollow: true, followForced: true })
-    expect(isFollowing(forced.viewport.mode)).toBe(true)
-    expect(forced.effects).toEqual([])
+    const followed = reduceViewport(detached, { _tag: "FollowCommanded" })
+    expect(isFollowing(followed.viewport.mode)).toBe(true)
+    expect(followed.effects).toEqual([
+      { _tag: "ProjectState" },
+      { _tag: "RequestFollowPosition" },
+      { _tag: "NotifyFollowed" },
+    ])
+  })
+
+  test("reset cancels a gesture without reusing its token sequence", () => {
+    const pending = viewportOf(following, { _tag: "AwaitingSettle", token: 4, displacement: -2 }, 5)
+    const reset = reduceViewport(pending, { _tag: "ResetCommanded" })
+    expect(reset.viewport).toEqual({ mode: following, wheel: wheelIdle, nextToken: 5 })
+    expect(reset.effects).toEqual([{ _tag: "ProjectState" }, { _tag: "RequestFollowPosition" }])
+  })
+})
+
+describe("transcript content classification", () => {
+  test("distinguishes prepends and appends by stable identity", () => {
+    expect(
+      classifyTranscriptContent(
+        [{ id: "a" }, { id: "b" }],
+        [{ id: "older" }, { id: "a" }, { id: "b" }, { id: "newer" }],
+      ),
+    ).toEqual({ prepended: ["older"], appended: ["newer"], removed: [] })
   })
 })
 

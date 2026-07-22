@@ -3,7 +3,7 @@ import { createTestRenderer, ManualClock } from "@opentui/core/testing"
 import { expect, test } from "vitest"
 import { Data, Effect } from "effect"
 import stringWidth from "string-width"
-import { Surface, maxMountedTranscriptEntries, maxMountedTranscriptRows } from "../src/adapter"
+import { Surface, boundedTranscriptModel, maxMountedTranscriptEntries, maxMountedTranscriptRows } from "../src/adapter"
 import { colors } from "../src/theme"
 import {
   applyQueueDelta,
@@ -384,7 +384,11 @@ test("moves the bounded transcript window to older mounted entries and keeps it 
       try {
         surface.update(base)
         yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(0)
+        setup.renderer.requestRender()
+        yield* openTui(() => setup.flush())
         const firstBefore = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         setup.mockInput.pressKey("\x1b[5~")
         yield* openTui(() => setup.flush())
@@ -464,12 +468,46 @@ test("keeps mounted renderables bounded inside one giant expanded subagent tree"
       try {
         surface.update(model)
         yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
         const state = surface as unknown as { readonly transcriptChildren: ReadonlyArray<Renderable> }
         expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptRows * 2)
         expect(state.transcriptChildren.length).toBeGreaterThan(0)
         const frame = setup.captureCharFrame()
-        expect(frame).toContain("├ ✓ $ cmd-61")
-        expect(frame).not.toContain("cmd-60 ")
+        expect(frame).toContain("├ ✓ $ cmd-299")
+        expect(frame).not.toContain("cmd-100 ")
+        expect(boundedTranscriptModel(model).items.length).toBeLessThanOrEqual(maxMountedTranscriptEntries)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("keeps the bounded suffix of an oversized tool tree when a trailing message arrives", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const giant = { ...giantSubagentModel(300), scrollFollow: true }
+      const tail = { role: "assistant" as const, text: "TRAILING_MESSAGE", turnId: "turn-tail" }
+      const grown: Model = {
+        ...giant,
+        entries: [...giant.entries, tail],
+        items: [...giant.items, { _tag: "Entry", index: giant.entries.length, id: "tail-answer", turnId: "turn-tail" }],
+      }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      try {
+        surface.update(giant)
+        yield* openTui(() => setup.flush())
+        expect(setup.captureCharFrame()).toContain("cmd-299")
+
+        surface.update(grown)
+        yield* openTui(() => setup.flush())
+        const frame = setup.captureCharFrame()
+
+        expect(frame).toContain("TRAILING_MESSAGE")
+        expect(frame).toContain("cmd-299")
+        expect(boundedTranscriptModel(grown).items.some((item) => item._tag === "Block")).toBe(true)
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -486,18 +524,20 @@ test("grows the row window backward inside a giant tree and keeps the reading po
       try {
         surface.update(model)
         yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(0)
         yield* openTui(() => setup.flush())
         const firstBefore = Number(/cmd-(\d+)/.exec(setup.captureCharFrame())?.[1])
         setup.mockInput.pressKey("\x1b[5~")
         yield* openTui(() => setup.flush())
         const state = surface as unknown as {
-          readonly transcriptRowWindow: { readonly end: number }
+          readonly transcriptWindowEnd: number
           readonly transcriptChildren: ReadonlyArray<Renderable>
         }
         const firstAfter = Number(/cmd-(\d+)/.exec(setup.captureCharFrame())?.[1])
-        expect(state.transcriptRowWindow.end).toBeGreaterThan(0)
-        expect(state.transcriptRowWindow.end).toBeLessThan(301)
+        expect(state.transcriptWindowEnd).toBeGreaterThan(0)
+        expect(state.transcriptWindowEnd).toBeLessThan(301)
         expect(firstAfter).toBeLessThan(firstBefore)
         expect(state.transcriptChildren.length).toBeLessThanOrEqual(maxMountedTranscriptRows * 2)
       } finally {
@@ -771,14 +811,17 @@ test("does not follow the tail while a forward transcript-window anchor is pendi
       )
       const state = surface as unknown as {
         readonly transcriptWindowEnd: number
-        readonly pendingTranscriptAnchor:
+        readonly pendingTranscriptPosition:
           | {
+              readonly _tag: "Anchor"
               readonly scrollBy: number
             }
           | undefined
       }
       try {
         surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
         yield* openTui(() => setup.flush())
 
         surface.transcriptScroll.scrollTo(0)
@@ -795,19 +838,82 @@ test("does not follow the tail while a forward transcript-window anchor is pendi
         yield* openTui(() => setup.mockMouse.scroll(10, 5, "down", { delayMs: 0 }))
         clock.advance(16)
         expect(state.transcriptWindowEnd).toBe(500)
-        expect(state.pendingTranscriptAnchor).toBeDefined()
+        expect(state.pendingTranscriptPosition?._tag).toBe("Anchor")
 
         yield* openTui(() => setup.mockMouse.scroll(10, 5, "down", { delayMs: 0 }))
-        const queuedDown = state.pendingTranscriptAnchor?.scrollBy ?? 0
+        const queuedDown = state.pendingTranscriptPosition?.scrollBy ?? 0
         yield* openTui(() => setup.mockMouse.scroll(10, 5, "up", { delayMs: 0 }))
         expect(model.scrollFollow).toBe(false)
-        expect(state.pendingTranscriptAnchor?.scrollBy).toBeLessThan(queuedDown)
+        expect(state.pendingTranscriptPosition?.scrollBy).toBeLessThan(queuedDown)
 
         yield* openTui(() => setup.flush())
         const firstAfter = Number(/answer (\d+)/.exec(setup.captureCharFrame())?.[1])
         expect(model.scrollFollow).toBe(false)
         expect(firstAfter).toBeGreaterThan(firstBefore)
         expect(firstAfter).toBeLessThan(firstBefore + 10)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("does not turn an upward wheel correction into a forward window page", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const clock = new ManualClock()
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const entries = Array.from({ length: 500 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const items = entries.map((_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      }))
+      let model: Model = { ...initial("/work", "high"), entries, items }
+      const surface = new Surface(
+        setup.renderer,
+        {
+          key: () => undefined,
+          resize: () => undefined,
+          scroll: (offset) => {
+            model = update(model, { _tag: "ScrollMoved", offset })
+            surface.update(model)
+          },
+          scrollFollow: () => {
+            model = update(model, { _tag: "ScrollFollowed" })
+            surface.update(model)
+          },
+        },
+        { clock },
+      )
+      const state = surface as unknown as { readonly transcriptWindowEnd: number }
+      try {
+        surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScroll.scrollTo(0)
+        setup.mockInput.pressKey("\x1b[5~")
+        yield* openTui(() => setup.flush())
+        expect(state.transcriptWindowEnd).toBe(400)
+
+        surface.transcriptScroll.scrollTo(surface.transcriptScroll.scrollHeight)
+        setup.renderer.requestRender()
+        yield* openTui(() => setup.flush())
+        const marker = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
+        yield* openTui(() => setup.mockMouse.scroll(10, 5, "up", { delayMs: 0 }))
+        yield* openTui(() => setup.mockMouse.scroll(10, 5, "down", { delayMs: 0 }))
+        clock.advance(16)
+        yield* openTui(() => setup.flush())
+
+        expect(model.scrollFollow).toBe(false)
+        expect(state.transcriptWindowEnd).toBe(400)
+        expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(marker)
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -929,7 +1035,11 @@ test("coalesces repeated page keys until the transcript anchor frame", () =>
       try {
         surface.update({ ...initial("/work", "high"), entries, items, scrollFollow: false })
         yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(0)
+        setup.renderer.requestRender()
+        yield* openTui(() => setup.flush())
         setup.mockInput.pressKey("\x1b[5~")
         setup.mockInput.pressKey("\x1b[5~")
         expect(state.transcriptWindowEnd).toBe(500)
@@ -979,6 +1089,8 @@ test("preserves a pending prepend anchor through an intervening composer update"
       const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
       try {
         surface.update(base)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
         yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(40)
         const firstBefore = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
@@ -1042,6 +1154,8 @@ test("keeps the nearest transcript content in view when markdown reflows", () =>
       })
       try {
         surface.update(model)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
         yield* openTui(() => setup.flush())
         surface.transcriptScroll.scrollTo(80)
         setup.renderer.requestRender()
@@ -1149,6 +1263,8 @@ test("keeps a detached transcript window stable when live entries arrive", () =>
       try {
         surface.update(base)
         yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
         const firstBefore = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
         surface.update({
           ...base,
@@ -1157,6 +1273,118 @@ test("keeps a detached transcript window stable when live entries arrive", () =>
         })
         yield* openTui(() => setup.flush())
         expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(firstBefore)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("preserves a detached window when prepended history and live appends share one update", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const entries = Array.from({ length: 500 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const items = entries.map((_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const base: Model = { ...initial("/work", "high"), entries, items }
+      const surface = new Surface(setup.renderer, { key: () => undefined, resize: () => undefined })
+      const state = surface as unknown as { readonly transcriptWindowEnd: number }
+      try {
+        surface.update(base)
+        yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
+        const marker = /answer (\d+)/.exec(setup.captureCharFrame())?.[1]
+        const older = Array.from({ length: 50 }, (_, index) => ({
+          role: "assistant" as const,
+          text: `older ${index}`,
+          turnId: `older-${index}`,
+        }))
+        const live = Array.from({ length: 220 }, (_, index) => ({
+          role: "assistant" as const,
+          text: `live ${index}`,
+          turnId: `live-${index}`,
+        }))
+        const combinedEntries = [...older, ...entries, ...live]
+        const combinedItems = [
+          ...older.map((entry, index) => ({
+            _tag: "Entry" as const,
+            index,
+            id: entry.turnId,
+            turnId: entry.turnId,
+          })),
+          ...items.map((item) => ({
+            _tag: item._tag,
+            index: item.index + older.length,
+            id: item.id,
+            turnId: item.turnId,
+          })),
+          ...live.map((entry, index) => ({
+            _tag: "Entry" as const,
+            index: older.length + entries.length + index,
+            id: entry.turnId,
+            turnId: entry.turnId,
+          })),
+        ]
+
+        surface.update({ ...base, entries: combinedEntries, items: combinedItems }, true)
+        yield* openTui(() => setup.flush())
+
+        expect(state.transcriptWindowEnd).toBe(550)
+        expect(/answer (\d+)/.exec(setup.captureCharFrame())?.[1]).toBe(marker)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
+test("End re-engages physical following and invalidates a queued scrollbar report", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const setup = yield* openTui(() => createTestRenderer({ width: 80, height: 24 }))
+      const entries = Array.from({ length: 100 }, (_, index) => ({
+        role: "assistant" as const,
+        text: `answer ${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const items = entries.map((_, index) => ({
+        _tag: "Entry" as const,
+        index,
+        id: `answer-${index}`,
+        turnId: `turn-${index}`,
+      }))
+      const offsets = new Array<number>()
+      let followed = 0
+      const surface = new Surface(setup.renderer, {
+        key: () => undefined,
+        resize: () => undefined,
+        scroll: (offset) => offsets.push(offset),
+        scrollFollow: () => {
+          followed += 1
+        },
+      })
+      try {
+        surface.update({ ...initial("/work", "high"), entries, items })
+        yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 20)
+        setup.mockInput.pressKey("\x1b[F")
+        yield* openTui(() => setup.flush())
+
+        expect(followed).toBe(1)
+        expect(offsets).toEqual([])
+        expect(surface.transcriptScroll.scrollTop).toBeGreaterThanOrEqual(
+          surface.transcriptScroll.scrollHeight - surface.transcriptScroll.viewport.height - 1,
+        )
       } finally {
         surface.destroy()
         setup.renderer.destroy()
@@ -1294,6 +1522,9 @@ test("reports prepend anchor geometry without requesting another page", () =>
       try {
         surface.update(base)
         yield* openTui(() => setup.flush())
+        surface.transcriptScrollbar.scrollPosition = Math.max(0, surface.transcriptScroll.scrollTop - 1)
+        yield* openTui(() => setup.flush())
+        requested.length = 0
         const older = Array.from({ length: 50 }, (_, index) => ({
           role: "assistant" as const,
           text: `older ${index}`,

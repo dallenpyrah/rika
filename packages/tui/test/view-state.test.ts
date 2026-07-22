@@ -340,7 +340,7 @@ describe("ViewState", () => {
     expect(model).toMatchObject({ scrollFollow: true, scrollOffset: 0 })
   })
 
-  test("pages through a long transcript, stays detached while streaming, and follows again at End", () => {
+  test("leaves transcript navigation keys to the viewport owner", () => {
     let model: ViewState.Model = {
       ...ViewState.initial("/work"),
       height: 24,
@@ -348,13 +348,13 @@ describe("ViewState", () => {
       scrollOffset: 120,
     }
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "pageup" }) })
-    expect(model).toMatchObject({ scrollOffset: 102, scrollFollow: false })
+    expect(model).toMatchObject({ scrollOffset: 120, scrollFollow: true })
     model = ViewState.update(model, { _tag: "AssistantStreamed", text: "more" })
-    expect(model).toMatchObject({ scrollOffset: 102, scrollFollow: false })
+    expect(model).toMatchObject({ scrollOffset: 120, scrollFollow: true })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "pagedown" }) })
-    expect(model).toMatchObject({ scrollOffset: 120, scrollFollow: false })
+    expect(model).toMatchObject({ scrollOffset: 120, scrollFollow: true })
     model = ViewState.update(model, { _tag: "KeyPressed", key: key({ name: "end" }) })
-    expect(model).toMatchObject({ scrollOffset: 0, scrollFollow: true })
+    expect(model).toMatchObject({ scrollOffset: 120, scrollFollow: true })
   })
 
   test("streams, completes, and reports failures", () => {

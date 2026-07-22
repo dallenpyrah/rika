@@ -2331,7 +2331,6 @@ export const interactiveTui =
               openPath,
               scroll: (offset) => {
                 model = ViewState.update(model, { _tag: "ScrollMoved", offset })
-                renderer?.surface.update(model)
                 if (offset <= 0 && !loadingOlder) {
                   loadingOlder = true
                   run(
@@ -2350,7 +2349,6 @@ export const interactiveTui =
               },
               scrollFollow: () => {
                 model = ViewState.update(model, { _tag: "ScrollFollowed" })
-                renderer?.surface.update(model)
               },
               paste: (text) => {
                 model = ViewState.update(model, { _tag: "Pasted", text })

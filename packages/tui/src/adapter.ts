@@ -70,6 +70,7 @@ import { filter, type Command } from "./palette"
 import { colors, spacing } from "./theme"
 import {
   atBottomWithin,
+  classifyTranscriptContent,
   clampScrollTop,
   initialViewport,
   isFollowing,
@@ -78,6 +79,7 @@ import {
   type TranscriptViewport,
   type ViewportEvent,
   type ViewportMetrics,
+  type ViewportAnchor,
 } from "./transcript-viewport"
 import { renderMarkdown, renderMarkdownLines, renderMarkdownStyled } from "./markdown-renderer"
 import { renderDiff, renderDiffStyled, renderPartialDiffStyled } from "./diff-renderer"
@@ -596,19 +598,22 @@ export const maxMountedTranscriptEntries = 200
 
 export { maxMountedTranscriptRows } from "./transcript-presenter"
 
+type BoundedTranscriptModel = Omit<Model, "items"> & { readonly items: ReadonlyArray<TranscriptItem> }
+
 export const boundedTranscriptModel: {
-  (model: Model): Model
-  (model: Model, end: number): Model
-  (end: number): (model: Model) => Model
+  (model: Model): BoundedTranscriptModel
+  (model: Model, end: number): BoundedTranscriptModel
+  (end: number): (model: Model) => BoundedTranscriptModel
 } = Function.dual(
   (args) => typeof args[0] === "object",
-  (model: Model, end = model.items.length): Model => {
+  (model: Model, end = model.items.length): BoundedTranscriptModel => {
     const limit = maxMountedTranscriptEntries
     if (model.items.length === 0)
       return {
         ...model,
         entries: model.entries.slice(-limit),
         blocks: model.blocks.slice(-limit),
+        items: [],
       }
     const windowEnd = Math.min(model.items.length, Math.max(0, Math.floor(end)))
     const allItems = model.items as ReadonlyArray<TranscriptItem>
@@ -678,18 +683,41 @@ export const boundedTranscriptModel: {
       members.push(position)
     }
     const orderedRoots = unitRoots.toSorted((left, right) => left - right)
-    const selectedRoots: Array<number> = []
-    let selectedCount = 0
+    const selectedPositions = new Set<number>()
     for (let unitIndex = orderedRoots.length - 1; unitIndex >= 0; unitIndex -= 1) {
       const members = unitMembers.get(orderedRoots[unitIndex]!)!
-      if (selectedRoots.length > 0 && selectedCount + members.length > limit) break
-      selectedRoots.push(orderedRoots[unitIndex]!)
-      selectedCount += members.length
+      const remaining = limit - selectedPositions.size
+      if (remaining <= 0) break
+      if (members.length <= remaining) {
+        for (const position of members) selectedPositions.add(position)
+        continue
+      }
+      const required = new Set<number>()
+      const ancestorsOf = (position: number): ReadonlyArray<number> => {
+        const ancestors: Array<number> = []
+        const seen = new Set<number>()
+        let current = position
+        while (!seen.has(current)) {
+          seen.add(current)
+          const parentId = allItems[current]?.parentId
+          if (parentId === undefined) break
+          const parent = itemPositionByBlockId.get(parentId)
+          if (parent === undefined) break
+          ancestors.unshift(parent)
+          current = parent
+        }
+        return ancestors
+      }
+      for (let position = members.length - 1; position >= 0 && required.size < remaining; position -= 1) {
+        const member = members[position]!
+        const additions = [...ancestorsOf(member), member].filter((candidate) => !required.has(candidate))
+        if (required.size + additions.length > remaining) break
+        for (const addition of additions) required.add(addition)
+      }
+      for (const position of required) selectedPositions.add(position)
+      break
     }
-    const source = selectedRoots
-      .flatMap((root) => unitMembers.get(root)!)
-      .toSorted((left, right) => left - right)
-      .map((position) => allItems[position]!)
+    const source = [...selectedPositions].toSorted((left, right) => left - right).map((position) => allItems[position]!)
     const entries: Array<Model["entries"][number]> = []
     const blocks: Array<Model["blocks"][number]> = []
     const entryIndices = new Map<number, number>()
@@ -1553,13 +1581,21 @@ interface TranscriptAnchor {
   readonly screenY: number
 }
 
-interface PendingTranscriptAnchor {
-  readonly anchor: TranscriptAnchor | undefined
-  readonly threadId: string | undefined
-  readonly scrollHeight: number
-  readonly scrollBy: number
-  readonly nearBottom: boolean
-}
+type PendingTranscriptPosition =
+  | {
+      readonly _tag: "Anchor"
+      readonly token: number
+      readonly anchor: TranscriptAnchor | undefined
+      readonly threadId: string | undefined
+      readonly scrollHeight: number
+      readonly scrollBy: number
+      readonly nearBottom: boolean
+    }
+  | {
+      readonly _tag: "Follow"
+      readonly token: number
+      readonly threadId: string | undefined
+    }
 
 interface TranscriptRenderInput {
   readonly entries: Model["entries"]
@@ -1571,6 +1607,19 @@ interface TranscriptRenderInput {
   readonly width: number
   readonly windowEnd: number
   readonly rowWindowEnd: number
+}
+
+const transcriptItemIdentities = (items: ReadonlyArray<TranscriptItem>) =>
+  items.flatMap((item) => (item.id === undefined ? [] : [{ id: `${item._tag}:${item.id}` }]))
+
+const prependedTranscriptItems = (
+  previousItems: ReadonlyArray<unknown>,
+  currentItems: ReadonlyArray<unknown>,
+): number => {
+  const previous = previousItems as ReadonlyArray<TranscriptItem>
+  const current = currentItems as ReadonlyArray<TranscriptItem>
+  return classifyTranscriptContent(transcriptItemIdentities(previous), transcriptItemIdentities(current)).prepended
+    .length
 }
 
 const mouseSequencePattern = new RegExp(`^(?:${String.fromCharCode(27)}?\\[)?<?\\d+(?:;\\d+)*[Mm]?$`)
@@ -1684,7 +1733,6 @@ export class Surface {
   private sidebarWindowHoveredRow: number | undefined
   private sidebarLayoutFrame: (() => void) | undefined
   private scrollProgrammatic = false
-  private scrollFramePending = false
   private wheelTimer: TimerHandle | undefined
   private transcriptViewport: TranscriptViewport = initialViewport
   private loaderPhase = 0
@@ -1700,10 +1748,11 @@ export class Surface {
   private transcriptRowWindow: RowWindowState = pinnedRowWindow
   private transcriptRowTotal = 0
   private transcriptWindowThread: string | undefined
-  private transcriptAnchorFrame: (() => void) | undefined
+  private transcriptPositionFrame: (() => void) | undefined
   private transcriptAnchorScrollBy = 0
   private transcriptAnchorNearBottom = false
-  private pendingTranscriptAnchor: PendingTranscriptAnchor | undefined
+  private pendingTranscriptPosition: PendingTranscriptPosition | undefined
+  private nextTranscriptPositionToken = 0
   private scrollbarSyncing = false
   private scrollGeneration = 0
   private destroyed = false
@@ -1754,9 +1803,10 @@ export class Surface {
       trackOptions: { foregroundColor: colors.text, backgroundColor: colors.muted },
       onChange: (position) => {
         if (this.scrollbarSyncing || this.destroyed) return
-        this.transcriptScroll.scrollTop = position
+        this.cancelWheelReport()
+        this.applyTranscriptPosition(position)
         if (!this.atTranscriptBottom() && isFollowing(this.transcriptViewport.mode))
-          this.dispatchTranscriptViewport({ _tag: "DetachCommanded" })
+          this.dispatchTranscriptViewport({ _tag: "DetachCommanded", anchor: this.captureViewportAnchor() })
         this.queueTranscriptScroll(() => this.reportTranscriptScroll())
       },
     })
@@ -2019,20 +2069,22 @@ export class Surface {
     const mapped = fromOpenTui(key)
     if (this.suppressMouseJunk(mapped)) return
     if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "pageup") {
-      this.dispatchTranscriptViewport({ _tag: "DetachCommanded" })
+      this.cancelWheelReport()
+      this.dispatchTranscriptViewport({ _tag: "DetachCommanded", anchor: this.captureViewportAnchor() })
       const amount = Math.max(1, this.transcriptScroll.viewport.height - 1)
       if (this.queuePendingTranscriptScroll(-amount)) return
       if (this.transcriptScroll.scrollTop <= 1 && this.shiftTranscriptWindow(-100, true, -amount)) return
-      this.transcriptScroll.scrollBy(-amount)
+      this.applyTranscriptPosition(this.transcriptScroll.scrollTop - amount)
       this.reportTranscriptScroll()
     } else if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "pagedown") {
-      this.transcriptScroll.stickyScroll = false
+      this.cancelWheelReport()
       const amount = Math.max(1, this.transcriptScroll.viewport.height - 1)
       if (this.queuePendingTranscriptScroll(amount, true)) return
       if (this.atMountedTranscriptBottom() && this.shiftTranscriptWindow(100, true, amount, true)) return
-      this.transcriptScroll.scrollBy(amount)
+      this.applyTranscriptPosition(this.transcriptScroll.scrollTop + amount)
       this.reportTranscriptScroll(true)
     } else if (!mapped.ctrl && !mapped.alt && !mapped.meta && mapped.name === "end") {
+      this.cancelWheelReport()
       this.dispatchTranscriptViewport({ _tag: "FollowCommanded" })
     } else if (mapped.ctrl && mapped.name === "v" && this.handlers.pasteImage !== undefined) this.handlers.pasteImage()
     else this.handlers.key(mapped)
@@ -2050,12 +2102,17 @@ export class Surface {
     this.transcriptWindowEnd >= (this.model?.items.length ?? 0) &&
     (this.transcriptRowWindow.end === 0 || this.transcriptRowWindow.end >= this.transcriptRowTotal)
   private dispatchTranscriptViewport(event: ViewportEvent): void {
+    const previousMode = this.transcriptViewport.mode
     const decision = reduceViewport(this.transcriptViewport, event)
     this.transcriptViewport = decision.viewport
+    if (previousMode !== decision.viewport.mode || event._tag === "ResetCommanded") this.scrollGeneration += 1
     for (const effect of decision.effects)
       switch (effect._tag) {
         case "ProjectState":
           this.transcriptScroll.stickyScroll = isFollowing(this.transcriptViewport.mode)
+          break
+        case "RequestFollowPosition":
+          this.scheduleTranscriptPosition({ _tag: "Follow", threadId: this.model?.currentThreadId })
           break
         case "NotifyDetached":
           this.handlers.scroll?.(this.transcriptScroll.scrollTop)
@@ -2091,6 +2148,17 @@ export class Surface {
   private clampTranscriptScrollTop(scrollTop: number): number {
     return clampScrollTop(scrollTop, { ...this.transcriptMetrics(), scrollTop })
   }
+  private applyTranscriptPosition(scrollTop: number): void {
+    const target = this.clampTranscriptScrollTop(scrollTop)
+    if (target === this.transcriptScroll.scrollTop) return
+    this.scrollProgrammatic = true
+    this.transcriptScroll.scrollTop = target
+    this.scrollProgrammatic = false
+  }
+  private captureViewportAnchor(): ViewportAnchor | undefined {
+    const anchor = this.captureTranscriptAnchor()
+    return anchor === undefined ? undefined : { unitId: anchor.key, offset: anchor.screenY }
+  }
   private captureTranscriptAnchor(): TranscriptAnchor | undefined {
     const viewportTop = this.transcriptScroll.screenY
     const drift = this.transcriptScroll.scrollTop - this.renderedTranscriptScrollTop
@@ -2112,7 +2180,8 @@ export class Surface {
       delta: event.scroll?.delta ?? 1,
       atTrueBottom: this.atTranscriptBottom(),
       atMountedBottom: this.atMountedTranscriptBottom(),
-      anchorPending: this.pendingTranscriptAnchor !== undefined,
+      anchorPending: this.pendingTranscriptPosition?._tag === "Anchor",
+      anchor: this.captureViewportAnchor(),
     })
   }
   private cancelWheelReport(): void {
@@ -2153,9 +2222,9 @@ export class Surface {
     return true
   }
   private queuePendingTranscriptScroll(scrollBy: number, nearBottom = false): boolean {
-    const pending = this.pendingTranscriptAnchor
-    if (pending === undefined || pending.threadId !== this.model?.currentThreadId) return false
-    this.pendingTranscriptAnchor = { ...pending, scrollBy: pending.scrollBy + scrollBy, nearBottom }
+    const pending = this.pendingTranscriptPosition
+    if (pending?._tag !== "Anchor" || pending.threadId !== this.model?.currentThreadId) return false
+    this.pendingTranscriptPosition = { ...pending, scrollBy: pending.scrollBy + scrollBy, nearBottom }
     this.renderer.requestRender()
     return true
   }
@@ -2184,24 +2253,40 @@ export class Surface {
       action()
     })
   }
-  private anchorTranscriptAfterLayout(): void {
-    this.defer(() => {
-      if (this.model === undefined) return
-      this.syncTranscriptScrollbar()
-    })
-  }
-  private followTranscriptAfterLayout(): void {
-    if (this.scrollFramePending) return
-    this.scrollFramePending = true
-    this.defer(() => {
-      this.scrollFramePending = false
-      if (!isFollowing(this.transcriptViewport.mode)) return
-      this.scrollProgrammatic = true
-      this.transcriptScroll.scrollTo(maxScrollTop(this.transcriptMetrics()))
-      this.scrollProgrammatic = false
+  private scheduleTranscriptPosition(position: Omit<PendingTranscriptPosition, "token">): void {
+    const token = this.nextTranscriptPositionToken
+    this.nextTranscriptPositionToken += 1
+    this.pendingTranscriptPosition = { ...position, token } as PendingTranscriptPosition
+    if (this.transcriptPositionFrame !== undefined)
+      this.renderer.off(CliRenderEvents.FRAME, this.transcriptPositionFrame)
+    const apply = () => {
+      this.renderer.off(CliRenderEvents.FRAME, apply)
+      if (this.transcriptPositionFrame === apply) this.transcriptPositionFrame = undefined
+      const current = this.pendingTranscriptPosition
+      if (current === undefined || current.token !== token || this.destroyed) return
+      this.pendingTranscriptPosition = undefined
+      if (current.threadId !== this.model?.currentThreadId) return
+      if (current._tag === "Follow" && !isFollowing(this.transcriptViewport.mode)) return
+      if (current._tag === "Anchor") {
+        if (isFollowing(this.transcriptViewport.mode)) return
+        const anchored = current.anchor === undefined ? undefined : this.transcriptRecords.get(current.anchor.key)
+        const anchorScreenY = current.anchor?.screenY
+        const offset =
+          anchored === undefined || anchorScreenY === undefined
+            ? this.transcriptScroll.scrollHeight - current.scrollHeight
+            : anchored.renderable.screenY - anchorScreenY
+        this.applyTranscriptPosition(this.transcriptScroll.scrollTop + offset + current.scrollBy)
+        if (current.scrollBy === 0) this.handlers.scrollGeometry?.(this.transcriptScroll.scrollTop)
+        else this.reportTranscriptScroll(current.nearBottom)
+      } else this.applyTranscriptPosition(maxScrollTop(this.transcriptMetrics()))
       this.syncTranscriptScrollbar()
       this.renderer.requestRender()
-    })
+    }
+    this.transcriptPositionFrame = apply
+    this.renderer.once(CliRenderEvents.FRAME, apply)
+    this.clock.setTimeout(() => {
+      if (this.transcriptPositionFrame === apply && !this.destroyed) apply()
+    }, 16)
   }
   private junkBuffer: Array<Key> = []
   private junkTimer: Fiber.Fiber<void> | undefined
@@ -2689,13 +2774,10 @@ export class Surface {
   update(model: Model, preserveTranscriptAnchor = false): void {
     const previousScrollHeight = this.transcriptScroll.scrollHeight
     const previousModel = this.model
-    this.dispatchTranscriptViewport({
-      _tag: "ModelSynced",
-      scrollFollow: model.scrollFollow,
-      followForced:
-        previousModel?.currentThreadId !== model.currentThreadId ||
-        (previousModel?.scrollFollow === false && model.scrollFollow),
-    })
+    if (previousModel?.currentThreadId !== model.currentThreadId) {
+      this.cancelWheelReport()
+      this.dispatchTranscriptViewport({ _tag: "ResetCommanded" })
+    }
     const scrollFollow = isFollowing(this.transcriptViewport.mode)
     const transcriptLayoutChanged =
       previousModel !== undefined &&
@@ -2710,15 +2792,15 @@ export class Surface {
       !scrollFollow &&
       (model.entries.length > 0 || model.blocks.length > 0) &&
       transcriptLayoutChanged &&
-      this.pendingTranscriptAnchor === undefined &&
-      this.wheelTimer === undefined
+      this.pendingTranscriptPosition === undefined &&
+      this.transcriptViewport.wheel._tag === "Idle"
     const preserveTranscriptPosition = preserveTranscriptAnchor || transcriptDetachedSameThread
     const transcriptAnchor = preserveTranscriptPosition ? this.captureTranscriptAnchor() : undefined
-    const previousItems = previousModel?.items.length ?? 0
     if (this.transcriptWindowThread !== model.currentThreadId) {
-      if (this.transcriptAnchorFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.transcriptAnchorFrame)
-      this.transcriptAnchorFrame = undefined
-      this.pendingTranscriptAnchor = undefined
+      if (this.transcriptPositionFrame !== undefined)
+        this.renderer.off(CliRenderEvents.FRAME, this.transcriptPositionFrame)
+      this.transcriptPositionFrame = undefined
+      this.pendingTranscriptPosition = undefined
       this.transcriptAnchorScrollBy = 0
       this.transcriptAnchorNearBottom = false
       this.transcriptWindowThread = model.currentThreadId
@@ -2728,7 +2810,7 @@ export class Surface {
     } else if (preserveTranscriptAnchor)
       this.transcriptWindowEnd = Math.min(
         model.items.length,
-        this.transcriptWindowEnd + Math.max(0, model.items.length - previousItems),
+        this.transcriptWindowEnd + prependedTranscriptItems(previousModel?.items ?? [], model.items),
       )
     else if (scrollFollow || this.transcriptWindowEnd === 0) {
       this.transcriptWindowEnd = model.items.length
@@ -3037,18 +3119,20 @@ export class Surface {
     } else {
       this.changedFilesHoveredRow = undefined
     }
-    this.transcriptScroll.stickyScroll = scrollFollow
-    this.anchorTranscriptAfterLayout()
     if (preserveTranscriptPosition) {
-      const pending = this.pendingTranscriptAnchor
-      this.pendingTranscriptAnchor =
-        pending !== undefined && pending.threadId === model.currentThreadId
+      const pending = this.pendingTranscriptPosition
+      const position =
+        pending?._tag === "Anchor" && pending.threadId === model.currentThreadId
           ? {
-              ...pending,
+              _tag: "Anchor" as const,
+              anchor: pending.anchor,
+              threadId: pending.threadId,
+              scrollHeight: pending.scrollHeight,
               scrollBy: pending.scrollBy + this.transcriptAnchorScrollBy,
               nearBottom: this.transcriptAnchorScrollBy === 0 ? pending.nearBottom : this.transcriptAnchorNearBottom,
             }
           : {
+              _tag: "Anchor" as const,
               anchor: transcriptAnchor,
               threadId: model.currentThreadId,
               scrollHeight: previousScrollHeight,
@@ -3057,47 +3141,12 @@ export class Surface {
             }
       this.transcriptAnchorScrollBy = 0
       this.transcriptAnchorNearBottom = false
-      if (this.transcriptAnchorFrame === undefined) {
-        const restore = () => {
-          this.transcriptAnchorFrame = undefined
-          const current = this.pendingTranscriptAnchor
-          this.pendingTranscriptAnchor = undefined
-          if (current === undefined || this.model?.currentThreadId !== current.threadId || this.destroyed) return
-          if (isFollowing(this.transcriptViewport.mode)) return
-          const anchored = current.anchor === undefined ? undefined : this.transcriptRecords.get(current.anchor.key)
-          const anchorScreenY = current.anchor?.screenY
-          const offset =
-            anchored === undefined || anchorScreenY === undefined
-              ? this.transcriptScroll.scrollHeight - current.scrollHeight
-              : anchored.renderable.screenY - anchorScreenY
-          this.scrollProgrammatic = true
-          this.transcriptScroll.scrollTop = this.clampTranscriptScrollTop(this.transcriptScroll.scrollTop + offset)
-          if (current.scrollBy !== 0)
-            this.transcriptScroll.scrollTop = this.clampTranscriptScrollTop(
-              this.transcriptScroll.scrollTop + current.scrollBy,
-            )
-          this.scrollProgrammatic = false
-          this.syncTranscriptScrollbar()
-          if (current.scrollBy === 0) this.handlers.scrollGeometry?.(this.transcriptScroll.scrollTop)
-          else this.reportTranscriptScroll(current.nearBottom)
-          this.renderer.requestRender()
-        }
-        this.transcriptAnchorFrame = restore
-        this.renderer.once(CliRenderEvents.FRAME, restore)
-        this.clock.setTimeout(() => {
-          if (this.transcriptAnchorFrame === restore && !this.destroyed) {
-            this.renderer.off(CliRenderEvents.FRAME, restore)
-            restore()
-          }
-        }, 16)
-      }
-    } else if (this.pendingTranscriptAnchor !== undefined) this.renderer.requestRender()
-    else if (scrollFollow) this.followTranscriptAfterLayout()
-    else if (this.wheelTimer === undefined && Math.abs(this.transcriptScroll.scrollTop - model.scrollOffset) > 1) {
-      this.scrollProgrammatic = true
-      this.transcriptScroll.scrollTop = this.clampTranscriptScrollTop(model.scrollOffset)
-      this.scrollProgrammatic = false
-    }
+      this.scheduleTranscriptPosition(position)
+    } else if (this.pendingTranscriptPosition !== undefined) this.renderer.requestRender()
+    else
+      this.defer(() => {
+        if (this.model !== undefined) this.syncTranscriptScrollbar()
+      })
     const loaderActive =
       model.busy ||
       model.activity !== undefined ||
@@ -3222,13 +3271,14 @@ export class Surface {
     this.scrollGeneration += 1
     if (this.cursorRestoreFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.cursorRestoreFrame)
     this.cursorRestoreFrame = undefined
-    if (this.transcriptAnchorFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.transcriptAnchorFrame)
-    this.transcriptAnchorFrame = undefined
+    if (this.transcriptPositionFrame !== undefined)
+      this.renderer.off(CliRenderEvents.FRAME, this.transcriptPositionFrame)
+    this.transcriptPositionFrame = undefined
     this.renderer.off(CliRenderEvents.FRAME, this.recordRenderedTranscriptScroll)
     if (this.sidebarLayoutFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.sidebarLayoutFrame)
     this.sidebarLayoutFrame = undefined
     this.transcriptAnchorScrollBy = 0
-    this.pendingTranscriptAnchor = undefined
+    this.pendingTranscriptPosition = undefined
     this.cancelWheelReport()
     if (this.loaderTimer !== undefined) this.clock.clearInterval(this.loaderTimer)
     this.loaderTimer = undefined

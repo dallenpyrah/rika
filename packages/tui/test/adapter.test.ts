@@ -219,6 +219,13 @@ const opentui = vi.hoisted(() => {
       else if (event === "frame") frameHandlers.add(handler as unknown as () => void)
       else resizeHandlers.add(handler)
     },
+    once(event: string, handler: (width: number, height: number) => void) {
+      const once = (...args: [number, number]) => {
+        renderer.off(event, once)
+        handler(...args)
+      }
+      renderer.on(event, once)
+    },
     off(event: string, handler: (width: number, height: number) => void) {
       if (event === "selection") selectionHandlers.delete(handler as unknown as (selection: object) => void)
       else if (event === "frame") frameHandlers.delete(handler as unknown as () => void)
@@ -289,6 +296,7 @@ import {
   boundedTranscriptModel,
   clipStyledLine,
   create,
+  maxMountedTranscriptEntries,
   previewBoxRows,
   renderBlock,
   renderChangedFiles,
@@ -600,7 +608,7 @@ describe("Surface", () => {
     expect(older.entries.at(-1)?.text).toBe("answer 399")
   })
 
-  test("keeps a subagent parent mounted when its child window exceeds the transcript limit", () => {
+  test("keeps a subagent parent within the bounded suffix when its children exceed the limit", () => {
     const parent = {
       _tag: "ToolCall" as const,
       id: "agent",
@@ -648,12 +656,12 @@ describe("Surface", () => {
 
     const bounded = boundedTranscriptModel(state)
 
-    expect(bounded.items).toHaveLength(206)
+    expect(bounded.items).toHaveLength(maxMountedTranscriptEntries)
     expect(bounded.blocks[0]).toMatchObject({ _tag: "ToolCall", id: "agent" })
     expect(bounded.items[0]).toMatchObject({ _tag: "Block", index: 0, id: "tool:agent" })
   })
 
-  test("keeps a subagent's direct tool calls mounted whenever its nested child survives the window", () => {
+  test("keeps nested ancestors and the newest child suffix within the transcript limit", () => {
     const layout: ReadonlyArray<{
       readonly id: string
       readonly family: "agent" | "explore"
@@ -691,11 +699,9 @@ describe("Surface", () => {
 
     expect([...mountedIds].some((id) => id.startsWith("nested-child-"))).toBe(true)
     expect(mountedIds.has("nested")).toBe(true)
-    for (let index = 0; index < 30; index += 1)
-      expect(
-        mountedIds.has(`agent-tool-${index}`),
-        `agent-tool-${index} should stay mounted with the nested child`,
-      ).toBe(true)
+    expect(mountedIds.has("agent")).toBe(true)
+    expect(mountedIds.size).toBeLessThanOrEqual(maxMountedTranscriptEntries)
+    expect(mountedIds.has("agent-tool-29")).toBe(false)
   })
 
   it.effect("mounts a bounded transcript window for large histories", () =>

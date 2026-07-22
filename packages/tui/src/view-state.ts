@@ -1663,20 +1663,7 @@ export const update: {
         if (key.name === "return") return update(model, { _tag: "ThreadSidebarSelectionConfirmed" })
         return model
       }
-      if (!key.ctrl && !key.alt && !key.meta && key.name === "pageup")
-        return {
-          ...model,
-          scrollOffset: Math.max(0, model.scrollOffset - Math.max(1, model.height - 6)),
-          scrollFollow: false,
-        }
-      if (!key.ctrl && !key.alt && !key.meta && key.name === "pagedown")
-        return {
-          ...model,
-          scrollOffset: model.scrollOffset + Math.max(1, model.height - 6),
-          scrollFollow: false,
-        }
-      if (!key.ctrl && !key.alt && !key.meta && key.name === "end")
-        return { ...model, scrollOffset: 0, scrollFollow: true }
+      if (!key.ctrl && !key.alt && !key.meta && ["pageup", "pagedown", "end"].includes(key.name)) return model
       if ((key.ctrl && key.name === "t") || (key.alt && key.name === "w")) {
         const open = !model.threadSwitcher.open
         const selected = Math.max(

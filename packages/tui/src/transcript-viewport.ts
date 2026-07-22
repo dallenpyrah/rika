@@ -7,7 +7,7 @@ export interface ViewportAnchor {
 
 export type ViewportState =
   | { readonly _tag: "Following" }
-  | { readonly _tag: "Anchored"; readonly anchor: ViewportAnchor | undefined }
+  | { readonly _tag: "Anchored"; readonly anchor: ViewportAnchor }
 
 export interface ViewportWindow {
   readonly end: number
@@ -28,8 +28,7 @@ export type WheelPhase =
   | {
       readonly _tag: "AwaitingSettle"
       readonly token: number
-      readonly direction: WheelDirection
-      readonly scrollBy: number
+      readonly displacement: number
     }
 
 export const wheelIdle: WheelPhase = { _tag: "Idle" }
@@ -50,6 +49,7 @@ export type ViewportEvent =
       readonly atTrueBottom: boolean
       readonly atMountedBottom: boolean
       readonly anchorPending: boolean
+      readonly anchor: ViewportAnchor | undefined
     }
   | {
       readonly _tag: "WheelSettleFired"
@@ -58,13 +58,14 @@ export type ViewportEvent =
       readonly atMountedBottom: boolean
     }
   | { readonly _tag: "WheelCancelled" }
-  | { readonly _tag: "DetachCommanded" }
+  | { readonly _tag: "DetachCommanded"; readonly anchor: ViewportAnchor | undefined }
   | { readonly _tag: "FollowCommanded" }
+  | { readonly _tag: "ResetCommanded" }
   | { readonly _tag: "BottomSettled" }
-  | { readonly _tag: "ModelSynced"; readonly scrollFollow: boolean; readonly followForced: boolean }
 
 export type ViewportEffect =
   | { readonly _tag: "ProjectState" }
+  | { readonly _tag: "RequestFollowPosition" }
   | { readonly _tag: "NotifyDetached" }
   | { readonly _tag: "NotifyFollowed" }
   | { readonly _tag: "QueueAnchorScroll"; readonly scrollBy: number }
@@ -77,7 +78,7 @@ export interface ViewportDecision {
   readonly effects: ReadonlyArray<ViewportEffect>
 }
 
-export const anchored = (anchor?: ViewportAnchor): ViewportState => ({ _tag: "Anchored", anchor })
+export const anchored = (anchor: ViewportAnchor): ViewportState => ({ _tag: "Anchored", anchor })
 
 export const isFollowing = (state: ViewportState): boolean => state._tag === "Following"
 
@@ -106,19 +107,19 @@ export const clampScrollTop: {
   Math.max(0, Math.min(scrollTop, maxScrollTop(metrics))),
 )
 
-export const detach = (anchor?: ViewportAnchor): ViewportState => anchored(anchor)
+export const detach = (anchor: ViewportAnchor): ViewportState => anchored(anchor)
 
 export const follow = (): ViewportState => following
-
-const detachedMode = (mode: ViewportState): ViewportState => (mode._tag === "Anchored" ? mode : anchored())
 
 const reduceWheelObserved = (
   viewport: TranscriptViewport,
   event: Extract<ViewportEvent, { _tag: "WheelObserved" }>,
 ): ViewportDecision => {
   if (event.direction === "down" && isFollowing(viewport.mode) && event.atTrueBottom) return { viewport, effects: [] }
-  const wasFollowing = event.direction === "up" && isFollowing(viewport.mode)
-  const mode = event.direction === "up" ? detachedMode(viewport.mode) : viewport.mode
+  const detachRequested = event.direction === "up" && isFollowing(viewport.mode)
+  if (detachRequested && event.anchor === undefined) return { viewport, effects: [] }
+  const wasFollowing = detachRequested
+  const mode = detachRequested ? anchored(event.anchor!) : viewport.mode
   const modeEffects: ReadonlyArray<ViewportEffect> =
     event.direction === "up"
       ? [{ _tag: "ProjectState" }, ...(wasFollowing ? ([{ _tag: "NotifyDetached" }] as const) : [])]
@@ -131,13 +132,13 @@ const reduceWheelObserved = (
         { _tag: "QueueAnchorScroll", scrollBy: (event.direction === "down" ? 1 : -1) * Math.max(1, event.delta) },
       ],
     }
-  const accumulated = event.direction === "down" && event.atMountedBottom ? event.delta : 0
+  const displacement = (event.direction === "down" ? 1 : -1) * Math.max(1, event.delta)
   if (viewport.wheel._tag === "AwaitingSettle")
     return {
       viewport: {
         ...viewport,
         mode,
-        wheel: { ...viewport.wheel, direction: event.direction, scrollBy: viewport.wheel.scrollBy + accumulated },
+        wheel: { ...viewport.wheel, displacement: viewport.wheel.displacement + displacement },
       },
       effects: modeEffects,
     }
@@ -146,7 +147,7 @@ const reduceWheelObserved = (
     viewport: {
       ...viewport,
       mode,
-      wheel: { _tag: "AwaitingSettle", token, direction: event.direction, scrollBy: accumulated },
+      wheel: { _tag: "AwaitingSettle", token, displacement },
       nextToken: token + 1,
     },
     effects: [...modeEffects, { _tag: "ScheduleWheelSettle", token }],
@@ -158,12 +159,11 @@ const reduceWheelSettleFired = (
   event: Extract<ViewportEvent, { _tag: "WheelSettleFired" }>,
 ): ViewportDecision => {
   if (viewport.wheel._tag !== "AwaitingSettle" || viewport.wheel.token !== event.token) return { viewport, effects: [] }
-  const { direction, scrollBy } = viewport.wheel
+  const { displacement } = viewport.wheel
   const settled: TranscriptViewport = { ...viewport, wheel: wheelIdle }
-  if (direction === "down" && isFollowing(viewport.mode) && event.atTrueBottom)
-    return { viewport: settled, effects: [] }
-  if (direction === "down" && event.atMountedBottom)
-    return { viewport: settled, effects: [{ _tag: "PageForward", scrollBy }] }
+  if (displacement > 0 && isFollowing(viewport.mode) && event.atTrueBottom) return { viewport: settled, effects: [] }
+  if (displacement > 0 && event.atMountedBottom)
+    return { viewport: settled, effects: [{ _tag: "PageForward", scrollBy: displacement }] }
   return { viewport: settled, effects: [{ _tag: "ReportSettled" }] }
 }
 
@@ -181,25 +181,30 @@ export const reduceViewport: {
         ? { viewport, effects: [] }
         : { viewport: { ...viewport, wheel: wheelIdle }, effects: [] }
     case "DetachCommanded":
+      if (isAnchored(viewport.mode) || event.anchor === undefined) return { viewport, effects: [] }
       return {
-        viewport: isAnchored(viewport.mode) ? viewport : { ...viewport, mode: anchored() },
+        viewport: { ...viewport, mode: anchored(event.anchor) },
         effects: [{ _tag: "ProjectState" }],
       }
     case "FollowCommanded":
       return {
         viewport: isFollowing(viewport.mode) ? viewport : { ...viewport, mode: following },
-        effects: [{ _tag: "NotifyFollowed" }],
+        effects: isFollowing(viewport.mode)
+          ? []
+          : [{ _tag: "ProjectState" }, { _tag: "RequestFollowPosition" }, { _tag: "NotifyFollowed" }],
+      }
+    case "ResetCommanded":
+      return {
+        viewport: { mode: following, wheel: wheelIdle, nextToken: viewport.nextToken },
+        effects: [{ _tag: "ProjectState" }, { _tag: "RequestFollowPosition" }],
       }
     case "BottomSettled":
       return isFollowing(viewport.mode)
         ? { viewport, effects: [] }
-        : { viewport: { ...viewport, mode: following }, effects: [{ _tag: "NotifyFollowed" }] }
-    case "ModelSynced": {
-      let mode = viewport.mode
-      if (!event.scrollFollow) mode = detachedMode(viewport.mode)
-      else if (event.followForced) mode = following
-      return mode === viewport.mode ? { viewport, effects: [] } : { viewport: { ...viewport, mode }, effects: [] }
-    }
+        : {
+            viewport: { ...viewport, mode: following },
+            effects: [{ _tag: "ProjectState" }, { _tag: "NotifyFollowed" }],
+          }
   }
 })
 
@@ -209,22 +214,54 @@ export const reanchor: {
 } = Function.dual(
   2,
   (state: ViewportState, anchor: ViewportAnchor | undefined): ViewportState =>
-    state._tag === "Anchored" ? anchored(anchor) : state,
+    state._tag === "Anchored" && anchor !== undefined ? anchored(anchor) : state,
 )
 
 export const contentChanged = (state: ViewportState): ViewportState => state
 
 export const resized = (state: ViewportState): ViewportState => state
 
-export const toggled = (anchor: ViewportAnchor | undefined): ViewportState => anchored(anchor)
+export const toggled = (anchor: ViewportAnchor | undefined): ViewportState =>
+  anchor === undefined ? following : anchored(anchor)
 
 export const settle: {
   (anchor: ViewportAnchor | undefined): (metrics: ViewportMetrics) => ViewportState
   (metrics: ViewportMetrics, anchor: ViewportAnchor | undefined): ViewportState
+} = Function.dual(2, (metrics: ViewportMetrics, anchor: ViewportAnchor | undefined): ViewportState => {
+  if (atBottom(metrics) || anchor === undefined) return following
+  return anchored(anchor)
+})
+
+export interface TranscriptContentChange {
+  readonly prepended: ReadonlyArray<string>
+  readonly appended: ReadonlyArray<string>
+  readonly removed: ReadonlyArray<string>
+}
+
+export const classifyTranscriptContent: {
+  (
+    current: ReadonlyArray<{ readonly id: string }>,
+  ): (previous: ReadonlyArray<{ readonly id: string }>) => TranscriptContentChange
+  (
+    previous: ReadonlyArray<{ readonly id: string }>,
+    current: ReadonlyArray<{ readonly id: string }>,
+  ): TranscriptContentChange
 } = Function.dual(
   2,
-  (metrics: ViewportMetrics, anchor: ViewportAnchor | undefined): ViewportState =>
-    atBottom(metrics) ? following : anchored(anchor),
+  (
+    previous: ReadonlyArray<{ readonly id: string }>,
+    current: ReadonlyArray<{ readonly id: string }>,
+  ): TranscriptContentChange => {
+    const previousIds = new Set(previous.map(({ id }) => id))
+    const currentIds = new Set(current.map(({ id }) => id))
+    const retained = current.findIndex(({ id }) => previousIds.has(id))
+    const lastRetained = current.findLastIndex(({ id }) => previousIds.has(id))
+    return {
+      prepended: (retained < 0 ? [] : current.slice(0, retained)).map(({ id }) => id),
+      appended: (lastRetained < 0 ? current : current.slice(lastRetained + 1)).map(({ id }) => id),
+      removed: previous.filter(({ id }) => !currentIds.has(id)).map(({ id }) => id),
+    }
+  },
 )
 
 export const initialWindow = (total: number): ViewportWindow => ({ end: Math.max(0, total) })
