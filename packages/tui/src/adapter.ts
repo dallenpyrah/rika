@@ -14,6 +14,7 @@ import {
   dim,
   fg,
   italic,
+  OptimizedBuffer,
   strikethrough,
   underline,
   RGBA,
@@ -104,6 +105,12 @@ import {
 } from "./transcript-presenter"
 
 export const spinnerFrames: ReadonlyArray<string> = cliSpinners.dots.frames
+
+export const probeNativeAsset = (): string => {
+  const buffer = OptimizedBuffer.create(1, 1, "wcwidth")
+  buffer.destroy()
+  return "RIKA_OPENTUI_NATIVE_OK"
+}
 export const statusSpinnerFrames: ReadonlyArray<string> = ["∼", "≈", "≋", "≈", "∼"]
 export const spinnerInterval = 200
 export const idleSpinnerFrame = "⠭"

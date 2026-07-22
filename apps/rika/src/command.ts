@@ -12,7 +12,9 @@ import { command as ThreadsCommand } from "./commands/threads"
 import { command as ToolsCommand } from "./commands/tools"
 import { command as WorkflowsCommand } from "./commands/workflows"
 
-export const version = "0.0.0"
+declare const RIKA_VERSION: string | undefined
+
+export const version = typeof RIKA_VERSION === "string" ? RIKA_VERSION : "0.0.0"
 
 const mode = Flag.choice("mode", ["low", "medium", "high", "ultra"]).pipe(Flag.withAlias("m"), Flag.optional)
 const workspace = Flag.directory("workspace").pipe(Flag.optional)

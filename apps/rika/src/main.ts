@@ -28,7 +28,7 @@ import * as ExecutionBackend from "@rika/runtime/contract"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
 import { MediaView, ReadWebPage, Runtime as ToolRuntime, ThreadTools, WebSearch, WorkspaceIndex } from "@rika/tools"
 import { Palette, Session, ViewState } from "@rika/tui"
-import { create as createTui } from "@rika/tui/adapter"
+import { create as createTui, probeNativeAsset } from "@rika/tui/adapter"
 import type { PathTarget } from "@rika/tui"
 import { FetchHttpClient } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -2593,6 +2593,11 @@ export const interactiveTui =
     })
 
 if (import.meta.main) {
+  const nativeProbe = Effect.runSync(Config.option(Config.string("RIKA_INTERNAL_OPENTUI_NATIVE_PROBE")))
+  if (Option.contains(nativeProbe, "1")) {
+    Effect.runSync(Console.log(probeNativeAsset()))
+    process.exit(0)
+  }
   const environment = Effect.runSync(
     Config.all({
       hostDataRoot: Config.option(Config.string("RIKA_INTERNAL_RESIDENT_DATA_ROOT")),

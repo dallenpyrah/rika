@@ -1,7 +1,15 @@
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
-import { isManagedPackagingEntry, targets } from "../../scripts/package"
+import {
+  archiveName,
+  archiveRoot,
+  expectedArchiveNames,
+  isPackageTarget,
+  ownedTargetEntries,
+  targets,
+  validateArchiveSet,
+} from "../../scripts/package"
 
 const sourceImports = (source: string) => {
   const imports = new Set<string>()
@@ -66,7 +74,7 @@ describe("release target construction", () => {
     expect(Object.keys(targets)).toEqual(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"])
     for (const [name, target] of Object.entries(targets)) {
       expect(target.bun).toBe(`bun-${name}`)
-      expect(target.opentui).toBe(`@opentui/core-${name}`)
+      expect(target.fffLibc).toBe("gnu")
     }
   })
 
@@ -74,39 +82,27 @@ describe("release target construction", () => {
     expect(Object.keys(targets).some((target) => target.startsWith("win32-"))).toBe(false)
   })
 
-  test("rejects an unsupported command target before touching artifacts", async () => {
-    const root = fileURLToPath(new URL("../..", import.meta.url))
-    const artifacts = join(root, "artifacts")
-    const sentinel = join(artifacts, "unrelated-command-output")
-    await Bun.write(sentinel, "preserve me")
-    try {
-      const child = Bun.spawn(["bun", "run", "scripts/package.ts", "--target", "freebsd-x64"], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      const [exitCode, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ])
-      expect(exitCode).not.toBe(0)
-      expect(`${stdout}\n${stderr}`).toContain("Unsupported target: freebsd-x64")
-      expect(await Bun.file(sentinel).text()).toBe("preserve me")
-    } finally {
-      await Bun.file(sentinel).delete()
-    }
+  test("rejects unsupported targets without executing a package command", () => {
+    expect(isPackageTarget("linux-x64")).toBe(true)
+    expect(isPackageTarget("freebsd-x64")).toBe(false)
+    expect(isPackageTarget("toString")).toBe(false)
+    expect(isPackageTarget("constructor")).toBe(false)
+    expect(isPackageTarget("__proto__")).toBe(false)
   })
 
-  test("cleans only packager-owned artifact entries", () => {
-    expect(isManagedPackagingEntry("rika-linux-x64.tar.gz")).toBe(true)
-    expect(isManagedPackagingEntry("rika-darwin-arm64")).toBe(true)
-    expect(isManagedPackagingEntry("SHA256SUMS")).toBe(true)
-    expect(isManagedPackagingEntry("release-evidence.json")).toBe(true)
-    expect(isManagedPackagingEntry(".platform-packages-abc123")).toBe(true)
-    expect(isManagedPackagingEntry("autoresearch")).toBe(false)
-    expect(isManagedPackagingEntry("notes.txt")).toBe(false)
-    expect(isManagedPackagingEntry("rika-custom.tar.gz")).toBe(false)
+  test("uses versioned names and assigns cleanup ownership to one target", () => {
+    expect(archiveRoot("1.2.3", "linux-x64")).toBe("rika-1.2.3-linux-x64")
+    expect(archiveName("1.2.3", "linux-x64")).toBe("rika-1.2.3-linux-x64.tar.gz")
+    expect(ownedTargetEntries("1.2.3", "linux-x64")).toEqual(["rika-1.2.3-linux-x64", "rika-1.2.3-linux-x64.tar.gz"])
+  })
+
+  test("accepts only the exact four-archive release set", () => {
+    const exact = expectedArchiveNames("1.2.3")
+    expect(validateArchiveSet("1.2.3", [...exact, "notes.txt"])).toEqual(exact)
+    expect(() => validateArchiveSet("1.2.3", exact.slice(1))).toThrow("Expected exact archive set")
+    expect(() => validateArchiveSet("1.2.3", [...exact, "rika-1.2.3-win32-x64.tar.gz"])).toThrow(
+      "Expected exact archive set",
+    )
   })
 
   test("keeps the full public client graph out of the resident, SQL, model, and TUI runtimes", async () => {
