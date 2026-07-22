@@ -1406,7 +1406,7 @@ export const configuredBackendLayer = ({
     }),
   ).pipe(Layer.provide(BunServices.layer))
 
-const lazyBackendLayer = (
+export const lazyBackendLayer = (
   backendLayer: Layer.Layer<ExecutionBackend.Service, Layer.Error<ReturnType<typeof configuredBackendLayer>>>,
 ) =>
   Layer.effect(
@@ -1477,12 +1477,25 @@ const lazyBackendLayer = (
                 : backend.follow(turnId, afterCursor, onEvent, reference, eventScope),
             ),
           ),
-        replay: (turnId, afterCursor) => load.pipe(Effect.flatMap((backend) => backend.replay(turnId, afterCursor))),
-        cancel: (turnId, cancelledAt) => load.pipe(Effect.flatMap((backend) => backend.cancel(turnId, cancelledAt))),
-        inspect: (turnId) => load.pipe(Effect.flatMap((backend) => backend.inspect(turnId))),
-        steer: (turnId, text, createdAt) =>
-          load.pipe(Effect.flatMap((backend) => backend.steer(turnId, text, createdAt))),
-        listApprovals: (turnId) => load.pipe(Effect.flatMap((backend) => backend.listApprovals(turnId))),
+        replay: (turnId, afterCursor, reference) =>
+          load.pipe(Effect.flatMap((backend) => backend.replay(turnId, afterCursor, reference))),
+        pageEvents: (turnId, direction, cursor, limit, reference) =>
+          load.pipe(
+            Effect.flatMap((backend) =>
+              backend.pageEvents === undefined
+                ? backend
+                    .replay(turnId, cursor, reference)
+                    .pipe(Effect.map((result) => ({ events: result.events, hasMore: false })))
+                : backend.pageEvents(turnId, direction, cursor, limit, reference),
+            ),
+          ),
+        cancel: (turnId, cancelledAt, reference) =>
+          load.pipe(Effect.flatMap((backend) => backend.cancel(turnId, cancelledAt, reference))),
+        inspect: (turnId, reference) => load.pipe(Effect.flatMap((backend) => backend.inspect(turnId, reference))),
+        steer: (turnId, text, createdAt, reference) =>
+          load.pipe(Effect.flatMap((backend) => backend.steer(turnId, text, createdAt, reference))),
+        listApprovals: (turnId, reference) =>
+          load.pipe(Effect.flatMap((backend) => backend.listApprovals(turnId, reference))),
         resolveToolApproval: (waitId, approved, resolvedAt, comment) =>
           load.pipe(Effect.flatMap((backend) => backend.resolveToolApproval(waitId, approved, resolvedAt, comment))),
         resolvePermission: (waitId, answer, resolvedAt, reason) =>
