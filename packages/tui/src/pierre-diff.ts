@@ -41,7 +41,8 @@ const clipLine = (chunks: ReadonlyArray<TextChunk>, width: number): ReadonlyArra
 const contentChunks = (row: Extract<Row, { number: number }>): ReadonlyArray<TextChunk> => {
   if (row.content.length === 0) return []
   if (row.marker === "-") return [fg(colors.red)(row.content)]
-  if (row.lang === undefined) return [fg(row.marker === "+" ? colors.green : colors.muted)(row.content)]
+  if (row.marker === "+") return [fg(colors.green)(row.content)]
+  if (row.lang === undefined) return [fg(colors.muted)(row.content)]
   return highlightLines(row.content, row.lang)[0] ?? []
 }
 

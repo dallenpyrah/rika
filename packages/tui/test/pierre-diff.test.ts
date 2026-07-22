@@ -38,14 +38,16 @@ describe("renderPierreDiff", () => {
     expect(added[0]!.fg).toEqual(colors.green)
   })
 
-  test("syntax highlights context and added lines and paints deletions red", () => {
+  test("syntax highlights context lines and paints additions green and deletions red", () => {
     const lines = splitLines(renderPierreDiff(patch, { width: 100 })!.chunks)
     const context = lines.find((line) => lineText(line).includes("keep"))!
     const removed = lines.find((line) => lineText(line).includes("removed"))!
     const added = lines.find((line) => lineText(line).includes("added"))!
     expect(context.some((chunk) => chunk.text === "const" && chunk.fg !== undefined)).toBe(true)
     expect(context.find((chunk) => chunk.text === "const")!.fg).toEqual(colors.blue)
-    expect(added.find((chunk) => chunk.text === '"new"')!.fg).toEqual(colors.green)
+    expect(added.slice(1)).toHaveLength(1)
+    expect(added[1]!.text).toBe('const added = "new"')
+    expect(added[1]!.fg).toEqual(colors.green)
     expect(removed.slice(1)).toHaveLength(1)
     expect(removed[1]!.text).toBe('const removed = "old"')
     expect(removed[1]!.fg).toEqual(colors.red)

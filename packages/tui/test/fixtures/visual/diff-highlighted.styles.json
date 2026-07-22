@@ -749,7 +749,7 @@
           "width": 1
         },
         {
-          "text": "  226 + ",
+          "text": "  226 +     description: \"Delegate planning, review, and debugging\",",
           "fg": {
             "buffer": {
               "0": 512,
@@ -767,70 +767,7 @@
             }
           },
           "attributes": 0,
-          "width": 8
-        },
-        {
-          "text": "    description: ",
-          "fg": {
-            "buffer": {
-              "0": 1984,
-              "1": 448,
-              "2": 192,
-              "3": 255
-            }
-          },
-          "bg": {
-            "buffer": {
-              "0": 0,
-              "1": 512,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "attributes": 0,
-          "width": 17
-        },
-        {
-          "text": "\"Delegate planning, review, and debugging\"",
-          "fg": {
-            "buffer": {
-              "0": 512,
-              "1": 384,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "bg": {
-            "buffer": {
-              "0": 0,
-              "1": 512,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "attributes": 0,
-          "width": 42
-        },
-        {
-          "text": ",",
-          "fg": {
-            "buffer": {
-              "0": 1984,
-              "1": 448,
-              "2": 192,
-              "3": 255
-            }
-          },
-          "bg": {
-            "buffer": {
-              "0": 0,
-              "1": 512,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "attributes": 0,
-          "width": 1
+          "width": 68
         },
         {
           "text": "           ",
