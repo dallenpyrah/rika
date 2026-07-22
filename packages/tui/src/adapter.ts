@@ -85,6 +85,7 @@ import { renderMarkdown, renderMarkdownLines, renderMarkdownStyled } from "./mar
 import { renderDiff, renderDiffStyled, renderPartialDiffStyled } from "./diff-renderer"
 import { renderPierreDiff } from "./pierre-diff"
 import { highlightShellCommand } from "./syntax-highlight"
+import { wrapStyledLine } from "./styled-text"
 import { renderToolSummary } from "./tool-summary"
 import { renderTool } from "./tool-renderer"
 import {
@@ -163,7 +164,7 @@ export class ToolSpinner {
   }
 }
 
-const markdownWidthForColumn = (width: number): number => Math.max(8, width - spacing.transcript * 2 - 2)
+export const transcriptWrapWidth = (width: number): number => Math.max(8, width - spacing.transcript * 2 - 2)
 
 const queueItemLabel = (item: QueueItem): string =>
   `${item.prompt}${item.attachments?.map((path) => `\n  ▧ ${path}`).join("") ?? ""}`
@@ -221,9 +222,15 @@ export const renderBlock: {
 } = Function.dual(
   (args) => args.length > 1 || typeof args[0] !== "number",
   (block: TranscriptBlock, width = 80): string => {
+    const body = (text: string) => wrapBodyText(text, width, "  ")
+    const head = (text: string) => {
+      const lines = wrapTextToWidth(text, Math.max(1, width))
+      const rest = lines.slice(1).join(" ")
+      return rest.length === 0 ? lines[0]! : `${lines[0]}\n${body(rest)}`
+    }
     switch (block._tag) {
       case "Reasoning":
-        return `◇ Reasoning\n  ${block.text}`
+        return `◇ Reasoning\n${body(block.text)}`
       case "ToolCall": {
         if (isToolOutputDisplayed(block)) return renderTool(block, width)
         const running = block.status === "running"
@@ -235,19 +242,19 @@ export const renderBlock: {
         return `${icon} ${label}${block.detail.length === 0 ? "" : ` ${block.detail}`}`
       }
       case "ToolResult":
-        return `${block.failed ? "✕" : "✓"} Result\n  ${block.output}`
+        return `${block.failed ? "✕" : "✓"} Result\n${body(block.output)}`
       case "Diff":
         return `Δ ${block.path}\n${renderDiff(block.patch, width)}`
       case "ContextUsage":
         return `◷ Context ${block.text}${block.cost === undefined ? "" : ` · ${block.cost}`}`
       case "Compaction":
-        return `↻ Compacted context${block.checkpoint === undefined ? "" : ` at ${block.checkpoint}`}\n  ${block.summary}`
+        return `↻ Compacted context${block.checkpoint === undefined ? "" : ` at ${block.checkpoint}`}\n${body(block.summary)}`
       case "Notification":
-        return `! ${block.title}\n  ${block.detail}`
+        return `${head(`! ${block.title}`)}\n${body(block.detail)}`
       case "Error":
-        return `✖ ERROR: ${block.title}${block.turnId === undefined ? "" : ` · Turn ${block.turnId}`}\n  ${block.detail}${block.recovery === undefined ? "" : `\n  Next: ${block.recovery}`}`
+        return `${head(`✖ ERROR: ${block.title}${block.turnId === undefined ? "" : ` · Turn ${block.turnId}`}`)}\n${body(block.detail)}${block.recovery === undefined ? "" : `\n${body(`Next: ${block.recovery}`)}`}`
       case "Permission":
-        return `? ${block.title} [${block.status}]\n  ${block.detail}`
+        return `${head(`? ${block.title} [${block.status}]`)}\n${body(block.detail)}`
       case "ChildAgent": {
         let icon = "✗"
         if (block.status === "running") icon = "⠿"
@@ -256,10 +263,10 @@ export const renderBlock: {
         let status = "finished"
         if (block.status === "running") status = "working"
         else if (block.status === "cancelled") status = "cancelled"
-        return `${icon} Subagent ${status} ▸\n  ${block.name} · ${block.summary}`
+        return `${icon} Subagent ${status} ▸\n${body(`${block.name} · ${block.summary}`)}`
       }
       case "Workflow":
-        return `◫ Workflow ${block.name} [${block.status}]\n  ${block.step}`
+        return `◫ Workflow ${block.name} [${block.status}]\n${body(block.step)}`
       case "ImageAttachment": {
         const dimensions =
           block.width !== undefined && block.height !== undefined ? ` · ${block.width}×${block.height}` : ""
@@ -370,6 +377,11 @@ const wrapTextToWidth = (text: string, width: number): ReadonlyArray<string> => 
   }
   return lines
 }
+
+const wrapBodyText = (text: string, width: number, indent: string): string =>
+  wrapTextToWidth(text, Math.max(1, width - stringWidth(indent)))
+    .map((line) => `${indent}${line}`)
+    .join("\n")
 
 const escapeChangedPathSegment = (text: string): string =>
   [...text]
@@ -494,7 +506,7 @@ export const renderTranscript = (model: Model): string => {
   const renderEntry = (entry: Model["entries"][number]): string => {
     if (entry.role === "user") return `┃ ${entry.text}`
     if (entry.role === "notice") return `! ${entry.text}`
-    return renderMarkdown(entry.text, markdownWidthForColumn(model.width))
+    return renderMarkdown(entry.text, transcriptWrapWidth(model.width))
   }
   const entries = model.entries.map(renderEntry).join("\n\n")
   const blocks = (model.blocks as ReadonlyArray<TranscriptBlock>)
@@ -898,7 +910,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
   const renderEntryBody = (index: number) => {
     const entry = model.entries[index]!
     if (entry.role === "assistant") {
-      appendAll(renderMarkdownStyled(entry.text.trimEnd(), markdownWidthForColumn(model.width)))
+      appendAll(renderMarkdownStyled(entry.text.trimEnd(), transcriptWrapWidth(model.width)))
       return
     }
     if (entry.role === "notice") {
@@ -906,20 +918,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       else append(fg(colors.amber)(`! ${entry.text}`))
       return
     }
-    const wrapWidth = markdownWidthForColumn(model.width)
-    const wrapped = entry.text.split("\n").flatMap((current) => {
-      if (current.length <= wrapWidth) return [current]
-      const parts: Array<string> = []
-      let rest = current
-      while (rest.length > wrapWidth) {
-        const slice = rest.slice(0, wrapWidth)
-        const breakAt = slice.lastIndexOf(" ") > wrapWidth / 2 ? slice.lastIndexOf(" ") : wrapWidth
-        parts.push(rest.slice(0, breakAt))
-        rest = rest.slice(breakAt).trimStart()
-      }
-      parts.push(rest)
-      return parts
-    })
+    const wrapWidth = Math.max(1, transcriptWrapWidth(model.width) - 2)
+    const wrapped = wrapTextToWidth(entry.text, wrapWidth)
     wrapped.forEach((current, lineIndex) => {
       if (lineIndex > 0) append(fg(colors.text)("\n"))
       append(fg(colors.green)("┃ "))
@@ -934,7 +934,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     )
     const rows = renderMarkdownLines(
       entry.text.trimEnd(),
-      Math.max(1, markdownWidthForColumn(model.width) - stringWidth(prefix)),
+      Math.max(1, transcriptWrapWidth(model.width) - stringWidth(prefix)),
     )
     const connector = prefix.lastIndexOf("│")
     const curl = gap && connector >= 0 ? `${prefix.slice(0, connector)}╰${prefix.slice(connector + 1)}` : prefix
@@ -969,7 +969,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     if (terminal.tone === "failed") color = colors.red
     else if (terminal.tone === "cancelled") color = colors.amber
     const paint = (value: string) => (terminal.tone === "info" ? dim(fg(color)(value)) : fg(color)(value))
-    const rows = wrapTextToWidth(text, Math.max(1, markdownWidthForColumn(model.width) - stringWidth(prefix)))
+    const rows = wrapTextToWidth(text, Math.max(1, transcriptWrapWidth(model.width) - stringWidth(prefix)))
     const connector = prefix.lastIndexOf("│")
     const curl = gap && connector >= 0 ? `${prefix.slice(0, connector)}╰${prefix.slice(connector + 1)}` : prefix
     const start = line + 1
@@ -1105,9 +1105,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         if (file.patch.length > 0) {
           append(fg(colors.text)("\n"))
           appendAll(
-            renderPierreDiff(file.patch, { width: model.width }) ??
-              (file.preview ? renderPartialDiffStyled(file.patch, { width: model.width }) : undefined) ??
-              renderDiffStyled(file.patch, { width: model.width }),
+            renderPierreDiff(file.patch, { width: transcriptWrapWidth(model.width) }) ??
+              (file.preview
+                ? renderPartialDiffStyled(file.patch, { width: transcriptWrapWidth(model.width) })
+                : undefined) ??
+              renderDiffStyled(file.patch, { width: transcriptWrapWidth(model.width) }),
           )
         }
       } else {
@@ -1129,9 +1131,11 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
           if (childExpanded && file.patch.length > 0) {
             append(fg(colors.text)("\n"))
             appendAll(
-              renderPierreDiff(file.patch, { width: model.width, indent: 4 }) ??
-                (file.preview ? renderPartialDiffStyled(file.patch, { width: model.width, indent: 4 }) : undefined) ??
-                renderDiffStyled(file.patch, { width: model.width, indent: 4 }),
+              renderPierreDiff(file.patch, { width: transcriptWrapWidth(model.width), indent: 4 }) ??
+                (file.preview
+                  ? renderPartialDiffStyled(file.patch, { width: transcriptWrapWidth(model.width), indent: 4 })
+                  : undefined) ??
+                renderDiffStyled(file.patch, { width: transcriptWrapWidth(model.width), indent: 4 }),
             )
           }
           nestedRanges.push({
@@ -1149,7 +1153,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         append(fg(colors.text)("\n"))
         const start = line
         appendAll(
-          renderPierreDiff(diff.patch, { width: model.width }) ?? renderDiffStyled(diff.patch, { width: model.width }),
+          renderPierreDiff(diff.patch, { width: transcriptWrapWidth(model.width) }) ??
+            renderDiffStyled(diff.patch, { width: transcriptWrapWidth(model.width) }),
         )
         nestedRanges.push({
           start,
@@ -1178,6 +1183,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       )
     } else {
       const highlighted = cancelled ? undefined : highlightShellCommand(command)
+      const commandWidth = Math.max(8, transcriptWrapWidth(model.width) - 4)
       lines.forEach((current, lineIndex) => {
         if (lineIndex === 0) {
           if (running) {
@@ -1185,13 +1191,19 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
             append(fg(colors.text)(" "))
           } else if (cancelled) append(bold(fg(colors.amber)("$ ")))
           else append(dim(fg(colors.text)("$ ")))
-          if (cancelled) append(strikethrough(fg(colors.text)(current)))
-          else for (const chunk of highlighted?.[lineIndex] ?? []) append(chunk)
-        } else if (cancelled) append(strikethrough(fg(colors.text)(`\n    ${current}`)))
-        else {
-          append(fg(colors.text)("\n    "))
-          for (const chunk of highlighted?.[lineIndex] ?? []) append(chunk)
-        }
+          if (cancelled) append(strikethrough(fg(colors.text)(wrapTextToWidth(current, commandWidth).join("\n    "))))
+          else
+            for (const [rowIndex, row] of wrapStyledLine(highlighted?.[lineIndex] ?? [], commandWidth).entries()) {
+              if (rowIndex > 0) append(fg(colors.text)("\n    "))
+              for (const chunk of row) append(chunk)
+            }
+        } else if (cancelled)
+          append(strikethrough(fg(colors.text)(`\n    ${wrapTextToWidth(current, commandWidth).join("\n    ")}`)))
+        else
+          for (const row of wrapStyledLine(highlighted?.[lineIndex] ?? [], commandWidth)) {
+            append(fg(colors.text)("\n    "))
+            for (const chunk of row) append(chunk)
+          }
       })
       if (failed) append(fg(colors.red)(` (exit code: ${exitCode ?? 1})`))
       if (cancelled) append(italic(fg(colors.amber)(" (cancelled)")))
@@ -1199,7 +1211,13 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     }
     if (expanded && output !== undefined) {
       append(fg(colors.text)("\n"))
-      append(dim(fg(colors.text)(output.split("\n").slice(0, 12).join("\n"))))
+      append(
+        dim(
+          fg(colors.text)(
+            wrapBodyText(output.split("\n").slice(0, 12).join("\n"), transcriptWrapWidth(model.width), "  "),
+          ),
+        ),
+      )
     }
   }
   const renderShellBody = (units: ReadonlyArray<ToolUnit>, selected: boolean, expanded: boolean) => {
@@ -1245,8 +1263,14 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         if (unit.block.status === "failed") append(fg(colors.red)(` (exit code: ${shellExitCode(unit.block) ?? 1})`))
         if (expandable) append(marker(childExpanded))
         if (expandable && childExpanded) {
-          append(fg(colors.text)("\n   "))
-          append(dim(fg(colors.text)(output!.split("\n").slice(0, 12).join("\n   "))))
+          append(fg(colors.text)("\n"))
+          append(
+            dim(
+              fg(colors.text)(
+                wrapBodyText(output!.split("\n").slice(0, 12).join("\n"), transcriptWrapWidth(model.width), "   "),
+              ),
+            ),
+          )
         }
         nestedRanges.push({ start, end: line, unit: childId, expandable })
       }
@@ -1287,11 +1311,12 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       if (expandable) append(marker(expanded))
     }
     if (expanded && agent && unit.block.detail.length > 0) {
-      append(dim(fg(colors.text)(`\n  ${unit.block.detail}`)))
+      append(fg(colors.text)("\n"))
+      append(dim(fg(colors.text)(wrapBodyText(unit.block.detail, transcriptWrapWidth(model.width), "  "))))
     } else if (expanded && !agent && output !== undefined) {
       append(fg(colors.text)("\n"))
       const body = output.split("\n").slice(0, 12).join("\n")
-      append(dim(fg(colors.text)(body)))
+      append(dim(fg(colors.text)(wrapBodyText(body, transcriptWrapWidth(model.width), "  "))))
     }
   }
   const renderNestedTool = (unit: ToolTranscriptUnit, prefix: string, last: boolean) => {
@@ -1311,7 +1336,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       unit.agentResponse !== undefined ||
       (agent && block.detail.length > 0) ||
       (output !== undefined && output.length > 0)
-    const rowWidth = markdownWidthForColumn(model.width)
+    const rowWidth = transcriptWrapWidth(model.width)
     const visiblePrefix = truncateToWidth(prefix, Math.max(0, rowWidth - 8))
     const branchPrefix = `${visiblePrefix}${last ? "└" : "├"} `
     const continuationPrefix = `${visiblePrefix}${last ? " " : "│"}   `
@@ -1360,14 +1385,18 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       ...(detail.target === undefined ? {} : { targets: [detail.target] }),
     })
     const bodyPrefix = `${visiblePrefix}${last ? "  " : "│ "}`
+    const bodyIndent = `${bodyPrefix}  `
+    const bodyWidth = Math.max(1, rowWidth - stringWidth(bodyIndent))
     if (expanded && agent && block.detail.length > 0) {
       append(fg(colors.text)("\n"))
-      append(dim(fg(colors.subtle)(`${bodyPrefix}  `)))
-      append(dim(fg(colors.text)(block.detail)))
+      append(dim(fg(colors.subtle)(bodyIndent)))
+      append(dim(fg(colors.text)(wrapTextToWidth(block.detail, bodyWidth).join(`\n${bodyIndent}`))))
     } else if (expanded && output !== undefined && output.length > 0) {
-      const renderedOutput = output.split("\n").slice(0, 12).join(`\n${bodyPrefix}  `)
+      const renderedOutput = wrapTextToWidth(output.split("\n").slice(0, 12).join("\n"), bodyWidth).join(
+        `\n${bodyIndent}`,
+      )
       append(fg(colors.text)("\n"))
-      append(dim(fg(colors.subtle)(`${bodyPrefix}  `)))
+      append(dim(fg(colors.subtle)(bodyIndent)))
       append(dim(fg(colors.text)(renderedOutput)))
     }
     if (expanded)
@@ -1410,8 +1439,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     for (const chunk of renderToolSummary(agentToolSummary(phrase), { leading: " " })[0]!) append(chunk)
     append(marker(expanded))
     if (expanded) {
-      if (block.summary.length > 0) append(dim(fg(colors.text)(`\n  ${block.summary}`)))
-      for (const activity of block.activity) append(dim(fg(colors.text)(`\n  ${activity}`)))
+      const width = transcriptWrapWidth(model.width)
+      if (block.summary.length > 0) append(dim(fg(colors.text)(`\n${wrapBodyText(block.summary, width, "  ")}`)))
+      for (const activity of block.activity) append(dim(fg(colors.text)(`\n${wrapBodyText(activity, width, "  ")}`)))
     }
   }
   const renderDiffBody = (index: number, selected: boolean, expanded: boolean) => {
@@ -1419,7 +1449,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     if (expanded) {
       append(bold(fg(selected ? colors.blue : colors.muted)(`Δ ${block.path} ▾\n`)))
       appendAll(
-        renderPierreDiff(block.patch, { width: model.width }) ?? renderDiffStyled(block.patch, { width: model.width }),
+        renderPierreDiff(block.patch, { width: transcriptWrapWidth(model.width) }) ??
+          renderDiffStyled(block.patch, { width: transcriptWrapWidth(model.width) }),
       )
       return
     }
@@ -1436,19 +1467,20 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
   }
   const renderReasoningBody = (index: number, selected: boolean) => {
     const block = model.blocks[index] as Extract<TranscriptBlock, { _tag: "Reasoning" }>
-    append(selected ? bold(fg(colors.blue)(block.text)) : dim(italic(fg(colors.text)(block.text))))
+    const text = wrapTextToWidth(block.text, transcriptWrapWidth(model.width)).join("\n")
+    append(selected ? bold(fg(colors.blue)(text)) : dim(italic(fg(colors.text)(text))))
   }
   const renderPlainBlock = (index: number) => {
     const block = model.blocks[index] as TranscriptBlock
     let color = colors.text
     if (block._tag === "ContextUsage") color = colors.muted
     else if (block._tag === "Error") color = colors.red
-    append(fg(color)(renderBlock(block, model.width)))
+    append(fg(color)(renderBlock(block, transcriptWrapWidth(model.width))))
     if (block._tag === "Permission" && block.status === "pending") {
       const options = ["Allow once", "Always", "Deny"]
         .map((option, optionIndex) => `${optionIndex === model.permissionSelection ? "›" : " "} ${option}`)
         .join("   ")
-      append(fg(colors.text)(`\n  ${options}`))
+      append(fg(colors.text)(`\n${wrapBodyText(options, transcriptWrapWidth(model.width), "  ")}`))
     }
   }
   const isUnitVisible = (unit: TranscriptUnit): boolean =>
@@ -2684,7 +2716,7 @@ export class Surface {
       }
       const renderable = new TextRenderable(this.renderer, {
         content: descriptor.content,
-        wrapMode: "word",
+        wrapMode: "none",
         selectable: descriptor.selectable ?? true,
       })
       renderable.onMouseDown = (event) => handleMouseDown(renderable, event)

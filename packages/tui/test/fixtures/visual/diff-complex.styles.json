@@ -159,6 +159,31 @@
     {
       "spans": [
         {
+          "text": "                                                                                ",
+          "fg": {
+            "buffer": {
+              "0": 255,
+              "1": 255,
+              "2": 255,
+              "3": 255
+            }
+          },
+          "bg": {
+            "buffer": {
+              "0": 0,
+              "1": 512,
+              "2": 0,
+              "3": 255
+            }
+          },
+          "attributes": 0,
+          "width": 80
+        }
+      ]
+    },
+    {
+      "spans": [
+        {
           "text": " ",
           "fg": {
             "buffer": {
@@ -850,7 +875,7 @@
           "width": 1
         },
         {
-          "text": "     21 +another addition with a deliberately long value that exercises ",
+          "text": "     21 +another addition with a deliberately long value that exercises cli…",
           "fg": {
             "buffer": {
               "0": 512,
@@ -868,10 +893,10 @@
             }
           },
           "attributes": 0,
-          "width": 72
+          "width": 76
         },
         {
-          "text": "       ",
+          "text": "   ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -889,74 +914,7 @@
             }
           },
           "attributes": 0,
-          "width": 7
-        }
-      ]
-    },
-    {
-      "spans": [
-        {
-          "text": " ",
-          "fg": {
-            "buffer": {
-              "0": 255,
-              "1": 255,
-              "2": 255,
-              "3": 255
-            }
-          },
-          "bg": {
-            "buffer": {
-              "0": 0,
-              "1": 512,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "attributes": 0,
-          "width": 1
-        },
-        {
-          "text": "clippin…",
-          "fg": {
-            "buffer": {
-              "0": 512,
-              "1": 384,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "bg": {
-            "buffer": {
-              "0": 0,
-              "1": 512,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "attributes": 0,
-          "width": 8
-        },
-        {
-          "text": "                                                                       ",
-          "fg": {
-            "buffer": {
-              "0": 255,
-              "1": 255,
-              "2": 255,
-              "3": 255
-            }
-          },
-          "bg": {
-            "buffer": {
-              "0": 0,
-              "1": 512,
-              "2": 0,
-              "3": 255
-            }
-          },
-          "attributes": 0,
-          "width": 71
+          "width": 3
         }
       ]
     },

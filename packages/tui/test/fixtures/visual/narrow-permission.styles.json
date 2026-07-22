@@ -147,7 +147,7 @@
           "width": 1
         },
         {
-          "text": "  bun run verification with ",
+          "text": "  bun run verification with",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -165,10 +165,10 @@
             }
           },
           "attributes": 0,
-          "width": 28
+          "width": 27
         },
         {
-          "text": "   ",
+          "text": "    ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -186,7 +186,7 @@
             }
           },
           "attributes": 0,
-          "width": 3
+          "width": 4
         }
       ]
     },
@@ -214,7 +214,7 @@
           "width": 1
         },
         {
-          "text": "a long command",
+          "text": "  a long command",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -232,10 +232,10 @@
             }
           },
           "attributes": 0,
-          "width": 14
+          "width": 16
         },
         {
-          "text": "                 ",
+          "text": "               ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -253,7 +253,7 @@
             }
           },
           "attributes": 0,
-          "width": 17
+          "width": 15
         }
       ]
     },
@@ -281,7 +281,7 @@
           "width": 1
         },
         {
-          "text": "  › Allow once     Always    ",
+          "text": "  › Allow once     Always",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -299,10 +299,10 @@
             }
           },
           "attributes": 0,
-          "width": 29
+          "width": 25
         },
         {
-          "text": "  ",
+          "text": "      ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -320,7 +320,7 @@
             }
           },
           "attributes": 0,
-          "width": 2
+          "width": 6
         }
       ]
     },
@@ -348,7 +348,7 @@
           "width": 1
         },
         {
-          "text": " Deny",
+          "text": "  Deny",
           "fg": {
             "buffer": {
               "0": 1984,
@@ -366,10 +366,10 @@
             }
           },
           "attributes": 0,
-          "width": 5
+          "width": 6
         },
         {
-          "text": "                          ",
+          "text": "                         ",
           "fg": {
             "buffer": {
               "0": 255,
@@ -387,7 +387,7 @@
             }
           },
           "attributes": 0,
-          "width": 26
+          "width": 25
         }
       ]
     },

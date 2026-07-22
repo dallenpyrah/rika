@@ -457,7 +457,7 @@ describe("tool presentation", () => {
     const value = model([webSearch], ["tool:web-failed"])
     const rendered = text(value)
 
-    expect(rendered).toContain(guidance)
+    expect(rendered.replace(/\n\s*/g, " ")).toContain(guidance)
     expect(rendered).toContain("▾")
     expect(expandableRowIds(value)).toEqual(["tool:web-failed"])
   })

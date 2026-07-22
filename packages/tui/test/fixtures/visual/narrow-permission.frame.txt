@@ -2,9 +2,9 @@
 
  ? Shell [pending]
    bun run verification with
- a long command
+   a long command
    › Allow once     Always
-  Deny
+   Deny
 ╭─────────────────────── high ─╮
 │                              │
 │                              │

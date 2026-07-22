@@ -776,11 +776,12 @@ describe("Surface", () => {
       { _tag: "ImageAttachment", name: "partial.png", mediaType: "image/png", width: 2 },
       { _tag: "ImageAttachment", name: "b.png", mediaType: "image/png", width: 2, height: 3, bytes: 4 },
     ] as const
-    expect(blocks.map(renderBlock).join("\n")).toContain("✕ Result")
-    expect(blocks.map(renderBlock).join("\n")).toContain(
+    const renderedBlocks = blocks.map((block) => renderBlock(block)).join("\n")
+    expect(renderedBlocks).toContain("✕ Result")
+    expect(renderedBlocks).toContain(
       "✖ ERROR: Execution failed · Turn turn-4\n  Model unavailable\n  Next: Press Enter to retry.",
     )
-    expect(blocks.map(renderBlock).join("\n")).toContain("2×3 · 4 bytes")
+    expect(renderedBlocks).toContain("2×3 · 4 bytes")
     const state = model({
       blocks: [...blocks],
       currentThreadId: "a",
