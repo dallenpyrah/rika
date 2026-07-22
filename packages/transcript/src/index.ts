@@ -590,10 +590,17 @@ const genericBlock = (turnId: string, event: SourceEvent): Block | undefined => 
     }
   if (event.type.includes("diff"))
     return { _tag: "Diff", path: string(value.path, "diff"), patch: event.text ?? string(value.patch ?? value.diff) }
+  if (event.type === "agent.compaction.started")
+    return {
+      _tag: "Compaction",
+      summary: event.text ?? string(value.summary),
+      status: "running",
+    }
   if (event.type.includes("compact"))
     return {
       _tag: "Compaction",
       summary: event.text ?? string(value.summary),
+      status: "complete",
       ...(string(value.checkpoint ?? value.checkpoint_id).length === 0
         ? {}
         : { checkpoint: string(value.checkpoint ?? value.checkpoint_id) }),
