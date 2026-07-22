@@ -133,7 +133,7 @@ describe("McpOAuth", () => {
   })
 
   it.effect("reports status, logout, and host failures through the service boundary", () => {
-    const store = OAuth.tokenStoreMemoryLayer
+    const store = OAuth.layerTokenStoreMemory
     const host = McpOAuth.hostTestLayer({
       open: () => Effect.fail(McpOAuth.Error.make({ server: "browser", operation: "open-browser", message: "denied" })),
       callback: () => Effect.succeed(Effect.succeed("unused")),
@@ -203,7 +203,7 @@ describe("McpOAuth", () => {
       }
       const layer = McpOAuth.layerWithClient(() => Effect.succeed(client)).pipe(
         Layer.provide(host),
-        Layer.provide(OAuth.tokenStoreMemoryLayer),
+        Layer.provide(OAuth.layerTokenStoreMemory),
       )
       yield* provideLayer(
         Effect.flatMap(McpOAuth.Service, (service) => service.login("server", "https://provider.test/mcp")),
@@ -218,7 +218,7 @@ describe("McpOAuth", () => {
   )
 
   it.effect("distinguishes provider denial and exchange failures without exposing provider details", () => {
-    const tokenStore = OAuth.tokenStoreMemoryLayer
+    const tokenStore = OAuth.layerTokenStoreMemory
     const host = McpOAuth.hostTestLayer({
       callback: (_url, state) => Effect.succeed(Effect.succeed(`http://localhost/?code=x&state=${state}`)),
       open: () => Effect.void,
@@ -235,7 +235,7 @@ describe("McpOAuth", () => {
       const denied = yield* Effect.flip(
         provideLayer(
           Effect.flatMap(McpOAuth.Service, (service) => service.login("server", "https://provider.test/mcp")),
-          failure(OAuth.OAuthDeniedError.make({ reason: "provider-secret" })),
+          failure(OAuth.OAuthDenied.make({ reason: "provider-secret" })),
         ),
       )
       expect(denied.message).toBe("OAuth authorization was denied")

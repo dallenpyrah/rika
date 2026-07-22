@@ -165,7 +165,7 @@ export const hostRegistration: Effect.Effect<ModelRegistry.Registration, Platfor
           respond(namespace, counter, options).pipe(Effect.map((parts) => Stream.fromIterable(toStreamParts(parts)))),
         ),
     })
-    return yield* ModelRegistry.registrationFromLayer({
+    return yield* ModelRegistry.registration({
       provider: hostSelection.provider,
       model: hostSelection.model,
       layer: Layer.succeed(LanguageModel.LanguageModel, service),

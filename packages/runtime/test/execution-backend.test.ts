@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { vi } from "vitest"
-import { ModelResilience, TurnPolicy } from "@batonfx/core"
+import { ModelResilience } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
 import { ChildFanOutHost, Client, Content, Execution, Ids, WorkflowDefinitionHost } from "@relayfx/sdk"
 import { ThreadTools } from "@rika/tools"
@@ -484,16 +484,13 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect(registrations[0]?.address).toBe("address:rika")
       expect((starts[0] as { agent_revision?: number }).agent_revision).toBe(40)
       const registration = registrations[0]
-      if (registration === undefined || !("agent" in registration)) return yield* Effect.die("Missing Baton agent")
-      expect(registration.agent).toMatchObject({
-        policy: TurnPolicy.forever,
-        toolExecution: { concurrency: 4 },
-      })
-      const agent = registration.agent as { readonly instructions: string }
-      expect(agent.instructions).toContain("Consult Oracle frequently for complex or difficult tasks")
-      expect(agent.instructions).toContain("tell the user that you are consulting it")
-      expect(agent.instructions).toContain("after consulting Oracle, state that you did")
-      expect(agent.instructions).toContain("remaining responsible for the implementation and conclusion")
+      if (registration === undefined || !("instructions" in registration))
+        return yield* Effect.die("Missing agent definition")
+      expect((registration as { readonly tool_execution?: unknown }).tool_execution).toEqual({ concurrency: 4 })
+      expect(registration.instructions).toContain("Consult Oracle frequently for complex or difficult tasks")
+      expect(registration.instructions).toContain("tell the user that you are consulting it")
+      expect(registration.instructions).toContain("after consulting Oracle, state that you did")
+      expect(registration.instructions).toContain("remaining responsible for the implementation and conclusion")
       expect(registration.metadata).toMatchObject({ rika_agent_depth: 0 })
       expect(registration.metadata?.multi_agent_enabled).toBeUndefined()
       expect(registration.permissions).not.toContainEqual({ name: "relay.child_run.spawn", value: true })
@@ -538,9 +535,8 @@ describe("ExecutionBackend Relay client adapter", () => {
         })
       }).pipe(provideBackendWithThreadTools(fixture.implementation))
       const registration = (yield* Ref.get(fixture.registrations))[0]
-      if (registration === undefined || !("agent" in registration)) return yield* Effect.die("Missing Baton agent")
-      const agent = registration.agent as { readonly toolkit: { readonly tools: Record<string, unknown> } }
-      expect(Object.keys(agent.toolkit.tools)).toEqual([])
+      if (registration === undefined || !("tools" in registration)) return yield* Effect.die("Missing agent definition")
+      expect(registration.tools).toEqual([])
       expect(registration.permissions).toEqual([])
       expect(registration).not.toHaveProperty("child_run_presets")
       expect((yield* Ref.get(fixture.starts))[0]).toMatchObject({
@@ -920,9 +916,9 @@ describe("ExecutionBackend Relay client adapter", () => {
         })
       }).pipe(provideBackend(fixture.implementation))
       const registered = (yield* Ref.get(fixture.registrations)).at(-1) as
-        | { agent?: { model?: { registrationKey?: string } } }
+        | { model?: { registration_key?: string } }
         | undefined
-      expect(registered?.agent?.model?.registrationKey).toBe("effort:xhigh:fast")
+      expect(registered?.model?.registration_key).toBe("effort:xhigh:fast")
       expect(RelayExecutionBackend.modelVariantKey("high", false)).toBe("effort:high")
     }),
   )
@@ -947,10 +943,10 @@ describe("ExecutionBackend Relay client adapter", () => {
         }),
       )
       const registered = (yield* Ref.get(fixture.registrations)).at(-1) as
-        | { agent?: { model?: { registrationKey?: string } } }
+        | { model?: { registration_key?: string } }
         | undefined
-      expect(registered?.agent?.model).toEqual(selection)
-      expect(registered?.agent?.model?.registrationKey).toBeUndefined()
+      expect(registered?.model).toEqual(selection)
+      expect(registered?.model?.registration_key).toBeUndefined()
     }),
   )
 
@@ -1731,7 +1727,11 @@ describe("ExecutionBackend Relay client adapter", () => {
         }),
       )
       const registered = (yield* Ref.get(fixture.registrations)).at(-1) as any
-      expect(registered.agent.model).toEqual({ ...selection, registrationKey: "default" })
+      expect(registered.model).toEqual({
+        provider: selection.provider,
+        model: selection.model,
+        registration_key: "default",
+      })
       expect(registered.compaction_policy).toEqual({
         context_window: 372_000,
         reserve_tokens: 128_000,
@@ -1896,8 +1896,8 @@ describe("ExecutionBackend Relay client adapter", () => {
       const registrations = yield* Ref.get(fixture.registrations)
       expect(registrations[0]?.id).toBe("agent:rika-thread-host")
       const registration = registrations[0]
-      if (registration === undefined || !("agent" in registration)) return yield* Effect.die("Missing host agent")
-      expect(registration.agent).toMatchObject({ policy: TurnPolicy.forever })
+      if (registration === undefined || !("model" in registration)) return yield* Effect.die("Missing host agent")
+      expect(registration.model).toEqual({ provider: "rika", model: "thread-host" })
       expect(registration.max_wait_turns).toBe(1_000_000)
       expect(registration.metadata?.steering_enabled).toBe(false)
       expect(kinds).toEqual([

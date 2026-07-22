@@ -89,7 +89,7 @@ test("three Task calls in one model turn run as overlapping durable children", (
           return { ...model, streamText }
         }),
       ).pipe(Layer.provide(fixture.layer))
-      const registration = yield* ModelRegistry.registrationFromLayer({
+      const registration = yield* ModelRegistry.registration({
         ...fixture.selection,
         layer: trackingLayer,
       })

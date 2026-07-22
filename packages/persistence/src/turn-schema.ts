@@ -40,6 +40,7 @@ export const ExecutionModelRoute = Schema.Struct({
     Schema.Struct({
       adapter: Schema.String,
       credentialIdentity: Schema.optionalKey(Schema.String),
+      connectionIdentity: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
     }),
   ),
   openAiAccountFingerprint: Schema.optionalKey(Schema.String),

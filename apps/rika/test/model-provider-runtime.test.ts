@@ -11,6 +11,7 @@ import {
   executionRoutePinFromPrepared,
   modelRoutesForExecution,
 } from "../src/main"
+import * as BedrockAuthRefresh from "../src/bedrock-auth-refresh"
 import * as ModelProviderRuntime from "../src/model-provider-runtime"
 
 const credential = (fingerprint: string): OpenAiAuth.Credential => ({
@@ -37,7 +38,10 @@ const authService = (
 })
 
 const runtimeLayer = (auth: OpenAiAuth.ServiceInterface) =>
-  ModelProviderRuntime.Service.layer.pipe(Layer.provide(Layer.succeed(OpenAiAuth.Service, auth)))
+  ModelProviderRuntime.Service.layer.pipe(
+    Layer.provide(Layer.succeed(OpenAiAuth.Service, auth)),
+    Layer.provide(BedrockAuthRefresh.testLayer({ run: () => Effect.void })),
+  )
 
 const withRuntime = <A, E>(
   auth: OpenAiAuth.ServiceInterface,
@@ -302,6 +306,100 @@ test("retains Anthropic registration behavior", () =>
       { ANTHROPIC_API_KEY: "test" },
     ),
   ))
+
+test("registers Bedrock routes and pins only non-secret connection identity", () =>
+  Effect.runPromise(
+    withRuntime(authService(), (runtime) =>
+      Effect.gen(function* () {
+        const refresh = { command: "aws", args: ["sso", "login", "--profile", "engineering"] }
+        const settings: ConfigContract.Settings = {
+          ...ConfigContract.defaults,
+          providers: {
+            ...ConfigContract.defaults.providers,
+            bedrock: {
+              protocol: "amazon-bedrock",
+              region: "us-east-1",
+              profile: "engineering",
+              authMode: "default",
+              authRefresh: refresh,
+            },
+          },
+          models: {
+            ...ConfigContract.defaults.models,
+            "bedrock-fable": {
+              ...ConfigContract.defaults.models.fable!,
+              provider: "bedrock",
+              candidates: ["us.anthropic.claude-sonnet-4-20250514-v1:0"],
+            },
+          },
+          modes: {
+            ...ConfigContract.defaults.modes,
+            low: { ...ConfigContract.defaults.modes.low, main: { alias: "bedrock-fable", effort: "low" } },
+          },
+        }
+        const route = ConfigContract.resolveModelRoute(settings, "low", "main")
+        const prepared = yield* runtime.prepare([route])
+        expect(prepared.registrations[0]).toMatchObject({
+          provider: "bedrock",
+          model: "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        })
+        expect(prepared.plans[0]?.runtime).toMatchObject({
+          adapter: "amazon-bedrock",
+          connectionIdentity: {
+            authMode: "default",
+            region: "us-east-1",
+            profile: "engineering",
+            authRefreshFingerprint: expect.stringMatching(/^sha256:/),
+          },
+        })
+        const encoded = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(executionRoutePin(settings, "low"))
+        expect(encoded).not.toContain(`"command":"${refresh.command}"`)
+        expect(encoded).not.toContain('"args"')
+      }),
+    ),
+  ))
+
+test("keys Bedrock registrations by connection and refresh identity without ambient credentials", () => {
+  const base = ConfigContract.resolveModelRoute(
+    {
+      ...ConfigContract.defaults,
+      providers: {
+        ...ConfigContract.defaults.providers,
+        bedrock: {
+          protocol: "amazon-bedrock",
+          region: "us-east-1",
+          profile: "engineering",
+          authMode: "default",
+          authRefresh: { command: "aws", args: ["sso", "login", "--profile", "engineering"] },
+        },
+      },
+      models: {
+        ...ConfigContract.defaults.models,
+        "bedrock-fable": {
+          ...ConfigContract.defaults.models.fable!,
+          provider: "bedrock",
+          candidates: ["model"],
+        },
+      },
+      modes: {
+        ...ConfigContract.defaults.modes,
+        low: { ...ConfigContract.defaults.modes.low, main: { alias: "bedrock-fable", effort: "low" } },
+      },
+    },
+    "low",
+  )
+  const key = ModelProviderRuntime.modelRoutePlan(base).registrationKey
+  for (const connection of [
+    { ...base.providerConnection, region: "us-west-2" },
+    { ...base.providerConnection, profile: "production" },
+    { ...base.providerConnection, authMode: "bearer" as const },
+    { ...base.providerConnection, authRefresh: { command: "aws", args: ["sso", "login"] } },
+  ])
+    expect(ModelProviderRuntime.modelRoutePlan({ ...base, providerConnection: connection }).registrationKey).not.toBe(
+      key,
+    )
+  expect(ModelProviderRuntime.modelRoutePlan(base).registrationKey).toBe(key)
+})
 
 test("fails before registration when an API credential is missing without exposing a secret", () =>
   Effect.runPromise(

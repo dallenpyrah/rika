@@ -7,11 +7,11 @@ const instructions =
 
 export const layer = (
   selection: ModelRegistry.ModelSelection,
-): Layer.Layer<MediaView.MediaAnalyzer, never, ModelRegistry.Service> =>
+): Layer.Layer<MediaView.MediaAnalyzer, never, ModelRegistry.ModelRegistry> =>
   Layer.effect(
     MediaView.MediaAnalyzer,
     Effect.gen(function* () {
-      const registry = yield* ModelRegistry.Service
+      const registry = yield* ModelRegistry.ModelRegistry
       return MediaView.MediaAnalyzer.of({
         analyze: Effect.fn("MediaAnalyzer.analyze")(function* (input) {
           const prompt = Prompt.fromMessages([
@@ -23,7 +23,7 @@ export const layer = (
             }),
           ])
           return yield* registry
-            .provide(
+            .operate(
               selection,
               Effect.gen(function* () {
                 const model = yield* LanguageModel.LanguageModel

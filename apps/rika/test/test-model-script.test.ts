@@ -31,6 +31,7 @@ import {
   persistedTitleModelRoutesForStartup,
   withPinnedRouteRegistration,
 } from "../src/main"
+import * as BedrockAuthRefresh from "../src/bedrock-auth-refresh"
 import { modelRoutePlan, Service as ModelProviderRuntime } from "../src/model-provider-runtime"
 
 const distinctModelRoutes = (routes: ReadonlyArray<ConfigContract.ResolvedModelRoute>) =>
@@ -40,6 +41,13 @@ const distinctModelRoutes = (routes: ReadonlyArray<ConfigContract.ResolvedModelR
         (candidate) => modelRoutePlan(candidate).registrationKey === modelRoutePlan(route).registrationKey,
       ) === index,
   )
+
+const httpRoute = (route: ConfigContract.ResolvedModelRoute) => {
+  if (route.providerConnection.protocol === "amazon-bedrock") throw new Error("Expected an HTTP model route")
+  return route as ConfigContract.ResolvedModelRoute & {
+    readonly providerConnection: ConfigContract.HttpProviderConnection
+  }
+}
 
 test("rejects web search provider IDs that are not installed", () =>
   Effect.runPromise(
@@ -146,7 +154,7 @@ test("uses production compaction defaults and route overrides", () => {
 })
 
 test("content-addresses non-secret model execution semantics deterministically", () => {
-  const route = ConfigContract.resolveModelRoute(ConfigContract.defaults, "high", "oracle")
+  const route = httpRoute(ConfigContract.resolveModelRoute(ConfigContract.defaults, "high", "oracle"))
   const key = modelRoutePlan(route).registrationKey
   expect(key).toMatch(/^sha256:[a-f0-9]{64}$/)
   expect(modelRoutePlan(route).registrationKey).toBe(key)
@@ -246,7 +254,7 @@ test("pins aliases, variants, candidates, specialists, titles, and summaries as 
     providers: {
       ...ConfigContract.defaults.providers,
       openai: {
-        ...ConfigContract.defaults.providers.openai,
+        ...ConfigContract.providerDefaults.openai,
         baseUrl: "https://models.example.test/v1?tenant=admission",
         apiKeyEnv: "ADMISSION_API_KEY",
       },
@@ -570,7 +578,7 @@ test("builds the configured backend with duplicate persisted routes and one unav
               ...ConfigContract.defaults.providers,
               openai: {
                 protocol: "openai",
-                baseUrl: ConfigContract.defaults.providers.openai!.baseUrl,
+                baseUrl: ConfigContract.providerDefaults.openai.baseUrl,
               },
             },
           }
@@ -598,7 +606,10 @@ test("builds the configured backend with duplicate persisted routes and one unav
             acquire: Effect.die("unused"),
             refreshRejected: () => Effect.die("unused"),
           })
-          const providerLayer = ModelProviderRuntime.layer.pipe(Layer.provide(Layer.succeed(OpenAiAuth.Service, auth)))
+          const providerLayer = ModelProviderRuntime.layer.pipe(
+            Layer.provide(Layer.succeed(OpenAiAuth.Service, auth)),
+            Layer.provide(BedrockAuthRefresh.testLayer({ run: () => Effect.void })),
+          )
           const context = yield* Layer.buildWithScope(
             configuredBackendLayer({
               filename: path.join(root, "relay.db"),

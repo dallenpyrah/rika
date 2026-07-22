@@ -90,6 +90,7 @@ describe("ConfigService", () => {
           baseUrl: "https://global.anthropic.test",
           apiKeyEnv: "GLOBAL_ANTHROPIC_KEY",
         },
+        bedrock: { protocol: "amazon-bedrock", authMode: "default" },
       })
     }).pipe(
       provideLayer(
@@ -102,6 +103,73 @@ describe("ConfigService", () => {
           },
           workspace: { providers: { openai: { apiKeyEnv: "WORKSPACE_OPENAI_KEY" } } },
         }),
+      ),
+    ),
+  )
+
+  it.effect("merges custom aliases by name and model routes by leaf while inheriting built-in policy", () =>
+    Effect.gen(function* () {
+      const config = yield* ConfigService.effective()
+      const alias = config.settings.models["bedrock-terra"]!
+      expect(alias.provider).toBe("bedrock")
+      expect(alias.candidates).toEqual(["workspace-model"])
+      expect(alias.limits).toBe(ConfigContract.defaults.models.sol!.limits)
+      expect(alias.variants).toBe(ConfigContract.defaults.models.sol!.variants)
+      expect(config.settings.modes.medium).toEqual({
+        main: { alias: "bedrock-terra", effort: "medium" },
+        oracle: { alias: "bedrock-terra", effort: "high" },
+      })
+      expect(config.settings.agents.task.alias).toBe("bedrock-fable")
+      expect(config.settings.agents.readThread.alias).toBe("bedrock-terra")
+      expect(config.settings.compaction.summaryModel).toEqual({ alias: "bedrock-fable", effort: "medium" })
+    }).pipe(
+      provideLayer(
+        ConfigService.memoryLayer({
+          global: {
+            modelAliases: {
+              "bedrock-terra": { base: "terra", provider: "bedrock", candidates: ["global-model"] },
+              "bedrock-fable": { base: "fable", provider: "bedrock", candidates: ["fable-model"] },
+            },
+            modelRoutes: {
+              modes: { medium: { main: "bedrock-terra" } },
+              agents: { task: "bedrock-fable" },
+              compaction: "bedrock-fable",
+            },
+          },
+          workspace: {
+            modelAliases: {
+              "bedrock-terra": { base: "sol", provider: "bedrock", candidates: ["workspace-model"] },
+            },
+            modelRoutes: {
+              modes: { medium: { oracle: "bedrock-terra" } },
+              agents: { readThread: "bedrock-terra" },
+            },
+          },
+        }),
+      ),
+    ),
+  )
+
+  it.effect("does not inspect or project ambient AWS credentials", () =>
+    Effect.gen(function* () {
+      const config = yield* ConfigService.effective()
+      expect(config.environment.providerCredentials).toEqual({})
+      expect(yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(config)).not.toContain("aws-secret-must-not-leak")
+    }).pipe(
+      provideLayer(
+        ConfigService.liveEnvironmentLayer({ webProviders }).pipe(
+          Layer.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  AWS_ACCESS_KEY_ID: "aws-access-must-not-leak",
+                  AWS_SECRET_ACCESS_KEY: "aws-secret-must-not-leak",
+                  AWS_SESSION_TOKEN: "aws-session-must-not-leak",
+                },
+              }),
+            ),
+          ),
+        ),
       ),
     ),
   )

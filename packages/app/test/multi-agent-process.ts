@@ -1,13 +1,11 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 import * as BunServices from "@effect/platform-bun/BunServices"
-import { Agent, TurnPolicy } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
 import { ChildFanOutHost, Client, Content, Ids, ModelHub, Runtime, ToolRuntime } from "@relayfx/sdk"
 import { SQLite } from "@relayfx/sdk/sqlite"
 import * as RelayExecutionBackend from "@rika/runtime/relay"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import { Config, Effect, FileSystem, Layer, Logger, Schedule, Schema, Semaphore, Stdio, Stream } from "effect"
-import { Toolkit } from "effect/unstable/ai"
 import { ProductAgent } from "../src/index"
 
 class FixtureError extends Schema.TaggedErrorClass<FixtureError>()("MultiAgentProcessFixtureError", {
@@ -160,12 +158,15 @@ const main = Effect.gen(function* () {
           const registered = yield* client.agents.register({
             id: parentAgentId,
             address,
-            agent: Agent.make({
-              name: `fixture-${message.value.parentTurnId}`,
-              model: fixture.selection,
-              toolkit: Toolkit.make(),
-              policy: TurnPolicy.forever,
-            }),
+            name: `fixture-${message.value.parentTurnId}`,
+            model: {
+              provider: fixture.selection.provider,
+              model: fixture.selection.model,
+              ...(fixture.selection.registrationKey === undefined
+                ? {}
+                : { registration_key: fixture.selection.registrationKey }),
+            },
+            permissions: [],
             metadata: { rika_execution_route: durableRoute },
           })
           yield* client.executions.startByAgentDefinition({

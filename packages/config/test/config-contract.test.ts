@@ -49,6 +49,65 @@ describe("ConfigContract", () => {
     ).toThrowError(/unknown key custom/)
   })
 
+  it("accepts Bedrock identity and structured SSO refresh settings", () => {
+    const input = {
+      providers: {
+        bedrock: {
+          region: "us-east-1",
+          profile: "engineering",
+          endpoint: "https://bedrock-runtime.us-east-1.amazonaws.com",
+          authMode: "default",
+          authRefresh: { command: "aws", args: ["sso", "login", "--profile", "engineering"] },
+        },
+      },
+    } as const
+    expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)
+  })
+
+  it.each([
+    { endpoint: "http://bedrock.example.test" },
+    { endpoint: "https://bedrock.example.test?token=secret" },
+    { endpoint: "https://bedrock.example.test#secret" },
+    { region: "" },
+    { profile: "" },
+    { authMode: "unknown" },
+    { authMode: "bearer", authRefresh: { command: "aws", args: ["sso", "login"] } },
+    { authRefresh: { command: "", args: [] } },
+    { authRefresh: { command: "aws", args: "sso login" } },
+  ])("rejects unsafe or malformed Bedrock settings %#", (bedrock) => {
+    expect(() => ConfigContract.decodeSettingsInput("settings.json", { providers: { bedrock } })).toThrowError()
+  })
+
+  it("allows HTTP Bedrock endpoints only for explicit loopback testing", () => {
+    for (const endpoint of ["http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"])
+      expect(ConfigContract.decodeSettingsInput("settings.json", { providers: { bedrock: { endpoint } } })).toEqual({
+        providers: { bedrock: { endpoint } },
+      })
+  })
+
+  it("accepts additive model aliases and leaf model route overrides", () => {
+    const input = {
+      modelAliases: {
+        "bedrock-terra": {
+          base: "terra",
+          provider: "bedrock",
+          candidates: ["us.anthropic.claude-sonnet-4-20250514-v1:0"],
+        },
+      },
+      modelRoutes: {
+        modes: { medium: { main: "bedrock-terra" } },
+        agents: { task: "bedrock-terra" },
+        compaction: "bedrock-terra",
+      },
+    } as const
+    expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)
+    expect(() =>
+      ConfigContract.decodeSettingsInput("settings.json", {
+        modelAliases: { terra: { base: "terra", provider: "bedrock", candidates: ["model"] } },
+      }),
+    ).toThrowError(/cannot replace a built-in model alias/)
+  })
+
   it("accepts arbitrary web search provider credentials and rejects malformed entries", () => {
     const input = { webSearch: { providers: { custom: { apiKey: "secret" } } } } as const
     expect(ConfigContract.decodeSettingsInput("settings.json", input)).toBe(input)

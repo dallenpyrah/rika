@@ -19,19 +19,51 @@ export const providerDefaults = {
     baseUrl: "https://api.anthropic.com",
     apiKeyEnv: "ANTHROPIC_API_KEY",
   },
+  bedrock: {
+    protocol: "amazon-bedrock",
+    authMode: "default",
+  },
 } as const
 
 export type ProviderId = keyof typeof providerDefaults
-export interface ProviderConnection {
-  readonly protocol: string
+export interface HttpProviderConnection {
+  readonly protocol: "openai" | "anthropic"
   readonly baseUrl: string
   readonly apiKeyEnv?: string | undefined
   readonly streamingOnly?: boolean | undefined
 }
-export interface ProviderOverride {
+export interface BedrockAuthRefresh {
+  readonly command: string
+  readonly args: ReadonlyArray<string>
+}
+export interface AmazonBedrockProviderConnection {
+  readonly protocol: "amazon-bedrock"
+  readonly baseUrl?: undefined
+  readonly apiKeyEnv?: undefined
+  readonly streamingOnly?: undefined
+  readonly region?: string
+  readonly profile?: string
+  readonly endpoint?: string
+  readonly authMode: "default" | "bearer"
+  readonly authRefresh?: BedrockAuthRefresh
+}
+export type ProviderConnection = HttpProviderConnection | AmazonBedrockProviderConnection
+export interface HttpProviderOverride {
   readonly baseUrl?: string
   readonly apiKeyEnv?: string
   readonly streamingOnly?: boolean
+}
+export type ProviderOverride = HttpProviderOverride | Omit<AmazonBedrockProviderConnection, "protocol">
+
+export interface ModelAliasInput {
+  readonly base: string
+  readonly provider: ProviderId
+  readonly candidates: ReadonlyArray<string>
+}
+export interface ModelRoutesInput {
+  readonly modes?: Partial<Readonly<Record<ModeId, Partial<Readonly<Record<Role, string>>>>>>
+  readonly agents?: Partial<Readonly<Record<AgentId, string>>>
+  readonly compaction?: string
 }
 
 export const isStreamingOnlyBaseUrl = (baseUrl: string): boolean => {
@@ -107,6 +139,8 @@ export interface Settings {
 
 export interface SettingsInput {
   readonly providers?: Partial<Readonly<Record<ProviderId, ProviderOverride>>>
+  readonly modelAliases?: Readonly<Record<string, ModelAliasInput>>
+  readonly modelRoutes?: ModelRoutesInput
   readonly keymap?: Readonly<Record<string, string>>
   readonly permissions?: Readonly<Record<string, PermissionDecision>>
   readonly extensionRoots?: ReadonlyArray<string>
@@ -260,6 +294,8 @@ export const decodeSettingsInput: {
   if (!object(value)) throw ConfigFileError.make({ path, message: "Configuration must be a JSON object" })
   exactKeys(path, "Configuration", value, [
     "providers",
+    "modelAliases",
+    "modelRoutes",
     "keymap",
     "permissions",
     "extensionRoots",
@@ -273,6 +309,64 @@ export const decodeSettingsInput: {
   exactKeys(path, "Providers", (value.providers ?? {}) as Record<string, unknown>, Object.keys(providerDefaults))
   for (const [name, providerConnection] of Object.entries((value.providers ?? {}) as Record<string, unknown>)) {
     if (!object(providerConnection)) throw ConfigFileError.make({ path, message: `Provider ${name} must be an object` })
+    if (name === "bedrock") {
+      exactKeys(path, `Provider ${name}`, providerConnection, [
+        "region",
+        "profile",
+        "endpoint",
+        "authMode",
+        "authRefresh",
+      ])
+      for (const field of ["region", "profile"] as const)
+        if (
+          providerConnection[field] !== undefined &&
+          (typeof providerConnection[field] !== "string" || providerConnection[field].length === 0)
+        )
+          throw ConfigFileError.make({ path, message: `Provider ${name} ${field} must be a non-empty string` })
+      if (
+        providerConnection.authMode !== undefined &&
+        providerConnection.authMode !== "default" &&
+        providerConnection.authMode !== "bearer"
+      )
+        throw ConfigFileError.make({ path, message: `Provider ${name} authMode must be default or bearer` })
+      if (providerConnection.endpoint !== undefined) {
+        httpUrl(path, `Provider ${name} endpoint`, providerConnection.endpoint)
+        const endpoint = new URL(providerConnection.endpoint as string)
+        if (endpoint.search.length > 0 || endpoint.hash.length > 0)
+          throw ConfigFileError.make({ path, message: `Provider ${name} endpoint cannot contain query or fragment` })
+        if (
+          endpoint.protocol !== "https:" &&
+          endpoint.hostname !== "localhost" &&
+          endpoint.hostname !== "127.0.0.1" &&
+          endpoint.hostname !== "[::1]"
+        )
+          throw ConfigFileError.make({ path, message: `Provider ${name} endpoint must use HTTPS except on loopback` })
+      }
+      if (providerConnection.authRefresh !== undefined) {
+        if (providerConnection.authMode === "bearer")
+          throw ConfigFileError.make({
+            path,
+            message: `Provider ${name} authRefresh is unavailable in bearer auth mode`,
+          })
+        if (!object(providerConnection.authRefresh))
+          throw ConfigFileError.make({ path, message: `Provider ${name} authRefresh must be an object` })
+        exactKeys(path, `Provider ${name} authRefresh`, providerConnection.authRefresh, ["command", "args"])
+        if (
+          typeof providerConnection.authRefresh.command !== "string" ||
+          providerConnection.authRefresh.command.length === 0
+        )
+          throw ConfigFileError.make({
+            path,
+            message: `Provider ${name} authRefresh command must be a non-empty string`,
+          })
+        if (
+          !Array.isArray(providerConnection.authRefresh.args) ||
+          providerConnection.authRefresh.args.some((arg) => typeof arg !== "string")
+        )
+          throw ConfigFileError.make({ path, message: `Provider ${name} authRefresh args must be an array of strings` })
+      }
+      continue
+    }
     exactKeys(path, `Provider ${name}`, providerConnection, ["baseUrl", "apiKeyEnv", "streamingOnly"])
     if (providerConnection.streamingOnly !== undefined && typeof providerConnection.streamingOnly !== "boolean")
       throw ConfigFileError.make({ path, message: `Provider ${name} streamingOnly must be a boolean` })
@@ -304,6 +398,59 @@ export const decodeSettingsInput: {
       providerUrl.hash.length > 0
     )
       throw ConfigFileError.make({ path, message: `Provider ${name} baseUrl cannot contain credentials` })
+  }
+  if (value.modelAliases !== undefined) {
+    if (!object(value.modelAliases)) throw ConfigFileError.make({ path, message: "Model aliases must be an object" })
+    for (const [name, alias] of Object.entries(value.modelAliases)) {
+      if (name.length === 0 || !object(alias))
+        throw ConfigFileError.make({ path, message: "Model alias names must be non-empty" })
+      if (name in modelDefaults)
+        throw ConfigFileError.make({ path, message: `Model alias ${name} cannot replace a built-in model alias` })
+      exactKeys(path, `Model alias ${name}`, alias, ["base", "provider", "candidates"])
+      if (typeof alias.base !== "string" || alias.base.length === 0 || !(alias.base in modelDefaults))
+        throw ConfigFileError.make({ path, message: `Model alias ${name} base must reference a built-in model alias` })
+      if (typeof alias.provider !== "string" || !(alias.provider in providerDefaults))
+        throw ConfigFileError.make({ path, message: `Model alias ${name} provider is unknown` })
+      if (
+        !Array.isArray(alias.candidates) ||
+        alias.candidates.length === 0 ||
+        alias.candidates.some((candidate) => typeof candidate !== "string" || candidate.length === 0)
+      )
+        throw ConfigFileError.make({ path, message: `Model alias ${name} candidates must be non-empty strings` })
+    }
+  }
+  if (value.modelRoutes !== undefined) {
+    if (!object(value.modelRoutes)) throw ConfigFileError.make({ path, message: "Model routes must be an object" })
+    exactKeys(path, "Model routes", value.modelRoutes, ["modes", "agents", "compaction"])
+    if (value.modelRoutes.modes !== undefined) {
+      if (!object(value.modelRoutes.modes))
+        throw ConfigFileError.make({ path, message: "Model route modes must be an object" })
+      exactKeys(path, "Model route modes", value.modelRoutes.modes, ["low", "medium", "high", "ultra"])
+      for (const [mode, roles] of Object.entries(value.modelRoutes.modes)) {
+        if (!object(roles)) throw ConfigFileError.make({ path, message: `Model route mode ${mode} must be an object` })
+        exactKeys(path, `Model route mode ${mode}`, roles, ["main", "oracle"])
+        if (Object.values(roles).some((alias) => typeof alias !== "string" || alias.length === 0))
+          throw ConfigFileError.make({ path, message: `Model route mode ${mode} aliases must be non-empty` })
+      }
+    }
+    if (value.modelRoutes.agents !== undefined) {
+      if (!object(value.modelRoutes.agents))
+        throw ConfigFileError.make({ path, message: "Model route agents must be an object" })
+      exactKeys(path, "Model route agents", value.modelRoutes.agents, [
+        "librarian",
+        "painter",
+        "review",
+        "readThread",
+        "task",
+      ])
+      if (Object.values(value.modelRoutes.agents).some((alias) => typeof alias !== "string" || alias.length === 0))
+        throw ConfigFileError.make({ path, message: "Model route agent aliases must be non-empty" })
+    }
+    if (
+      value.modelRoutes.compaction !== undefined &&
+      (typeof value.modelRoutes.compaction !== "string" || value.modelRoutes.compaction.length === 0)
+    )
+      throw ConfigFileError.make({ path, message: "Model route compaction must be a non-empty alias" })
   }
   if (value.keymap !== undefined) stringMap(path, "Keymap", value.keymap)
   if (value.permissions !== undefined) {

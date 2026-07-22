@@ -31,6 +31,7 @@ export interface ExecutionModelRoute {
   readonly providerRuntime?: {
     readonly adapter: string
     readonly credentialIdentity?: string
+    readonly connectionIdentity?: Readonly<Record<string, string>>
   }
   readonly openAiAccountFingerprint?: string
   readonly effort: string

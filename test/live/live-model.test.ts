@@ -120,7 +120,7 @@ describe("configured OpenAI-compatible live model", () => {
 
   liveIt("detects workflow capability without inventing support", () =>
     Effect.gen(function* () {
-      const registry = yield* ModelRegistry.Service
+      const registry = yield* ModelRegistry.ModelRegistry
       const registrations = yield* registry.registrations
       const workflowSupported = registrations.some((registration) => registration.metadata?.workflow === true)
       expect({

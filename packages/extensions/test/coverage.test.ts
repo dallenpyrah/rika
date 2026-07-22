@@ -90,7 +90,7 @@ it.effect("maps MCP discovery, call, and connection errors", () =>
         server: "remote",
         tools: Effect.succeed([]),
         callTool: () =>
-          Effect.fail(McpToolSource.McpToolCallError.make({ server: "remote", tool: "x", message: "call failed" })),
+          Effect.fail(McpToolSource.McpToolCallFailed.make({ server: "remote", tool: "x", message: "call failed" })),
         aiTools: Effect.succeed([]),
       })
       const call = yield* Effect.flip(

@@ -126,7 +126,7 @@ export const discover = (
     const workspace = yield* SkillLoader.make(loaderOptions(options.workspaceRoot)).pipe(
       Effect.mapError(failure.bind(undefined, "discover", options.workspaceRoot)),
     )
-    const source = SkillSource.merge([global, workspace])
+    const source = SkillSource.merge(global, workspace)
     const skills = yield* source.all.pipe(Effect.mapError(failure.bind(undefined, "list", options.workspaceRoot)))
     const canonical = skills.toSorted((left, right) => left.frontmatter.name.localeCompare(right.frontmatter.name))
     const digestBytes = yield* crypto

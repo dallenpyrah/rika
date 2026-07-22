@@ -58,6 +58,7 @@ import {
 import { Command } from "effect/unstable/cli"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { createHash } from "node:crypto"
+import * as BedrockAuthRefresh from "./bedrock-auth-refresh"
 import { command, version } from "./command"
 import { renderGoodbye } from "./goodbye"
 import * as InteractiveController from "./interactive-controller"
@@ -834,7 +835,10 @@ const executionModelRoute = (
   model: plan.selection.model,
   registrationKey: plan.registrationKey,
   providerProtocol: route.providerConnection.protocol,
-  providerBaseUrl: ModelProviderRuntime.normalizedBaseUrl(route.providerConnection.baseUrl),
+  providerBaseUrl:
+    route.providerConnection.protocol === "amazon-bedrock"
+      ? (route.providerConnection.endpoint ?? "bedrock://default")
+      : ModelProviderRuntime.normalizedBaseUrl(route.providerConnection.baseUrl),
   ...(route.providerConnection.apiKeyEnv === undefined
     ? {}
     : { providerApiKeyEnv: route.providerConnection.apiKeyEnv }),
@@ -2729,7 +2733,10 @@ if (import.meta.main) {
         const providerRuntimeContext = yield* Layer.build(
           testModelConfigured
             ? ModelProviderRuntime.bypassLayer
-            : ModelProviderRuntime.Service.layer.pipe(Layer.provide(openAiAuthLayer)),
+            : ModelProviderRuntime.Service.layer.pipe(
+                Layer.provide(openAiAuthLayer),
+                Layer.provide(BedrockAuthRefresh.liveLayer),
+              ),
         )
         const modelProviders = Context.get(providerRuntimeContext, ModelProviderRuntime.Service)
         const effectiveConfigForWorkspace = (workspace: string) =>

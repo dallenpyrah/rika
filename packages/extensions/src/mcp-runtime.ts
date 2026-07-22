@@ -59,7 +59,7 @@ export const layerWithStore = Layer.effect(
   }),
 )
 
-export const layer = layerWithStore.pipe(Layer.provide(OAuth.tokenStoreMemoryLayer))
+export const layer = layerWithStore.pipe(Layer.provide(OAuth.layerTokenStoreMemory))
 
 export const testLayer = (connect: Interface["connect"]) => Layer.succeed(Service, Service.of({ connect }))
 

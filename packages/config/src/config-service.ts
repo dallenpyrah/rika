@@ -4,8 +4,12 @@ import {
   type Diagnostic,
   type EffectiveConfig,
   type Environment,
+  type AgentId,
+  type HttpProviderConnection,
+  type HttpProviderOverride,
   isStreamingOnlyBaseUrl,
   type ProviderId,
+  type ModeId,
   type Settings,
   type SettingsInput,
 } from "./config-contract"
@@ -31,14 +35,33 @@ const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Setting
   const provider = (id: ProviderId) => {
     const builtIn = defaults.providers[id]!
     const override = workspace.providers?.[id] ?? global.providers?.[id]
-    const baseUrl = override?.baseUrl ?? builtIn.baseUrl
+    if (builtIn.protocol === "amazon-bedrock") {
+      const bedrock = override as (Extract<SettingsInput["providers"], unknown> & Record<string, unknown>) | undefined
+      return {
+        protocol: "amazon-bedrock" as const,
+        authMode: bedrock?.authMode === "bearer" ? ("bearer" as const) : ("default" as const),
+        ...(bedrock?.region === undefined ? {} : { region: bedrock.region as string }),
+        ...(bedrock?.profile === undefined ? {} : { profile: bedrock.profile as string }),
+        ...(bedrock?.endpoint === undefined ? {} : { endpoint: bedrock.endpoint as string }),
+        ...(bedrock?.authRefresh === undefined
+          ? {}
+          : {
+              authRefresh: bedrock.authRefresh as Settings["providers"]["bedrock"] extends { authRefresh?: infer A }
+                ? A
+                : never,
+            }),
+      }
+    }
+    const httpBuiltIn = builtIn as HttpProviderConnection
+    const httpOverride = override as HttpProviderOverride | undefined
+    const baseUrl = httpOverride?.baseUrl ?? httpBuiltIn.baseUrl
     const streamingOnly =
-      override?.streamingOnly ?? builtIn.streamingOnly ?? (isStreamingOnlyBaseUrl(baseUrl) ? true : undefined)
-    if (override === undefined) return streamingOnly === undefined ? builtIn : { ...builtIn, streamingOnly }
+      httpOverride?.streamingOnly ?? httpBuiltIn.streamingOnly ?? (isStreamingOnlyBaseUrl(baseUrl) ? true : undefined)
+    if (override === undefined) return streamingOnly === undefined ? httpBuiltIn : { ...httpBuiltIn, streamingOnly }
     return {
-      protocol: builtIn.protocol,
+      protocol: httpBuiltIn.protocol,
       baseUrl,
-      ...(override.apiKeyEnv === undefined ? {} : { apiKeyEnv: override.apiKeyEnv }),
+      ...(httpOverride?.apiKeyEnv === undefined ? {} : { apiKeyEnv: httpOverride.apiKeyEnv }),
       ...(streamingOnly === undefined ? {} : { streamingOnly }),
     }
   }
@@ -46,10 +69,62 @@ const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Setting
     providers: Object.fromEntries(
       (Object.keys(defaults.providers) as Array<ProviderId>).map((id) => [id, provider(id)]),
     ) as Readonly<Record<ProviderId, Settings["providers"][ProviderId]>>,
-    models: defaults.models,
-    modes: defaults.modes,
-    agents: defaults.agents,
-    compaction: defaults.compaction,
+    models:
+      global.modelAliases === undefined && workspace.modelAliases === undefined
+        ? defaults.models
+        : Object.fromEntries(
+            Object.entries({ ...global.modelAliases, ...workspace.modelAliases }).reduce((all, [name, input]) => {
+              const base = defaults.models[input.base]!
+              all.push([name, { ...base, provider: input.provider, candidates: input.candidates }])
+              return all
+            }, Object.entries(defaults.models)),
+          ),
+    modes:
+      global.modelRoutes?.modes === undefined && workspace.modelRoutes?.modes === undefined
+        ? defaults.modes
+        : (Object.fromEntries(
+            Object.entries(defaults.modes).map(([mode, configured]) => {
+              const globalMode = global.modelRoutes?.modes?.[mode as ModeId]
+              const workspaceMode = workspace.modelRoutes?.modes?.[mode as ModeId]
+              return [
+                mode,
+                {
+                  main: { ...configured.main, alias: workspaceMode?.main ?? globalMode?.main ?? configured.main.alias },
+                  oracle: {
+                    ...configured.oracle,
+                    alias: workspaceMode?.oracle ?? globalMode?.oracle ?? configured.oracle.alias,
+                  },
+                },
+              ]
+            }),
+          ) as Settings["modes"]),
+    agents:
+      global.modelRoutes?.agents === undefined && workspace.modelRoutes?.agents === undefined
+        ? defaults.agents
+        : (Object.fromEntries(
+            Object.entries(defaults.agents).map(([agent, configured]) => [
+              agent,
+              {
+                ...configured,
+                alias:
+                  workspace.modelRoutes?.agents?.[agent as AgentId] ??
+                  global.modelRoutes?.agents?.[agent as AgentId] ??
+                  configured.alias,
+              },
+            ]),
+          ) as Settings["agents"]),
+    compaction:
+      global.modelRoutes?.compaction === undefined && workspace.modelRoutes?.compaction === undefined
+        ? defaults.compaction
+        : {
+            summaryModel: {
+              ...defaults.compaction.summaryModel,
+              alias:
+                workspace.modelRoutes?.compaction ??
+                global.modelRoutes?.compaction ??
+                defaults.compaction.summaryModel.alias,
+            },
+          },
     keymap: { ...defaults.keymap, ...global.keymap, ...workspace.keymap },
     permissions: { ...defaults.permissions, ...global.permissions, ...workspace.permissions },
     extensionRoots: workspace.extensionRoots ?? global.extensionRoots ?? defaults.extensionRoots,
@@ -150,7 +225,9 @@ export const liveEnvironmentLayer = (options: {
         })
       const variables = Object.values(settings.providers)
         .flatMap((providerConnection) =>
-          providerConnection.apiKeyEnv === undefined ? [] : [providerConnection.apiKeyEnv],
+          providerConnection.protocol === "amazon-bedrock" || providerConnection.apiKeyEnv === undefined
+            ? []
+            : [providerConnection.apiKeyEnv],
         )
         .filter((variable, index, all) => all.indexOf(variable) === index)
       const values = yield* Config.all({

@@ -37,7 +37,15 @@ export const run = Effect.fn("ConfigOperations.run")(function* (
   const providers = Object.fromEntries(
     Object.entries(config.settings.providers).map(([id, provider]) => [
       id,
-      { baseUrl: provider.baseUrl, ...(provider.apiKeyEnv === undefined ? {} : { apiKeyEnv: provider.apiKeyEnv }) },
+      provider.protocol === "amazon-bedrock"
+        ? {
+            ...(provider.region === undefined ? {} : { region: provider.region }),
+            ...(provider.profile === undefined ? {} : { profile: provider.profile }),
+            ...(provider.endpoint === undefined ? {} : { endpoint: provider.endpoint }),
+            authMode: provider.authMode,
+            authRefresh: provider.authRefresh === undefined ? "not-configured" : "configured",
+          }
+        : { baseUrl: provider.baseUrl, ...(provider.apiKeyEnv === undefined ? {} : { apiKeyEnv: provider.apiKeyEnv }) },
     ]),
   )
   const apiKeyStatus = (apiKeyEnv: string | undefined) => {
@@ -46,7 +54,10 @@ export const run = Effect.fn("ConfigOperations.run")(function* (
     return "present"
   }
   const providerApiKeys = Object.fromEntries(
-    Object.entries(config.settings.providers).map(([id, provider]) => [id, apiKeyStatus(provider.apiKeyEnv)]),
+    Object.entries(config.settings.providers).map(([id, provider]) => [
+      id,
+      provider.protocol === "amazon-bedrock" ? "not-configured" : apiKeyStatus(provider.apiKeyEnv),
+    ]),
   )
   const webSearchCredentials = Object.fromEntries(
     Object.keys(config.settings.webSearch.providers).map((id) => [

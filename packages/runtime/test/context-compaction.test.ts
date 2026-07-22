@@ -185,7 +185,7 @@ describe("ContextCompaction", () => {
           yield* Layer.build(
             Layer.mergeAll(
               fixture.layer,
-              ToolOutput.testLayer({
+              ToolOutput.layerTest({
                 put: (_toolCallId, content) => {
                   spilled = content
                   return Effect.succeed(Option.some("memory:tool-output"))
@@ -227,7 +227,7 @@ describe("ContextCompaction", () => {
           yield* Layer.build(
             Layer.mergeAll(
               fixture.layer,
-              ToolOutput.testLayer({
+              ToolOutput.layerTest({
                 put: () => Effect.fail(ToolOutput.ToolOutputError.make({ message: "spill failed" })),
               }),
             ),

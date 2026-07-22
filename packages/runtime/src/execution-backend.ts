@@ -1,4 +1,4 @@
-import { Agent, type Compaction, ModelRegistry, ModelResilience, type Permissions, TurnPolicy } from "@batonfx/core"
+import { type Compaction, ModelRegistry, ModelResilience, type Permissions } from "@batonfx/core"
 import {
   AgentTools,
   Catalog as ToolCatalog,
@@ -77,7 +77,7 @@ type ToolRuntimeRequirements =
   ReturnType<typeof RikaToolRuntime.layer> extends Layer.Layer<infer _A, infer _E, infer R> ? R : never
 type SuppliedToolRuntimeRequirements =
   | MediaView.MediaAnalyzer
-  | ModelRegistry.Service
+  | ModelRegistry.ModelRegistry
   | ProcessRegistry.Service
   | ReadWebPage.Service
   | WebSearch.Service
@@ -1034,13 +1034,10 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
         Effect.gen(function* () {
           yield* client.agents.register({
             id: ThreadHost.hostAgentId,
-            agent: Agent.make({
-              name: "rika-thread-host",
-              instructions: "Promote pending Rika turns delivered to this thread host.",
-              model: ThreadHost.hostSelection,
-              toolkit: ThreadHost.toolkit,
-              policy: TurnPolicy.forever,
-            }),
+            name: "rika-thread-host",
+            instructions: "Promote pending Rika turns delivered to this thread host.",
+            model: ThreadHost.hostSelection,
+            tools: Object.values(ThreadHost.toolkit.tools).map((tool) => ({ name: tool.name })),
             permissions: [
               { name: "relay.inbox.wait", value: true },
               { name: "relay.inbox.send", value: true },
@@ -1457,14 +1454,11 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 ? client.agents.register({
                     id: agentId,
                     address: addressId,
-                    agent: Agent.make({
-                      name: agentName,
-                      instructions: mainInstructions,
-                      model: selection,
-                      toolkit: Toolkit.make(),
-                      policy: TurnPolicy.forever,
-                      toolExecution: { concurrency: 4 },
-                    }),
+                    name: agentName,
+                    instructions: mainInstructions,
+                    model: relayModelSelection(selection),
+                    tools: [],
+                    tool_execution: { concurrency: 4 },
                     permissions: [],
                     ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
                     metadata,
@@ -1473,14 +1467,11 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 : client.agents.register({
                     id: agentId,
                     address: addressId,
-                    agent: Agent.make({
-                      name: agentName,
-                      instructions: mainInstructions,
-                      model: selection,
-                      toolkit: toolkitFor(executionToolOptions),
-                      policy: TurnPolicy.forever,
-                      toolExecution: { concurrency: 4 },
-                    }),
+                    name: agentName,
+                    instructions: mainInstructions,
+                    model: relayModelSelection(selection),
+                    tools: Object.values(toolkitFor(executionToolOptions).tools).map((tool) => ({ name: tool.name })),
+                    tool_execution: { concurrency: 4 },
                     permissions: parentPermissions,
                     ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
                     metadata,
@@ -1644,7 +1635,10 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               created_at: createdAt,
             })
             .pipe(Effect.mapError(error))
-          return { steeringMessageId: String(accepted.steering_message_id), sequence: accepted.sequence }
+          return {
+            steeringMessageId: `${String(accepted.execution_id)}:${accepted.kind}:${accepted.sequence}`,
+            sequence: accepted.sequence,
+          }
         }),
         listApprovals: Effect.fn("ExecutionBackend.listApprovals")(function* (turnId, reference) {
           return yield* Effect.gen(function* () {
@@ -1917,15 +1911,21 @@ export const layer = <
             ThreadHost.handlerLayer(promoterRegistry),
             delegationHandlerLayer,
           )
-          const modelContext = yield* Layer.build(
-            ModelHub.layerFromRegistrationEffects([
-              ...registrationsFor(options).map((registration) => Effect.succeed(registration)),
-              ThreadHost.hostRegistration,
-            ]),
+          const registrationEffects = [
+            ...registrationsFor(options).map((registration) => Effect.succeed(registration)),
+            ThreadHost.hostRegistration,
+          ]
+          const modelContext = yield* Layer.build(ModelRegistry.layer(registrationEffects)).pipe(Effect.mapError(error))
+          const modelRegistry = Context.get(modelContext, ModelRegistry.ModelRegistry)
+          const relayModelContext = yield* Layer.build(
+            ModelHub.layerFromRegistrationEffects(
+              registrationEffects as unknown as ReadonlyArray<
+                Effect.Effect<Parameters<ModelHub.Interface["modelRegistry"]["register"]>[0]["registration"]>
+              >,
+            ),
           ).pipe(Effect.mapError(error))
-          const modelRegistry = Context.get(modelContext, ModelRegistry.Service)
-          const languageModelLayer = Layer.succeedContext(modelContext)
-          const sharedModelRegistryLayer = Layer.succeed(ModelRegistry.Service, modelRegistry)
+          const languageModelLayer = Layer.succeedContext(relayModelContext)
+          const sharedModelRegistryLayer = Layer.succeed(ModelRegistry.ModelRegistry, modelRegistry)
           const rikaToolRuntimeLayer =
             options.toolRuntimeLayerForWorkspace !== undefined && options.resolveWorkspace !== undefined
               ? routedToolRuntimeLayer(options.toolRuntimeLayerForWorkspace, options.resolveWorkspace)
@@ -2031,13 +2031,10 @@ export const layer = <
                       const registered = yield* client.agents.register({
                         id: childAgentId,
                         address: child.address_id,
-                        agent: Agent.make({
-                          name: `rika-fan-out-${String(child.child_execution_id)}`,
-                          ...(override.instructions === undefined ? {} : { instructions: override.instructions }),
-                          model: childSelection,
-                          toolkit: childToolkit,
-                          policy: TurnPolicy.forever,
-                        }),
+                        name: `rika-fan-out-${String(child.child_execution_id)}`,
+                        ...(override.instructions === undefined ? {} : { instructions: override.instructions }),
+                        model: relayModelSelection(childSelection),
+                        tools: Object.values(childToolkit.tools).map((tool) => ({ name: tool.name })),
                         permissions:
                           override.permissions === undefined
                             ? parentPermissions
@@ -2131,13 +2128,10 @@ export const layer = <
                       const registered = yield* client.agents.register({
                         id: childAgentId,
                         address: grounded ? operation.address_id : addressId,
-                        agent: Agent.make({
-                          name: `rika-workflow-${String(childId)}`,
-                          instructions: preset.instructions,
-                          model: childSelection,
-                          toolkit: childToolkit,
-                          policy: TurnPolicy.forever,
-                        }),
+                        name: `rika-workflow-${String(childId)}`,
+                        instructions: preset.instructions,
+                        model: relayModelSelection(childSelection),
+                        tools: Object.values(childToolkit.tools).map((tool) => ({ name: tool.name })),
                         permissions: preset.permissions.map((name) => ({ name, value: true })),
                         ...(options.permissionPolicy === undefined
                           ? {}

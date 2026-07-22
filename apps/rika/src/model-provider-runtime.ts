@@ -2,22 +2,33 @@ import { ConfigContract, Models } from "@rika/config"
 import type * as Turn from "@rika/persistence/turn"
 import { withStreamingOnlyModel } from "@rika/runtime/relay"
 import { Compaction, ModelRegistry } from "@batonfx/core"
-import { anthropic, anthropicClientLayerConfig } from "@batonfx/providers/anthropic"
-import {
-  OpenAiAccountCredentialError,
-  openAi,
-  openAiAccount,
-  openAiClientLayerConfig,
-  type OpenAiAccountCredentials,
-} from "@batonfx/providers/openai"
+import * as Anthropic from "@batonfx/providers/anthropic"
+import * as AmazonBedrock from "@batonfx/providers/amazon-bedrock"
+import * as OpenAi from "@batonfx/providers/openai"
+import { OpenAiAccountCredentialError, type OpenAiAccountCredentials } from "@batonfx/providers/openai"
 import { OpenAiAuth } from "@rika/app"
-import { Config, Context, Effect, Function, Layer, Option, Redacted, Schema, Scope, Semaphore } from "effect"
+import {
+  Config,
+  Context,
+  Deferred,
+  Effect,
+  Function,
+  Layer,
+  Option,
+  Redacted,
+  Ref,
+  Schema,
+  Scope,
+  Semaphore,
+} from "effect"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { createHash } from "node:crypto"
+import * as BedrockAuthRefresh from "./bedrock-auth-refresh"
 
 export interface ProviderRuntimePin {
   readonly adapter: string
   readonly credentialIdentity?: string
+  readonly connectionIdentity?: Readonly<Record<string, string>>
 }
 
 export class RuntimeError extends Schema.TaggedErrorClass<RuntimeError>()("ModelProviderRuntimeError", {
@@ -62,8 +73,8 @@ export const normalizedBaseUrl = (value: string) => {
 export const isNativeOpenAiRoute = (route: ConfigContract.ResolvedModelRoute) =>
   route.providerId === "openai" &&
   route.providerConnection.protocol === "openai" &&
-  normalizedBaseUrl(route.providerConnection.baseUrl) ===
-    normalizedBaseUrl(ConfigContract.defaults.providers.openai!.baseUrl)
+  normalizedBaseUrl(route.providerConnection.baseUrl!) ===
+    normalizedBaseUrl(ConfigContract.defaults.providers.openai!.baseUrl!)
 
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== "object") return JSON.stringify(value)
@@ -171,23 +182,76 @@ const streamingOnlyRegistration =
     streamingOnly ? withStreamingOnlyModel(registration) : registration
 
 const routeStreamingOnly = (route: ConfigContract.ResolvedModelRoute): boolean =>
-  route.providerConnection.streamingOnly ?? ConfigContract.isStreamingOnlyBaseUrl(route.providerConnection.baseUrl)
+  route.providerConnection.protocol !== "amazon-bedrock" &&
+  (route.providerConnection.streamingOnly ?? ConfigContract.isStreamingOnlyBaseUrl(route.providerConnection.baseUrl))
+
+const bedrockOptions = (route: ConfigContract.ResolvedModelRoute) => {
+  const {
+    output_config,
+    additionalModelRequestFields,
+    max_output_tokens: _,
+    max_tokens: __,
+    ...options
+  } = route.options
+  return {
+    ...options,
+    maxTokens: route.maxOutputTokens,
+    ...(output_config === undefined && additionalModelRequestFields === undefined
+      ? {}
+      : {
+          additionalModelRequestFields: {
+            ...(typeof additionalModelRequestFields === "object" && additionalModelRequestFields !== null
+              ? additionalModelRequestFields
+              : {}),
+            ...(output_config === undefined ? {} : { output_config }),
+          },
+        }),
+  }
+}
+
+const authRefreshFingerprint = (command: ConfigContract.BedrockAuthRefresh) =>
+  `sha256:${createHash("sha256")
+    .update(canonical([command.command, ...command.args]))
+    .digest("hex")}`
+
+const registerBedrock = (
+  route: ConfigContract.ResolvedModelRoute,
+  resolution: Resolution,
+  recovery?: AmazonBedrock.Recovery,
+) => {
+  const connection = route.providerConnection
+  if (connection.protocol !== "amazon-bedrock")
+    return Effect.fail(RuntimeError.make({ message: "Invalid Amazon Bedrock connection" }))
+  return provideScoped(
+    ModelRegistry.registrations().pipe(Effect.map((items) => ({ ...items[0]!, provider: route.providerId }))),
+    AmazonBedrock.layer({
+      model: route.model,
+      registrationKey: resolution.registrationKey,
+      config: resolution.options as AmazonBedrock.Config,
+      client: {
+        ...(connection.region === undefined ? {} : { region: connection.region }),
+        ...(connection.profile === undefined ? {} : { profile: connection.profile }),
+        ...(connection.endpoint === undefined ? {} : { endpoint: connection.endpoint }),
+        authMode: connection.authMode,
+        ...(recovery === undefined ? {} : { recovery }),
+      },
+    }),
+  ).pipe(Effect.mapError(() => RuntimeError.make({ message: "Amazon Bedrock provider registration failed" })))
+}
 
 const registerOpenAi = (route: ConfigContract.ResolvedModelRoute, resolution: Resolution) =>
   credential(route.providerConnection.apiKeyEnv, route.providerId).pipe(
     Effect.flatMap((apiKey) =>
       provideScoped(
-        openAi({
+        ModelRegistry.registrations().pipe(
+          Effect.map((items) => streamingOnlyRegistration(routeStreamingOnly(route))(items[0]!)),
+        ),
+        OpenAi.layer({
           model: route.model,
           registrationKey: resolution.registrationKey,
-          config: resolution.options as NonNullable<Parameters<typeof openAi>[0]["config"]>,
-        }).pipe(
-          Effect.map((registration) => ({ ...registration, provider: route.providerId })),
-          Effect.map(streamingOnlyRegistration(routeStreamingOnly(route))),
-        ),
-        openAiClientLayerConfig({
-          apiUrl: Config.succeed(route.providerConnection.baseUrl),
-          apiKey: Config.succeed(apiKey),
+          config: resolution.options as NonNullable<Parameters<typeof OpenAi.layer>[0]["config"]>,
+          apiKey: Config.succeed(apiKey!),
+          clientConfig: { apiUrl: Config.succeed(route.providerConnection.baseUrl!) },
         }).pipe(Layer.provide(sanitizedFetchLayer), Layer.orDie),
       ),
     ),
@@ -200,17 +264,15 @@ const registerAnthropic = (route: ConfigContract.ResolvedModelRoute, resolution:
   credential(route.providerConnection.apiKeyEnv, route.providerId).pipe(
     Effect.flatMap((apiKey) =>
       provideScoped(
-        anthropic({
+        ModelRegistry.registrations().pipe(
+          Effect.map((items) => streamingOnlyRegistration(routeStreamingOnly(route))(items[0]!)),
+        ),
+        Anthropic.layer({
           model: route.model,
           registrationKey: resolution.registrationKey,
-          config: resolution.options as NonNullable<Parameters<typeof anthropic>[0]["config"]>,
-        }).pipe(
-          Effect.map((registration) => ({ ...registration, provider: route.providerId })),
-          Effect.map(streamingOnlyRegistration(routeStreamingOnly(route))),
-        ),
-        anthropicClientLayerConfig({
-          apiUrl: Config.succeed(route.providerConnection.baseUrl),
-          apiKey: Config.succeed(apiKey),
+          config: resolution.options as NonNullable<Parameters<typeof Anthropic.layer>[0]["config"]>,
+          apiKey: Config.succeed(apiKey!),
+          clientConfig: { apiUrl: Config.succeed(route.providerConnection.baseUrl!) },
         }).pipe(Layer.provide(sanitizedFetchLayer), Layer.orDie),
       ),
     ),
@@ -230,11 +292,22 @@ const configuredFromPin = (
   effort: route.effort as ConfigContract.Effort,
   fast: route.fast,
   providerId: route.provider as ConfigContract.ProviderId,
-  providerConnection: {
-    protocol: route.providerProtocol as ConfigContract.ProviderId,
-    baseUrl: route.providerBaseUrl,
-    ...(runtime.credentialIdentity === undefined ? {} : { apiKeyEnv: runtime.credentialIdentity }),
-  },
+  providerConnection:
+    route.providerProtocol === "amazon-bedrock"
+      ? {
+          protocol: "amazon-bedrock",
+          authMode: runtime.connectionIdentity?.authMode === "bearer" ? "bearer" : "default",
+          ...(runtime.connectionIdentity?.region === undefined ? {} : { region: runtime.connectionIdentity.region }),
+          ...(runtime.connectionIdentity?.profile === undefined ? {} : { profile: runtime.connectionIdentity.profile }),
+          ...(runtime.connectionIdentity?.endpoint === undefined
+            ? {}
+            : { endpoint: runtime.connectionIdentity.endpoint }),
+        }
+      : {
+          protocol: route.providerProtocol as "openai" | "anthropic",
+          baseUrl: route.providerBaseUrl,
+          ...(runtime.credentialIdentity === undefined ? {} : { apiKeyEnv: runtime.credentialIdentity }),
+        },
   candidates: [route.model],
   model: route.model,
   compaction: route.compaction,
@@ -246,7 +319,44 @@ const configuredFromPin = (
   options: route.providerOptions ?? {},
 })
 
-const adapters = (auth: OpenAiAuth.ServiceInterface): ReadonlyArray<Adapter> => [
+const adapters = (
+  auth: OpenAiAuth.ServiceInterface,
+  bedrockRecovery: (runtime: ProviderRuntimePin) => AmazonBedrock.Recovery | undefined = () => undefined,
+): ReadonlyArray<Adapter> => [
+  {
+    id: "amazon-bedrock",
+    matchesConfigured: (route) => route.providerConnection.protocol === "amazon-bedrock",
+    matchesPinned: (route) =>
+      route.providerRuntime?.adapter === "amazon-bedrock" && route.providerProtocol === "amazon-bedrock",
+    resolve: (route) => {
+      const connection = route.providerConnection
+      if (connection.protocol !== "amazon-bedrock") return { adapter: "amazon-bedrock" }
+      const fingerprint =
+        connection.authRefresh === undefined ? undefined : authRefreshFingerprint(connection.authRefresh)
+      return {
+        adapter: "amazon-bedrock",
+        connectionIdentity: {
+          authMode: connection.authMode,
+          ...(connection.region === undefined ? {} : { region: connection.region }),
+          ...(connection.profile === undefined ? {} : { profile: connection.profile }),
+          ...(connection.endpoint === undefined ? {} : { endpoint: connection.endpoint }),
+          ...(fingerprint === undefined ? {} : { authRefreshFingerprint: fingerprint }),
+        },
+      }
+    },
+    options: bedrockOptions,
+    register: (route, resolution) => registerBedrock(route, resolution, bedrockRecovery(resolution.runtime)),
+    restore: (route, runtime) =>
+      registerBedrock(
+        configuredFromPin(route, runtime),
+        {
+          runtime,
+          registrationKey: route.registrationKey,
+          options: route.providerOptions ?? {},
+        },
+        bedrockRecovery(runtime),
+      ),
+  },
   {
     id: "openai-account",
     matchesConfigured: (route, account) => account !== undefined && isNativeOpenAiRoute(route),
@@ -259,25 +369,23 @@ const adapters = (auth: OpenAiAuth.ServiceInterface): ReadonlyArray<Adapter> => 
     },
     register: (route, resolution, account) =>
       provideScoped(
-        openAiAccount({
+        ModelRegistry.registrations().pipe(Effect.map((items) => withStreamingOnlyModel(items[0]!))),
+        OpenAi.layerAccount({
           model: route.model,
           registrationKey: resolution.registrationKey,
           credentials: batonCredentials(account!.auth, account!.fingerprint),
-          config: resolution.options as NonNullable<Parameters<typeof openAiAccount>[0]["config"]>,
-        }).pipe(
-          Effect.map((registration) => ({ ...registration, provider: route.providerId })),
-          Effect.map(withStreamingOnlyModel),
-        ),
-        sanitizedFetchLayer,
+          config: resolution.options as NonNullable<Parameters<typeof OpenAi.layerAccount>[0]["config"]>,
+        }).pipe(Layer.provide(sanitizedFetchLayer)),
       ).pipe(Effect.mapError((error) => RuntimeError.make({ message: String(error) }))),
     restore: (route, runtime) =>
       runtime.credentialIdentity === undefined ||
       route.provider !== "openai" ||
       route.providerProtocol !== "openai" ||
-      normalizedBaseUrl(route.providerBaseUrl) !== normalizedBaseUrl(ConfigContract.defaults.providers.openai!.baseUrl)
+      normalizedBaseUrl(route.providerBaseUrl) !== normalizedBaseUrl(ConfigContract.defaults.providers.openai!.baseUrl!)
         ? unavailableRestore(route)
         : provideScoped(
-            openAiAccount({
+            ModelRegistry.registrations().pipe(Effect.map((items) => withStreamingOnlyModel(items[0]!))),
+            OpenAi.layerAccount({
               model: route.model,
               registrationKey: route.registrationKey,
               credentials: batonCredentials(auth, runtime.credentialIdentity),
@@ -286,12 +394,8 @@ const adapters = (auth: OpenAiAuth.ServiceInterface): ReadonlyArray<Adapter> => 
                   Object.entries(route.providerOptions ?? {}).filter(([name]) => name !== "max_output_tokens"),
                 ),
                 store: false,
-              } as NonNullable<Parameters<typeof openAiAccount>[0]["config"]>,
-            }).pipe(
-              Effect.map((registration) => ({ ...registration, provider: route.provider })),
-              Effect.map(withStreamingOnlyModel),
-            ),
-            sanitizedFetchLayer,
+              } as NonNullable<Parameters<typeof OpenAi.layerAccount>[0]["config"]>,
+            }).pipe(Layer.provide(sanitizedFetchLayer)),
           ).pipe(Effect.mapError((error) => RuntimeError.make({ message: String(error) }))),
   },
   {
@@ -381,7 +485,11 @@ const plan = (route: ConfigContract.ResolvedModelRoute, adapter: Adapter, accoun
         adapter: runtime.adapter,
         credentialIdentity: runtime.credentialIdentity,
         provider: route.providerId,
-        baseUrl: normalizedBaseUrl(route.providerConnection.baseUrl),
+        connection:
+          runtime.connectionIdentity ??
+          (route.providerConnection.protocol === "amazon-bedrock"
+            ? {}
+            : { baseUrl: normalizedBaseUrl(route.providerConnection.baseUrl) }),
         model: route.model,
         effort: route.effort,
         fast: route.fast,
@@ -407,7 +515,7 @@ const purePlan = (route: ConfigContract.ResolvedModelRoute, fingerprint?: string
   const available = adapters({} as OpenAiAuth.ServiceInterface)
   const adapter =
     fingerprint !== undefined && isNativeOpenAiRoute(route)
-      ? available[0]!
+      ? available.find((candidate) => candidate.id === "openai-account")!
       : available.find((candidate) => candidate.id === route.providerConnection.protocol)!
   return plan(
     route,
@@ -451,8 +559,51 @@ export class Service extends Context.Service<Service, ServiceInterface>()("@rika
     Service,
     Effect.gen(function* () {
       const auth = yield* OpenAiAuth.Service
+      const authRefresh = yield* BedrockAuthRefresh.Service
       const scope = yield* Effect.scope
-      const available = adapters(auth)
+      const trustedRefreshCommands = new Map<string, ConfigContract.BedrockAuthRefresh>()
+      const refreshes = yield* Ref.make(new Map<string, Deferred.Deferred<void, BedrockAuthRefresh.Failure>>())
+      const refresh = (fingerprint: string, command: ConfigContract.BedrockAuthRefresh) =>
+        Effect.gen(function* () {
+          const deferred = yield* Deferred.make<void, BedrockAuthRefresh.Failure>()
+          const current = yield* Ref.modify(refreshes, (entries) => {
+            const existing = entries.get(fingerprint)
+            if (existing !== undefined) return [existing, entries] as const
+            const updated = new Map(entries)
+            updated.set(fingerprint, deferred)
+            return [undefined, updated] as const
+          })
+          if (current !== undefined) return yield* Deferred.await(current)
+          return yield* Deferred.complete(deferred, authRefresh.run(command)).pipe(
+            Effect.andThen(Deferred.await(deferred)),
+            Effect.ensuring(
+              Ref.update(refreshes, (entries) => {
+                if (entries.get(fingerprint) !== deferred) return entries
+                const updated = new Map(entries)
+                updated.delete(fingerprint)
+                return updated
+              }),
+            ),
+          )
+        })
+      const bedrockRecovery = (runtime: ProviderRuntimePin): AmazonBedrock.Recovery | undefined => {
+        const fingerprint = runtime.connectionIdentity?.authRefreshFingerprint
+        if (fingerprint === undefined) return undefined
+        const command = trustedRefreshCommands.get(fingerprint)
+        return command === undefined
+          ? undefined
+          : {
+              recover: () =>
+                refresh(fingerprint, command).pipe(
+                  Effect.mapError(() =>
+                    AmazonBedrock.RecoveryFailure.make({
+                      description: "Amazon Bedrock authentication refresh failed",
+                    }),
+                  ),
+                ),
+            }
+      }
+      const available = adapters(auth, bedrockRecovery)
       const registrationAdmission = yield* Semaphore.make(1)
       const registrationCache = new Map<string, ModelRegistry.Registration>()
       const inScope = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, Scope.Scope, scope)
@@ -471,6 +622,11 @@ export class Service extends Context.Service<Service, ServiceInterface>()("@rika
         )
       const prepare: ServiceInterface["prepare"] = (routes) =>
         Effect.gen(function* () {
+          for (const route of routes) {
+            const connection = route.providerConnection
+            if (connection.protocol !== "amazon-bedrock" || connection.authRefresh === undefined) continue
+            trustedRefreshCommands.set(authRefreshFingerprint(connection.authRefresh), connection.authRefresh)
+          }
           const account = routes.some(isNativeOpenAiRoute) ? yield* accountStatus(auth) : undefined
           const resolutions = yield* Effect.forEach(routes, (route) => {
             const adapter = available.find((candidate) => candidate.matchesConfigured(route, account))

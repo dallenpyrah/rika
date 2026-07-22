@@ -223,7 +223,7 @@ export interface OAuthClient {
   readonly clear: Effect.Effect<void, OAuth.OAuthProviderError>
 }
 
-export type OAuthClientError = OAuth.OAuthDeniedError | OAuth.OAuthExpiredError | OAuth.OAuthProviderError
+export type OAuthClientError = OAuth.OAuthDenied | OAuth.OAuthExpired | OAuth.OAuthProviderError
 
 const service = (
   oauth: (server: string, url: string) => Effect.Effect<OAuthClient>,
@@ -235,9 +235,13 @@ const service = (
       Effect.mapError((cause: unknown) => {
         let detail = `OAuth ${operation} failed`
         if (typeof cause === "object" && cause !== null && "_tag" in cause) {
-          if (cause._tag === "OAuthExpiredError") detail = "OAuth callback state is invalid or expired"
-          else if (cause._tag === "OAuthDeniedError") detail = "OAuth authorization was denied"
-          else if (cause._tag === "OAuthProviderError" && "operation" in cause && typeof cause.operation === "string")
+          if (cause._tag === "@batonfx/mcp/OAuthExpired") detail = "OAuth callback state is invalid or expired"
+          else if (cause._tag === "@batonfx/mcp/OAuthDenied") detail = "OAuth authorization was denied"
+          else if (
+            cause._tag === "@batonfx/mcp/OAuthProviderError" &&
+            "operation" in cause &&
+            typeof cause.operation === "string"
+          )
             detail = `OAuth ${cause.operation} failed`
         }
         return Error.make({ server, operation, message: detail })
