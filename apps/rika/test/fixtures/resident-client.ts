@@ -632,35 +632,40 @@ const program = Effect.gen(function* () {
             })
           })
         if (command === "upgrade-interactive")
-          return connection
-            .run(
-              { _tag: "Interactive", prompt: [], ephemeral: false, workspace },
-              {
-                interactive: (_input, session) =>
-                  Effect.gen(function* () {
-                    yield* emit({ type: "interactive-callback" })
-                    const events = yield* Queue.unbounded<string>()
-                    const feed = yield* Effect.forkChild(
-                      session.events((event) => Queue.offerUnsafe(events, event._tag)),
-                    )
-                    yield* emit({ type: "initial-read", tag: yield* Queue.take(events) })
-                    return yield* Effect.never
-                    yield* Fiber.interrupt(feed)
+          return Effect.gen(function* () {
+            let callbacks = 0
+            yield* connection
+              .run(
+                { _tag: "Interactive", prompt: [], ephemeral: false, workspace },
+                {
+                  interactive: (_input, session) =>
+                    Effect.gen(function* () {
+                      callbacks += 1
+                      yield* emit({ type: "interactive-callback", callbacks })
+                      const events = yield* Queue.unbounded<string>()
+                      const feed = yield* Effect.forkChild(
+                        session.events((event) => Queue.offerUnsafe(events, event._tag)),
+                      )
+                      yield* emit({ type: "initial-read", tag: yield* Queue.take(events) })
+                      yield* emit({ type: "upgrade-survived", tag: yield* Queue.take(events), callbacks })
+                      return yield* Effect.never
+                      yield* Fiber.interrupt(feed)
+                    }),
+                },
+              )
+              .pipe(
+                Effect.catch((error) =>
+                  emit({
+                    type: "restart-required",
+                    tag: error._tag,
+                    error: error.message,
+                    ...(error._tag === "ResidentRestartRequired" && error.threadId !== undefined
+                      ? { text: error.threadId }
+                      : {}),
                   }),
-              },
-            )
-            .pipe(
-              Effect.catch((error) =>
-                emit({
-                  type: "restart-required",
-                  tag: error._tag,
-                  error: error.message,
-                  ...(error._tag === "ResidentRestartRequired" && error.threadId !== undefined
-                    ? { text: error.threadId }
-                    : {}),
-                }),
-              ),
-            )
+                ),
+              )
+          })
         if (command === "blocking-interactive")
           return connection
             .run(

@@ -47,6 +47,108 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
+    "does not supersede a recorded frozen v3 resident from an unsigned close",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          const old = yield* startOldResident(root, true, "v3")
+          try {
+            const client = yield* start(root, 1_000)
+            expect(yield* client.nextEffect).toMatchObject({
+              type: "rejected",
+              error: expect.stringContaining("unsigned resident incompatibility"),
+            })
+            expect(alive(Number(old.pid))).toBe(true)
+            expect(yield* fileExists(`${root}/owner-acquisitions.log`)).toBe(false)
+          } finally {
+            yield* old.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore)
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
+    "returns the frozen v3 restart signal without attaching the old client",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const current = yield* start(root, 1_000)
+            yield* attachedEffect(current)
+            const legacy = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              script: "test/fixtures/resident-v3-client.ts",
+            })
+            expect(yield* legacy.nextEffect).toEqual({ type: "legacy-restart-required", callbacks: 4406 })
+            yield* legacy.awaitExit
+            yield* current.send("ping")
+            expect((yield* current.nextEffect).type).toBe("pong")
+            yield* current.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test.each(["proof", "nonce", "build", "kind"])(
+    "rejects a frozen v3 client with a tampered %s before sending the upgrade signal",
+    (tamper) =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const current = yield* start(root, 1_000)
+            yield* attachedEffect(current)
+            const legacy = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              script: "test/fixtures/resident-v3-client.ts",
+              environment: {
+                RIKA_TEST_V3_EXPECT_CLOSE: "4400",
+                RIKA_TEST_V3_TAMPER: tamper,
+              },
+            })
+            expect(yield* legacy.nextEffect).toEqual({ type: "legacy-close", callbacks: 4400 })
+            yield* legacy.awaitExit
+            yield* current.send("ping")
+            expect((yield* current.nextEffect).type).toBe("pong")
+            yield* current.closeEffect
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
+    "does not kill an unrecorded listener that only sends the legacy incompatibility close",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          const old = yield* startOldResident(root, false, "fake-incompatible")
+          try {
+            const client = yield* start(root, 1_000)
+            expect(yield* client.nextEffect).toMatchObject({
+              type: "rejected",
+              error: expect.stringContaining("unsigned resident incompatibility"),
+            })
+            expect(alive(Number(old.pid))).toBe(true)
+            expect(yield* fileExists(`${root}/owner-acquisitions.log`)).toBe(false)
+          } finally {
+            yield* old.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore)
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
     "closes an old-path client with a clean incompatibility signal",
     () =>
       run(
@@ -330,7 +432,7 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "launching client supersedes an incompatible resident while another client stays attached",
+    "launching client supersedes a compatible different build while two interactive clients stay alive",
     () =>
       run(
         Effect.gen(function* () {
@@ -344,9 +446,21 @@ describe("resident WebSocket process transport", () => {
               },
             })
             const oldAttached = yield* attachedEffect(mismatched)
+            const second = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              script: "test/fixtures/resident-mismatched-client.ts",
+              environment: {
+                RIKA_TEST_RESIDENT_HOST_SCRIPT: "test/fixtures/resident-mismatched-host.ts",
+                RIKA_TEST_BUILD_IDENTITY: "rika-test-other-build",
+              },
+            })
+            const secondAttached = yield* attachedEffect(second)
+            expect(secondAttached.hostPid).toBe(oldAttached.hostPid)
             yield* mismatched.send("upgrade-interactive")
-            expect((yield* mismatched.nextEffect).type).toBe("interactive-callback")
+            yield* second.send("upgrade-interactive")
+            expect(yield* mismatched.nextEffect).toMatchObject({ type: "interactive-callback", callbacks: 1 })
             expect((yield* mismatched.nextEffect).type).toBe("initial-read")
+            expect(yield* second.nextEffect).toMatchObject({ type: "interactive-callback", callbacks: 1 })
+            expect((yield* second.nextEffect).type).toBe("initial-read")
 
             const current = yield* start(root, 1_000)
             expect(yield* current.nextEffect).toEqual({ type: "resident-status", callbacks: 1 })
@@ -357,18 +471,26 @@ describe("resident WebSocket process transport", () => {
               3_000,
             )
 
-            let event = yield* mismatched.nextEffect
-            while (event.type !== "restart-required") {
-              expect(event.type).not.toBe("resident-status")
-              event = yield* mismatched.nextEffect
+            for (const client of [mismatched, second]) {
+              let event = yield* client.nextEffect
+              while (event.type !== "upgrade-survived") {
+                expect(event.type).not.toBe("resident-status")
+                expect(event.type).not.toBe("restart-required")
+                expect(event.type).not.toBe("interactive-callback")
+                event = yield* client.nextEffect
+              }
+              expect(event).toMatchObject({ tag: "ThreadsListed", callbacks: 1 })
             }
-            expect(event.tag).toBe("ResidentRestartRequired")
+            expect(yield* readText(`${root}/owner-acquisitions.log`)).toBe(
+              `${oldAttached.hostPid}\n${newAttached.hostPid}\n`,
+            )
 
             yield* Effect.sleep("750 millis")
             expect(alive(newAttached.hostPid!)).toBe(true)
             yield* current.send("ping")
             expect((yield* current.nextEffect).type).toBe("pong")
             yield* mismatched.kill
+            yield* second.kill
             yield* current.closeEffect
           } finally {
             yield* cleanRoot(root)
@@ -379,7 +501,34 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
-    "a client without supersede rights yields to an incompatible resident",
+    "a reattaching client fails closed against a frozen v3 resident without replacing it",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          const old = yield* startOldResident(root, true, "v3")
+          try {
+            const client = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
+              environment: { RIKA_TEST_RESIDENT_NO_SUPERSEDE: "1" },
+            })
+            expect(yield* client.nextEffect).toMatchObject({
+              type: "rejected",
+              tag: "ResidentServiceError",
+              error: expect.stringContaining("unsigned resident incompatibility"),
+            })
+            expect(alive(Number(old.pid))).toBe(true)
+            expect(yield* fileExists(`${root}/owner-acquisitions.log`)).toBe(false)
+          } finally {
+            yield* old.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore)
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
+    "a client without supersede rights attaches to a compatible different build",
     () =>
       run(
         Effect.gen(function* () {
@@ -397,13 +546,12 @@ describe("resident WebSocket process transport", () => {
             const restarted = yield* start(root, 1_000, 0, false, 1_024, 0, false, undefined, 0, {
               environment: { RIKA_TEST_RESIDENT_NO_SUPERSEDE: "1" },
             })
-            expect(yield* restarted.nextEffect).toMatchObject({
-              type: "rejected",
-              tag: "ResidentRestartRequired",
-            })
+            const attached = yield* attachedEffect(restarted)
+            expect(attached.hostPid).toBe(oldAttached.hostPid)
             expect(alive(oldAttached.hostPid!)).toBe(true)
             yield* mismatched.send("ping")
             expect((yield* mismatched.nextEffect).type).toBe("pong")
+            yield* restarted.closeEffect
             yield* mismatched.closeEffect
           } finally {
             yield* cleanRoot(root)

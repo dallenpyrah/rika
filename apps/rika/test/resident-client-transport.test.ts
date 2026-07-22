@@ -23,10 +23,10 @@ describe("residentSocketFailure close-code mapping", () => {
     expect(residentSocketFailure(closeFailure(4401), true).reason).toBe("foreign-listener")
   })
 
-  it("maps an incompatible resident to one actionable failure", () => {
+  it("does not trust a bare incompatible close", () => {
     expect(residentSocketFailure(closeFailure(4406), true)).toMatchObject({
-      reason: "incompatible-resident",
-      message: "An incompatible Rika resident is still running; close other Rika clients, then run rika again",
+      reason: "foreign-listener",
+      message: "A listener reported an unsigned resident incompatibility; stop it, then run rika again",
     })
   })
 

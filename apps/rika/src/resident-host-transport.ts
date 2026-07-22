@@ -519,7 +519,28 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                 catch: () => transportError("Invalid resident request"),
               }),
             )
-            if (decoded._tag === "Failure") return yield* close(4400)
+            if (decoded._tag === "Failure") {
+              if (!isAttached) {
+                const legacy = yield* Effect.result(
+                  Effect.try({
+                    try: () => parse(text),
+                    catch: () => transportError("Invalid legacy resident request"),
+                  }).pipe(
+                    Effect.flatMap(Schema.decodeUnknownEffect(ResidentService.HandshakeV3)),
+                    Effect.mapError(() => transportError("Invalid legacy resident request")),
+                  ),
+                )
+                if (
+                  legacy._tag === "Success" &&
+                  ResidentService.validateHandshakeV3(legacy.success, {
+                    identity: options.identity,
+                    token: options.token,
+                  })
+                )
+                  return yield* close(4406)
+              }
+              return yield* close(4400)
+            }
             const message = decoded.success
             if (message === undefined) return
             if (!isAttached) {
@@ -540,7 +561,28 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                     "rika.resident.rejection.reason": result._tag,
                   }),
                 )
-                return yield* close(incompatible ? 4406 : 4401, reason)
+                if (incompatible) {
+                  const response = {
+                    _tag: "incompatible" as const,
+                    disposition: message.connectRole === "launch" ? ("supersede" as const) : ("restart" as const),
+                    family: "rika-resident" as const,
+                    identity: options.identity,
+                    clientNonce: message.clientNonce,
+                    serviceNonce,
+                    connectionId,
+                    protocolVersion: ResidentService.protocolVersion,
+                    buildIdentity: ResidentService.buildIdentity,
+                    residentPid: process.pid,
+                  }
+                  yield* writer(
+                    json({
+                      ...response,
+                      serverProof: ResidentService.serverProof(options.token, message, response),
+                    } satisfies ResidentService.HandshakeIncompatible),
+                  )
+                  return yield* close(4406, reason)
+                }
+                return yield* close(4401, reason)
               }
               if (!(yield* lifecycle.tryAttach)) {
                 yield* writer(
@@ -552,23 +594,22 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
               const existing = yield* Ref.get(graceFiber)
               if (existing !== undefined) yield* Fiber.interrupt(existing)
               yield* Ref.set(graceFiber, undefined)
-              const acceptedProof = ResidentService.serverProof(options.token, message, {
+              const response = {
+                _tag: "accepted" as const,
+                family: "rika-resident" as const,
+                identity: options.identity,
+                clientNonce: message.clientNonce,
                 serviceNonce,
                 connectionId,
+                protocolVersion: ResidentService.protocolVersion,
                 buildIdentity: ResidentService.buildIdentity,
-              })
+                residentPid: process.pid,
+              }
+              const acceptedProof = ResidentService.serverProof(options.token, message, response)
               yield* writer(
                 json({
-                  _tag: "accepted",
-                  family: "rika-resident",
-                  identity: options.identity,
-                  clientNonce: message.clientNonce,
-                  serviceNonce,
-                  connectionId,
-                  protocolVersion: ResidentService.protocolVersion,
-                  buildIdentity: ResidentService.buildIdentity,
+                  ...response,
                   serverProof: acceptedProof,
-                  residentPid: process.pid,
                 } satisfies ResidentService.HandshakeAccepted),
               )
               yield* Effect.logInfo("resident.connection.accepted").pipe(
