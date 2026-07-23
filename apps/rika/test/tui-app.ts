@@ -152,7 +152,7 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
     close: () => setup.mockInput.pressCtrlC(),
     done: Fiber.join(operationFiber).pipe(Effect.asVoid, Effect.orDie),
     quit: Effect.gen(function* () {
-      for (const activity of ["Waiting", "Streaming", "Running tools", "Thinking"]) {
+      for (const activity of ["Waiting", "Streaming", "Running 1 tool", "Thinking"]) {
         yield* waitFor((captured) => !captured.includes(activity), 60_000)
       }
       setup.mockInput.pressCtrlC()

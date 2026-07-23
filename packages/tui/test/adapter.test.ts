@@ -275,7 +275,8 @@ vi.mock("@opentui/core", () => ({
   TextRenderable: opentui.TextRenderable,
   createCliRenderer: opentui.createCliRenderer,
   decodePasteBytes: (bytes: Uint8Array) => new TextDecoder().decode(bytes),
-  fg: (color: string) => (text: string) => ({ text, fg: color }),
+  fg: (color: string) => (input: string | { text: string }) =>
+    typeof input === "string" ? { text: input, fg: color } : { ...input, fg: color },
   bg: (_color: string) => (chunk: { text: string }) => chunk,
   bold: (chunk: { text: string }) => chunk,
   italic: (chunk: { text: string }) => chunk,
@@ -1093,6 +1094,26 @@ describe("Surface", () => {
     expect(text).not.toContain("finished without a final message")
   })
 
+  test("renders a completed subagent's tool-result fallback as markdown", () => {
+    const state = model({
+      blocks: [
+        {
+          ...agentToolBlock("complete"),
+          output: JSON.stringify({ output: [{ type: "text", text: "## Review complete\n\n**No defects found.**" }] }),
+        },
+      ],
+      items: [{ _tag: "Block", index: 0, id: "tool:agent" }],
+      expandedRowKeys: ["tool:agent"],
+    })
+    const text = buildTranscript(state)
+      .styled.chunks.map((current) => current.text)
+      .join("")
+    expect(text).toContain("Review complete")
+    expect(text).toContain("No defects found.")
+    expect(text).not.toContain("##")
+    expect(text).not.toContain("**")
+  })
+
   test("matches Amp cancelled subagent and shell treatment", () => {
     const state = model({
       blocks: [
@@ -1262,7 +1283,7 @@ describe("Surface", () => {
     expect(lines.every((line) => !line.startsWith("│"))).toBe(true)
   })
 
-  test("renders the presenter-owned active sibling count in agent labels", () => {
+  test("does not add an active-agent count to agent labels", () => {
     const blocks = Array.from({ length: 4 }, (_, index) => ({
       ...subagentToolBlock,
       id: `agent-${index}`,
@@ -1272,7 +1293,8 @@ describe("Surface", () => {
       blocks,
       items: blocks.map((block, index) => ({ _tag: "Block", index, id: `tool:${block.id}` })),
     })
-    expect(text.match(/Subagent working · 3 active/g)).toHaveLength(3)
+    expect(text.match(/Subagent working/g)).toHaveLength(3)
+    expect(text).not.toContain("active")
     expect(text).toContain("Subagent finished")
   })
 

@@ -7,7 +7,7 @@ const settled = (app: TuiApp.TuiApp) =>
   Effect.gen(function* () {
     yield* app.waitGone("Waiting")
     yield* app.waitGone("Streaming")
-    yield* app.waitGone("Running tools")
+    yield* app.waitGone("Running 1 tool")
     yield* app.waitGone("Thinking")
   })
 
@@ -85,7 +85,7 @@ test(
         const completed = yield* app.waitFrame("FINAL_OUTPUT")
         expect(completed.match(/Waited for/g) ?? []).toHaveLength(2)
         expect(completed).not.toContain("Waiting for")
-        expect(completed).not.toContain("Running tools")
+        expect(completed).not.toContain("Running 1 tool")
         expect(completed.match(/\$ printf EARLY_OUTPUT/g) ?? []).toHaveLength(1)
         yield* app.quit
       }),

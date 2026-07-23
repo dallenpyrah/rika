@@ -414,9 +414,9 @@ describe("resident WebSocket process transport", () => {
             expect(times[2]! - times[0]!).toBeGreaterThanOrEqual(100)
             expect(times[3]! - times[2]!).toBeGreaterThanOrEqual(100)
             expect(tags.map((tag) => tag.split(":")[2])).toEqual([
-              "Running tools",
-              "Running tools",
-              "Running tools",
+              "Running 1 tool",
+              "Running 1 tool",
+              "Running 1 tool",
               "Waiting",
             ])
             yield* client.closeEffect

@@ -183,29 +183,29 @@ const sourceBlockId = (event: Transcript.SourceEvent, fallback: string): string 
   return typeof id === "string" ? id : fallback
 }
 
-const hasRunningTools = (projection: Transcript.Projection) =>
-  projection.units.some(
-    (unit) =>
-      unit.content._tag === "Block" &&
-      unit.content.block._tag === "ToolCall" &&
-      unit.content.block.status === "running",
-  )
-
 const activityAfter = (
   activity: ViewState.Activity | undefined,
   event: Transcript.SourceEvent,
   projection: Transcript.Projection,
+  model: ViewState.Model,
 ): ViewState.Activity | undefined => {
+  const runningActivity = ViewState.runningToolsActivity(model)
+  const running = (runningActivity.subagents ?? 0) + (runningActivity.tools ?? 0) > 0
   if (event.type.includes("reasoning"))
-    return ViewState.streamActivity(activity, "Thinking", sourceText(event), `reasoning:${projection.modelPhase}`)
+    return running
+      ? runningActivity
+      : ViewState.streamActivity(activity, "Thinking", sourceText(event), `reasoning:${projection.modelPhase}`)
   if (event.type === "model.output.delta")
-    return ViewState.streamActivity(activity, "Streaming", sourceText(event), `answer:${projection.modelPhase}`)
+    return running
+      ? runningActivity
+      : ViewState.streamActivity(activity, "Streaming", sourceText(event), `answer:${projection.modelPhase}`)
   if (event.type === "model.toolcall.delta")
-    return ViewState.streamActivity(activity, "Streaming", sourceText(event), sourceBlockId(event, "tool"))
+    return running
+      ? runningActivity
+      : ViewState.streamActivity(activity, "Streaming", sourceText(event), sourceBlockId(event, "tool"))
   if (event.type === "tool.call.requested" || event.type === "tool.call.executing" || event.type === "tool.started")
-    return { _tag: "RunningTools" }
-  if (event.type === "tool.result.received")
-    return hasRunningTools(projection) ? { _tag: "RunningTools" } : { _tag: "Waiting" }
+    return runningActivity
+  if (event.type === "tool.result.received") return running ? runningActivity : { _tag: "Waiting" }
   if (
     event.type === "execution.accepted" ||
     event.type === "execution.started" ||
@@ -216,10 +216,10 @@ const activityAfter = (
     event.type === "tool.approval.requested" ||
     event.type === "tool.approval.resolved"
   )
-    return { _tag: "Waiting" }
+    return running ? runningActivity : { _tag: "Waiting" }
   if (event.type === "execution.completed" || event.type === "execution.failed" || event.type === "execution.cancelled")
-    return undefined
-  return activity
+    return running ? runningActivity : undefined
+  return running ? runningActivity : activity
 }
 
 const prependProjection = (
@@ -518,7 +518,7 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
     )
     const projectedModel = {
       ...attached.model,
-      activity: activityAfter(state.model.activity, event.event, next),
+      activity: activityAfter(state.model.activity, event.event, next, attached.model),
     }
     let terminalStatus: "completed" | "failed" | "cancelled" | undefined
     if (event.event.type === "execution.completed") terminalStatus = "completed"

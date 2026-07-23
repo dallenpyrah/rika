@@ -963,7 +963,7 @@ it("keeps one of five status labels from submit until the turn completes", () =>
     replayTurns: new Map([[turn.id, turn]]),
     projections: new Map([[turn.id, Transcript.empty(turn.id, turn.prompt)]]),
   }
-  const labels = ["Sending", "Waiting", "Thinking 2 tok", "Streaming 2 tok", "Running tools"]
+  const labels = ["Sending", "Waiting", "Thinking 2 tok", "Streaming 2 tok", "Running 1 tool", "Running 2 tools"]
   const expectStatus = (expected: string) => {
     const label = ViewState.formatActivity(state.model.activity)
     expect(label).toBe(expected)
@@ -1001,15 +1001,15 @@ it("keeps one of five status labels from submit until the turn completes", () =>
     tool_name: "read",
     input: { path: "src/a.ts" },
   })
-  expectStatus("Running tools")
+  expectStatus("Running 1 tool")
   patch(5, "tool.call.requested", undefined, {
     tool_call_id: "status",
     tool_name: "bash",
     input: { command: "git --no-optional-locks status --short --branch" },
   })
-  expectStatus("Running tools")
+  expectStatus("Running 2 tools")
   patch(6, "tool.result.received", undefined, { tool_call_id: "read", output: "contents" })
-  expectStatus("Running tools")
+  expectStatus("Running 1 tool")
   patch(7, "tool.result.received", undefined, { tool_call_id: "status", output: "clean" })
   expectStatus("Waiting")
   patch(8, "model.output.delta", "abcdefgh")
@@ -1090,9 +1090,9 @@ it("keeps 200ms tool lifecycle events in distinct TUI frames", () => {
 
   expect(applied.map(({ at }) => at)).toEqual([16, 16, 216, 416])
   expect(applied.map(({ activity }) => activity)).toEqual([
-    "Running tools",
-    "Running tools",
-    "Running tools",
+    "Running 1 tool",
+    "Running 2 tools",
+    "Running 1 tool",
     "Waiting",
   ])
 })
