@@ -738,12 +738,9 @@ const backfillChildTranscripts = Effect.fn("Operation.backfillChildTranscripts")
         )
       const storedUnits = stored.get(childKey) ?? []
       const storedTranscript = storedUnits.some(realChildUnit) ? storedChildProjection(storedUnits) : undefined
-      const projection =
-        storedTranscript !== undefined && storedTranscript.revision > replayed.revision
-          ? storedTranscript
-          : replayed.revision < 0
-            ? undefined
-            : replayed
+      let projection: Transcript.Projection | undefined = replayed
+      if (replayed.revision < 0) projection = undefined
+      if (storedTranscript !== undefined && storedTranscript.revision > replayed.revision) projection = storedTranscript
       if (projection === undefined) continue
       let parent = toolForChild(parentProjection(), child.executionId)
       if (parent === undefined) {
