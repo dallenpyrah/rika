@@ -55,7 +55,7 @@ for (const scenario of [
   { name: "delivery", first: "child:workflow:delivery-run:delivery:investigate", count: 5 },
   {
     name: "research-synthesis",
-    first: "workflow:workflow:research-synthesis-run:fan-out:research:member:research:oracle",
+    first: "workflow:workflow:research-synthesis-run:fan-out:research:member:research:investigate",
     count: 3,
   },
 ]) {

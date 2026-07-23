@@ -489,7 +489,8 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect((registration as { readonly tool_execution?: unknown }).tool_execution).toEqual({
         concurrency: "unbounded",
       })
-      expect(registration.instructions).toContain("Consult Oracle frequently for complex or difficult tasks")
+      expect(registration.instructions).toContain("Route delegation by purpose")
+      expect(registration.instructions).toContain("do not use Oracle to search or explore the codebase")
       expect(registration.instructions).toContain("tell the user that you are consulting it")
       expect(registration.instructions).toContain("after consulting Oracle, state that you did")
       expect(registration.instructions).toContain("remaining responsible for the implementation and conclusion")

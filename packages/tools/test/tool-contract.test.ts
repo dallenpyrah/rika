@@ -9,8 +9,13 @@ describe("tool contracts", () => {
     Effect.gen(function* () {
       const schema = Tool.getJsonSchema(AgentTools.taskTool)
       expect(AgentTools.taskTool.description).toContain(
+        "Delegate workspace investigation, codebase exploration, reproductions, or implementation",
+      )
+      expect(AgentTools.taskTool.description).toContain(
         "Independent explorations SHOULD be parallel spawn calls in one turn.",
       )
+      expect(AgentTools.oracleTool.description).toContain("already-gathered evidence")
+      expect(AgentTools.oracleTool.description).toContain("do not use it for primary workspace or codebase exploration")
       expect(schema).toMatchObject({
         properties: {
           prompt: { type: "string" },

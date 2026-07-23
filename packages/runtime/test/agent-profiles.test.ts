@@ -13,18 +13,16 @@ import {
 
 const model = { provider: "test", model: "deterministic" }
 const threadRecoveryTools = ["search_threads", "read_thread_transcript"]
-const expectedMainInstructions =
-  "Oracle is a read-only, high-reasoning advisor for planning, reviewing, understanding code, and debugging. Consult Oracle frequently for complex or difficult tasks. Before consulting Oracle, tell the user that you are consulting it; after consulting Oracle, state that you did and use its advice while remaining responsible for the implementation and conclusion. Use web_search when the task depends on current external facts, documentation, or public code. Use auto for normal lookups and compare only when claims are disputed, recent, safety-sensitive, or high-impact. Use kind code for semantic implementation examples and kind github for exact code, repository metadata, issues, pull requests, or commits. Treat search snippets as discovery evidence: fetch authoritative pages when details matter, cite the URLs used, and state when sources disagree. Delegate broad or multi-source research to Librarian, but handle simple lookups directly and do not query every source by default."
 const expectedInstructions = {
   Oracle:
-    "Act as a read-only, high-reasoning technical advisor for planning, reviewing, understanding code, and debugging. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
+    "Act as a read-only, high-reasoning advisor for high-level planning, architecture tradeoffs, difficult debugging analysis, and critical review of focused evidence. Do not perform primary workspace or codebase exploration; use focused inspection only to assess supplied evidence. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
   Librarian:
     "Research current external sources and return concise, cited findings without modifying files. Start with a self-contained objective and one to three focused queries. Use auto for a normal lookup. Use compare only for disputed, recent, safety-sensitive, or high-impact claims where independent perspectives improve confidence; do not query every source by default. Choose the search kind deliberately. Use web for general research, Exa through kind code for semantic implementation examples, and kind github with githubSearchType for exact code, repositories, issues and pull requests, or commit history. Prefer primary and authoritative sources. Search excerpts are leads, not final proof: use read_web_page when the source text, version, date, qualification, or surrounding context matters. Cross-check important claims, distinguish sourced facts from your conclusions, cite the URLs that support each material finding, and call out disagreement or uncertainty explicitly. Stop when the evidence is sufficient for the request.",
   Painter:
     "Produce a requested visual artifact through the available media route and report its metadata. Do not modify source files.",
   Review: "Review workspace changes for correctness, regressions, and missing tests. Do not modify files.",
   ReadThread: "Answer only from local thread transcripts and identify the threads used.",
-  Task: "Complete the assigned implementation task in the workspace and report changed files and verification.",
+  Task: "Complete the assigned workspace investigation, reproduction, verification, or implementation task and report findings, changed files, and verification. Modify files only when the delegated task requests it.",
 } as const
 const relayModel = (selection: {
   readonly provider: string
@@ -38,8 +36,8 @@ const relayModel = (selection: {
 
 describe("product agent profiles", () => {
   it("loads normalized instructions for every shipping profile", () => {
-    expect(expectedMainInstructions.length).toBeGreaterThan(0)
     expect(Object.keys(expectedInstructions)).toEqual(names)
+    expect(mainInstructions).toContain("Route delegation by purpose")
     expect(mainInstructions).toContain("Call the read_thread subagent selectively")
     for (const name of names) {
       const profile = resolve(name, model)
@@ -67,9 +65,22 @@ describe("product agent profiles", () => {
       tool_names: ["grep", "read", "web_search", "read_thread", ...threadRecoveryTools],
       permissions: ["workspace.read", "network.read", "thread.read"],
     })
-    expect(registered.Oracle?.instructions).toContain("planning, reviewing, understanding code, and debugging")
+    expect(registered.Oracle?.instructions).toContain(
+      "high-level planning, architecture tradeoffs, difficult debugging analysis",
+    )
+    expect(registered.Oracle?.instructions).toContain("Do not perform primary workspace or codebase exploration")
     expect(registered.Oracle?.instructions).toContain("do not modify files")
-    expect(mainInstructions).toContain("Consult Oracle frequently for complex or difficult tasks")
+    expect(mainInstructions).toContain(
+      "Use Task for workspace investigation, codebase exploration, reproductions, and implementation",
+    )
+    expect(mainInstructions).toContain(
+      "delegate independent investigations in parallel only when they are genuinely independent",
+    )
+    expect(mainInstructions).toContain("Use Oracle only as a read-only, high-reasoning advisor")
+    expect(mainInstructions).toContain("after it has been gathered")
+    expect(mainInstructions).toContain("do not use Oracle to search or explore the codebase")
+    expect(mainInstructions).not.toContain("Consult Oracle frequently")
+    expect(mainInstructions).toContain("Use Review for a focused assessment")
     expect(mainInstructions).toContain("tell the user that you are consulting it")
     expect(mainInstructions).toContain("after consulting Oracle, state that you did")
     expect(mainInstructions).toContain("remaining responsible for the implementation and conclusion")
@@ -78,7 +89,7 @@ describe("product agent profiles", () => {
     expect(mainInstructions).toContain("kind github for exact code")
     expect(mainInstructions).not.toContain("provider IDs")
     expect(mainInstructions).toContain("fetch authoritative pages")
-    expect(mainInstructions).toContain("Delegate broad or multi-source research to Librarian")
+    expect(mainInstructions).toContain("Delegate broad or multi-source external research to Librarian")
     expect(mainInstructions).not.toContain("Use subagents for independent work")
     expect(mainInstructions).not.toContain("parallel delegation")
     expect(mainInstructions).not.toContain("same tool-call batch")
@@ -106,6 +117,10 @@ describe("product agent profiles", () => {
       permissions: ["workspace.read", "network.read", "thread.read"],
     })
     expect(registered.Oracle?.tool_names).not.toContain("task")
+    expect(registered.Task?.instructions).toContain(
+      "workspace investigation, reproduction, verification, or implementation",
+    )
+    expect(registered.Task?.instructions).toContain("Modify files only when the delegated task requests it")
     expect(registered.Task).toMatchObject({
       tool_names: [
         "grep",

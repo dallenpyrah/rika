@@ -7,7 +7,16 @@ describe("workflow definitions", () => {
       [2, "delivery"],
       [2, "research-synthesis"],
     ])
+    const delivery = definitions[0]!.definition
     const research = definitions[1]!.definition
+    expect(delivery.operations.find((operation) => operation.id === "delivery:investigate")).toMatchObject({
+      kind: "child",
+      preset_name: "Task",
+    })
+    expect(research.operations.find((operation) => operation.id === "research:investigate")).toMatchObject({
+      kind: "child",
+      preset_name: "Task",
+    })
     expect(research.operations.find((operation) => operation.kind === "parallel")).toMatchObject({
       fan_out_key: "research",
       max_concurrency: 2,

@@ -26,7 +26,7 @@ const Failure = Schema.Struct({
 })
 
 export const taskDescription =
-  "Spawn a durable Task subagent and wait for its result. Independent explorations SHOULD be parallel spawn calls in one turn."
+  "Delegate workspace investigation, codebase exploration, reproductions, or implementation to a durable Task subagent and wait for its result. Independent explorations SHOULD be parallel spawn calls in one turn."
 
 export const taskTool = Tool.make("task", {
   description: taskDescription,
@@ -47,7 +47,7 @@ const specialist = <const Name extends string>(name: Name, description: string) 
 
 export const oracleTool = specialist(
   "oracle",
-  "Delegate a focused technical investigation to the read-only Oracle product agent and wait for its result",
+  "Delegate high-level planning, architecture tradeoffs, difficult debugging analysis, or critical review of already-gathered evidence to the read-only Oracle product agent; do not use it for primary workspace or codebase exploration",
 )
 export const librarianTool = specialist(
   "librarian",
