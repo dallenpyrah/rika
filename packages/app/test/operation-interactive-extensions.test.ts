@@ -714,6 +714,92 @@ describe("interactive session extensions", () => {
     ),
   )
 
+  it.effect("follows every discovered child without waiting for earlier children", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const repository = yield* ThreadRepository.makeMemory()
+        const turns = yield* TurnRepository.makeMemory()
+        const registration = yield* Deferred.make<Operation.InteractiveSession>()
+        const releaseChildren = yield* Deferred.make<void>()
+        const allChildrenStarted = yield* Deferred.make<void>()
+        const followed = yield* Ref.make<ReadonlyArray<string>>([])
+        const childIds = Array.from({ length: 12 }, (_, index) => `child:execution%3Aparent-turn:worker-${index}`)
+        const backend = ExecutionBackend.Service.of({
+          ...baseBackend,
+          start: (input) =>
+            Effect.sync(() => {
+              for (const [sequence, childId] of childIds.entries())
+                input.onEvent?.({
+                  cursor: `spawn-${sequence}`,
+                  sequence,
+                  type: "child_run.spawned",
+                  createdAt: sequence,
+                  data: { child_execution_id: childId },
+                })
+              return { turnId: input.turnId, status: "running" as const, events: [] }
+            }),
+          follow: (executionId, _afterCursor, onEvent) => {
+            if (executionId === "parent-turn")
+              return Effect.succeed({ turnId: executionId, status: "running" as const, events: [] })
+            return Ref.updateAndGet(followed, (values) => [...values, executionId]).pipe(
+              Effect.tap((values) =>
+                Effect.sync(() =>
+                  onEvent?.({
+                    cursor: `${executionId}:started`,
+                    sequence: 0,
+                    type: "model.output.delta",
+                    createdAt: 1,
+                    text: "started",
+                  }),
+                ).pipe(
+                  Effect.andThen(
+                    values.length === childIds.length ? Deferred.succeed(allChildrenStarted, undefined) : Effect.void,
+                  ),
+                ),
+              ),
+              Effect.andThen(Deferred.await(releaseChildren)),
+              Effect.as({ turnId: executionId, status: "running" as const, events: [] }),
+            )
+          },
+        })
+        const context = yield* Layer.build(
+          interactiveLayer(
+            repository,
+            turns,
+            backend,
+            registration,
+            Effect.succeed(Thread.ThreadId.make("thread")),
+            Effect.succeed(Turn.TurnId.make("parent-turn")),
+          ),
+        )
+        const operation = Context.get(context, Operation.Service)
+        const operationFiber = yield* Effect.forkChild(
+          operation.run({ _tag: "Interactive", prompt: [], ephemeral: false }),
+        )
+        const session = yield* Deferred.await(registration)
+        const events: Array<Operation.InteractiveEvent> = []
+        const feed = yield* Effect.forkChild(session.events((event) => events.push(event)))
+        yield* Effect.yieldNow
+
+        yield* session.submit("delegate broadly")
+        yield* Deferred.await(allChildrenStarted)
+
+        expect(new Set(yield* Ref.get(followed))).toEqual(new Set(childIds))
+        const startedCursors = () =>
+          events.flatMap((event) =>
+            event._tag === "TranscriptPatched" && event.event.type === "model.output.delta" ? [event.event.cursor] : [],
+          )
+        while (startedCursors().length < childIds.length) yield* Effect.yieldNow
+        expect(startedCursors()).toEqual(expect.arrayContaining(childIds.map((childId) => `${childId}:started`)))
+        expect(startedCursors()).toHaveLength(childIds.length)
+
+        yield* Deferred.succeed(releaseChildren, undefined)
+        yield* Fiber.interrupt(feed)
+        yield* Fiber.interrupt(operationFiber)
+      }),
+    ),
+  )
+
   it.effect("resumes a waiting child from its last cursor after permission resolution", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -10,6 +10,22 @@ const event = (
   fields: Partial<Transcript.SourceEvent> = {},
 ): Transcript.SourceEvent => ({ cursor, sequence, type, createdAt: sequence, ...fields })
 
+const agentBlock = (id: string, status: "running" | "complete" | "failed" | "cancelled" | "rejected") => ({
+  _tag: "ToolCall" as const,
+  id,
+  name: "task",
+  input: "{}",
+  status,
+  presentation: {
+    family: "agent" as const,
+    action: "task",
+    activeLabel: "Subagent working",
+    completeLabel: "Subagent finished",
+  },
+  detail: "",
+  files: [],
+})
+
 const parentProjection = Transcript.project("turn", "prompt", [
   event("assistant-0", 0, "model.output.completed", { text: "Working on it." }),
   event("agent", 1, "tool.call.requested", {
@@ -48,6 +64,119 @@ const nestedModel = () => {
 }
 
 describe("TranscriptPresenter", () => {
+  it("counts only running direct sibling agents at each hierarchy level", () => {
+    const blocks = [
+      agentBlock("root-a", "running"),
+      agentBlock("root-b", "running"),
+      agentBlock("root-c", "running"),
+      agentBlock("root-complete", "complete"),
+      agentBlock("root-failed", "failed"),
+      agentBlock("root-cancelled", "cancelled"),
+      agentBlock("nested-a", "running"),
+      agentBlock("nested-b", "running"),
+      agentBlock("nested-rejected", "rejected"),
+    ]
+    const items = blocks.map((block, index) => ({
+      _tag: "Block" as const,
+      index,
+      id: `tool:${block.id}`,
+      ...(index < 6 ? {} : { parentId: "root-a" }),
+    }))
+    const counts = (statuses: ReadonlyArray<(typeof blocks)[number]["status"]>) => {
+      const model = {
+        ...ViewState.initial("/work"),
+        blocks: blocks.map((block, index) => ({ ...block, status: statuses[index]! })),
+        items,
+      }
+      const rows = TranscriptPresenter.rows(model)
+      const root = rows.filter((row) => row.kind === "tool")
+      const nested = root[0]?.kind === "tool" ? (root[0].children ?? []) : []
+      return {
+        root: root.map((row) => (row.kind === "tool" ? row.activeSiblingCount : undefined)),
+        nested: nested.map((row) => row.activeSiblingCount),
+      }
+    }
+
+    expect(counts(blocks.map((block) => block.status))).toEqual({
+      root: [3, 3, 3, undefined, undefined, undefined],
+      nested: [2, 2, undefined],
+    })
+    expect(
+      counts(["complete", "running", "running", "complete", "failed", "cancelled", "complete", "running", "rejected"])
+        .root,
+    ).toEqual([undefined, 2, 2, undefined, undefined, undefined])
+    expect(
+      counts(["complete", "complete", "running", "complete", "failed", "cancelled", "complete", "complete", "rejected"])
+        .root,
+    ).toEqual([undefined, undefined, 1, undefined, undefined, undefined])
+    expect(
+      counts([
+        "complete",
+        "complete",
+        "complete",
+        "complete",
+        "failed",
+        "cancelled",
+        "complete",
+        "complete",
+        "rejected",
+      ]),
+    ).toEqual({
+      root: [undefined, undefined, undefined, undefined, undefined, undefined],
+      nested: [undefined, undefined, undefined],
+    })
+  })
+
+  it("excludes a linked agent while its child permission is pending and counts it again after resolution", () => {
+    const parent = Transcript.project("turn", "prompt", [
+      event("agent-a", 0, "tool.call.requested", {
+        data: { tool_call_id: "agent-a", tool_name: "task", input: { prompt: "A" } },
+      }),
+      event("agent-a-spawned", 1, "child_run.spawned", {
+        data: { tool_call_id: "agent-a", child_execution_id: "child:a" },
+      }),
+      event("agent-b", 2, "tool.call.requested", {
+        data: { tool_call_id: "agent-b", tool_name: "task", input: { prompt: "B" } },
+      }),
+      event("agent-b-spawned", 3, "child_run.spawned", {
+        data: { tool_call_id: "agent-b", child_execution_id: "child:b" },
+      }),
+    ])
+    const requested = Transcript.project("child:a", "", [
+      event("permission-requested", 0, "permission.ask.requested", {
+        data: { wait_id: "permission-a", title: "Allow read", input: { path: "a.ts" } },
+      }),
+    ])
+    const resolved = Transcript.project("child:a", "", [
+      event("permission-requested", 0, "permission.ask.requested", {
+        data: { wait_id: "permission-a", title: "Allow read", input: { path: "a.ts" } },
+      }),
+      event("permission-resolved", 1, "permission.ask.resolved", {
+        data: { wait_id: "permission-a", title: "Allow read", approved: true },
+      }),
+    ])
+    const counts = (model: ViewState.Model) =>
+      TranscriptPresenter.rows(model)
+        .filter((row) => row.kind === "tool")
+        .map((row) => ({
+          id: (model.blocks[row.blocks[0]!] as { readonly id: string }).id,
+          count: row.activeSiblingCount,
+        }))
+
+    let model = TranscriptPresenter.applyTurnUnits(ViewState.initial("/work"), parent.units)
+    model = TranscriptPresenter.applyChildUnits(model, "turn:agent-a", requested.units)
+    expect(counts(model)).toEqual([
+      { id: "turn:agent-a", count: undefined },
+      { id: "turn:agent-b", count: 1 },
+    ])
+
+    model = TranscriptPresenter.applyChildUnits(model, "turn:agent-a", resolved.units)
+    expect(counts(model)).toEqual([
+      { id: "turn:agent-a", count: 2 },
+      { id: "turn:agent-b", count: 2 },
+    ])
+  })
+
   it("projects turn units identically to the legacy projection", () => {
     const legacy = ExecutionEvents.projectUnits(ViewState.initial("/work"), parentProjection.units)
     const presenter = TranscriptPresenter.applyTurnUnits(ViewState.initial("/work"), parentProjection.units)

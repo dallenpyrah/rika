@@ -407,7 +407,24 @@ const knownIndexesFor = (items: ReadonlyArray<TranscriptItem>): Map<string, numb
   return built
 }
 
+const rememberPendingChildApprovals = (model: Model, units: ReadonlyArray<Unit>, parentId?: string): Model => {
+  if (parentId === undefined) return model
+  const current = model.pendingChildApprovalOwners
+  let approvals: Readonly<Record<string, string>> = current
+  for (const unit of units) {
+    if (unit.content._tag !== "Block" || unit.content.block._tag !== "Permission") continue
+    const pending = unit.content.block.status === "pending"
+    if ((current[unit.key] === parentId) === pending) continue
+    if (approvals === current) approvals = { ...current }
+    const writable = approvals as Record<string, string>
+    if (pending) writable[unit.key] = parentId
+    else delete writable[unit.key]
+  }
+  return approvals === current ? model : { ...model, pendingChildApprovalOwners: approvals }
+}
+
 const projectUnitsImpl = (model: Model, units: ReadonlyArray<Unit>, parentId?: string): Model => {
+  model = rememberPendingChildApprovals(model, units, parentId)
   const parentCancelled =
     parentId !== undefined &&
     (model.blocks as ReadonlyArray<Block>).some(
