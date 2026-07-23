@@ -152,6 +152,8 @@ const operationFailureDetail = (error: unknown) =>
     : operationFailureMessage
 const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString)
 const untrustedData = (value: unknown) => JSON.stringify(value).replaceAll("<", "\\u003c")
+const transcriptPageEncoder = new TextEncoder()
+const maximumTranscriptPageBytes = 8 * 1024 * 1024
 
 export interface ProductLayerOptions<
   ThreadError,
@@ -2824,7 +2826,22 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           }
           const loadedEntries =
             olderPages.length === 0 ? page.entries : olderPages.toReversed().flat().concat(page.entries)
-          const storedEntries = initialBoundary <= 0 ? loadedEntries : loadedEntries.slice(initialBoundary)
+          let storedEntries = initialBoundary <= 0 ? loadedEntries : loadedEntries.slice(initialBoundary)
+          let boundedStart = storedEntries.length
+          let boundedBytes = 0
+          while (boundedStart > 0) {
+            const entryBytes = transcriptPageEncoder.encode(encodeJson(storedEntries[boundedStart - 1])).byteLength
+            if (boundedBytes + entryBytes > maximumTranscriptPageBytes && boundedStart < storedEntries.length) break
+            boundedStart -= 1
+            boundedBytes += entryBytes
+          }
+          if (boundedStart > 0) {
+            const turnBoundary = storedEntries.findIndex(
+              (entry, index) => index >= boundedStart && entry.unit.key === `turn:${entry.turn.id}:user`,
+            )
+            storedEntries = storedEntries.slice(turnBoundary < 0 ? boundedStart : turnBoundary)
+            initialBoundary = 1
+          }
           if (initialBoundary > 0) {
             const oldest = storedEntries[0]
             if (oldest !== undefined)

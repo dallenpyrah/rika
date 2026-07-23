@@ -57,16 +57,13 @@ export const usageCostUsd = (value: Record<string, unknown>): number | undefined
   const input = token(value, "input_tokens")
   const reportedUncached = token(value, "input_tokens_uncached")
   const cacheRead = token(value, "input_tokens_cache_read")
-  const cacheWrite = token(value, "input_tokens_cache_write")
+  const reportedCacheWrite = token(value, "input_tokens_cache_write")
   const output = token(value, "output_tokens")
-  if (
-    input === undefined ||
-    reportedUncached === undefined ||
-    cacheRead === undefined ||
-    cacheWrite === undefined ||
-    output === undefined
-  )
+  if (input === undefined || reportedUncached === undefined || cacheRead === undefined || output === undefined)
     return undefined
+  const cacheWrite =
+    reportedCacheWrite ?? (reportedUncached + cacheRead === input && value.input_tokens_cache_write === null ? 0 : undefined)
+  if (cacheWrite === undefined) return undefined
   const accountedInput = [reportedUncached, cacheRead, cacheWrite].reduce<number>((sum, count) => sum + (count ?? 0), 0)
   if (accountedInput > input) return undefined
 

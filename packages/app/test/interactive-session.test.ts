@@ -7,7 +7,7 @@ import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import { Runtime as ToolRuntime } from "@rika/tools"
 import * as Transcript from "@rika/transcript"
-import { Context, Deferred, Effect, Fiber, Layer, Queue, Ref } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Queue, Ref, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { Operation } from "../src/index"
 import { createTurn, executionRoute } from "./current-state"
@@ -1152,7 +1152,7 @@ describe("InteractiveSession controls", () => {
               turnId: created.id,
               order: { sequence: index + 1, part: 0 },
               revision: index + 1,
-              content: { _tag: "Entry", role: "assistant", text: `${created.id} ${index}` },
+              content: { _tag: "Entry", role: "assistant", text: `${created.id} ${index} ${"x".repeat(50_000)}` },
             }),
           ),
         ]
@@ -1165,8 +1165,10 @@ describe("InteractiveSession controls", () => {
 
       const initial = events.find((event) => event._tag === "SelectionLoaded")
       const loaded = initial?._tag === "SelectionLoaded" ? initial.entries : []
-      expect(loaded).toHaveLength(219)
-      expect(loaded[0]?.unit.key).toBe("turn:boundary-2:user")
+      const encoded = yield* Schema.encodeEffect(Schema.UnknownFromJsonString)(initial)
+      expect(new TextEncoder().encode(encoded).byteLength).toBeLessThan(10 * 1024 * 1024)
+      expect(loaded.length).toBeGreaterThan(0)
+      expect(loaded[0]?.unit.key).toBe(`turn:${loaded[0]?.turn.id}:user`)
       expect(initial?._tag === "SelectionLoaded" ? initial.hasOlder : false).toBe(true)
 
       yield* session.loadOlder
