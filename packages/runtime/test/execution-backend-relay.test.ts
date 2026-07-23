@@ -95,7 +95,7 @@ test(
             const replay = yield* backend.replay(input.turnId)
             const cursor = replay.events.at(1)?.cursor
             const after = yield* backend.replay(input.turnId, cursor)
-            return { first, duplicate, replay, after, streamed, requests: yield* fixture.requests }
+            return { first, duplicate, replay, after, cursor, streamed, requests: yield* fixture.requests }
           }),
         )
         const result = yield* program
@@ -108,7 +108,16 @@ test(
         expect(result.replay.events.map((event) => event.cursor)).toEqual(
           result.first.events.map((event) => event.cursor),
         )
-        expect(result.after.events[0]?.cursor).not.toBe(result.replay.events[0]?.cursor)
+        expect(result.replay.events.every((event) => event.id !== undefined)).toBe(true)
+        expect(result.replay.events.every((event) => event.executionId === "execution:turn-a")).toBe(true)
+        expect(new Set(result.replay.events.map((event) => `${event.executionId}\u0000${event.id}`)).size).toBe(
+          result.replay.events.length,
+        )
+        expect(result.after.events.map((event) => event.cursor)).toEqual(
+          result.replay.events
+            .slice(result.replay.events.findIndex((event) => event.cursor === result.cursor) + 1)
+            .map((event) => event.cursor),
+        )
         expect(result.requests).toHaveLength(1)
       }),
     ),
@@ -116,7 +125,7 @@ test(
 )
 
 test(
-  "delivers image attachments to Baton as image bytes",
+  "delivers image attachments to Baton as data URLs",
   () =>
     runNative(
       withBackend([TestModel.text("image received")], (fixture) =>
@@ -139,9 +148,11 @@ test(
           )
           expect(parts).toMatchObject([
             { type: "text", text: "inspect " },
-            { type: "file", mediaType: "image/png", data: Uint8Array.from([1, 2, 3]), fileName: "shot.png" },
+            { type: "file", mediaType: "image/png", fileName: "shot.png" },
             { type: "text", text: " closely" },
           ])
+          expect(String(parts?.[1]?.data)).toBe("data:image/png;base64,AQID")
+          expect(Object.prototype.toString.call(parts?.[1]?.data)).toBe("[object URL]")
         }),
       ),
     ),
@@ -216,7 +227,7 @@ test(
 )
 
 test(
-  "delivers image bytes through a dynamically registered model",
+  "delivers image data URLs through a dynamically registered model",
   () =>
     runNative(
       withBackend(
@@ -247,10 +258,10 @@ test(
             const parts = requests[0]?.prompt.content.flatMap((message) =>
               message.role === "user" && Array.isArray(message.content) ? message.content : [],
             )
-            expect(result.status).toBe("completed")
-            expect(parts).toMatchObject([
-              { type: "file", mediaType: "image/png", data: Uint8Array.from([1, 2, 3]), fileName: "shot.png" },
-            ])
+            expect(result.status, encodeJson(result.events)).toBe("completed")
+            expect(parts).toHaveLength(1)
+            expect(parts?.[0]).toMatchObject({ type: "file", mediaType: "image/png", fileName: "shot.png" })
+            expect(String(parts?.[0]?.data)).toBe("data:image/png;base64,AQID")
           }),
         { modelVariantPolicy: "registration-key" },
       ),
@@ -1295,9 +1306,10 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
             )
             expect(userParts).toMatchObject([
               { type: "text", text: "read " },
-              { type: "file", mediaType: "image/png", data: Uint8Array.from([1, 2, 3]), fileName: "shot.png" },
+              { type: "file", mediaType: "image/png", fileName: "shot.png" },
               { type: "text", text: " fixture" },
             ])
+            expect(String(userParts?.[1]?.data)).toBe("data:image/png;base64,AQID")
           }
           expect(result.replay.events.filter((event) => event.type === "tool.result.received")).toHaveLength(
             answer === "Denied" ? 0 : 1,

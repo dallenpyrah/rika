@@ -82,6 +82,9 @@ export const compact = Effect.fn("ContextCompaction.compact")(function* (config:
     reserveTokens: config.reserveTokens,
   })
   const result = yield* service.maybeCompact({
+    compactionId: createHash("sha256")
+      .update(`${input.sessionId}\0${input.turn}\0${input.path.map((entry) => entry.id).join("\0")}`)
+      .digest("hex"),
     agentName: input.agentName,
     sessionId: input.sessionId,
     turn: input.turn,

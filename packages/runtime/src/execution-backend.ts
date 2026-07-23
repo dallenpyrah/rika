@@ -704,6 +704,9 @@ const workflow = (value: any) => {
 }
 
 const event = (value: {
+  readonly id: string
+  readonly execution_id: string
+  readonly child_execution_id?: string
   readonly cursor: string
   readonly sequence: number
   readonly type: string
@@ -721,6 +724,9 @@ const event = (value: {
       : undefined
   const text = contentText !== undefined && contentText.length > 0 ? contentText : failureText
   return {
+    id: value.id,
+    executionId: value.execution_id,
+    ...(value.child_execution_id === undefined ? {} : { childExecutionId: value.child_execution_id }),
     cursor: value.cursor,
     sequence: value.sequence,
     type: value.type,
@@ -1631,6 +1637,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             Effect.map((value) => ({
               turnId,
               status: Status.make(value.status),
+              ...(existing.created_at === undefined ? {} : { createdAt: existing.created_at }),
               ...(value.last_event_cursor === undefined ? {} : { lastCursor: value.last_event_cursor }),
               waits: value.waiting_on.map((wait) => ({
                 id: wait.wait_id,

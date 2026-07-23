@@ -163,9 +163,11 @@ test("three Task calls in one model turn run as overlapping durable children", (
           expect(children).toHaveLength(3)
           expect(children.every((child) => child.status === "completed")).toBe(true)
           expect(decodeToolExecution(root?.agent_snapshot_json ?? "{}").tool_execution).toEqual({ concurrency: 4 })
-          expect(
-            children.every((child) => decodeToolExecution(child.agent_snapshot_json).tool_execution === undefined),
-          ).toBe(true)
+          expect(children.map((child) => decodeToolExecution(child.agent_snapshot_json).tool_execution)).toEqual([
+            { concurrency: 4 },
+            { concurrency: 4 },
+            { concurrency: 4 },
+          ])
           expect(
             childRuns
               .map(({ metadata_json }) => JSON.parse(metadata_json))
@@ -806,6 +808,8 @@ test("handoff child approval asks surface through the parent and resume after ap
         Effect.sync(() => {
           expect(waiting.status).toBe("waiting")
           expect(String(ask?.data?.execution_id).startsWith("child:execution%3Aturn-child-permission:")).toBe(true)
+          expect(ask?.executionId).toBe(ask?.data?.execution_id)
+          expect(ask?.id).toBeTypeOf("string")
           expect(approvals[0]?.executionId).toBe(String(ask?.data?.execution_id))
           expect(completed.status).toBe("completed")
           expect(requests.length).toBeGreaterThanOrEqual(4)
