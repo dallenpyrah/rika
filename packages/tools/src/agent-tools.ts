@@ -2,15 +2,8 @@ import { Schema } from "effect"
 import { Tool, Toolkit } from "effect/unstable/ai"
 import * as Policy from "./tool-policy"
 
-export const modelGuidance =
-  "Use Luna for cheap, fast, easy-to-check work: simple searches, file listing, extraction, classification, summaries, and mechanical edits. Avoid it for deep reasoning or large-context synthesis. Use Terra as the balanced default for normal subagent work: repository exploration, multi-step research, document analysis, and moderate coding. Escalate to Sol when mistakes are costly or the task needs the strongest reasoning and coding: architecture analysis, complex debugging, long-horizon implementation, security work, or adversarial review. Relative token cost: Luna 1x, Terra 2.5x, Sol 5x."
-
-export const Model = Schema.Literals(["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
-export type Model = typeof Model.Type
-
 export const TaskInput = Schema.Struct({
   prompt: Schema.String,
-  model: Schema.optionalKey(Model),
 })
 export type TaskInput = typeof TaskInput.Type
 
@@ -32,7 +25,8 @@ const Failure = Schema.Struct({
   message: Schema.String,
 })
 
-export const taskDescription = `Spawn a durable Task subagent and wait for its result. Omit model to inherit the parent model and effort. Independent explorations SHOULD be parallel spawn calls in one turn. ${modelGuidance}`
+export const taskDescription =
+  "Spawn a durable Task subagent and wait for its result. Independent explorations SHOULD be parallel spawn calls in one turn."
 
 export const taskTool = Tool.make("task", {
   description: taskDescription,
@@ -63,13 +57,17 @@ export const reviewTool = specialist(
   "review",
   "Delegate a focused correctness and regression review to the read-only Review product agent and wait for its result",
 )
+export const readThreadTool = specialist(
+  "read_thread",
+  "Delegate recovery of exact current or historical Rika thread context to the ReadThread agent and wait for its answer",
+)
 
-export const delegationToolNames = ["task", "oracle", "librarian", "review"] as const
+export const delegationToolNames = ["task", "oracle", "librarian", "review", "read_thread"] as const
 export type DelegationToolName = (typeof delegationToolNames)[number]
 export const isDelegationToolName = (name: string): name is DelegationToolName =>
   delegationToolNames.includes(name as DelegationToolName)
 
-export const modelToolkit = Toolkit.make(taskTool, oracleTool, librarianTool, reviewTool)
+export const modelToolkit = Toolkit.make(taskTool, oracleTool, librarianTool, reviewTool, readThreadTool)
 
 export const registrations: ReadonlyArray<Policy.Registration> = [
   Policy.register(
@@ -107,6 +105,16 @@ export const registrations: ReadonlyArray<Policy.Registration> = [
       activeLabel: "Reviewing code",
       completeLabel: "Reviewed code",
       counter: "review",
+    }),
+  ),
+  Policy.register(
+    readThreadTool,
+    Policy.allow("unsafe", 120_000, 40_000, {
+      family: "agent",
+      action: "read-thread",
+      activeLabel: "Reading Thread",
+      completeLabel: "Read Thread",
+      counter: "thread",
     }),
   ),
 ]

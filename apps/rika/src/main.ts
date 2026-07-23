@@ -624,13 +624,14 @@ const relayBackendLayerImpl = (
   >,
   repositoryLayer: Layer.Layer<ThreadRepository.Service, ThreadRepository.RepositoryError, never>,
   turnRepositoryLayer: Layer.Layer<TurnRepository.Service, TurnRepository.RepositoryError, never>,
+  transcriptRepositoryLayer: Layer.Layer<TranscriptRepository.Service, TranscriptRepository.RepositoryError, never>,
 ): ReturnType<typeof RelayExecutionBackend.layer<typeof ThreadTools.toolkit.tools>> =>
   RelayExecutionBackend.layer({
     ...options,
     additionalToolkit: ThreadTools.toolkit,
     additionalHandlerLayer: ThreadToolHandlers.handlerLayer.pipe(
       Layer.provide(ThreadQuery.layer),
-      Layer.provide(Layer.merge(repositoryLayer, turnRepositoryLayer)),
+      Layer.provide(Layer.mergeAll(repositoryLayer, turnRepositoryLayer, transcriptRepositoryLayer)),
       Layer.catchCause((cause) =>
         Layer.effectContext(Effect.fail(ExecutionBackend.BackendError.make({ message: Cause.pretty(cause) }))),
       ),
@@ -641,6 +642,7 @@ export const relayBackendLayer: {
   (
     repositoryLayer: Layer.Layer<ThreadRepository.Service, ThreadRepository.RepositoryError, never>,
     turnRepositoryLayer: Layer.Layer<TurnRepository.Service, TurnRepository.RepositoryError, never>,
+    transcriptRepositoryLayer: Layer.Layer<TranscriptRepository.Service, TranscriptRepository.RepositoryError, never>,
   ): (
     options: Omit<
       RelayExecutionBackend.LayerOptions<typeof ThreadTools.toolkit.tools>,
@@ -654,8 +656,9 @@ export const relayBackendLayer: {
     >,
     repositoryLayer: Layer.Layer<ThreadRepository.Service, ThreadRepository.RepositoryError, never>,
     turnRepositoryLayer: Layer.Layer<TurnRepository.Service, TurnRepository.RepositoryError, never>,
+    transcriptRepositoryLayer: Layer.Layer<TranscriptRepository.Service, TranscriptRepository.RepositoryError, never>,
   ): ReturnType<typeof relayBackendLayerImpl>
-} = Function.dual(3, relayBackendLayerImpl)
+} = Function.dual(4, relayBackendLayerImpl)
 
 const testModelPartSchema = Schema.Union([
   Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
@@ -769,8 +772,6 @@ export const makeReloadingTestModel = Effect.fn("Main.makeReloadingTestModel")(f
 })
 
 const modeIds = ["low", "medium", "high", "ultra"] as const
-const agentIds = ["librarian", "painter", "review", "readThread", "task"] as const
-
 const resolveTunedModeRoute = (
   settings: ConfigContract.Settings,
   mode: ConfigContract.ModeId,
@@ -789,7 +790,6 @@ const resolveTunedModeRoute = (
 const supportingModelRoutes = (settings: ConfigContract.Settings) => [
   ConfigContract.resolveThreadTitleRoute(settings),
   ConfigContract.resolveCompactionSummaryRoute(settings),
-  ...agentIds.map((agent) => ConfigContract.resolveAgentRoute(settings, agent)),
 ]
 
 const modelRoutesForExecutionImpl = (
@@ -859,17 +859,14 @@ const executionRoutePinFromPreparedImpl = (
 ): Turn.ExecutionRoutePin => {
   const routes = prepared.routes
   const plans = prepared.plans
-  if (routes.length !== 9 || plans.length !== routes.length)
-    throw new Error(`Expected nine prepared execution routes, received ${routes.length}`)
+  if (routes.length !== 4 || plans.length !== routes.length)
+    throw new Error(`Expected four prepared execution routes, received ${routes.length}`)
   return {
     mode,
     main: executionModelRoute(routes[0]!, plans[0]!, "main"),
     oracle: executionModelRoute(routes[1]!, plans[1]!, "oracle"),
     title: executionModelRoute(routes[2]!, plans[2]!, "title"),
     compactionSummary: executionModelRoute(routes[3]!, plans[3]!, "compaction"),
-    agents: Object.fromEntries(
-      agentIds.map((agent, index) => [agent, executionModelRoute(routes[index + 4]!, plans[index + 4]!, agent)]),
-    ) as NonNullable<Turn.ExecutionRoutePin["agents"]>,
   }
 }
 
@@ -953,7 +950,6 @@ export const executionModelRoutes = (route: Turn.ExecutionRoutePin): ReadonlyArr
   route.oracle,
   ...(route.title === undefined ? [] : [route.title]),
   ...(route.compactionSummary === undefined ? [] : [route.compactionSummary]),
-  ...Object.values(route.agents ?? {}),
 ]
 
 export const isLegacyUnavailableExecutionRoute = (route: Turn.ExecutionRoutePin) =>
@@ -978,11 +974,10 @@ export const resolveExecutionWorkspace = Effect.fn("Main.resolveExecutionWorkspa
       return yield* ExecutionBackend.BackendError.make({
         message: `Execution ${durableExecutionId} is not attached to a Rika Turn`,
       })
-    const owningTurnId = turnId.startsWith("title:") ? turnId.slice("title:".length) : turnId
     const turns = yield* TurnRepository.Service
-    const turn = yield* turns.get(Turn.TurnId.make(owningTurnId))
+    const turn = yield* turns.get(Turn.TurnId.make(turnId))
     if (turn === undefined)
-      return yield* ExecutionBackend.BackendError.make({ message: `Turn ${owningTurnId} does not exist` })
+      return yield* ExecutionBackend.BackendError.make({ message: `Turn ${turnId} does not exist` })
     const threads = yield* ThreadRepository.Service
     const thread = yield* threads.get(turn.threadId)
     if (thread === undefined)
@@ -1107,6 +1102,11 @@ export interface ConfiguredBackendOptions {
   readonly workspace: string
   readonly repositoryLayer: Layer.Layer<ThreadRepository.Service, ThreadRepository.RepositoryError, never>
   readonly turnRepositoryLayer: Layer.Layer<TurnRepository.Service, TurnRepository.RepositoryError, never>
+  readonly transcriptRepositoryLayer: Layer.Layer<
+    TranscriptRepository.Service,
+    TranscriptRepository.RepositoryError,
+    never
+  >
   readonly settings?: ConfigContract.Settings
   readonly persistedModelRoutes?: ReadonlyArray<Turn.ExecutionModelRoute>
   readonly webSearchCredentials?: Readonly<Record<string, Redacted.Redacted<string>>>
@@ -1126,6 +1126,7 @@ export const configuredBackendLayer = ({
   workspace,
   repositoryLayer,
   turnRepositoryLayer,
+  transcriptRepositoryLayer,
   settings = ConfigContract.defaults,
   persistedModelRoutes = [],
   webSearchCredentials = {},
@@ -1384,6 +1385,7 @@ export const configuredBackendLayer = ({
         },
         repositoryLayer,
         turnRepositoryLayer,
+        transcriptRepositoryLayer,
       ).pipe(Layer.provide(BunCrypto.layer))
       if (testScript._tag === "Some" || testResponse._tag === "Some") return backendLayer
       return Layer.effect(
@@ -2844,6 +2846,7 @@ if (import.meta.main) {
           workspace: process.cwd(),
           repositoryLayer: repositories,
           turnRepositoryLayer: repositories,
+          transcriptRepositoryLayer: repositories,
           settings: effectiveConfig.settings,
           persistedModelRoutes,
           webSearchCredentials,

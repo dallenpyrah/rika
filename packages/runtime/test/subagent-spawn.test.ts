@@ -1,7 +1,7 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
 import { LanguageModel, ModelRegistry } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
-import { Runtime } from "@rika/tools"
+import { Runtime, ThreadTools } from "@rika/tools"
 import { expect, test } from "vitest"
 import { Database } from "bun:sqlite"
 import { Clock, Deferred, Effect, Fiber, FileSystem, Layer, Ref, Schedule, Schema, Stream } from "effect"
@@ -172,18 +172,7 @@ test("three Task calls in one model turn run as overlapping durable children", (
               (child) => decodeToolExecution(child.agent_snapshot_json).tool_execution?.concurrency === "unbounded",
             ),
           ).toBe(true)
-          expect(
-            childRuns
-              .map(({ metadata_json }) => JSON.parse(metadata_json))
-              .map(({ kind, preset_name }) => ({
-                kind,
-                preset_name,
-              })),
-          ).toEqual([
-            { kind: "static", preset_name: "Task" },
-            { kind: "static", preset_name: "Task" },
-            { kind: "static", preset_name: "Task" },
-          ])
+          expect(childRuns).toHaveLength(3)
           expect(
             children.map(({ agent_snapshot_json }) => {
               const snapshot = JSON.parse(agent_snapshot_json) as {
@@ -222,7 +211,104 @@ test("three Task calls in one model turn run as overlapping durable children", (
   )
 }, 60_000)
 
-test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", () => {
+test("ReadThread uses the Oracle route and receives the current Thread identity", () => {
+  const program = Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "rika-read-thread-agent-" })
+      const main = yield* TestModel.make(
+        [
+          TestModel.toolCall("read_thread", { prompt: "Recover the earlier requirement." }, { id: "read-thread" }),
+          TestModel.text("Recovered the requirement."),
+        ],
+        { provider: "test", model: "gpt-5.6-terra", registrationKey: "terra-xhigh" },
+      )
+      const oracle = yield* TestModel.make([TestModel.text("The earlier requirement was exact.")], {
+        provider: "test",
+        model: "gpt-5.6-sol",
+        registrationKey: "sol-medium",
+      })
+      const backendLayer = RelayExecutionBackend.layer({
+        filename: `${directory}/relay.db`,
+        workspace: directory,
+        registration: main.registration,
+        additionalRegistrations: [oracle.registration],
+        selection: main.selection,
+        additionalToolkit: ThreadTools.toolkit,
+        additionalHandlerLayer: ThreadTools.toolkit.toLayer({
+          search_threads: () => Effect.succeed({ text: "", truncated: false }),
+          read_thread_transcript: () => Effect.succeed({ text: "", truncated: false }),
+        }),
+        toolRuntimeLayer: Runtime.testLayer(() => Effect.succeed({ text: "runtime", truncated: false })),
+        toolNeedsApproval: () => false,
+        permissionPolicy: { rules: [{ pattern: "*", level: "allow" }] },
+      })
+      const backendContext = yield* Layer.build(backendLayer)
+      return yield* Effect.gen(function* () {
+        const backend = yield* ExecutionBackend.Service
+        const route: ExecutionBackend.ExecutionRoutePin = {
+          mode: "medium",
+          main: executionModelRoute("main", main.selection, "xhigh"),
+          oracle: executionModelRoute("oracle", oracle.selection, "medium"),
+        }
+        const settled = yield* start(backend, {
+          threadId: "thread-current-context",
+          turnId: "turn-current-context",
+          prompt: "Recover an earlier requirement.",
+          startedAt: 1,
+          executionRoute: route,
+        })
+        const database = yield* Effect.acquireRelease(
+          Effect.sync(() => new Database(`${directory}/relay.db`, { readonly: true })),
+          (connection) => Effect.sync(() => connection.close()),
+        )
+        const child = database
+          .query<
+            { readonly agent_snapshot_json: string },
+            []
+          >("select agent_snapshot_json from relay_executions where id like 'child:%'")
+          .get()
+        return { settled, child, oracleRequests: yield* oracle.requests }
+      }).pipe(Effect.provide(backendContext))
+    }),
+  )
+  return Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const bunContext = yield* Layer.build(BunServices.layer)
+        return yield* program.pipe(Effect.provide(bunContext))
+      }),
+    ).pipe(
+      Effect.tap(({ settled, child, oracleRequests }) =>
+        Effect.gen(function* () {
+          const snapshot = yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
+            child?.agent_snapshot_json ?? "{}",
+          )
+          expect(settled.status).toBe("completed")
+          expect(oracleRequests).toHaveLength(1)
+          expect(encodeJson(oracleRequests[0]?.prompt)).toContain("Current thread ID: thread-current-context")
+          expect(encodeJson(oracleRequests[0]?.prompt)).toContain("Recover the earlier requirement.")
+          expect(oracleRequests[0]?.tools.map((tool) => tool.name)).toEqual([
+            "search_threads",
+            "read_thread_transcript",
+          ])
+          expect(snapshot).toMatchObject({
+            model: {
+              model: "gpt-5.6-sol",
+              registration_key: "sol-medium",
+              metadata: {
+                rika_thread_id: "thread-current-context",
+                rika_reasoning_effort: "medium",
+              },
+            },
+          })
+        }),
+      ),
+    ),
+  )
+}, 60_000)
+
+test("parallel Task calls use the pinned main Sol route despite legacy per-agent routes", () => {
   const program = Effect.scoped(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
@@ -230,25 +316,17 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
       const sol = yield* TestModel.make(
         [
           TestModel.turn([
-            TestModel.toolCall("task", { prompt: "Explore with Luna.", model: "gpt-5.6-luna" }, { id: "call-luna" }),
-            TestModel.toolCall("task", { prompt: "Explore with Terra.", model: "gpt-5.6-terra" }, { id: "call-terra" }),
-            TestModel.toolCall("task", { prompt: "Explore with inherited Sol." }, { id: "call-sol" }),
+            TestModel.toolCall("task", { prompt: "Explore alpha." }, { id: "call-alpha" }),
+            TestModel.toolCall("task", { prompt: "Explore beta." }, { id: "call-beta" }),
+            TestModel.toolCall("task", { prompt: "Explore gamma." }, { id: "call-gamma" }),
           ]),
-          TestModel.text("Sol completed its exploration."),
-          TestModel.text("All model choices completed."),
+          TestModel.text("Sol completed alpha."),
+          TestModel.text("Sol completed beta."),
+          TestModel.text("Sol completed gamma."),
+          TestModel.text("All pinned tasks completed."),
         ],
         { provider: "test", model: "gpt-5.6-sol", registrationKey: "sol-xhigh" },
       )
-      const luna = yield* TestModel.make([TestModel.text("Luna completed its exploration.")], {
-        provider: "test",
-        model: "gpt-5.6-luna",
-        registrationKey: "luna-low",
-      })
-      const terra = yield* TestModel.make([TestModel.text("Terra completed its exploration.")], {
-        provider: "test",
-        model: "gpt-5.6-terra",
-        registrationKey: "terra-medium",
-      })
       const executionRoute: ExecutionBackend.ExecutionRoutePin = {
         mode: "high",
         main: executionModelRoute("main", sol.selection, "xhigh"),
@@ -257,8 +335,8 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
           { provider: "test", model: "gpt-5.6-sol", registrationKey: "sol-max" },
           "max",
         ),
-        title: executionModelRoute("title", luna.selection, "low"),
-        compactionSummary: executionModelRoute("compaction", terra.selection, "medium"),
+        title: executionModelRoute("title", { provider: "legacy", model: "luna" }, "low"),
+        compactionSummary: executionModelRoute("compaction", { provider: "legacy", model: "terra" }, "medium"),
         agents: {
           librarian: executionModelRoute(
             "librarian",
@@ -275,15 +353,14 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
             { provider: "test", model: "gpt-5.6-sol", registrationKey: "sol-high" },
             "high",
           ),
-          readThread: executionModelRoute("readThread", terra.selection, "medium"),
-          task: executionModelRoute("task", terra.selection, "medium"),
+          readThread: executionModelRoute("readThread", { provider: "legacy", model: "terra" }, "medium"),
+          task: executionModelRoute("task", { provider: "legacy", model: "terra" }, "medium"),
         },
       }
       const backendLayer = RelayExecutionBackend.layer({
         filename: `${directory}/relay.db`,
         workspace: directory,
         registration: sol.registration,
-        additionalRegistrations: [luna.registration, terra.registration],
         selection: sol.selection,
         toolRuntimeLayer: Runtime.testLayer(() => Effect.succeed({ text: "runtime", truncated: false })),
         toolNeedsApproval: () => false,
@@ -295,7 +372,7 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
         const settled = yield* start(backend, {
           threadId: "thread-high-models",
           turnId: "turn-high-models",
-          prompt: "Run Luna, Terra, and inherited Sol together.",
+          prompt: "Run three tasks together.",
           startedAt: 1,
           executionRoute,
         })
@@ -338,15 +415,7 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
           expect(children).toHaveLength(3)
           expect(children.every((child) => child.status === "completed")).toBe(true)
           expect(results).toEqual([{ error: null }, { error: null }, { error: null }])
-          const childRunMetadata = (callId: string) => {
-            const child = childRuns.find(({ id }) => id.endsWith(`:${callId}`))
-            return child === undefined ? undefined : JSON.parse(child.metadata_json)
-          }
-          expect(childRunMetadata("call-sol")).toMatchObject({ kind: "static", preset_name: "Task" })
-          expect(childRunMetadata("call-luna")).toMatchObject({ kind: "dynamic" })
-          expect(childRunMetadata("call-luna")).not.toHaveProperty("preset_name")
-          expect(childRunMetadata("call-terra")).toMatchObject({ kind: "dynamic" })
-          expect(childRunMetadata("call-terra")).not.toHaveProperty("preset_name")
+          expect(childRuns).toHaveLength(3)
           expect(
             children.map((child) => {
               const snapshot = JSON.parse(child.agent_snapshot_json) as {
@@ -354,20 +423,23 @@ test("high mode runs Luna, Terra, and inherited Sol Task calls in one batch", ()
               }
               return [snapshot.model?.model, snapshot.model?.registration_key]
             }),
-          ).toEqual(
-            expect.arrayContaining([
-              ["gpt-5.6-luna", "luna-low"],
-              ["gpt-5.6-terra", "terra-medium"],
-              ["gpt-5.6-sol", "sol-xhigh"],
-            ]),
-          )
+          ).toEqual([
+            ["gpt-5.6-sol", "sol-xhigh"],
+            ["gpt-5.6-sol", "sol-xhigh"],
+            ["gpt-5.6-sol", "sol-xhigh"],
+          ])
+          expect(
+            children.map(
+              ({ agent_snapshot_json }) => JSON.parse(agent_snapshot_json).model?.metadata?.rika_reasoning_effort,
+            ),
+          ).toEqual(["xhigh", "xhigh", "xhigh"])
         }),
       ),
     ),
   )
 }, 60_000)
 
-test("depth-one agents call specialists and spawn a chosen depth-two model without depth-three tools", () => {
+test("depth-one agents route Task to main and specialists to oracle without depth-three tools", () => {
   const program = Effect.scoped(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem
@@ -377,25 +449,16 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           TestModel.toolCall("task", { prompt: "Coordinate nested work." }, { id: "call-depth-one" }),
           TestModel.turn([
             TestModel.toolCall("oracle", { prompt: "Check the nested design." }, { id: "call-oracle" }),
-            TestModel.toolCall(
-              "task",
-              { prompt: "Do a cheap nested check.", model: "gpt-5.6-luna" },
-              { id: "call-depth-two" },
-            ),
-            TestModel.toolCall("task", { prompt: "Do another nested check." }, { id: "call-depth-three" }),
+            TestModel.toolCall("task", { prompt: "Do a nested check." }, { id: "call-depth-two" }),
+            TestModel.toolCall("review", { prompt: "Review the nested check." }, { id: "call-review" }),
           ]),
-          TestModel.text("Terra completed another nested check."),
+          TestModel.text("Terra completed the nested check."),
           TestModel.text("Depth one combined both results."),
           TestModel.text("Root received the nested result."),
         ],
         { provider: "test", model: "gpt-5.6-terra", registrationKey: "terra-medium" },
       )
-      const luna = yield* TestModel.make([TestModel.text("Luna completed the nested check.")], {
-        provider: "test",
-        model: "gpt-5.6-luna",
-        registrationKey: "luna-medium",
-      })
-      const sol = yield* TestModel.make([TestModel.text("Oracle checked the nested design.")], {
+      const sol = yield* TestModel.make([TestModel.text("Oracle checked."), TestModel.text("Review checked.")], {
         provider: "test",
         model: "gpt-5.6-sol",
         registrationKey: "sol-medium",
@@ -413,11 +476,9 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
               Stream.unwrap(
                 Effect.gen(function* () {
                   const prompt = encodeJson(options.prompt)
-                  const nested = [
-                    "Check the nested design.",
-                    "Do a cheap nested check.",
-                    "Do another nested check.",
-                  ].some((text) => prompt.includes(text))
+                  const nested = ["Check the nested design.", "Do a nested check.", "Review the nested check."].some(
+                    (text) => prompt.includes(text),
+                  )
                   if (!nested) return model.streamText(options)
                   const active = yield* Ref.updateAndGet(nestedStarted, (value) => value + 1)
                   yield* Ref.update(maximumNested, (value) => Math.max(value, active))
@@ -433,13 +494,12 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
         ...terra.selection,
         layer: trackedLayer(terra.layer),
       })
-      const lunaRegistration = yield* ModelRegistry.registration({ ...luna.selection, layer: trackedLayer(luna.layer) })
       const solRegistration = yield* ModelRegistry.registration({ ...sol.selection, layer: trackedLayer(sol.layer) })
       const executionRoute: ExecutionBackend.ExecutionRoutePin = {
         mode: "test",
         main: executionModelRoute("main", terra.selection),
         oracle: executionModelRoute("oracle", sol.selection),
-        title: executionModelRoute("title", luna.selection),
+        title: executionModelRoute("title", terra.selection),
         agents: {
           librarian: executionModelRoute("librarian", terra.selection),
           painter: executionModelRoute("painter", terra.selection),
@@ -452,7 +512,7 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
         filename: `${directory}/relay.db`,
         workspace: directory,
         registration: terraRegistration,
-        additionalRegistrations: [lunaRegistration, solRegistration],
+        additionalRegistrations: [solRegistration],
         selection: terra.selection,
         toolRuntimeLayer: Runtime.testLayer(() => Effect.succeed({ text: "runtime", truncated: false })),
         toolNeedsApproval: () => false,
@@ -502,7 +562,7 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
             },
             []
           >(
-            "select call.execution_id, call.name, call.input_json, result.output_json, result.error from relay_tool_calls call join relay_tool_results result on result.tool_call_id = call.id where call.execution_id like 'child:%' and call.name in ('task', 'oracle') order by call.created_at",
+            "select call.execution_id, call.name, call.input_json, result.output_json, result.error from relay_tool_calls call join relay_tool_results result on result.tool_call_id = call.id where call.execution_id like 'child:%' and call.name in ('task', 'oracle', 'review') order by call.created_at",
           )
           .all()
         return {
@@ -511,7 +571,6 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           failures,
           delegationResults,
           terraRequests: yield* terra.requests,
-          lunaRequests: yield* luna.requests,
           solRequests: yield* sol.requests,
           allNestedOverlapped,
           nestedMaximum,
@@ -533,7 +592,6 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           failures,
           delegationResults,
           terraRequests,
-          lunaRequests,
           solRequests,
           allNestedOverlapped,
           nestedMaximum,
@@ -541,7 +599,7 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
           Effect.sync(() => {
             const delegationTools = ["task", "oracle", "librarian", "review"]
             const depthOneTools = terraRequests[1]?.tools.map((tool) => tool.name) ?? []
-            const lunaDepthTwoTools = lunaRequests[0]?.tools.map((tool) => tool.name) ?? []
+            const taskDepthTwoTools = terraRequests[2]?.tools.map((tool) => tool.name) ?? []
             const oracleDepthTwoTools = solRequests[0]?.tools.map((tool) => tool.name) ?? []
             expect(settled.status).toBe("completed")
             expect(failures).toEqual([])
@@ -552,7 +610,7 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
             expect(delegationResults.map((result) => ({ name: result.name, error: result.error }))).toEqual([
               { name: "oracle", error: null },
               { name: "task", error: null },
-              { name: "task", error: null },
+              { name: "review", error: null },
             ])
             expect(children).toHaveLength(4)
             expect(children.every((child) => child.status === "completed")).toBe(true)
@@ -562,10 +620,9 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
               ),
             ).toBe(true)
             expect(depthOneTools).toEqual(expect.arrayContaining(delegationTools))
-            expect(lunaDepthTwoTools).not.toEqual(expect.arrayContaining(delegationTools))
+            expect(taskDepthTwoTools).not.toEqual(expect.arrayContaining(delegationTools))
             expect(oracleDepthTwoTools).not.toEqual(expect.arrayContaining(delegationTools))
-            expect(lunaRequests).toHaveLength(1)
-            expect(solRequests).toHaveLength(1)
+            expect(solRequests).toHaveLength(2)
             expect(
               children.some((child) => {
                 const snapshot = JSON.parse(child.agent_snapshot_json) as {
@@ -599,8 +656,8 @@ test("depth-one agents call specialists and spawn a chosen depth-two model witho
                   }
                 }
                 return (
-                  snapshot.model?.model === "gpt-5.6-luna" &&
-                  snapshot.model.registration_key === "luna-medium" &&
+                  snapshot.model?.model === "gpt-5.6-terra" &&
+                  snapshot.model.registration_key === "terra-medium" &&
                   snapshot.model.metadata?.rika_agent_depth === 2 &&
                   snapshot.model.metadata.rika_reasoning_effort === "medium"
                 )

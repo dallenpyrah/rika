@@ -124,7 +124,6 @@ export interface Settings {
   readonly providers: Readonly<Record<ProviderId, ProviderConnection>>
   readonly models: Readonly<Record<string, ModelAlias>>
   readonly modes: Readonly<Record<ModeId, ModeConfig>>
-  readonly agents: Readonly<Record<AgentId, RoleRoute>>
   readonly compaction: { readonly summaryModel: RoleRoute }
   readonly keymap: Readonly<Record<string, string>>
   readonly permissions: Readonly<Record<string, PermissionDecision>>
@@ -275,14 +274,7 @@ export const resolveModelRoute: {
 )
 
 export const resolveThreadTitleRoute = (settings: Settings): ResolvedModelRoute =>
-  resolveRoute(settings, { ...settings.modes.low.main, effort: "low", fast: false }, "Thread title model")
-
-export const resolveAgentRoute: {
-  (agent: AgentId): (settings: Settings) => ResolvedModelRoute
-  (settings: Settings, agent: AgentId): ResolvedModelRoute
-} = Function.dual(2, (settings: Settings, agent: AgentId) =>
-  resolveRoute(settings, settings.agents[agent], `Agent ${agent}`),
-)
+  resolveRoute(settings, { alias: "luna", effort: "low", fast: false }, "Thread title model")
 
 export const resolveCompactionSummaryRoute = (settings: Settings): ResolvedModelRoute =>
   resolveRoute(settings, settings.compaction.summaryModel, "Compaction summary model")
@@ -531,19 +523,12 @@ export const defaults: Settings = {
   providers: providerDefaults,
   models: modelDefaults,
   modes: {
-    low: { main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
-    medium: { main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
-    high: { main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "sol", effort: "max" } },
-    ultra: { main: { alias: "sol", effort: "max" }, oracle: { alias: "sol", effort: "max" } },
+    low: { main: { alias: "luna", effort: "xhigh" }, oracle: { alias: "terra", effort: "xhigh" } },
+    medium: { main: { alias: "terra", effort: "xhigh" }, oracle: { alias: "sol", effort: "medium" } },
+    high: { main: { alias: "sol", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
+    ultra: { main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "sol", effort: "max" } },
   },
-  agents: {
-    librarian: { alias: "sol", effort: "high" },
-    painter: { alias: "sol", effort: "high" },
-    review: { alias: "sol", effort: "high" },
-    readThread: { alias: "terra", effort: "medium" },
-    task: { alias: "terra", effort: "medium" },
-  },
-  compaction: { summaryModel: { alias: "terra", effort: "medium" } },
+  compaction: { summaryModel: { alias: "sol", effort: "xhigh" } },
   keymap: { mode: "ctrl+s", palette: "ctrl+p", submit: "enter", newline: "shift+enter", interrupt: "escape" },
   permissions: { read: "allow", search: "allow", write: "allow", shell: "allow", external: "allow" },
   extensionRoots: ["~/.config/rika/extensions", ".rika/extensions"],

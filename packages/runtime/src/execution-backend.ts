@@ -57,7 +57,7 @@ import {
   type StartInput,
   Status,
 } from "./execution-contract"
-import { mainInstructions, parentPermissions, presets, resolve } from "./agent-profiles"
+import { mainInstructions, parentPermissions, presets, resolve, resolveTitle } from "./agent-profiles"
 import * as MediaAnalyzer from "./media-analyzer"
 import * as ThreadHost from "./thread-host"
 import { definitions, idFor } from "./workflow-definitions"
@@ -67,7 +67,6 @@ import {
   delegationAvailableAtDepth,
   toolsAtDepth,
 } from "./agent-depth"
-import { resolveSpawnModel } from "./agent-model"
 import * as DataBlobStore from "./data-blob-store"
 
 export { streamingOnlyLanguageModel, withStreamingOnlyModel } from "./streaming-only-model"
@@ -435,19 +434,14 @@ const awaitExecutionAvailable = (client: Client.Interface, id: Ids.ExecutionId):
 }
 const makeChildExecutionId = (parentTurnId: string, childId: string) =>
   Ids.ChildExecutionId.make(encodeChildExecutionId(parentTurnId, childId))
-const modelSelection = (model: {
-  readonly provider: string
-  readonly model: string
-  readonly registration_key?: string
-}): ModelRegistry.ModelSelection => ({
-  provider: model.provider,
-  model: model.model,
-  ...(model.registration_key === undefined ? {} : { registrationKey: model.registration_key }),
-})
 const executionRouteFromMetadata = (metadata: Readonly<Record<string, unknown>> | undefined) => {
   const route = metadata?.rika_execution_route
   if (route === null || typeof route !== "object" || !("main" in route) || !("oracle" in route)) return undefined
   return route as unknown as ExecutionRoutePin
+}
+const threadIdFromMetadata = (metadata: Readonly<Record<string, unknown>> | undefined) => {
+  const threadId = metadata?.rika_thread_id
+  return typeof threadId === "string" && threadId.length > 0 ? threadId : undefined
 }
 const pinnedRouteForExecution = (client: Client.Interface, execution: Execution.Execution) =>
   Effect.gen(function* () {
@@ -463,31 +457,7 @@ const pinnedRouteForExecution = (client: Client.Interface, execution: Execution.
     }
     return undefined
   })
-const routeForProfile = (pin: ExecutionRoutePin, profile: AgentProfile) => {
-  if (profile === "Oracle") return pin.oracle
-  if (pin.agents === undefined) return pin.main
-  if (profile === "Librarian") return pin.agents.librarian
-  if (profile === "Painter") return pin.agents.painter
-  if (profile === "Review") return pin.agents.review
-  if (profile === "ReadThread") return pin.agents.readThread
-  return pin.agents.task
-}
-const executionRoutes = (pin: ExecutionRoutePin) => [
-  pin.main,
-  pin.oracle,
-  ...(pin.title === undefined ? [] : [pin.title]),
-  ...(pin.compactionSummary === undefined ? [] : [pin.compactionSummary]),
-  ...(pin.agents === undefined
-    ? []
-    : [pin.agents.librarian, pin.agents.painter, pin.agents.review, pin.agents.readThread, pin.agents.task]),
-]
-const routeForSelection = (pin: ExecutionRoutePin, selection: ModelRegistry.ModelSelection) =>
-  executionRoutes(pin).find(
-    (route) =>
-      route.provider === selection.provider &&
-      route.model === selection.model &&
-      route.registrationKey === selection.registrationKey,
-  )
+const routeForProfile = (pin: ExecutionRoutePin, profile: AgentProfile) => (profile === "Task" ? pin.main : pin.oracle)
 const recoveredDeltaOutput = (events: ReadonlyArray<Execution.ExecutionEvent>) => {
   const groups = new Map<string, { order: number; deltas: Array<{ index: number; delta: string }> }>()
   for (const event of events) {
@@ -627,10 +597,7 @@ export const workspaceFromExecutionId = (value: string): string | undefined => {
   return parent === undefined ? undefined : workspaceFromExecutionId(parent)
 }
 const sessionId = (threadId: string) => Ids.SessionId.make(`session:${threadId}`)
-const startSessionId = (input: Pick<StartInput, "threadId" | "sessionPurpose">) =>
-  input.sessionPurpose?._tag === "ThreadTitle"
-    ? Ids.SessionId.make(`session:aux:title:${input.sessionPurpose.owningTurnId}`)
-    : sessionId(input.threadId)
+const startSessionId = (input: Pick<StartInput, "threadId">) => sessionId(input.threadId)
 const childSessionId = (childExecutionId: Ids.ChildExecutionId) =>
   Ids.SessionId.make(`session:child:${String(childExecutionId)}`)
 const isBackendError = Schema.is(BackendError)
@@ -1204,34 +1171,26 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
             const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(routePin)
             const summaryModel = routePin?.compactionSummary
             const parentExecutionId = executionId(input.parentTurnId)
+            const parent = yield* client.executions.get(parentExecutionId).pipe(Effect.mapError(error))
+            const threadId =
+              threadIdFromMetadata(parent?.metadata) ?? threadIdFromMetadata(parent?.agent_snapshot?.metadata)
             const depth = childExecutionDepth(String(parentExecutionId)) + 1
             const executionToolOptions = yield* toolOptionsForExecution(String(parentExecutionId))
             const children = yield* Effect.forEach(input.children, (child) => {
               const profile = child.profile ?? "Task"
-              const profileRoute =
-                options.modelVariantPolicy === "fixed-selection" ? undefined : routeForProfile(routePin, profile)
-              const inherited =
-                options.modelVariantPolicy === "fixed-selection" ? options.selection : pinnedSelection(routePin.main)
-              const requested =
-                child.model === undefined ? undefined : resolveSpawnModel(routePin, inherited, child.model)
-              if (child.model !== undefined && requested === undefined)
-                return Effect.fail(BackendError.make({ message: `Model ${child.model} is not available` }))
-              let selected = requested?.selection
-              if (selected === undefined) {
-                if (profileRoute !== undefined) selected = pinnedSelection(profileRoute)
-                else if (profile === "Oracle") selected = options.oracleSelection ?? options.selection
-                else selected = options.selection
-              }
-              const selectedRoute = requested === undefined ? profileRoute : routeForSelection(routePin, selected)
+              const profileRoute = routeForProfile(routePin, profile)
+              let selected = pinnedSelection(profileRoute)
+              if (options.modelVariantPolicy === "fixed-selection")
+                selected = profile === "Task" ? options.selection : (options.oracleSelection ?? options.selection)
               const preset = resolve(profile, selected).preset
               const policy =
-                selectedRoute === undefined
+                options.modelVariantPolicy === "fixed-selection"
                   ? compactionPolicy(
-                      profile === "Oracle" ? (options.oracleCompaction ?? options.compaction) : options.compaction,
+                      profile === "Task" ? options.compaction : (options.oracleCompaction ?? options.compaction),
                       options.compactionSummarySelection,
                     )
-                  : pinnedCompactionPolicy(selectedRoute, summaryModel)
-              const effort = requested?.effort ?? selectedRoute?.effort ?? routePin.main.effort
+                  : pinnedCompactionPolicy(profileRoute, summaryModel)
+              const effort = profileRoute.effort
               return Effect.succeed({
                 child_execution_id: makeChildExecutionId(input.parentTurnId, child.childId),
                 address_id: addressId,
@@ -1255,6 +1214,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                   rika_agent_depth: depth,
                   rika_reasoning_effort: effort,
                   ...(input.workspace === undefined ? {} : { rika_workspace: input.workspace }),
+                  ...(threadId === undefined ? {} : { rika_thread_id: threadId }),
                   rika_execution_route: durableRoute,
                 },
               })
@@ -1333,11 +1293,17 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
           const routePin = executionRouteFromMetadata(parent?.agent_snapshot?.metadata)
           if (parent?.agent_snapshot === undefined || routePin === undefined)
             return yield* BackendError.make({ message: `Execution ${input.parentTurnId} has no pinned model route` })
-          const route = routeForProfile(routePin, input.profile)
-          const preset = resolve(input.profile, pinnedSelection(route)).preset
+          const route = input.profile === "Title" ? routePin.title : routeForProfile(routePin, input.profile)
+          if (route === undefined)
+            return yield* BackendError.make({ message: `Execution ${input.parentTurnId} has no pinned title route` })
+          const preset =
+            input.profile === "Title"
+              ? resolveTitle(pinnedSelection(route))
+              : resolve(input.profile, pinnedSelection(route)).preset
           const depth = childExecutionDepth(String(parentExecutionId)) + 1
           const executionToolOptions = yield* toolOptionsForExecution(String(parentExecutionId))
           const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(routePin).pipe(Effect.mapError(error))
+          const threadId = threadIdFromMetadata(parent.metadata) ?? threadIdFromMetadata(parent.agent_snapshot.metadata)
           yield* client.childRuns
             .spawn({
               execution_id: parentExecutionId,
@@ -1351,16 +1317,23 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                   rika_execution_route: durableRoute,
                   rika_agent_depth: depth,
                   rika_reasoning_effort: route.effort,
+                  ...(threadId === undefined ? {} : { rika_thread_id: threadId }),
                 },
               },
-              tool_names: availableTools(executionToolOptions, toolsAtDepth(preset.tool_names, depth)),
+              tool_names:
+                input.profile === "Title"
+                  ? []
+                  : availableTools(executionToolOptions, toolsAtDepth(preset.tool_names, depth)),
               permissions: preset.permissions,
-              compaction_policy: pinnedCompactionPolicy(route, routePin.compactionSummary),
+              ...(input.profile === "Title"
+                ? {}
+                : { compaction_policy: pinnedCompactionPolicy(route, routePin.compactionSummary) }),
               metadata: {
                 product_profile: input.profile,
                 steering_enabled: true,
                 rika_agent_depth: depth,
                 rika_reasoning_effort: route.effort,
+                ...(threadId === undefined ? {} : { rika_thread_id: threadId }),
                 rika_execution_route: durableRoute,
               },
               wait: false,
@@ -1384,6 +1357,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
               const metadata = {
                 steering_enabled: true,
                 rika_execution_id: String(id),
+                rika_thread_id: input.threadId,
                 rika_agent_depth: 0,
                 rika_reasoning_effort: input.reasoningEffort ?? input.executionRoute.main.effort,
                 rika_execution_route: durableRoute,
@@ -1405,58 +1379,51 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                 options.modelVariantPolicy === "fixed-selection"
                   ? options.oracleSelection
                   : pinnedSelection(input.executionRoute.oracle)
-              const agentRoutes =
-                options.modelVariantPolicy === "fixed-selection" ? undefined : input.executionRoute.agents
-              const agentModels =
-                agentRoutes === undefined
-                  ? {}
-                  : {
-                      Librarian: pinnedSelection(agentRoutes.librarian),
-                      Painter: pinnedSelection(agentRoutes.painter),
-                      Review: pinnedSelection(agentRoutes.review),
-                      ReadThread: pinnedSelection(agentRoutes.readThread),
-                    }
               const childDepth = 1
               const childRunPresets = Object.fromEntries(
-                Object.entries(presets(selection, oracleSelection, agentModels)).map(([name, preset]) => {
-                  const profile = name as AgentProfile
-                  const profileRoute =
-                    profile === "Task" ? input.executionRoute.main : routeForProfile(input.executionRoute, profile)
-                  const effort =
-                    profile === "Task"
-                      ? (input.reasoningEffort ?? input.executionRoute.main.effort)
-                      : profileRoute.effort
-                  const policy =
-                    options.modelVariantPolicy === "fixed-selection"
-                      ? compactionPolicy(
-                          profile === "Oracle" ? (options.oracleCompaction ?? options.compaction) : options.compaction,
-                          options.compactionSummarySelection,
-                        )
-                      : pinnedCompactionPolicy(profileRoute, input.executionRoute.compactionSummary)
-                  return [
-                    name,
-                    {
-                      ...preset,
-                      model: {
-                        ...preset.model,
+                Object.entries(presets({ model: selection, oracleModel: oracleSelection }))
+                  .filter(([name]) => name !== "ReadThread")
+                  .map(([name, preset]) => {
+                    const profile = name as AgentProfile
+                    const profileRoute =
+                      profile === "Task" ? input.executionRoute.main : routeForProfile(input.executionRoute, profile)
+                    const effort =
+                      profile === "Task"
+                        ? (input.reasoningEffort ?? input.executionRoute.main.effort)
+                        : profileRoute.effort
+                    const policy =
+                      options.modelVariantPolicy === "fixed-selection"
+                        ? compactionPolicy(
+                            profile === "Task" ? options.compaction : (options.oracleCompaction ?? options.compaction),
+                            options.compactionSummarySelection,
+                          )
+                        : pinnedCompactionPolicy(profileRoute, input.executionRoute.compactionSummary)
+                    return [
+                      name,
+                      {
+                        ...preset,
+                        model: {
+                          ...preset.model,
+                          metadata: {
+                            rika_execution_route: durableRoute,
+                            rika_thread_id: input.threadId,
+                            rika_agent_depth: childDepth,
+                            rika_reasoning_effort: effort,
+                          },
+                        },
+                        tool_names: availableTools(executionToolOptions, toolsAtDepth(preset.tool_names, childDepth)),
+                        ...(policy === undefined ? {} : { compaction_policy: policy }),
                         metadata: {
-                          rika_execution_route: durableRoute,
+                          ...preset.metadata,
+                          steering_enabled: true,
+                          rika_thread_id: input.threadId,
                           rika_agent_depth: childDepth,
                           rika_reasoning_effort: effort,
+                          rika_execution_route: durableRoute,
                         },
                       },
-                      tool_names: availableTools(executionToolOptions, toolsAtDepth(preset.tool_names, childDepth)),
-                      ...(policy === undefined ? {} : { compaction_policy: policy }),
-                      metadata: {
-                        ...preset.metadata,
-                        steering_enabled: true,
-                        rika_agent_depth: childDepth,
-                        rika_reasoning_effort: effort,
-                        rika_execution_route: durableRoute,
-                      },
-                    },
-                  ]
-                }),
+                    ]
+                  }),
               )
               yield* Effect.logInfo("execution.starting").pipe(
                 Effect.annotateLogs({
@@ -1464,36 +1431,21 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                   "rika.model.provider": selection.provider,
                 }),
               )
-              const auxiliaryTitle = input.sessionPurpose?._tag === "ThreadTitle"
               const agentName = `rika-${encodeURIComponent(input.turnId)}`
-              const registered = yield* auxiliaryTitle
-                ? client.agents.register({
-                    id: agentId,
-                    address: addressId,
-                    name: agentName,
-                    instructions: mainInstructions,
-                    model: relayModelSelection(selection),
-                    tools: [],
-                    tool_execution: toolExecutionPolicy,
-                    permissions: [],
-                    ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
-                    metadata,
-                    ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
-                  })
-                : client.agents.register({
-                    id: agentId,
-                    address: addressId,
-                    name: agentName,
-                    instructions: mainInstructions,
-                    model: relayModelSelection(selection),
-                    tools: Object.values(toolkitFor(executionToolOptions).tools).map((tool) => ({ name: tool.name })),
-                    tool_execution: toolExecutionPolicy,
-                    permissions: parentPermissions,
-                    ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
-                    metadata,
-                    ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
-                    child_run_presets: childRunPresets,
-                  })
+              const registered = yield* client.agents.register({
+                id: agentId,
+                address: addressId,
+                name: agentName,
+                instructions: mainInstructions,
+                model: relayModelSelection(selection),
+                tools: Object.values(toolkitFor(executionToolOptions).tools).map((tool) => ({ name: tool.name })),
+                tool_execution: toolExecutionPolicy,
+                permissions: parentPermissions,
+                ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
+                metadata,
+                ...(rootCompaction === undefined ? {} : { compaction_policy: rootCompaction }),
+                child_run_presets: childRunPresets,
+              })
               const startInput = {
                 root_address_id: addressId,
                 session_id: startSessionId(input),
@@ -1784,15 +1736,16 @@ export const layer = <
               .pipe(
                 Effect.mapError((cause) => AgentTools.AgentToolError.make({ tool: toolName, message: String(cause) })),
               )
+            if (parent === undefined) {
+              return yield* AgentTools.AgentToolError.make({
+                tool: toolName,
+                message: `Execution ${call.executionId} was not found`,
+              })
+            }
             const snapshot = parent?.agent_snapshot
-            const routePin =
-              parent === undefined
-                ? undefined
-                : yield* pinnedRouteForExecution(client, parent).pipe(
-                    Effect.mapError((cause) =>
-                      AgentTools.AgentToolError.make({ tool: toolName, message: String(cause) }),
-                    ),
-                  )
+            const routePin = yield* pinnedRouteForExecution(client, parent).pipe(
+              Effect.mapError((cause) => AgentTools.AgentToolError.make({ tool: toolName, message: String(cause) })),
+            )
             if (snapshot === undefined) {
               return yield* AgentTools.AgentToolError.make({
                 tool: toolName,
@@ -1805,18 +1758,23 @@ export const layer = <
                 message: "The parent execution does not have a pinned model route",
               })
             }
-            const parentSelection = modelSelection(snapshot.model)
             const durableRoute = yield* Schema.decodeUnknownEffect(Schema.Json)(routePin).pipe(
               Effect.mapError((cause) => AgentTools.AgentToolError.make({ tool: toolName, message: String(cause) })),
             )
             const executionToolOptions = yield* toolOptionsForExecution(String(call.executionId)).pipe(
               Effect.mapError((cause) => AgentTools.AgentToolError.make({ tool: toolName, message: String(cause) })),
             )
+            const threadId =
+              threadIdFromMetadata(parent.metadata) ??
+              threadIdFromMetadata(snapshot.metadata) ??
+              threadIdFromMetadata(snapshot.model.metadata)
             const calls = [
               {
                 callId: String(call.call.id),
-                prompt: input.prompt,
-                ...(profile === "Task" && "model" in input && input.model !== undefined ? { model: input.model } : {}),
+                prompt:
+                  profile === "ReadThread" && threadId !== undefined
+                    ? `Current thread ID: ${threadId}\n\n${input.prompt}`
+                    : input.prompt,
               },
             ]
             const children = yield* Effect.forEach(calls, (childCall) => {
@@ -1825,47 +1783,17 @@ export const layer = <
                 address_id: addressId,
                 input: [Content.text(childCall.prompt)],
               }
-              if (childCall.model === undefined && snapshot.child_run_presets?.[profile] !== undefined) {
-                return Effect.succeed(
-                  buildChildRunInput(base, {
-                    _tag: "preset",
-                    presetName: profile,
-                  }),
-                )
-              }
-              let selected:
-                | {
-                    readonly selection: ModelRegistry.ModelSelection
-                    readonly effort: string
-                  }
-                | undefined
-              if (profile === "Task") selected = resolveSpawnModel(routePin, parentSelection, childCall.model)
-              else {
-                const profileRoute = routeForProfile(routePin, profile)
-                let selection: ModelRegistry.ModelSelection
-                if (options.modelVariantPolicy !== "fixed-selection") selection = pinnedSelection(profileRoute)
-                else if (profile === "Oracle") selection = options.oracleSelection ?? options.selection
-                else selection = options.selection
-                selected = {
-                  selection,
-                  effort: profileRoute.effort,
-                }
-              }
-              if (selected === undefined) {
-                return Effect.fail(
-                  AgentTools.AgentToolError.make({
-                    tool: toolName,
-                    message: `Model ${childCall.model} is not available in this execution's registered routes`,
-                  }),
-                )
-              }
+              const profileRoute = routeForProfile(routePin, profile)
+              let selection = pinnedSelection(profileRoute)
+              if (options.modelVariantPolicy === "fixed-selection")
+                selection = profile === "Task" ? options.selection : (options.oracleSelection ?? options.selection)
+              const selected = { selection, effort: profileRoute.effort }
               const childDepth = parentDepth + 1
               const preset = resolve(profile, selected.selection).preset
-              const selectedRoute = routeForSelection(routePin, selected.selection)
               const policy =
-                selectedRoute === undefined
+                options.modelVariantPolicy === "fixed-selection"
                   ? snapshot.compaction_policy
-                  : pinnedCompactionPolicy(selectedRoute, routePin.compactionSummary)
+                  : pinnedCompactionPolicy(profileRoute, routePin.compactionSummary)
               return Effect.succeed(
                 buildChildRunInput(base, {
                   _tag: "override",
@@ -1875,6 +1803,7 @@ export const layer = <
                       ...relayModelSelection(selected.selection),
                       metadata: {
                         rika_execution_route: durableRoute,
+                        ...(threadId === undefined ? {} : { rika_thread_id: threadId }),
                         rika_agent_depth: childDepth,
                         rika_reasoning_effort: selected.effort,
                       },
@@ -1885,6 +1814,7 @@ export const layer = <
                     metadata: {
                       product_profile: profile,
                       steering_enabled: true,
+                      ...(threadId === undefined ? {} : { rika_thread_id: threadId }),
                       rika_agent_depth: childDepth,
                       rika_reasoning_effort: selected.effort,
                       rika_execution_route: durableRoute,
@@ -1939,6 +1869,7 @@ export const layer = <
               oracle: (input) => runDelegation("oracle", "Oracle", input),
               librarian: (input) => runDelegation("librarian", "Librarian", input),
               review: (input) => runDelegation("review", "Review", input),
+              read_thread: (input) => runDelegation("read_thread", "ReadThread", input),
             })
           const handlerLayer = Layer.mergeAll(
             options.additionalHandlerLayer === undefined
@@ -2132,7 +2063,7 @@ export const layer = <
                 const childId = makeChildExecutionId(parentExecutionId, String(operation.id))
                 const grounded = "address_id" in operation
                 const profileName = grounded ? String(operation.preset_name) : "Task"
-                const availablePresets = presets(options.selection, options.oracleSelection)
+                const availablePresets = presets({ model: options.selection, oracleModel: options.oracleSelection })
                 const preset = availablePresets[profileName] ?? availablePresets.Task!
                 const childSelection = {
                   provider: preset.model.provider,

@@ -28,9 +28,7 @@ Bedrock uses Baton's AWS default credential chain, including environment, shared
     }
   },
   "modelRoutes": {
-    "modes": { "high": { "main": "bedrock-opus", "oracle": "bedrock-opus" } },
-    "agents": { "task": "bedrock-fable" },
-    "compaction": "bedrock-fable"
+    "modes": { "high": { "main": "bedrock-opus", "oracle": "bedrock-opus" } }
   }
 }
 ```

@@ -79,19 +79,6 @@ describe("ProductAgent", () => {
           })).join,
         ).toBe("best-effort")
       }).pipe(provideLayer(layer))
-      expect(
-        [
-          "review",
-          "research",
-          "documentation",
-          "architecture",
-          "investigate",
-          "image",
-          "visual",
-          "thread",
-          "other",
-        ].map(ProductAgent.selectProfile),
-      ).toEqual(["Review", "Librarian", "Librarian", "Oracle", "Oracle", "Painter", "Painter", "ReadThread", "Task"])
     }),
   )
 
@@ -341,7 +328,7 @@ describe("ProductAgent", () => {
           fanOutId: "fan",
           executionRoute: executionRoute(),
           tasks: [
-            { id: "a", prompt: "research APIs", model: "gpt-5.6-luna" },
+            { id: "a", prompt: "research APIs", profile: "Librarian" },
             { id: "b", prompt: "implement it" },
           ],
           maxConcurrency: 1,
@@ -352,7 +339,6 @@ describe("ProductAgent", () => {
       }).pipe(provideLayer(ProductAgent.layer.pipe(Layer.provide(Layer.succeed(ExecutionBackend.Service, backend)))))
       expect(captured?.maxConcurrency).toBe(1)
       expect(captured?.children.map((child) => child.profile)).toEqual(["Librarian", "Task"])
-      expect(captured?.children.map((child) => child.model)).toEqual(["gpt-5.6-luna", undefined])
       expect(result.projected).toEqual([
         { parentTurnId: "parent", fanOutId: "fan", childId: "a", ordinal: 0, state: "completed", output: "ok" },
         { parentTurnId: "parent", fanOutId: "fan", childId: "b", ordinal: 1, state: "failed", error: "check failed" },

@@ -3069,8 +3069,28 @@ describe("Operation", () => {
       const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
       const runSync = Effect.runSyncWith(yield* Effect.context<never>())
       const startInputs = yield* Ref.make<ReadonlyArray<ExecutionBackend.StartInput>>([])
+      const childInputs = yield* Ref.make<ReadonlyArray<ExecutionBackend.InvokeChildInput>>([])
       const liveBackend = ExecutionBackend.Service.of({
         ...backend,
+        invokeChild: (input) =>
+          Ref.update(childInputs, (all) => [...all, input]).pipe(Effect.as({ ...input, type: "accepted" as const })),
+        follow: (executionId) =>
+          executionId === "child:turn-interactive:title"
+            ? Effect.succeed({
+                turnId: executionId,
+                status: "completed" as const,
+                events: [
+                  {
+                    cursor: "title-a",
+                    sequence: 1,
+                    type: "model.output.completed" as const,
+                    createdAt: 3,
+                    text: "answer",
+                  },
+                  { cursor: "title-b", sequence: 2, type: "execution.completed" as const, createdAt: 4 },
+                ],
+              })
+            : backend.follow!(executionId, undefined),
         start: (input) =>
           Ref.update(startInputs, (all) => [...all, input]).pipe(
             Effect.andThen(
@@ -3103,8 +3123,7 @@ describe("Operation", () => {
         yield* Effect.yieldNow
         yield* session.submit("exact prompt")
         while ((yield* turns.get(Turn.TurnId.make("turn-interactive")))?.status !== "completed") yield* Effect.yieldNow
-        while ((yield* Ref.get(events)).filter((event) => event._tag !== "ThreadsListed").length < 5)
-          yield* Effect.yieldNow
+        while (!(yield* Ref.get(events)).some((event) => event._tag === "ThreadTitled")) yield* Effect.yieldNow
       }).pipe(provideLayer(layer))
       const dispatched = yield* Ref.get(events)
       const transcript = dispatched.filter((event) => event._tag !== "ThreadsListed")
@@ -3146,8 +3165,12 @@ describe("Operation", () => {
         },
       ])
       expect(transcript[5]).toMatchObject({ _tag: "ThreadTitled", threadId: "thread-interactive", title: "answer" })
-      const titleStart = (yield* Ref.get(startInputs)).find((input) => input.turnId === "title:turn-interactive")
-      expect(titleStart?.sessionPurpose).toEqual({ _tag: "ThreadTitle", owningTurnId: "turn-interactive" })
+      expect(yield* Ref.get(childInputs)).toContainEqual({
+        parentTurnId: "turn-interactive",
+        childId: "title",
+        profile: "Title",
+        prompt: "exact prompt",
+      })
       expect(yield* turns.get(Turn.TurnId.make("turn-interactive"))).toMatchObject({
         prompt: "exact prompt",
         status: "completed",
@@ -3266,6 +3289,7 @@ describe("Operation", () => {
       const turns = yield* TurnRepository.makeMemory()
       const sessions = yield* Ref.make<ReadonlyArray<Operation.InteractiveSession>>([])
       const starts = yield* Ref.make<ReadonlyArray<string>>([])
+      const titleInvocations = yield* Ref.make<ReadonlyArray<ExecutionBackend.InvokeChildInput>>([])
       const titleRoute = {
         ...Turn.testExecutionRoute("low").main,
         role: "title" as const,
@@ -3274,6 +3298,25 @@ describe("Operation", () => {
       }
       const routedBackend = ExecutionBackend.Service.of({
         ...backend,
+        invokeChild: (input) =>
+          Ref.update(titleInvocations, (values) => [...values, input]).pipe(
+            Effect.as({ ...input, type: "accepted" as const }),
+          ),
+        follow: (executionId) =>
+          Effect.succeed({
+            turnId: executionId,
+            status: "completed" as const,
+            events: [
+              {
+                cursor: "title-output",
+                sequence: 1,
+                type: "model.output.completed" as const,
+                createdAt: 3,
+                text: "Selected Route Title",
+              },
+              { cursor: "title-completed", sequence: 2, type: "execution.completed" as const, createdAt: 4 },
+            ],
+          }),
         start: (input) =>
           Ref.update(starts, (values) => [...values, `${input.executionRoute.main.model}:${input.turnId}`]).pipe(
             Effect.as({
@@ -3285,7 +3328,7 @@ describe("Operation", () => {
                   sequence: 1,
                   type: "model.output.completed" as const,
                   createdAt: 1,
-                  text: input.turnId.startsWith("title:") ? "Selected Route Title" : "answer",
+                  text: "answer",
                 },
                 {
                   cursor: `cursor:${input.turnId}:completed`,
@@ -3321,12 +3364,12 @@ describe("Operation", () => {
           ephemeral: false,
         })
         yield* session.submit("Build groceries", "high")
-        while ((yield* Ref.get(starts)).length < 2) yield* Effect.yieldNow
+        while ((yield* Ref.get(titleInvocations)).length < 1) yield* Effect.yieldNow
       }).pipe(provideLayer(layer))
 
-      expect(yield* Ref.get(starts)).toEqual([
-        "high-model:turn-selected-title",
-        "gpt-5.6-luna:title:turn-selected-title",
+      expect(yield* Ref.get(starts)).toEqual(["high-model:turn-selected-title"])
+      expect(yield* Ref.get(titleInvocations)).toEqual([
+        { parentTurnId: "turn-selected-title", childId: "title", profile: "Title", prompt: "Build groceries" },
       ])
       expect(yield* repository.get(Thread.ThreadId.make("thread-selected-title"))).toMatchObject({
         title: "Selected Route Title",
@@ -3343,10 +3386,7 @@ describe("Operation", () => {
       const runSync = Effect.runSyncWith(yield* Effect.context<never>())
       const titleFailingBackend = ExecutionBackend.Service.of({
         ...backend,
-        start: (input) =>
-          input.turnId.startsWith("title:")
-            ? Effect.fail(ExecutionBackend.BackendError.make({ message: "title unavailable" }))
-            : backend.start(input),
+        invokeChild: () => Effect.fail(ExecutionBackend.BackendError.make({ message: "title unavailable" })),
       })
       const layer = Operation.productLayer({
         repositoryLayer: Layer.succeed(ThreadRepository.Service, repository),
@@ -3400,7 +3440,7 @@ describe("Operation", () => {
         start: (input) => Ref.update(starts, (count) => count + 1).pipe(Effect.andThen(backend.start(input))),
         inspect: (executionId) =>
           Effect.succeed(
-            executionId === "title:title-restart-turn"
+            executionId === "child:title-restart-turn:title"
               ? {
                   turnId: executionId,
                   status: "completed" as const,
@@ -3448,7 +3488,7 @@ describe("Operation", () => {
       )
 
       expect(yield* Ref.get(starts)).toBe(0)
-      expect(yield* Ref.get(replayed)).toContain("title:title-restart-turn")
+      expect(yield* Ref.get(replayed)).toContain("child:title-restart-turn:title")
     }),
   )
 

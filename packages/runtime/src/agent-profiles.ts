@@ -9,6 +9,7 @@ import readThreadPrompt from "./prompts/read-thread.prompt.txt"
 import reviewPrompt from "./prompts/review.prompt.txt"
 import rootPrompt from "./prompts/root.prompt.txt"
 import taskPrompt from "./prompts/task.prompt.txt"
+import titlePrompt from "./prompts/title.prompt.txt"
 
 export const names = ["Oracle", "Librarian", "Painter", "Review", "ReadThread", "Task"] as const
 export type Name = (typeof names)[number]
@@ -25,6 +26,19 @@ const instructions = (name: string, prompt: string) => {
 }
 
 export const mainInstructions = instructions("root", rootPrompt)
+export const titleInstructions = instructions("Title", titlePrompt)
+
+export const resolveTitle = (model: ModelRegistry.ModelSelection) => ({
+  instructions: titleInstructions,
+  model: {
+    provider: model.provider,
+    model: model.model,
+    ...(model.registrationKey === undefined ? {} : { registration_key: model.registrationKey }),
+  },
+  tool_names: [] as ReadonlyArray<string>,
+  permissions: [] as ReadonlyArray<string>,
+  metadata: { product_profile: "Title" },
+})
 
 const definitions = {
   Oracle: {
@@ -49,7 +63,7 @@ const definitions = {
   },
   ReadThread: {
     instructions: instructions("ReadThread", readThreadPrompt),
-    tools: [ThreadTools.findThreadTool, ThreadTools.readThreadTool],
+    tools: [ThreadTools.searchThreadsTool, ThreadTools.readThreadTranscriptTool],
     permissions: ["thread.read"],
   },
   Task: {
@@ -69,10 +83,14 @@ const definitions = {
 
 const resolveImpl = (name: Name, model: ModelRegistry.ModelSelection) => {
   const definition = definitions[name]
-  const toolkit = Toolkit.make(
-    ...definition.tools,
-    ...(name === "Oracle" || name === "Review" ? [] : Object.values(AgentTools.modelToolkit.tools)),
-  )
+  const delegationTools = (() => {
+    if (name === "ReadThread") return []
+    if (name === "Oracle" || name === "Review") return [AgentTools.readThreadTool]
+    return Object.values(AgentTools.modelToolkit.tools)
+  })()
+  const recoveryTools =
+    name === "ReadThread" ? [] : [ThreadTools.searchThreadsTool, ThreadTools.readThreadTranscriptTool]
+  const toolkit = Toolkit.make(...definition.tools, ...delegationTools, ...recoveryTools)
   const relayModel = {
     provider: model.provider,
     model: model.model,
@@ -118,33 +136,16 @@ export const resolvePainter = Effect.fn("AgentProfiles.resolvePainter")(function
   return resolve("Painter", model)
 })
 
-const presetsImpl = (
-  model: ModelRegistry.ModelSelection,
-  oracleModel?: ModelRegistry.ModelSelection,
-  agentModels?: Partial<Readonly<Record<Name, ModelRegistry.ModelSelection>>>,
-): Record<string, ResolvedProfile["preset"]> =>
+export const presets = (options: {
+  readonly model: ModelRegistry.ModelSelection
+  readonly oracleModel?: ModelRegistry.ModelSelection | undefined
+}): Record<string, ResolvedProfile["preset"]> =>
   Object.fromEntries(
     names.map((name) => [
       name,
-      resolve(name, agentModels?.[name] ?? (name === "Oracle" ? (oracleModel ?? model) : model)).preset,
+      resolve(name, name === "Task" ? options.model : (options.oracleModel ?? options.model)).preset,
     ]),
   )
-
-export const presets: {
-  (
-    model: ModelRegistry.ModelSelection,
-    oracleModel?: ModelRegistry.ModelSelection,
-    agentModels?: Partial<Readonly<Record<Name, ModelRegistry.ModelSelection>>>,
-  ): Record<string, ResolvedProfile["preset"]>
-  (
-    oracleModel?: ModelRegistry.ModelSelection,
-    agentModels?: Partial<Readonly<Record<Name, ModelRegistry.ModelSelection>>>,
-  ): (model: ModelRegistry.ModelSelection) => Record<string, ResolvedProfile["preset"]>
-} = Function.dual(
-  (arguments_) =>
-    arguments_.length > 0 && (arguments_.length !== 2 || arguments_[1] === undefined || "provider" in arguments_[1]),
-  presetsImpl,
-)
 
 export const parentPermissions = [...new Set(names.flatMap((name) => definitions[name].permissions))].map((name) => ({
   name,

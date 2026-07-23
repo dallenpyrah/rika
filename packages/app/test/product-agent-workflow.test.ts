@@ -134,12 +134,4 @@ describe("ProductAgent and Workflow", () => {
       expect(results.every((error) => error.message === "backend failed")).toBe(true)
     }).pipe(provideLayer(Layer.merge(ProductAgent.layer, Workflow.layer).pipe(Layer.provide(failedLayer)))),
   )
-
-  it("selects all product profiles", () => {
-    expect(
-      ["review", "research", "documentation", "architecture", "investigate", "image", "visual", "thread", "other"].map(
-        ProductAgent.selectProfile,
-      ),
-    ).toEqual(["Review", "Librarian", "Librarian", "Oracle", "Oracle", "Painter", "Painter", "ReadThread", "Task"])
-  })
 })

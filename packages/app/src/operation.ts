@@ -5,6 +5,7 @@ import * as TurnRepository from "@rika/persistence/turn-repository"
 import * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
+import { AgentDepth } from "@rika/runtime"
 import * as Transcript from "@rika/transcript"
 import * as ProductAgent from "./product-agent"
 import { ExecutionExtensions } from "@rika/extensions"
@@ -102,7 +103,7 @@ const ignoreInteractiveEvent = (_event: InteractiveEvent) => {}
 
 const temporaryThreadTitle = (prompt: string) => [...prompt].slice(0, 80).join("") || "New thread"
 
-const titleExecutionId = (turnId: Turn.TurnId) => `title:${turnId}`
+const titleExecutionId = (turnId: Turn.TurnId) => AgentDepth.childExecutionId(String(turnId), "title")
 
 const sanitizeThreadTitle = (text: string) =>
   [
@@ -1209,20 +1210,17 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             settledTitleExecutions.add(executionId)
             return
           }
-          const titleExecutionRoute = {
-            ...firstTurn.executionRoute,
-            main: { ...firstTurn.executionRoute.title, role: "main" as const },
-          }
           let result
           if (inspection === undefined) {
-            result = yield* backend.start({
-              threadId: thread.id,
-              turnId: executionId,
-              prompt: `Generate a concise 3-6 word title for a conversation that starts with the following user message. Reply with only the title, no quotes, no punctuation.\n\n${firstTurn.prompt.slice(0, 2000)}`,
-              startedAt: firstTurn.updatedAt,
-              executionRoute: titleExecutionRoute,
-              sessionPurpose: { _tag: "ThreadTitle", owningTurnId: String(firstTurn.id) },
+            yield* backend.invokeChild({
+              parentTurnId: String(firstTurn.id),
+              childId: "title",
+              profile: "Title",
+              prompt: firstTurn.prompt.slice(0, 2000),
             })
+            const spawned = yield* backend.inspect(executionId)
+            if (spawned !== undefined && isTerminalStatus(spawned.status)) result = yield* backend.replay(executionId)
+            else if (backend.follow !== undefined) result = yield* backend.follow(executionId, undefined)
           } else if (isTerminalStatus(inspection.status)) {
             result = yield* backend.replay(executionId)
           } else if (backend.follow !== undefined) {

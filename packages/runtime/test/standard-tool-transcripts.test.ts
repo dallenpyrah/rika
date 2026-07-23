@@ -17,8 +17,8 @@ const cases = [
   ["web_search", { objective: "deterministic research", searchQueries: ["fixture"] }, "objective"],
   ["read_web_page", { url: "https://example.test/page", fullContent: true }, "url"],
   ["view_media", { path: "fixture.png" }, "path"],
-  ["find_thread", { query: "workspace:fixture", limit: 1 }, "query"],
-  ["read_thread", { threadId: "thread-fixture", maxTurns: 1, maxChars: 100 }, "threadId"],
+  ["search_threads", { query: "workspace:fixture", limit: 1 }, "query"],
+  ["read_thread_transcript", { threadId: "thread-fixture", maxTurns: 1, maxChars: 100 }, "threadId"],
 ] as const
 
 const caseNames = new Set<string>(cases.map(([name]) => name))
@@ -28,8 +28,8 @@ const standardNames = Catalog.definitions
 
 const threadHandlers = ThreadTools.toolkit.toLayer(
   Effect.succeed({
-    find_thread: () => Effect.succeed({ text: "thread result", truncated: false }),
-    read_thread: () => Effect.succeed({ text: "thread transcript", truncated: false }),
+    search_threads: () => Effect.succeed({ text: "thread result", truncated: false }),
+    read_thread_transcript: () => Effect.succeed({ text: "thread transcript", truncated: false }),
   }),
 )
 
@@ -102,7 +102,7 @@ for (const [name, parameters, malformedField] of cases) {
               expect(result.replay.events).toEqual(result.completed.events)
               expect(definition.permission).toBe("allow")
               expect(transcript).not.toContain("rika-tool-matrix-")
-              if (name !== "read" && name !== "find_thread" && name !== "read_thread")
+              if (name !== "read" && name !== "search_threads" && name !== "read_thread_transcript")
                 expect(transcript).toContain('"truncated":true')
               if (name === "read") expect(transcript).toContain("[REDACTED]")
             })

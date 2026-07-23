@@ -4,7 +4,6 @@ import {
   type Diagnostic,
   type EffectiveConfig,
   type Environment,
-  type AgentId,
   type HttpProviderConnection,
   type HttpProviderOverride,
   isStreamingOnlyBaseUrl,
@@ -98,33 +97,7 @@ const mergeSettings = (global: SettingsInput, workspace: SettingsInput): Setting
               ]
             }),
           ) as Settings["modes"]),
-    agents:
-      global.modelRoutes?.agents === undefined && workspace.modelRoutes?.agents === undefined
-        ? defaults.agents
-        : (Object.fromEntries(
-            Object.entries(defaults.agents).map(([agent, configured]) => [
-              agent,
-              {
-                ...configured,
-                alias:
-                  workspace.modelRoutes?.agents?.[agent as AgentId] ??
-                  global.modelRoutes?.agents?.[agent as AgentId] ??
-                  configured.alias,
-              },
-            ]),
-          ) as Settings["agents"]),
-    compaction:
-      global.modelRoutes?.compaction === undefined && workspace.modelRoutes?.compaction === undefined
-        ? defaults.compaction
-        : {
-            summaryModel: {
-              ...defaults.compaction.summaryModel,
-              alias:
-                workspace.modelRoutes?.compaction ??
-                global.modelRoutes?.compaction ??
-                defaults.compaction.summaryModel.alias,
-            },
-          },
+    compaction: defaults.compaction,
     keymap: { ...defaults.keymap, ...global.keymap, ...workspace.keymap },
     permissions: { ...defaults.permissions, ...global.permissions, ...workspace.permissions },
     extensionRoots: workspace.extensionRoots ?? global.extensionRoots ?? defaults.extensionRoots,
@@ -155,6 +128,14 @@ const diagnostics = (
   }
   record(global, "global")
   record(workspace, "workspace")
+  if (global.modelRoutes?.agents !== undefined)
+    entries.push({ path: "modelRoutes.agents", source: "global", message: "legacy agent routes ignored" })
+  if (workspace.modelRoutes?.agents !== undefined)
+    entries.push({ path: "modelRoutes.agents", source: "workspace", message: "legacy agent routes ignored" })
+  if (global.modelRoutes?.compaction !== undefined)
+    entries.push({ path: "modelRoutes.compaction", source: "global", message: "legacy compaction route ignored" })
+  if (workspace.modelRoutes?.compaction !== undefined)
+    entries.push({ path: "modelRoutes.compaction", source: "workspace", message: "legacy compaction route ignored" })
   for (const providerId of Object.keys(environment.webSearchCredentials).toSorted())
     entries.push({
       path: `webSearchCredentials.${providerId}`,

@@ -28,7 +28,6 @@ describe("ConfigService", () => {
       expect(config.settings.providers).toEqual(ConfigContract.defaults.providers)
       expect(config.settings.models).toBe(ConfigContract.defaults.models)
       expect(config.settings.modes).toBe(ConfigContract.defaults.modes)
-      expect(config.settings.agents).toBe(ConfigContract.defaults.agents)
       expect(config.settings.compaction).toBe(ConfigContract.defaults.compaction)
       expect(config.environment.providerCredentials).toEqual({})
       expect(config.environment.webSearchCredentials).toEqual({})
@@ -50,7 +49,6 @@ describe("ConfigService", () => {
         ConfigContract.resolveModelRoute(config.settings, "ultra", "oracle"),
         ConfigContract.resolveThreadTitleRoute(config.settings),
         ConfigContract.resolveCompactionSummaryRoute(config.settings),
-        ConfigContract.resolveAgentRoute(config.settings, "task"),
       ]
       expect(routes.every((route) => route.providerConnection === config.settings.providers.openai)).toBe(true)
       expect(routes.map((route) => route.providerConnection.baseUrl)).toEqual(
@@ -116,12 +114,15 @@ describe("ConfigService", () => {
       expect(alias.limits).toBe(ConfigContract.defaults.models.sol!.limits)
       expect(alias.variants).toBe(ConfigContract.defaults.models.sol!.variants)
       expect(config.settings.modes.medium).toEqual({
-        main: { alias: "bedrock-terra", effort: "medium" },
-        oracle: { alias: "bedrock-terra", effort: "high" },
+        main: { alias: "bedrock-terra", effort: "xhigh" },
+        oracle: { alias: "bedrock-terra", effort: "medium" },
       })
-      expect(config.settings.agents.task.alias).toBe("bedrock-fable")
-      expect(config.settings.agents.readThread.alias).toBe("bedrock-terra")
-      expect(config.settings.compaction.summaryModel).toEqual({ alias: "bedrock-fable", effort: "medium" })
+      expect(config.settings.compaction).toBe(ConfigContract.defaults.compaction)
+      expect(config.diagnostics).toContainEqual({
+        path: "modelRoutes.agents",
+        source: "workspace",
+        message: "legacy agent routes ignored",
+      })
     }).pipe(
       provideLayer(
         ConfigService.memoryLayer({

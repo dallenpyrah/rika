@@ -3509,15 +3509,15 @@ const paletteContent = (
 
 const modeGaugeFill = { low: 2, medium: 19, high: 36, ultra: 54 } as const
 const modeAgentLabel = {
-  low: "GPT-5.6 Luna low",
-  medium: "GPT-5.6 Terra medium",
-  high: "GPT-5.6 Sol xhigh",
-  ultra: "GPT-5.6 Sol max",
+  low: "GPT-5.6 Luna xhigh",
+  medium: "GPT-5.6 Terra xhigh",
+  high: "GPT-5.6 Sol medium",
+  ultra: "GPT-5.6 Sol xhigh",
 } as const
 const modeOracleLabel = {
-  low: "GPT-5.6 Sol high",
-  medium: "GPT-5.6 Sol high",
-  high: "GPT-5.6 Sol max",
+  low: "GPT-5.6 Terra xhigh",
+  medium: "GPT-5.6 Sol medium",
+  high: "GPT-5.6 Sol high",
   ultra: "GPT-5.6 Sol max",
 } as const
 const modeDescription = {

@@ -9,8 +9,9 @@ export const handlerLayer = ThreadTools.toolkit.toLayer(
   Effect.gen(function* () {
     const query = yield* Service
     return {
-      find_thread: (input) => query.find(input).pipe(Effect.mapError((cause) => error("find_thread", cause))),
-      read_thread: (input) => query.read(input).pipe(Effect.mapError((cause) => error("read_thread", cause))),
+      search_threads: (input) => query.find(input).pipe(Effect.mapError((cause) => error("search_threads", cause))),
+      read_thread_transcript: (input) =>
+        query.read(input).pipe(Effect.mapError((cause) => error("read_thread_transcript", cause))),
     }
   }),
 )

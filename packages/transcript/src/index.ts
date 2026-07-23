@@ -181,8 +181,8 @@ const detailFor = (name: string, inputText: string): string => {
   if (normalizedName === "shell_command_status") return inputString(input, ["processId", "process_id"]) ?? ""
   if (normalizedName === "web_search") return inputString(input, ["objective", "query"]) ?? ""
   if (normalizedName === "read_web_page") return inputString(input, ["url"]) ?? ""
-  if (normalizedName === "find_thread") return inputString(input, ["query"]) ?? ""
-  if (normalizedName === "read_thread") return inputString(input, ["threadId", "thread_id", "id"]) ?? ""
+  if (normalizedName === "search_threads") return inputString(input, ["query"]) ?? ""
+  if (normalizedName === "read_thread_transcript") return inputString(input, ["threadId", "thread_id", "id"]) ?? ""
   if (path !== undefined) return path
   return inputString(input, ["description", "prompt", "task", "query", "objective"]) ?? inputContentText(input) ?? ""
 }

@@ -1,6 +1,8 @@
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
 import * as TurnRepository from "@rika/persistence/turn-repository"
+import * as TranscriptRepository from "@rika/persistence/transcript-repository"
+import type * as Transcript from "@rika/transcript"
 import { Context, Effect, Layer, Schema } from "effect"
 
 export interface FindInput {
@@ -111,11 +113,38 @@ const bound = (text: string, maximum: number, truncated = false): Result => ({
   truncated: truncated || text.length > maximum,
 })
 
+const renderUnit = (unit: Transcript.Unit): string | undefined => {
+  const content = unit.content
+  if (content._tag === "Entry") {
+    if (content.role === "user") return `User: ${content.text}`
+    if (content.role === "assistant") return `Assistant: ${content.text}`
+    return `Notice: ${content.text}`
+  }
+  const block = content.block
+  if (block._tag === "Reasoning") return undefined
+  if (block._tag === "ToolCall")
+    return `Tool call: ${block.name} (${block.status})\nInput: ${block.input}${block.output === undefined ? "" : `\nOutput: ${block.output}`}`
+  if (block._tag === "ToolResult") return `Tool result${block.failed ? " (failed)" : ""}: ${block.output}`
+  if (block._tag === "ChildAgent")
+    return `Child agent ${block.name} (${block.status}): ${block.summary}${block.activity.length === 0 ? "" : `\nActivity: ${block.activity.join("; ")}`}`
+  if (block._tag === "Compaction") return `Compaction (${block.status ?? "complete"}): ${block.summary}`
+  if (block._tag === "Error")
+    return `Error: ${block.title}\n${block.detail}${block.recovery === undefined ? "" : `\nRecovery: ${block.recovery}`}`
+  if (block._tag === "Notification") return `Notice: ${block.title}\n${block.detail}`
+  if (block._tag === "Diff") return `Diff ${block.path}:\n${block.patch}`
+  if (block._tag === "Permission") return `Permission (${block.status}): ${block.title}\n${block.detail}`
+  if (block._tag === "Workflow") return `Workflow ${block.name} (${block.status}): ${block.step}`
+  if (block._tag === "ImageAttachment") return `Image: ${block.name} (${block.mediaType})`
+  if (block._tag === "ContextUsage") return `Context usage: ${block.text}`
+  return undefined
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const threads = yield* ThreadRepository.Service
     const turns = yield* TurnRepository.Service
+    const transcripts = yield* TranscriptRepository.Service
     return Service.of({
       find: Effect.fn("ThreadQuery.find")(function* (input) {
         const parsed = yield* parse(input.query)
@@ -164,8 +193,25 @@ export const layer = Layer.effect(
           .list(threadId)
           .pipe(Effect.mapError((error) => QueryError.make({ message: error.message })))
         const selected = allTurns.slice(0, maxTurns)
-        const sections = selected.map((turn) =>
-          [`## Turn ${turn.id} (${turn.status})`, `User: ${turn.prompt}`].join("\n"),
+        const sections = yield* Effect.forEach(selected, (turn) =>
+          transcripts.get(turn.id).pipe(
+            Effect.mapError((error) => QueryError.make({ message: error.message })),
+            Effect.map((projection) => {
+              const rendered =
+                projection?.units.flatMap((unit) => {
+                  const text = renderUnit(unit)
+                  return text === undefined ? [] : [text]
+                }) ?? []
+              const hasUser = projection?.units.some(
+                (unit) => unit.content._tag === "Entry" && unit.content.role === "user",
+              )
+              return [
+                `## Turn ${turn.id} (${turn.status})`,
+                ...(hasUser === true ? [] : [`User: ${turn.prompt}`]),
+                ...rendered,
+              ].join("\n")
+            }),
+          ),
         )
         const text = [`# ${thread.title}`, `Thread: ${thread.id}`, `Workspace: ${thread.workspace}`, ...sections].join(
           "\n\n",

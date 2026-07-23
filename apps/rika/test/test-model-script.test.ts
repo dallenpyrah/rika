@@ -9,6 +9,7 @@ import * as Database from "@rika/persistence/database"
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
 import * as TurnRepository from "@rika/persistence/turn-repository"
+import * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import * as Turn from "@rika/persistence/turn"
 import * as ExecutionBackend from "@rika/runtime/contract"
 import { ViewState } from "@rika/tui"
@@ -192,12 +193,10 @@ test("content-addresses non-secret model execution semantics deterministically",
     { ...route, providerConnection: { ...route.providerConnection, protocol: "anthropic" as const } },
     { ...route, providerConnection: { ...route.providerConnection, baseUrl: "https://models.example.test/v1" } },
     { ...route, model: "claude-opus-4-8" },
-    { ...route, effort: "high" as const },
+    { ...route, effort: "xhigh" as const },
     { ...route, fast: true },
     { ...route, options: { ...route.options, max_tokens: 64_000 } },
     { ...route, options: { ...route.options, service_tier: "priority" } },
-    { ...route, providerConnection: { ...route.providerConnection, apiKeyEnv: undefined } },
-    { ...route, providerConnection: { ...route.providerConnection, apiKeyEnv: "OTHER_API_KEY" } },
   ]
   for (const changed of changes) expect(modelRoutePlan(changed).registrationKey).not.toBe(key)
   expect(JSON.stringify(modelRoutePlan(route))).not.toContain("API_KEY_VALUE")
@@ -205,7 +204,6 @@ test("content-addresses non-secret model execution semantics deterministically",
   expect(executionRoutePin(ConfigContract.defaults, "high").oracle.providerOptions).toEqual(
     modelRoutePlan(route).options,
   )
-  expect(executionRoutePin(ConfigContract.defaults, "high").agents?.review.alias).toBe("sol")
   expect(executionRoutePin(ConfigContract.defaults, "medium").tokenBudget).toBeUndefined()
   const settings = {
     ...ConfigContract.defaults,
@@ -261,44 +259,17 @@ test("pins aliases, variants, candidates, specialists, titles, and summaries as 
     },
   }
   const resolved = modelRoutesForExecution(settings, "high", { fastMode: true })
-  expect(resolved.map((route) => route.alias)).toEqual([
-    "sol",
-    "sol",
-    "luna",
-    "terra",
-    "sol",
-    "sol",
-    "sol",
-    "terra",
-    "terra",
-  ])
+  expect(resolved.map((route) => route.alias)).toEqual(["sol", "sol", "luna", "sol"])
   expect(resolved.map((route) => route.model)).toEqual(resolved.map((route) => route.candidates[0]))
 
   const pin = executionRoutePin(settings, "high", { fastMode: true })
-  expect(executionModelRoutes(pin).map((route) => route.role)).toEqual([
-    "main",
-    "oracle",
-    "title",
-    "compaction",
-    "librarian",
-    "painter",
-    "review",
-    "readThread",
-    "task",
-  ])
+  expect(executionModelRoutes(pin).map((route) => route.role)).toEqual(["main", "oracle", "title", "compaction"])
   expect(pin).toMatchObject({
     mode: "high",
-    main: { alias: "sol", effort: "xhigh", fast: true },
-    oracle: { alias: "sol", effort: "max", fast: true },
+    main: { alias: "sol", effort: "medium", fast: true },
+    oracle: { alias: "sol", effort: "high", fast: true },
     title: { alias: "luna", effort: "low", fast: false },
-    compactionSummary: { alias: "terra", effort: "medium", fast: false },
-    agents: {
-      librarian: { alias: "sol", effort: "high" },
-      painter: { alias: "sol", effort: "high" },
-      review: { alias: "sol", effort: "high" },
-      readThread: { alias: "terra", effort: "medium" },
-      task: { alias: "terra", effort: "medium" },
-    },
+    compactionSummary: { alias: "sol", effort: "xhigh", fast: false },
   })
   for (const route of executionModelRoutes(pin)) {
     expect(route.providerBaseUrl).toBe("https://models.example.test/v1?tenant=admission")
@@ -306,8 +277,8 @@ test("pins aliases, variants, candidates, specialists, titles, and summaries as 
     expect(route.requestVariant).toBe(route.registrationKey)
     expect(JSON.stringify(route)).not.toContain("secret")
   }
-  expect(pin.main.providerOptions).toMatchObject({ reasoning: { effort: "xhigh" }, service_tier: "priority" })
-  expect(pin.oracle.providerOptions).toMatchObject({ reasoning: { effort: "max" }, service_tier: "priority" })
+  expect(pin.main.providerOptions).toMatchObject({ reasoning: { effort: "medium" }, service_tier: "priority" })
+  expect(pin.oracle.providerOptions).toMatchObject({ reasoning: { effort: "high" }, service_tier: "priority" })
   expect(pin.title?.providerOptions).not.toHaveProperty("service_tier")
   expect(pin.compactionSummary?.providerOptions).not.toHaveProperty("service_tier")
 })
@@ -616,6 +587,7 @@ test("builds the configured backend with duplicate persisted routes and one unav
               workspace: "/work",
               repositoryLayer,
               turnRepositoryLayer,
+              transcriptRepositoryLayer: TranscriptRepository.memoryLayer,
               settings,
               persistedModelRoutes: [restored, restored, stale],
             }).pipe(Layer.provide(providerLayer)),
@@ -670,13 +642,7 @@ test("resolves a legacy unavailable route to the current default when it starts"
       }
       const starts = new Array<ExecutionBackend.StartInput>()
       const isolated = yield* withPinnedRouteRegistration(recordingBackend(starts), {
-        registeredRoutes: [
-          current.main,
-          current.oracle,
-          current.title!,
-          current.compactionSummary!,
-          ...Object.values(current.agents!),
-        ],
+        registeredRoutes: [current.main, current.oracle, current.title!, current.compactionSummary!],
         unavailable: [],
         registerPinnedRoutes: (routes) =>
           Effect.succeed(
@@ -759,11 +725,6 @@ test("restores every pinned role from a nonterminal turn into the restart regist
     "workspace-oracle",
     route.title!.registrationKey,
     route.compactionSummary!.registrationKey,
-    route.agents!.librarian.registrationKey,
-    route.agents!.painter.registrationKey,
-    route.agents!.review.registrationKey,
-    route.agents!.readThread.registrationKey,
-    route.agents!.task.registrationKey,
   ])
   const titleOwner: Turn.Turn = {
     ...owner,
@@ -855,7 +816,7 @@ test("uses the owning thread workspace for durable title executions", () =>
           now: 1,
         })
         const workspace = yield* resolveExecutionWorkspace(
-          "execution:title:title-workspace-turn",
+          "child:execution%3Atitle-workspace-turn:title",
           "/backend-workspace",
           repositoryLayer,
           repositoryLayer,

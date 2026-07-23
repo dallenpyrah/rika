@@ -34,28 +34,29 @@ export const ReadThreadInput = Schema.Struct({
   maxChars: Schema.optionalKey(PositiveInt),
 })
 
-export const findThreadTool = Tool.make("find_thread", {
+export const searchThreadsTool = Tool.make("search_threads", {
   description:
-    "Find local Rika threads by bounded metadata query terms. Supports plain text and workspace:, repo:, ref:, author:, label:, file:, after:, and before: terms.",
+    "Internal ReadThread agent tool. Find local Rika threads by bounded metadata query terms. Supports plain text and workspace:, repo:, ref:, author:, label:, file:, after:, and before: terms.",
   parameters: FindThreadInput,
   success: Result,
   failure: ToolFailure,
   failureMode: "return",
 })
 
-export const readThreadTool = Tool.make("read_thread", {
-  description: "Read a bounded deterministic transcript for one local Rika thread by id",
+export const readThreadTranscriptTool = Tool.make("read_thread_transcript", {
+  description:
+    "Internal ReadThread agent tool. Read a bounded deterministic transcript for one local Rika thread by id",
   parameters: ReadThreadInput,
   success: Result,
   failure: ToolFailure,
   failureMode: "return",
 })
 
-export const toolkit = Toolkit.make(findThreadTool, readThreadTool)
+export const toolkit = Toolkit.make(searchThreadsTool, readThreadTranscriptTool)
 
 export const registrations: ReadonlyArray<Policy.Registration> = [
   Policy.register(
-    findThreadTool,
+    searchThreadsTool,
     Policy.allow("safe", 10_000, 20_000, {
       family: "explore",
       action: "find-thread",
@@ -65,7 +66,7 @@ export const registrations: ReadonlyArray<Policy.Registration> = [
     }),
   ),
   Policy.register(
-    readThreadTool,
+    readThreadTranscriptTool,
     Policy.allow("safe", 10_000, 40_000, {
       family: "direct",
       action: "read-thread",

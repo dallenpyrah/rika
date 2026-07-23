@@ -5,29 +5,23 @@ import { AgentTools, Catalog, ParallelSearch, ProcessRegistry, Runtime, ThreadTo
 import { provide } from "./test-layer"
 
 describe("tool contracts", () => {
-  it.effect("defines the model-facing Task spawn contract and rejects unknown model variants", () =>
+  it.effect("defines the model-facing Task spawn contract without model routing controls", () =>
     Effect.gen(function* () {
       const schema = Tool.getJsonSchema(AgentTools.taskTool)
       expect(AgentTools.taskTool.description).toContain(
         "Independent explorations SHOULD be parallel spawn calls in one turn.",
       )
-      expect(AgentTools.taskTool.description).toContain("Omit model to inherit the parent model and effort.")
-      expect(AgentTools.taskTool.description).toContain(AgentTools.modelGuidance)
       expect(schema).toMatchObject({
         properties: {
           prompt: { type: "string" },
-          model: { enum: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"] },
         },
         required: ["prompt"],
       })
       expect(schema.properties).not.toHaveProperty("_batch")
-      expect(
-        yield* Schema.decodeUnknownEffect(AgentTools.TaskInput)({ prompt: "List files", model: "gpt-5.6-luna" }),
-      ).toEqual({ prompt: "List files", model: "gpt-5.6-luna" })
-      const invalid = yield* Effect.flip(
-        Schema.decodeUnknownEffect(AgentTools.TaskInput)({ prompt: "List files", model: "gpt-5.6-unknown" }),
-      )
-      expect(String(invalid)).toContain("gpt-5.6-unknown")
+      expect(schema.properties).not.toHaveProperty("model")
+      expect(yield* Schema.decodeUnknownEffect(AgentTools.TaskInput)({ prompt: "List files" })).toEqual({
+        prompt: "List files",
+      })
     }),
   )
 
@@ -52,6 +46,7 @@ describe("tool contracts", () => {
       "oracle",
       "librarian",
       "review",
+      "read_thread",
     ])
   })
 
@@ -140,12 +135,12 @@ describe("tool contracts", () => {
       action: "read-web-page",
       outputDisplay: "hidden",
     })
-    expect(Catalog.get("find_thread")?.presentation).toMatchObject({
+    expect(Catalog.get("search_threads")?.presentation).toMatchObject({
       family: "explore",
       activeLabel: "Exploring",
       completeLabel: "Explored",
     })
-    expect(Catalog.get("read_thread")?.presentation).toMatchObject({
+    expect(Catalog.get("read_thread_transcript")?.presentation).toMatchObject({
       family: "direct",
       activeLabel: "Reading Thread",
       completeLabel: "Read Thread",

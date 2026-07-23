@@ -9,7 +9,7 @@ Unselected summaries show the action or agent identity as primary text and mute 
 | `read`                               | `Exploring`                      | `Explored`                      | `Read <path>`          |
 | `view_media`                         | `Exploring`                      | `Explored`                      | `Viewed <path>`        |
 | `grep`                               | `Exploring`                      | `Explored`                      | `Grep <query>`         |
-| `find_thread`                        | `Exploring`                      | `Explored`                      | `Searched <query>`     |
+| `search_threads`                     | `Exploring`                      | `Explored`                      | `Searched <query>`     |
 | `skill`                              | `Exploring`                      | `Explored`                      | the skill name         |
 | `write`                              | `Creating <path>`                | `Created <path>`                | the live or final diff |
 | `edit`                               | `Editing <path>`                 | `Edited <path>`                 | the live or final diff |
@@ -23,7 +23,7 @@ Unselected summaries show the action or agent identity as primary text and mute 
 | review agents                        | `Reviewing code`                 | `Reviewed code`                 | delegated task         |
 | `web_search`                         | `Web Search <query>`             | `Web Search <query>`            | none                   |
 | `read_web_page`                      | `Read <url>`                     | `Read <url>`                    | none                   |
-| `read_thread`                        | `Reading Thread <thread>`        | `Read Thread <thread>`          | bounded result         |
+| `read_thread_transcript`             | `Reading Thread <thread>`        | `Read Thread <thread>`          | bounded result         |
 | `painter`                            | `Painter <detail>`               | `Painter <detail>`              | bounded result         |
 | `list_agent_modes`                   | `Checking available agent modes` | `Checked available agent modes` | bounded result         |
 | `load_plugin`                        | `Loading plugin`                 | `Loaded plugin`                 | bounded result         |

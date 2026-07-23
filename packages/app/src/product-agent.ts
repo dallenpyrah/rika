@@ -1,5 +1,4 @@
 import * as ExecutionBackend from "@rika/runtime/contract"
-import type { AgentTools } from "@rika/tools"
 import { Context, Effect, Layer, Schema } from "effect"
 
 export const Profile = Schema.Literals(["Oracle", "Librarian", "Painter", "Review", "ReadThread", "Task"])
@@ -23,7 +22,6 @@ export interface TaskInput {
   readonly id: string
   readonly prompt: string
   readonly profile?: Profile
-  readonly model?: AgentTools.Model
 }
 
 export interface ParallelInput {
@@ -71,7 +69,10 @@ export const layer = Layer.effect(
     const backend = yield* ExecutionBackend.Service
     return Service.of({
       invoke: Effect.fn("ProductAgent.invoke")((input) =>
-        backend.invokeChild(input).pipe(Effect.mapError((cause) => InvocationError.make({ message: cause.message }))),
+        backend.invokeChild(input).pipe(
+          Effect.map((event) => ({ ...event, profile: input.profile })),
+          Effect.mapError((cause) => InvocationError.make({ message: cause.message })),
+        ),
       ),
       fanOut: Effect.fn("ProductAgent.fanOut")((input) =>
         backend.createFanOut(input).pipe(Effect.mapError((cause) => InvocationError.make({ message: cause.message }))),
@@ -98,9 +99,8 @@ export const layer = Layer.effect(
             executionRoute: input.executionRoute,
             children: input.tasks.map((task) => ({
               childId: task.id,
-              profile: task.profile ?? selectProfile(task.prompt),
+              profile: task.profile ?? "Task",
               prompt: task.prompt,
-              ...(task.model === undefined ? {} : { model: task.model }),
             })),
             maxConcurrency: input.maxConcurrency,
             join: input.join ?? "all",
@@ -137,13 +137,3 @@ export const layer = Layer.effect(
     })
   }),
 )
-
-export const selectProfile = (task: string): Profile => {
-  const normalized = task.toLowerCase()
-  if (normalized.includes("review")) return "Review"
-  if (normalized.includes("research") || normalized.includes("documentation")) return "Librarian"
-  if (normalized.includes("architecture") || normalized.includes("investigate")) return "Oracle"
-  if (normalized.includes("image") || normalized.includes("visual")) return "Painter"
-  if (normalized.includes("thread")) return "ReadThread"
-  return "Task"
-}

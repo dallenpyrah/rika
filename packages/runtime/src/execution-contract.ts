@@ -64,9 +64,7 @@ export interface ExecutionRoutePin {
   }
 }
 
-export type SessionPurpose =
-  | { readonly _tag: "Conversation" }
-  | { readonly _tag: "ThreadTitle"; readonly owningTurnId: string }
+export type SessionPurpose = { readonly _tag: "Conversation" }
 
 export interface StartInput {
   readonly threadId: string
@@ -112,7 +110,6 @@ export interface FanOutInput {
     readonly childId: string
     readonly profile?: AgentProfile
     readonly prompt: string
-    readonly model?: string
   }>
   readonly maxConcurrency: number
   readonly join: JoinPolicy
@@ -156,14 +153,14 @@ export interface WorkflowInspection {
 export interface InvokeChildInput {
   readonly parentTurnId: string
   readonly childId: string
-  readonly profile: AgentProfile
+  readonly profile: AgentProfile | "Title"
   readonly prompt: string
 }
 
 export interface ChildEvent {
   readonly parentTurnId: string
   readonly childId: string
-  readonly profile: AgentProfile
+  readonly profile: AgentProfile | "Title"
   readonly type: "accepted"
 }
 

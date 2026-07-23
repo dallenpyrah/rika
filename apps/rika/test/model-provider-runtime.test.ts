@@ -149,10 +149,10 @@ test("sends configured reasoning effort and summary to custom OpenAI requests", 
           yield* Effect.exit(LanguageModel.generateText({ prompt: mode }).pipe(Effect.provide(context)))
         }
         expect(requests.map((request) => request.reasoning)).toEqual([
-          { effort: "low", summary: "auto" },
+          { effort: "xhigh", summary: "auto" },
+          { effort: "xhigh", summary: "auto" },
           { effort: "medium", summary: "auto" },
           { effort: "xhigh", summary: "auto" },
-          { effort: "max", summary: "auto" },
         ])
       }),
     ).pipe(Effect.ensuring(Effect.promise(() => server.stop(true)))),

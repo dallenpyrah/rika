@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import * as ThreadRepository from "@rika/persistence/repository"
 import * as Thread from "@rika/persistence/thread"
 import * as TurnRepository from "@rika/persistence/turn-repository"
+import * as TranscriptRepository from "@rika/persistence/transcript-repository"
 import * as Turn from "@rika/persistence/turn"
 import { Effect, Layer, Schema, Stream } from "effect"
 import { ThreadQuery, ThreadToolHandlers } from "../src"
@@ -35,7 +36,13 @@ const turn = (id: string, threadId: string, prompt: string): Turn.Turn => ({
 
 const queryWith = (threads: ReadonlyArray<Thread.Thread>, turns: ReadonlyArray<Turn.Turn>) =>
   ThreadQuery.layer.pipe(
-    Layer.provide(Layer.merge(ThreadRepository.memoryLayer(threads), TurnRepository.memoryLayer(turns))),
+    Layer.provide(
+      Layer.mergeAll(
+        ThreadRepository.memoryLayer(threads),
+        TurnRepository.memoryLayer(turns),
+        TranscriptRepository.memoryLayer,
+      ),
+    ),
   )
 
 const queryLayer = ThreadQuery.layer.pipe(
@@ -47,6 +54,7 @@ const queryLayer = ThreadQuery.layer.pipe(
         thread("three", "Other repo", { workspace: "/work/other" }),
       ]),
       TurnRepository.memoryLayer([turn("turn-1", "one", "please fix auth")]),
+      TranscriptRepository.memoryLayer,
     ),
   ),
 )
@@ -91,7 +99,7 @@ describe("ThreadQuery", () => {
     Effect.gen(function* () {
       const toolkit = yield* ThreadTools.toolkit
       const chunks = yield* toolkit
-        .handle("read_thread", { threadId: "one", maxChars: 200 })
+        .handle("read_thread_transcript", { threadId: "one", maxChars: 200 })
         .pipe(Effect.flatMap(Stream.runCollect))
       expect(yield* Schema.encodeEffect(Schema.UnknownFromJsonString)([...chunks])).toContain("please fix auth")
     }).pipe(provideLayer(ThreadToolHandlers.handlerLayer.pipe(Layer.provide(queryLayer)))),
@@ -100,8 +108,10 @@ describe("ThreadQuery", () => {
   it.effect("maps query failures through both tool handlers", () =>
     Effect.gen(function* () {
       const toolkit = yield* ThreadTools.toolkit
-      const find = yield* toolkit.handle("find_thread", { query: "x" }).pipe(Effect.flatMap(Stream.runCollect))
-      const read = yield* toolkit.handle("read_thread", { threadId: "x" }).pipe(Effect.flatMap(Stream.runCollect))
+      const find = yield* toolkit.handle("search_threads", { query: "x" }).pipe(Effect.flatMap(Stream.runCollect))
+      const read = yield* toolkit
+        .handle("read_thread_transcript", { threadId: "x" })
+        .pipe(Effect.flatMap(Stream.runCollect))
       expect(yield* Schema.encodeEffect(Schema.UnknownFromJsonString)([...find])).toContain("find failed")
       expect(yield* Schema.encodeEffect(Schema.UnknownFromJsonString)([...read])).toContain("ThreadNotFoundError")
     }).pipe(
@@ -210,9 +220,10 @@ describe("ThreadQuery", () => {
           provideLayer(
             ThreadQuery.layer.pipe(
               Layer.provide(
-                Layer.merge(
+                Layer.mergeAll(
                   Layer.succeed(ThreadRepository.Service, threads),
                   Layer.succeed(TurnRepository.Service, turns),
+                  TranscriptRepository.memoryLayer,
                 ),
               ),
             ),

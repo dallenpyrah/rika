@@ -540,32 +540,6 @@ describe("ExecutionBackend Relay client adapter", () => {
     }),
   )
 
-  it.effect("isolates title executions in a tool-free auxiliary session", () =>
-    Effect.gen(function* () {
-      const fixture = yield* makeClient({ streamEvents: [relayEvent("execution.completed", 1)] })
-      yield* Effect.gen(function* () {
-        const backend = yield* ExecutionBackend.Service
-        yield* start(backend, {
-          threadId: "thread-a",
-          turnId: "title:turn-a",
-          prompt: "title prompt",
-          startedAt: 5,
-          sessionPurpose: { _tag: "ThreadTitle", owningTurnId: "turn-a" },
-        })
-      }).pipe(provideBackendWithThreadTools(fixture.implementation))
-      const registration = (yield* Ref.get(fixture.registrations))[0]
-      if (registration === undefined || !("tools" in registration)) return yield* Effect.die("Missing agent definition")
-      expect(registration.tools).toEqual([])
-      expect(registration.permissions).toEqual([])
-      expect(registration).not.toHaveProperty("child_run_presets")
-      expect((yield* Ref.get(fixture.starts))[0]).toMatchObject({
-        session_id: "session:aux:title:turn-a",
-        idempotency_key: "title:turn-a",
-        execution_id: "execution:title:turn-a",
-      })
-    }),
-  )
-
   it.effect("maps distinct top-level Turn identities to distinct deterministic Relay identities", () =>
     Effect.gen(function* () {
       const fixture = yield* makeClient({
@@ -1788,11 +1762,6 @@ describe("ExecutionBackend Relay client adapter", () => {
         model: "oracle-model",
         registrationKey: "sol:high:normal",
       }
-      const taskSelection = {
-        provider: "task-provider",
-        model: "task-model",
-        registrationKey: "terra:medium:normal",
-      }
       const summarySelection = {
         provider: "summary-provider",
         model: "summary-model",
@@ -1812,7 +1781,7 @@ describe("ExecutionBackend Relay client adapter", () => {
             painter: routeFor("painter", selection, mainCompaction),
             review: routeFor("review", selection, mainCompaction),
             readThread: routeFor("readThread", selection, mainCompaction),
-            task: routeFor("task", taskSelection, mainCompaction),
+            task: routeFor("task", selection, mainCompaction),
           },
         }
         yield* start(backend, {
@@ -1900,9 +1869,9 @@ describe("ExecutionBackend Relay client adapter", () => {
       expect(fanOutInputs[0].children[0].override.tool_names).not.toContain("web_search")
       expect(fanOutInputs[0].children[0].override.tool_names).not.toContain("read_web_page")
       expect(fanOutInputs[0].children[1].override.model).toMatchObject({
-        provider: taskSelection.provider,
-        model: taskSelection.model,
-        registration_key: taskSelection.registrationKey,
+        provider: selection.provider,
+        model: selection.model,
+        registration_key: "default",
         metadata: { rika_agent_depth: 1, rika_reasoning_effort: "medium" },
       })
       expect(fanOutInputs[0].children[1].override.compaction_policy).toEqual(registered.compaction_policy)
@@ -1919,7 +1888,7 @@ describe("ExecutionBackend Relay client adapter", () => {
           painter: routeFor("painter", selection, mainCompaction),
           review: routeFor("review", selection, mainCompaction),
           readThread: routeFor("readThread", selection, mainCompaction),
-          task: routeFor("task", taskSelection, mainCompaction),
+          task: routeFor("task", selection, mainCompaction),
         },
       })
     }),

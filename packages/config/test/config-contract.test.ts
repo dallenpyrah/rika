@@ -4,17 +4,10 @@ import { ConfigContract, Models } from "../src/index"
 describe("ConfigContract", () => {
   it("owns the built-in model catalog, routes, limits, variants, and compaction policy", () => {
     expect(ConfigContract.defaults.modes).toEqual({
-      low: { main: { alias: "luna", effort: "low" }, oracle: { alias: "sol", effort: "high" } },
-      medium: { main: { alias: "terra", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
-      high: { main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "sol", effort: "max" } },
-      ultra: { main: { alias: "sol", effort: "max" }, oracle: { alias: "sol", effort: "max" } },
-    })
-    expect(ConfigContract.defaults.agents).toEqual({
-      librarian: { alias: "sol", effort: "high" },
-      painter: { alias: "sol", effort: "high" },
-      review: { alias: "sol", effort: "high" },
-      readThread: { alias: "terra", effort: "medium" },
-      task: { alias: "terra", effort: "medium" },
+      low: { main: { alias: "luna", effort: "xhigh" }, oracle: { alias: "terra", effort: "xhigh" } },
+      medium: { main: { alias: "terra", effort: "xhigh" }, oracle: { alias: "sol", effort: "medium" } },
+      high: { main: { alias: "sol", effort: "medium" }, oracle: { alias: "sol", effort: "high" } },
+      ultra: { main: { alias: "sol", effort: "xhigh" }, oracle: { alias: "sol", effort: "max" } },
     })
     expect(ConfigContract.defaults.models.luna).toMatchObject({
       provider: "openai",
@@ -26,12 +19,13 @@ describe("ConfigContract", () => {
       alias: "terra",
       providerId: "openai",
       model: "gpt-5.6-terra",
-      options: { reasoning: { effort: "medium" } },
+      options: { reasoning: { effort: "xhigh" } },
       compaction: { contextWindow: 1_050_000, reserveTokens: 128_000, keepRecentTokens: 32_000 },
     })
     expect(ConfigContract.resolveCompactionSummaryRoute(ConfigContract.defaults)).toMatchObject({
-      alias: "terra",
-      model: "gpt-5.6-terra",
+      alias: "sol",
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
     })
   })
 
@@ -190,9 +184,6 @@ describe("ConfigContract", () => {
       ...modes.flatMap((mode) =>
         roles.map((role) => ConfigContract.resolveModelRoute(ConfigContract.defaults, mode, role)),
       ),
-      ...(
-        Object.keys(ConfigContract.defaults.agents) as ReadonlyArray<keyof typeof ConfigContract.defaults.agents>
-      ).map((agent) => ConfigContract.resolveAgentRoute(ConfigContract.defaults, agent)),
       ConfigContract.resolveThreadTitleRoute(ConfigContract.defaults),
       ConfigContract.resolveCompactionSummaryRoute(ConfigContract.defaults),
     ]
