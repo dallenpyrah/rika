@@ -91,12 +91,15 @@ const terminalTitleText = (value: string) =>
     .trim()
 
 export const terminalTitleSequence: {
-  (title: string, workspace: string): string
+  (title: string, workspace: string, workingFrame?: string): string
   (workspace: string): (title: string) => string
 } = Function.dual(
-  2,
-  (title: string, workspace: string): string =>
-    `\u001b]0;${terminalTitleText(title)} - rika - ${terminalTitleText(workspace.replace(/^\/Users\/[^/]+/, "~"))}\u0007`,
+  (args) => args.length > 1,
+  (title: string, workspace: string, workingFrame?: string): string => {
+    const safeWorkingFrame = workingFrame === undefined ? "" : terminalTitleText(workingFrame)
+    const prefix = safeWorkingFrame.length === 0 ? "" : `${safeWorkingFrame} `
+    return `\u001b]0;${prefix}${terminalTitleText(title)} - rika - ${terminalTitleText(workspace.replace(/^\/Users\/[^/]+/, "~"))}\u0007`
+  },
 )
 
 const tuiTraceEventTypes = new Set([
@@ -1662,6 +1665,7 @@ export const settleTuiInitialization: {
 export interface InteractiveTuiOptions {
   readonly editor?: string | undefined
   readonly makeRenderer?: NonNullable<Parameters<typeof createTui>[0]["makeRenderer"]>
+  readonly writeTerminalTitle?: (sequence: string) => void
 }
 
 export const interactiveTui =
@@ -1676,6 +1680,16 @@ export const interactiveTui =
       const fork = Effect.runForkWith(context)
       return yield* Effect.callback<void, Operation.OperationUnavailable>((resume) => {
         let model = ViewState.initial(input.workspace ?? process.cwd(), input.mode ?? "medium")
+        let workingFrame: string | undefined
+        const writeTerminalTitle = options.writeTerminalTitle ?? ((sequence: string) => process.stdout.write(sequence))
+        const refreshTerminalTitle = () => {
+          const threadId = model.currentThreadId
+          const title =
+            model.currentThreadTitle ??
+            (model.threads as ReadonlyArray<ViewState.ThreadItem>).find((thread) => thread.id === threadId)?.title
+          if (title !== undefined)
+            writeTerminalTitle(terminalTitleSequence(title, model.workspace, model.busy ? workingFrame : undefined))
+        }
         let renderer: Effect.Success<ReturnType<typeof createTui>> | undefined
         let initialization: Fiber.Fiber<void, never> | undefined
         let closed = false
@@ -1766,7 +1780,7 @@ export const interactiveTui =
               model.currentThreadId === event.thread.id &&
               (model.currentThreadId !== previousThreadId || model.currentThreadTitle !== previousThreadTitle)
             )
-              process.stdout.write(terminalTitleSequence(event.thread.title, model.workspace))
+              refreshTerminalTitle()
             if (event._tag === "TranscriptPatched" && event.event.type === "steering.delivered") {
               const rawSequences = event.event.data?.message_sequences
               const sequences = Array.isArray(rawSequences)
@@ -1943,16 +1957,14 @@ export const interactiveTui =
               threadId: event.threadId,
               title: event.title,
             })
-            if (model.currentThreadId === event.threadId)
-              process.stdout.write(terminalTitleSequence(event.title, model.workspace))
+            if (model.currentThreadId === event.threadId) refreshTerminalTitle()
           } else if (event._tag === "ThreadActivated") {
             model = ViewState.update(model, {
               _tag: "ThreadActivated",
               threadId: event.threadId,
               title: event.title,
             })
-            if (model.currentThreadId === event.threadId)
-              process.stdout.write(terminalTitleSequence(event.title, model.workspace))
+            if (model.currentThreadId === event.threadId) refreshTerminalTitle()
           } else if (event._tag === "ThreadPreviewLoaded") {
             if (model.threadSwitcher.open && ViewState.selectedThreadMetadata(model)?.id === event.threadId)
               model = ViewState.update(model, {
@@ -2341,6 +2353,11 @@ export const interactiveTui =
           settleTuiInitialization(
             createTui({
               ...(options.makeRenderer === undefined ? {} : { makeRenderer: options.makeRenderer }),
+              workingFrame: (frame) => {
+                if (workingFrame === frame) return
+                workingFrame = frame
+                refreshTerminalTitle()
+              },
               openPath,
               scroll: (offset) => {
                 model = ViewState.update(model, { _tag: "ScrollMoved", offset })

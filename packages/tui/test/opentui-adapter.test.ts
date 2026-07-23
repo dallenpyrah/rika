@@ -1893,6 +1893,61 @@ test("ticks Amp status and running-tool spinners every 200ms without rebuilding 
     }),
   ))
 
+test("publishes the running-tool spinner frame while the selected agent is working and clears it when idle", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const clock = new ManualClock()
+      const setup = yield* openTui(() => createTestRenderer({ width: 100, height: 30, clock }))
+      const frames: Array<string | undefined> = []
+      const running = streamingShell("title-spinner")
+      const working: Model = {
+        ...initial("/work", "high"),
+        width: 100,
+        height: 30,
+        busy: true,
+        activity: { _tag: "Waiting" },
+        activeTurnId: "turn",
+        blocks: [running],
+        items: [{ _tag: "Block", index: 0, id: "tool:title-spinner", turnId: "turn" }],
+      }
+      const surface = new Surface(
+        setup.renderer,
+        { key: () => undefined, resize: () => undefined, workingFrame: (frame) => frames.push(frame) },
+        { clock },
+      )
+      const header = () =>
+        styledTextValue(
+          (
+            surface as unknown as {
+              readonly transcriptRecords: ReadonlyMap<
+                string,
+                { readonly renderable: { readonly content: { readonly chunks: ReadonlyArray<{ text: string }> } } }
+              >
+            }
+          ).transcriptRecords.get("tool:title-spinner:header")!.renderable.content,
+        )
+      try {
+        surface.update(working)
+        yield* openTui(() => setup.renderOnce())
+        expect(frames).toEqual(["⠭"])
+        expect(header()).toContain("⠭")
+
+        clock.advance(200)
+        expect(frames).toHaveLength(2)
+        expect(header()).toContain(frames.at(-1))
+
+        surface.update({ ...working, busy: false, activity: undefined, activeTurnId: undefined })
+        expect(frames.at(-1)).toBeUndefined()
+        const settledFrameCount = frames.length
+        clock.advance(400)
+        expect(frames).toHaveLength(settledFrameCount)
+      } finally {
+        surface.destroy()
+        setup.renderer.destroy()
+      }
+    }),
+  ))
+
 test("does not animate a cancelled subagent again when a new turn starts", () =>
   Effect.runPromise(
     Effect.gen(function* () {

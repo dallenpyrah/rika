@@ -45,6 +45,7 @@ export interface TuiApp {
   readonly spans: () => CapturedSpans
   readonly waitFrame: (marker: string, timeoutMillis?: number) => Effect.Effect<string>
   readonly waitGone: (marker: string, timeoutMillis?: number) => Effect.Effect<string>
+  readonly waitTerminalTitle: (predicate: (title: string) => boolean, timeoutMillis?: number) => Effect.Effect<string>
   readonly close: () => void
   readonly done: Effect.Effect<void>
   readonly quit: Effect.Effect<void>
@@ -100,6 +101,7 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
     ),
     (created) => Effect.sync(() => created.renderer.destroy()).pipe(Effect.ignore),
   )
+  const terminalTitles: Array<string> = []
   let nextThread = 0
   let nextTurn = 0
   const operationLayer = Operation.productLayer({
@@ -116,7 +118,10 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
         const { title: _title, ...pin } = Turn.testExecutionRoute(mode)
         return pin
       }),
-    interactive: interactiveTui({ makeRenderer: () => Promise.resolve(setup.renderer) }),
+    interactive: interactiveTui({
+      makeRenderer: () => Promise.resolve(setup.renderer),
+      writeTerminalTitle: (sequence) => terminalTitles.push(sequence.slice(4, -1)),
+    }),
   })
   const operation = Context.get(yield* Layer.buildWithScope(operationLayer, yield* Effect.scope), Operation.Service)
   const operationFiber = yield* Effect.forkChild(
@@ -137,6 +142,18 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
         yield* Effect.sleep("20 millis")
       }
     })
+  const waitTerminalTitle = (predicate: (title: string) => boolean, timeoutMillis: number) =>
+    Effect.gen(function* () {
+      const started = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+      for (;;) {
+        const title = terminalTitles.at(-1)
+        if (title !== undefined && predicate(title)) return title
+        const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis)
+        if (now - started >= timeoutMillis)
+          return yield* Effect.die(`tui-app timed out waiting on terminal title\n${title ?? "<unset>"}`)
+        yield* Effect.sleep("20 millis")
+      }
+    })
   const app: TuiApp = {
     workspace,
     type: (text) => setup.mockInput.typeText(text),
@@ -149,6 +166,7 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
     spans: () => setup.captureSpans(),
     waitFrame: (marker, timeoutMillis = 60_000) => waitFor((captured) => captured.includes(marker), timeoutMillis),
     waitGone: (marker, timeoutMillis = 60_000) => waitFor((captured) => !captured.includes(marker), timeoutMillis),
+    waitTerminalTitle: (predicate, timeoutMillis = 60_000) => waitTerminalTitle(predicate, timeoutMillis),
     close: () => setup.mockInput.pressCtrlC(),
     done: Fiber.join(operationFiber).pipe(Effect.asVoid, Effect.orDie),
     quit: Effect.gen(function* () {

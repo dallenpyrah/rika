@@ -1654,6 +1654,7 @@ export const renderTranscriptStyled = (model: Model): StyledText => buildTranscr
 
 export interface Handlers {
   readonly key: (key: Key) => void
+  readonly workingFrame?: (frame: string | undefined) => void
   readonly scroll?: (offset: number) => void
   readonly scrollGeometry?: (offset: number) => void
   readonly scrollFollow?: () => void
@@ -1855,6 +1856,8 @@ export class Surface {
   private transcriptViewport: TranscriptViewport = initialViewport
   private loaderPhase = 0
   private loaderTimer: TimerHandle | undefined
+  private publishedWorkingFrame: string | undefined
+  private workingFramePublished = false
   private readonly clock: OpenTuiClock
   private readonly toolSpinner = new ToolSpinner()
   private transcriptViewportRows = 0
@@ -2435,6 +2438,13 @@ export class Surface {
     )
   }
 
+  private publishWorkingFrame(frame: string | undefined): void {
+    if (this.workingFramePublished && this.publishedWorkingFrame === frame) return
+    this.workingFramePublished = true
+    this.publishedWorkingFrame = frame
+    this.handlers.workingFrame?.(frame)
+  }
+
   private tickLoader(): void {
     this.loaderPhase += 1
     this.toolSpinner.step()
@@ -2448,6 +2458,7 @@ export class Surface {
           dim(fg(colors.text)(` ${label} `)),
         ])
       const glyph = this.toolSpinner.toBraille()
+      if (current.busy) this.publishWorkingFrame(glyph)
       for (const record of this.transcriptRecords.values()) {
         if (record.spinnerChunk === undefined) continue
         const content = record.renderable.content
@@ -2901,6 +2912,8 @@ export class Surface {
       this.dispatchTranscriptViewport({ _tag: "ResetCommanded" })
     }
     const scrollFollow = isFollowing(this.transcriptViewport.mode)
+    if (model.busy && previousModel?.busy !== true) this.publishWorkingFrame(idleSpinnerFrame)
+    else if (!model.busy && previousModel?.busy === true) this.publishWorkingFrame(undefined)
     const transcriptLayoutChanged =
       previousModel !== undefined &&
       (previousModel.items !== model.items ||
@@ -3405,6 +3418,7 @@ export class Surface {
 
   destroy(): void {
     this.destroyed = true
+    if (this.publishedWorkingFrame !== undefined) this.publishWorkingFrame(undefined)
     this.scrollGeneration += 1
     if (this.cursorRestoreFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.cursorRestoreFrame)
     this.cursorRestoreFrame = undefined
