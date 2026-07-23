@@ -8,6 +8,7 @@ import {
   isValidIncompatibility,
   makeLifecycle,
   protocolVersion,
+  replacementDisposition,
   ResidentRestartRequired,
   runtimeRestartExitCode,
   ServerMessage,
@@ -17,6 +18,13 @@ import {
 } from "../src/resident-service"
 
 describe("resident service protocol", () => {
+  it("supersedes only an idle resident for a launching client", () => {
+    expect(replacementDisposition({ connectRole: "launch", hasActiveExecutionWork: false })).toBe("supersede")
+    expect(replacementDisposition({ connectRole: "launch", hasActiveExecutionWork: true })).toBe("defer")
+    expect(replacementDisposition({ connectRole: "reattach", hasActiveExecutionWork: false })).toBe("restart")
+    expect(replacementDisposition({ connectRole: "reattach", hasActiveExecutionWork: true })).toBe("restart")
+  })
+
   it.effect("uses canonical profile and data root identity", () => {
     const crypto = Layer.succeed(
       Crypto.Crypto,
@@ -195,6 +203,7 @@ describe("resident service protocol", () => {
     if (incompatible._tag !== "incompatible") return
     expect(verifyServerProof("token", handshake, incompatible)).toBe(true)
     expect(verifyServerProof("token", handshake, { ...incompatible, disposition: "restart" })).toBe(false)
+    expect(verifyServerProof("token", handshake, { ...incompatible, disposition: "defer" })).toBe(false)
     expect(verifyServerProof("token", handshake, { ...incompatible, residentPid: 124 })).toBe(false)
     expect(verifyServerProof("token", handshake, { ...incompatible, connectionId: "other" })).toBe(false)
   })

@@ -54,6 +54,7 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
   readonly stopped: Deferred.Deferred<void>
   readonly ready: Deferred.Deferred<void>
   readonly onReady: Effect.Effect<void, ResidentService.ResidentServiceError, FileSystem.FileSystem>
+  readonly hasActiveExecutionWork: Effect.Effect<boolean>
   readonly owner: ResidentService.Owner
 }) {
   const crypto = yield* Crypto.Crypto
@@ -562,9 +563,13 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                   }),
                 )
                 if (incompatible) {
+                  const replacementDelayed = message.connectRole === "launch" && (yield* options.hasActiveExecutionWork)
                   const response = {
                     _tag: "incompatible" as const,
-                    disposition: message.connectRole === "launch" ? ("supersede" as const) : ("restart" as const),
+                    disposition: ResidentService.replacementDisposition({
+                      connectRole: message.connectRole,
+                      hasActiveExecutionWork: replacementDelayed,
+                    }),
                     family: "rika-resident" as const,
                     identity: options.identity,
                     clientNonce: message.clientNonce,
@@ -580,7 +585,16 @@ const host = Effect.fn("ResidentTransport.host")(function* (options: {
                       serverProof: ResidentService.serverProof(options.token, message, response),
                     } satisfies ResidentService.HandshakeIncompatible),
                   )
-                  return yield* close(4406, reason)
+                  if (replacementDelayed)
+                    yield* Effect.logWarning("resident.replacement.delayed").pipe(
+                      Effect.annotateLogs("rika.resident.rejection.reason", "active-execution-work"),
+                    )
+                  return yield* close(
+                    4406,
+                    replacementDelayed
+                      ? `Rika resident PID ${process.pid} owns active execution work; replacement is delayed until that work completes`
+                      : reason,
+                  )
                 }
                 return yield* close(4401, reason)
               }
@@ -1028,6 +1042,7 @@ export const serve = Effect.fn("ResidentTransport.serve")(function* (options: {
   readonly startupHoldMilliseconds?: number
   readonly outboundCapacity?: number
   readonly onReady?: Effect.Effect<void, ResidentService.ResidentServiceError, FileSystem.FileSystem>
+  readonly hasActiveExecutionWork: Effect.Effect<boolean>
   readonly owner: ResidentService.Owner
 }) {
   const endpoint = yield* resolve(options.profile, options.dataRoot)
@@ -1052,6 +1067,7 @@ export const serve = Effect.fn("ResidentTransport.serve")(function* (options: {
     stopped,
     ready,
     onReady: options.onReady ?? Effect.void,
+    hasActiveExecutionWork: options.hasActiveExecutionWork,
     owner: options.owner,
   }).pipe(Effect.ensuring(releaseAdoptedStartup(endpoint.startupPath, endpoint.identity, process.pid)))
 })

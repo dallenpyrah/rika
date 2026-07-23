@@ -3066,6 +3066,17 @@ if (import.meta.main) {
         }),
       ),
     )
+  const hasActiveExecutionWork = TurnRepository.Service.pipe(
+    Effect.flatMap((turns) => turns.listNonterminal),
+    Effect.map((turns) => turns.some((turn) => turn.status !== "queued")),
+    provideLayerScoped(turnRepositoryLayer),
+    Effect.catch((error) =>
+      Effect.logError("resident.replacement.status_failed").pipe(
+        Effect.annotateLogs("rika.failure.kind", String(error)),
+        Effect.as(true),
+      ),
+    ),
+  )
   const observedProgram = <A, E>(role: Logging.ProcessRole, dataRoot: string, program: Effect.Effect<A, E>) =>
     Clock.currentTimeMillis.pipe(
       Effect.flatMap((startedAt) =>
@@ -3267,6 +3278,7 @@ if (import.meta.main) {
               environment.residentStartupHold._tag === "Some" ? environment.residentStartupHold.value : "10000",
             ),
             onReady: ResidentProcessStartup.signalReady,
+            hasActiveExecutionWork,
             owner: residentOwner,
           }),
         ).pipe(

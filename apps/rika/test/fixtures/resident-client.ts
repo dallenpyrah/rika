@@ -740,6 +740,17 @@ const program = Effect.gen(function* () {
               Effect.andThen(emit({ type: "delayed-completed" })),
               Effect.catch((error) => emit({ type: "delayed-failed", error: error.message })),
             )
+        if (command === "active-root-with-child")
+          return connection
+            .run({
+              _tag: "Run",
+              prompt: ["active-root-with-child"],
+              ephemeral: false,
+              streamJson: false,
+              streamJsonInput: false,
+              streamJsonThinking: false,
+            })
+            .pipe(Effect.catch((error) => emit({ type: "active-execution-failed", error: error.message })))
         if (command === "cancel-delayed")
           return Effect.gen(function* () {
             const operation = yield* Effect.forkChild(
