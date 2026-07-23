@@ -14,7 +14,7 @@ import {
 const model = { provider: "test", model: "deterministic" }
 const threadRecoveryTools = ["search_threads", "read_thread_transcript"]
 const expectedMainInstructions =
-  "Oracle is a read-only, high-reasoning advisor for planning, reviewing, understanding code, and debugging. Consult Oracle frequently for complex or difficult tasks. Before consulting Oracle, tell the user that you are consulting it; after consulting Oracle, state that you did and use its advice while remaining responsible for the implementation and conclusion. Use web_search when the task depends on current external facts, documentation, or public code. Use auto for normal lookups and compare only when claims are disputed, recent, safety-sensitive, or high-impact. Use kind code for semantic implementation examples and kind github for exact code, repository metadata, issues, pull requests, or commits. Treat search snippets as discovery evidence: fetch authoritative pages when details matter, cite the URLs used, and state when sources disagree. Delegate broad or multi-source research to Librarian, but handle simple lookups directly and do not query every source by default. Use subagents for independent work when this improves speed or confidence. When the user gives a subagent count, honor that number; otherwise, when parallel delegation is useful, default to four useful subagents rather than forcing filler work. Start independent delegations in the same tool-call batch so they run in parallel."
+  "Oracle is a read-only, high-reasoning advisor for planning, reviewing, understanding code, and debugging. Consult Oracle frequently for complex or difficult tasks. Before consulting Oracle, tell the user that you are consulting it; after consulting Oracle, state that you did and use its advice while remaining responsible for the implementation and conclusion. Use web_search when the task depends on current external facts, documentation, or public code. Use auto for normal lookups and compare only when claims are disputed, recent, safety-sensitive, or high-impact. Use kind code for semantic implementation examples and kind github for exact code, repository metadata, issues, pull requests, or commits. Treat search snippets as discovery evidence: fetch authoritative pages when details matter, cite the URLs used, and state when sources disagree. Delegate broad or multi-source research to Librarian, but handle simple lookups directly and do not query every source by default."
 const expectedInstructions = {
   Oracle:
     "Act as a read-only, high-reasoning technical advisor for planning, reviewing, understanding code, and debugging. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
@@ -24,7 +24,7 @@ const expectedInstructions = {
     "Produce a requested visual artifact through the available media route and report its metadata. Do not modify source files.",
   Review: "Review workspace changes for correctness, regressions, and missing tests. Do not modify files.",
   ReadThread: "Answer only from local thread transcripts and identify the threads used.",
-  Task: "Complete the assigned implementation task in the workspace and report changed files and verification. Use subagents for independent work when this improves speed or confidence. When the user gives a subagent count, honor that number; otherwise, when parallel delegation is useful, default to four useful subagents rather than forcing filler work. Start independent delegations in the same tool-call batch so they run in parallel.",
+  Task: "Complete the assigned implementation task in the workspace and report changed files and verification.",
 } as const
 const relayModel = (selection: {
   readonly provider: string
@@ -79,9 +79,9 @@ describe("product agent profiles", () => {
     expect(mainInstructions).not.toContain("provider IDs")
     expect(mainInstructions).toContain("fetch authoritative pages")
     expect(mainInstructions).toContain("Delegate broad or multi-source research to Librarian")
-    expect(mainInstructions).toContain("default to four useful subagents")
-    expect(mainInstructions).toContain("honor that number")
-    expect(mainInstructions).toContain("same tool-call batch")
+    expect(mainInstructions).not.toContain("Use subagents for independent work")
+    expect(mainInstructions).not.toContain("parallel delegation")
+    expect(mainInstructions).not.toContain("same tool-call batch")
     expect(registered.Librarian).toMatchObject({
       tool_names: [
         "web_search",
@@ -124,9 +124,9 @@ describe("product agent profiles", () => {
       ],
       permissions: ["workspace.read", "workspace.write", "process.run", "network.read", "thread.read"],
     })
-    expect(registered.Task?.instructions).toContain("default to four useful subagents")
-    expect(registered.Task?.instructions).toContain("honor that number")
-    expect(registered.Task?.instructions).toContain("same tool-call batch")
+    expect(registered.Task?.instructions).not.toContain("Use subagents for independent work")
+    expect(registered.Task?.instructions).not.toContain("parallel delegation")
+    expect(registered.Task?.instructions).not.toContain("same tool-call batch")
   })
 
   it("grants thread read permission to every profile that can recover thread context", () => {
