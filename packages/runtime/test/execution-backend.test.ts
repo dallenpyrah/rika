@@ -486,7 +486,9 @@ describe("ExecutionBackend Relay client adapter", () => {
       const registration = registrations[0]
       if (registration === undefined || !("instructions" in registration))
         return yield* Effect.die("Missing agent definition")
-      expect((registration as { readonly tool_execution?: unknown }).tool_execution).toEqual({ concurrency: 4 })
+      expect((registration as { readonly tool_execution?: unknown }).tool_execution).toEqual({
+        concurrency: "unbounded",
+      })
       expect(registration.instructions).toContain("Consult Oracle frequently for complex or difficult tasks")
       expect(registration.instructions).toContain("tell the user that you are consulting it")
       expect(registration.instructions).toContain("after consulting Oracle, state that you did")

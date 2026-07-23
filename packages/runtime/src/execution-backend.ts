@@ -132,6 +132,7 @@ const observableEventTypes = new Set([
   "execution.failed",
   "execution.cancelled",
 ])
+const toolExecutionPolicy = { concurrency: "unbounded" as const }
 
 export interface CompactionPolicy {
   readonly context_window: number
@@ -1458,7 +1459,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                     instructions: mainInstructions,
                     model: relayModelSelection(selection),
                     tools: [],
-                    tool_execution: { concurrency: 4 },
+                    tool_execution: toolExecutionPolicy,
                     permissions: [],
                     ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
                     metadata,
@@ -1471,7 +1472,7 @@ export const layerFromClient = <AdditionalTools extends Record<string, Tool.Any>
                     instructions: mainInstructions,
                     model: relayModelSelection(selection),
                     tools: Object.values(toolkitFor(executionToolOptions).tools).map((tool) => ({ name: tool.name })),
-                    tool_execution: { concurrency: 4 },
+                    tool_execution: toolExecutionPolicy,
                     permissions: parentPermissions,
                     ...(permissionPolicy === undefined ? {} : { permission_rules: permissionPolicy }),
                     metadata,
@@ -2053,6 +2054,7 @@ export const layer = <
                         ...(override.instructions === undefined ? {} : { instructions: override.instructions }),
                         model: relayModelSelection(childSelection),
                         tools: Object.values(childToolkit.tools).map((tool) => ({ name: tool.name })),
+                        tool_execution: toolExecutionPolicy,
                         permissions:
                           override.permissions === undefined
                             ? parentPermissions
@@ -2150,6 +2152,7 @@ export const layer = <
                         instructions: preset.instructions,
                         model: relayModelSelection(childSelection),
                         tools: Object.values(childToolkit.tools).map((tool) => ({ name: tool.name })),
+                        tool_execution: toolExecutionPolicy,
                         permissions: preset.permissions.map((name) => ({ name, value: true })),
                         ...(options.permissionPolicy === undefined
                           ? {}
