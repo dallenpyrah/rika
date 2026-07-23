@@ -181,6 +181,102 @@ it("forgets live child outcomes when SelectionLoaded replaces the transcript", (
   )
 })
 
+it("clears stale running activity when a repaired transcript has no active turn", () => {
+  const stale = {
+    ...initialState(),
+    model: {
+      ...ViewState.initial("/work", "medium"),
+      currentThreadId: thread.id,
+      activeTurnId: "turn",
+      busy: true,
+      activity: { _tag: "RunningTools" as const, subagents: 4, tools: 0 },
+    },
+    selectionEpoch: 1,
+  }
+  const repaired = InteractiveController.update(stale, {
+    _tag: "TranscriptReplaced",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    entries: entries("turn", 1, [
+      {
+        cursor: "failed",
+        sequence: 1,
+        type: "execution.failed",
+        createdAt: 2,
+        text: "replacement failed",
+      },
+    ]),
+    hasOlder: false,
+  })
+
+  expect(repaired.state.model.activeTurnId).toBeUndefined()
+  expect(repaired.state.model.busy).toBe(false)
+  expect(repaired.state.model.activity).toBeUndefined()
+  expect(repaired.state.model.blocks).toContainEqual(
+    expect.objectContaining({ _tag: "Error", detail: "replacement failed" }),
+  )
+})
+
+it("does not resurrect a failed root when a stale repair still reports it active", () => {
+  const activeTurn: Turn.Turn = {
+    id: Turn.TurnId.make("turn"),
+    threadId: thread.id,
+    prompt: "turn",
+    executionRoute: Turn.testExecutionRoute(),
+    status: "running",
+    createdAt: 1,
+    updatedAt: 1,
+  }
+  const selected = InteractiveController.update(initialState(), {
+    _tag: "SelectionLoaded",
+    selectionEpoch: 1,
+    activitySequence: 0,
+    queueRevision: 0,
+    queue: [],
+    thread,
+    entries: entries("turn", 1, [
+      {
+        cursor: "agent",
+        sequence: 0,
+        type: "tool.call.requested",
+        createdAt: 1,
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "work" } },
+      },
+    ]),
+    hasOlder: false,
+    activeTurn,
+  }).state
+  const failed = InteractiveController.update(selected, {
+    _tag: "TranscriptPatched",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    turnId: activeTurn.id,
+    event: { cursor: "failed", sequence: 1, type: "execution.failed", createdAt: 2, text: "root failed" },
+    revision: 1,
+  }).state
+  const repaired = InteractiveController.update(failed, {
+    _tag: "TranscriptReplaced",
+    selectionEpoch: 1,
+    threadId: thread.id,
+    entries: entries("turn", 1, [
+      {
+        cursor: "agent",
+        sequence: 0,
+        type: "tool.call.requested",
+        createdAt: 1,
+        data: { tool_call_id: "agent", tool_name: "task", input: { prompt: "work" } },
+      },
+    ]),
+    hasOlder: false,
+    activeTurn,
+  })
+
+  expect(repaired.state.model.activeTurnId).toBeUndefined()
+  expect(repaired.state.model.busy).toBe(false)
+  expect(repaired.state.model.activity).toBeUndefined()
+  expect(repaired.state.model.blocks).toContainEqual(expect.objectContaining({ _tag: "Error", detail: "root failed" }))
+})
+
 it("maps the new-thread palette action to a command and resets the transcript from the fresh selection", () => {
   const populated = InteractiveController.update(initialState(), {
     _tag: "SelectionLoaded",

@@ -1,4 +1,5 @@
 import * as BunServices from "@effect/platform-bun/BunServices"
+import { AiError } from "@batonfx/core"
 import { TestModel } from "@batonfx/test"
 import { createTestRenderer } from "@opentui/core/testing"
 import { Operation } from "@rika/app"
@@ -16,6 +17,14 @@ import { interactiveTui } from "../src/main"
 export const model = {
   text: (text: string, delayMs?: number) =>
     TestModel.turn([TestModel.text(text)], delayMs === undefined ? {} : { delay: `${delayMs} millis` }),
+  failure: (description: string) =>
+    TestModel.failure(
+      AiError.make({
+        module: "test",
+        method: "streamText",
+        reason: AiError.InvalidOutputError.make({ description }),
+      }),
+    ),
   turn: TestModel.turn,
   part: TestModel.text,
   reasoning: TestModel.reasoning,
@@ -45,6 +54,7 @@ export interface TuiApp {
   readonly spans: () => CapturedSpans
   readonly waitFrame: (marker: string, timeoutMillis?: number) => Effect.Effect<string>
   readonly waitGone: (marker: string, timeoutMillis?: number) => Effect.Effect<string>
+  readonly reload: () => Effect.Effect<void>
   readonly close: () => void
   readonly done: Effect.Effect<void>
   readonly quit: Effect.Effect<void>
@@ -102,6 +112,8 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
   )
   let nextThread = 0
   let nextTurn = 0
+  let session: Operation.InteractiveSession | undefined
+  let selectionEpoch = 100
   const operationLayer = Operation.productLayer({
     repositoryLayer,
     turnRepositoryLayer,
@@ -116,7 +128,10 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
         const { title: _title, ...pin } = Turn.testExecutionRoute(mode)
         return pin
       }),
-    interactive: interactiveTui({ makeRenderer: () => Promise.resolve(setup.renderer) }),
+    interactive: (input, active) => {
+      session = active
+      return interactiveTui({ makeRenderer: () => Promise.resolve(setup.renderer) })(input, active)
+    },
   })
   const operation = Context.get(yield* Layer.buildWithScope(operationLayer, yield* Effect.scope), Operation.Service)
   const operationFiber = yield* Effect.forkChild(
@@ -149,6 +164,10 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
     spans: () => setup.captureSpans(),
     waitFrame: (marker, timeoutMillis = 60_000) => waitFor((captured) => captured.includes(marker), timeoutMillis),
     waitGone: (marker, timeoutMillis = 60_000) => waitFor((captured) => !captured.includes(marker), timeoutMillis),
+    reload: () =>
+      session === undefined
+        ? Effect.die("TUI session is unavailable")
+        : session.selectThread(Thread.ThreadId.make("tui-thread-0"), selectionEpoch++).pipe(Effect.orDie),
     close: () => setup.mockInput.pressCtrlC(),
     done: Fiber.join(operationFiber).pipe(Effect.asVoid, Effect.orDie),
     quit: Effect.gen(function* () {

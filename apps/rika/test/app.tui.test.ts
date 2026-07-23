@@ -58,6 +58,53 @@ test(
 )
 
 test(
+  "reloads a failed root with completed and failed direct plus completed nested subagents",
+  () =>
+    TuiApp.run(
+      Effect.gen(function* () {
+        const app = yield* TuiApp.tuiApp({
+          script: [
+            TuiApp.model.toolCall("task", { prompt: "Coordinate durable child work." }, "direct-task"),
+            TuiApp.model.toolCall("task", { prompt: "Complete the nested durable check." }, "nested-task"),
+            TuiApp.model.text("NESTED_DURABLE_COMPLETE"),
+            TuiApp.model.text("DIRECT_DURABLE_COMPLETE"),
+            TuiApp.model.toolCall("task", { prompt: "Fail the second durable child." }, "failed-task"),
+            TuiApp.model.failure("direct child projection failure"),
+            TuiApp.model.failure("root projection failure"),
+          ],
+        })
+
+        yield* Effect.promise(() => app.type("Run nested work, then fail the root."))
+        app.pressEnter()
+        const live = yield* app.waitFrame("Execution failed")
+        yield* app.reload()
+        const reloaded = yield* app.waitFrame("Edit your prompt and press Enter to try again.")
+        const executionRows = (frame: string) =>
+          frame
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.includes("Subagent") || line.includes("ERROR: Execution failed"))
+        expect(reloaded).toContain("Execution failed")
+        expect(reloaded).not.toContain("Running 1 subagent")
+        expect(reloaded).not.toContain("Running 2 subagents")
+        expect(reloaded).toContain("Subagent finished")
+        expect(reloaded).toContain("Subagent failed")
+        expect(executionRows(reloaded)).toEqual(executionRows(live))
+        app.pressKey("\t")
+        app.pressEnter()
+        const direct = yield* app.waitFrame("DIRECT_DURABLE_COMPLETE")
+        expect(direct).not.toContain("Running 1 subagent")
+        app.pressKey("\t")
+        app.pressEnter()
+        const nested = yield* app.waitFrame("NESTED_DURABLE_COMPLETE")
+        expect(nested).not.toContain("Running 1 subagent")
+        yield* app.quit
+      }),
+    ),
+  240_000,
+)
+
+test(
   "settles repeated process waits while the original shell row owns process liveness",
   () =>
     TuiApp.run(

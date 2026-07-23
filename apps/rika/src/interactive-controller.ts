@@ -404,14 +404,35 @@ const updateState = (state: State, event: TranscriptEvent): Update => {
       ...replacement.filter((entry) => !staleTurns.has(entry.turn.id)),
       ...state.entries.filter((entry) => staleTurns.has(entry.turn.id) || !replacementTurns.has(entry.turn.id)),
     ])
+    const activeTurn = event.activeTurn
+    const replacementActivity =
+      activeTurn === undefined
+        ? { activeTurnId: undefined, busy: false, activity: undefined }
+        : state.model.busy
+          ? {
+              activeTurnId: state.model.activeTurnId,
+              busy: state.model.busy,
+              activity: state.model.activity,
+            }
+          : { activeTurnId: undefined, busy: false, activity: undefined }
     const { threadCostUsd: _threadCostUsd, ...stateWithoutCost } = state
     return {
       state: {
         ...stateWithoutCost,
-        model: project(cleared(state.model), entries, event.threadCostUsd),
+        model: project(
+          cleared({
+            ...state.model,
+            ...replacementActivity,
+          }),
+          entries,
+          event.threadCostUsd,
+        ),
         replayTurns: new Map([
           ...entries.map((entry) => [entry.turn.id, entry.turn] as const),
-          ...[...state.replayTurns].filter(([turnId]) => !entries.some((entry) => entry.turn.id === turnId)),
+          ...(activeTurn === undefined ? [] : [[activeTurn.id, activeTurn] as const]),
+          ...[...state.replayTurns].filter(
+            ([turnId]) => turnId !== activeTurn?.id && !entries.some((entry) => entry.turn.id === turnId),
+          ),
         ]),
         entries,
         revisions: new Map(entries.map((entry) => [entry.turn.id, entry.projectionRevision])),

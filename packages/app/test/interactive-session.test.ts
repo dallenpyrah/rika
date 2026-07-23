@@ -1345,6 +1345,13 @@ const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagent
   readonly turnLastCursor: string
   readonly childReplayEvents: ReadonlyArray<ExecutionBackend.Event>
   readonly turnStatus?: Turn.Status
+  readonly inspectionStatus?: Turn.Status
+  readonly rootReplayEvents?: ReadonlyArray<ExecutionBackend.Event>
+  readonly nestedChild?: {
+    readonly executionId: string
+    readonly events: ReadonlyArray<ExecutionBackend.Event>
+    readonly status: ExecutionBackend.Status
+  }
   readonly followed?: Ref.Ref<ReadonlyArray<string>>
 }) {
   const subagentThread = thread("subagent-thread", 1)
@@ -1367,15 +1374,30 @@ const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagent
     turnId === "done"
       ? {
           turnId,
-          status: options.turnStatus ?? "completed",
-          lastCursor: "done-final",
+          status: options.inspectionStatus ?? options.turnStatus ?? "completed",
+          lastCursor: options.rootReplayEvents?.at(-1)?.cursor ?? "done-final",
           waits: [],
           pendingTools: [],
           children: [{ executionId: subagentChildId, status: "completed" }],
         }
-      : { turnId, status: "completed", waits: [], pendingTools: [], children: [] }
+      : {
+          turnId,
+          status: turnId === options.nestedChild?.executionId ? options.nestedChild.status : "completed",
+          waits: [],
+          pendingTools: [],
+          children:
+            turnId === subagentChildId && options.nestedChild !== undefined
+              ? [{ executionId: options.nestedChild.executionId, status: options.nestedChild.status }]
+              : [],
+        }
   const eventsFor = (turnId: string): ReadonlyArray<ExecutionBackend.Event> =>
-    turnId === subagentChildId ? options.childReplayEvents : []
+    turnId === "done"
+      ? (options.rootReplayEvents ?? [])
+      : turnId === subagentChildId
+        ? options.childReplayEvents
+        : turnId === options.nestedChild?.executionId
+          ? options.nestedChild.events
+          : []
   const backend = ExecutionBackend.Service.of({
     invokeChild: (input) => Effect.succeed({ ...input, type: "accepted" }),
     createFanOut: () => Effect.die("unused"),
@@ -1561,6 +1583,99 @@ describe("InteractiveSession subagent reload", () => {
       const { nestedTool, nestedAnswer } = nestedSubagentExpectations(entries)
       expect(nestedTool).toBe(true)
       expect(nestedAnswer).toBe(true)
+    }),
+  )
+
+  it.effect("reconciles a stale running turn to the failed durable root during reload", () =>
+    Effect.gen(function* () {
+      const rootProjection = Transcript.project("done", "delegate", subagentRootEvents.slice(0, 2))
+      const failed: ExecutionBackend.Event = {
+        cursor: "done-failed",
+        sequence: 6,
+        type: "execution.failed",
+        createdAt: 6,
+        text: "resident replacement observed the root failure",
+      }
+      const { session, subagentThread } = yield* makeSubagentReloadHarness({
+        storedTree: rootProjection,
+        turnLastCursor: `execution:done:child:${subagentChildId}`,
+        childReplayEvents: subagentChildEvents,
+        turnStatus: "running",
+        inspectionStatus: "failed",
+        rootReplayEvents: [...subagentRootEvents, failed],
+      })
+      const { entries, events } = yield* selectionEntriesFor(session, subagentThread.id)
+      const replacement = events.find((event) => event._tag === "TranscriptReplaced")
+
+      expect(replacement).not.toHaveProperty("activeTurn")
+      expect(entries.some((entry) => entry.turn.status === "running")).toBe(false)
+      expect(
+        entries.some(
+          (entry) =>
+            entry.unit.content._tag === "Block" &&
+            entry.unit.content.block._tag === "Error" &&
+            entry.unit.content.block.detail === "resident replacement observed the root failure",
+        ),
+      ).toBe(true)
+      expect(
+        entries.some(
+          (entry) =>
+            entry.unit.content._tag === "Block" &&
+            entry.unit.content.block._tag === "ToolCall" &&
+            entry.unit.content.block.status === "running",
+        ),
+      ).toBe(false)
+    }),
+  )
+
+  it.effect("discovers a nested terminal child from durable inspection without replayed spawn events", () =>
+    Effect.gen(function* () {
+      const nestedId = `child:${encodeURIComponent(subagentChildId)}:nested`
+      const nestedEvents: ReadonlyArray<ExecutionBackend.Event> = [
+        {
+          cursor: "nested-answer",
+          sequence: 1,
+          type: "model.output.completed",
+          createdAt: 3,
+          text: "nested durable answer",
+        },
+        { cursor: "nested-completed", sequence: 2, type: "execution.completed", createdAt: 4 },
+      ]
+      const followed = yield* Ref.make<ReadonlyArray<string>>([])
+      const rootProjection = Transcript.project("done", "delegate", subagentRootEvents.slice(0, 2))
+      const { session, subagentThread } = yield* makeSubagentReloadHarness({
+        storedTree: rootProjection,
+        turnLastCursor: `execution:done:child:${subagentChildId}`,
+        childReplayEvents: subagentChildEvents,
+        turnStatus: "running",
+        nestedChild: { executionId: nestedId, events: nestedEvents, status: "completed" },
+        followed,
+      })
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* collectEvents(session, events)
+      yield* session.selectThread(subagentThread.id, 1)
+      for (
+        let attempt = 0;
+        attempt < 400 &&
+        !events.some(
+          (event) =>
+            event._tag === "TranscriptPatched" &&
+            event.turnId === nestedId &&
+            event.event.cursor === "nested-completed",
+        );
+        attempt += 1
+      )
+        yield* Effect.yieldNow
+
+      expect(yield* Ref.get(followed)).toEqual(expect.arrayContaining([subagentChildId, nestedId]))
+      expect(
+        events.some(
+          (event) =>
+            event._tag === "TranscriptPatched" &&
+            event.turnId === nestedId &&
+            event.event.cursor === "nested-completed",
+        ),
+      ).toBe(true)
     }),
   )
 })

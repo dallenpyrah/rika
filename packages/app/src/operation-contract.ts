@@ -406,6 +406,7 @@ export type InteractiveEvent =
       readonly threadCostUsd?: number
       readonly globalCostUsd?: number
       readonly oldestCursor?: TranscriptPage.PageCursor
+      readonly activeTurn?: Turn.Turn
     }
   | {
       readonly _tag: "TranscriptPagePrepended"
@@ -588,6 +589,7 @@ export const InteractiveEventSchema = Schema.Union([
     threadCostUsd: Schema.optionalKey(Schema.Finite),
     globalCostUsd: Schema.optionalKey(Schema.Finite),
     oldestCursor: Schema.optionalKey(TranscriptPage.PageCursor),
+    activeTurn: Schema.optionalKey(Turn.Turn),
   }),
   Schema.Struct({
     _tag: Schema.tag("TranscriptPagePrepended"),

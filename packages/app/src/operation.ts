@@ -786,7 +786,7 @@ const backfillChildTranscripts = Effect.fn("Operation.backfillChildTranscripts")
   return Transcript.withNestedProjections(withoutSynthesizedTwins(rootProjection, parents), nested)
 })
 
-const activeDescendantExecutionIds = Effect.fn("Operation.activeDescendantExecutionIds")(function* (
+const descendantExecutions = Effect.fn("Operation.descendantExecutions")(function* (
   backend: ExecutionBackend.Interface,
   rootExecutionId: string,
 ) {
@@ -794,23 +794,31 @@ const activeDescendantExecutionIds = Effect.fn("Operation.activeDescendantExecut
     { executionId: rootExecutionId, reference: false },
   ]
   const seen = new Set([normalizeChildExecutionId(rootExecutionId)])
-  const active: Array<string> = []
+  const descendants: Array<ExecutionBackend.Inspection["children"][number]> = []
   while (pending.length > 0) {
     const current = pending.shift()!
-    const inspection = yield* backend.inspect(
-      current.executionId,
-      current.reference ? ExecutionBackend.executionReference : undefined,
-    )
+    const inspection = yield* backend
+      .inspect(current.executionId, current.reference ? ExecutionBackend.executionReference : undefined)
+      .pipe(Effect.orElseSucceed(() => undefined))
     if (inspection === undefined) continue
     for (const child of inspection.children) {
       const normalized = normalizeChildExecutionId(child.executionId)
       if (seen.has(normalized)) continue
       seen.add(normalized)
       pending.push({ executionId: child.executionId, reference: true })
-      if (!isTerminalStatus(child.status)) active.push(child.executionId)
+      descendants.push(child)
     }
   }
-  return active
+  return descendants
+})
+
+const activeDescendantExecutionIds = Effect.fn("Operation.activeDescendantExecutionIds")(function* (
+  backend: ExecutionBackend.Interface,
+  rootExecutionId: string,
+) {
+  return (yield* descendantExecutions(backend, rootExecutionId))
+    .filter((child) => !isTerminalStatus(child.status))
+    .map((child) => child.executionId)
 })
 
 const sessionQuiescencePollAttempts = 40
@@ -2756,9 +2764,34 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   else if (isTerminalStatus(turn.status)) yield* healTerminalTurn(turn)
                   return
                 }
-                yield* projectExecutionPages(backend, turn, execution.status)
-                yield* backfillTree({ ...turn, status: execution.status }, true)
-                yield* healTerminalTurn({ ...turn, status: execution.status })
+                const reconciled =
+                  isTerminalStatus(execution.status) && !isTerminalStatus(turn.status)
+                    ? yield* Effect.gen(function* () {
+                        const current = yield* turns.get(turn.id)
+                        if (current !== undefined && isTerminalStatus(current.status)) return current
+                        return yield* setTurnStatus(
+                          turn.id,
+                          execution.status,
+                          execution.lastCursor ?? turn.lastCursor,
+                          yield* Clock.currentTimeMillis,
+                        ).pipe(
+                          Effect.catch((error) =>
+                            turns
+                              .get(turn.id)
+                              .pipe(
+                                Effect.flatMap((latest) =>
+                                  latest !== undefined && isTerminalStatus(latest.status)
+                                    ? Effect.succeed(latest)
+                                    : Effect.fail(error),
+                                ),
+                              ),
+                          ),
+                        )
+                      })
+                    : turn
+                yield* projectExecutionPages(backend, reconciled, execution.status)
+                yield* backfillTree(reconciled, true)
+                yield* healTerminalTurn(reconciled)
               }),
             { concurrency: 4, discard: true },
           )
@@ -2913,6 +2946,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           const threadCostUsd = usageCosts.complete ? (usageCosts.threadCostUsd.get(thread.id) ?? 0) : undefined
           const globalCostUsd = displayGlobalCostUsd(usageCosts)
           if (before === undefined && replace) {
+            const activeTurn = yield* turns.findActive(thread.id)
             dispatch({
               _tag: "TranscriptReplaced",
               selectionEpoch: request,
@@ -2922,6 +2956,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               ...(threadCostUsd === undefined ? {} : { threadCostUsd }),
               ...(globalCostUsd === undefined ? {} : { globalCostUsd }),
               ...(oldestCursor === undefined ? {} : { oldestCursor }),
+              ...(activeTurn === undefined ? {} : { activeTurn }),
             })
           } else if (before === undefined) {
             const queue = yield* turns.readQueue(thread.id)
@@ -2953,11 +2988,6 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               }),
             )
             yield* startUsageCostLoad
-            if (activeTurn !== undefined) {
-              const inspection = yield* backend.inspect(activeTurn.id)
-              for (const child of inspection?.children ?? [])
-                enqueueChildFollower(thread.id, child.executionId, activeTurn.id, child.status)
-            }
           } else
             dispatch({
               _tag: "TranscriptPagePrepended",
@@ -3002,6 +3032,15 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           yield* transcriptPageAdmission.withPermits(1)(
             loadTranscriptPage(thread, request, dispatch, undefined, !hasStoredSnapshot),
           )
+          const seedDescendantFollowers = Effect.gen(function* () {
+            const turns = yield* TurnRepository.Service
+            const activeTurn = yield* turns.findActive(thread.id)
+            if (activeTurn === undefined) return
+            const backend = yield* ExecutionBackend.Service
+            for (const child of yield* descendantExecutions(backend, activeTurn.id))
+              enqueueChildFollower(thread.id, child.executionId, activeTurn.id, child.status)
+          })
+          if (!hasStoredSnapshot) yield* seedDescendantFollowers
           if ((yield* Ref.get(selectionRequest)) !== request) return
           const summaries = yield* ThreadSummaryRepository.Service
           yield* summaries.markRead(thread.id, yield* Clock.currentTimeMillis)
@@ -3044,6 +3083,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                       loadTranscriptPage(thread, request, dispatch, undefined, true, true),
                     ),
                   ),
+                  Effect.andThen(seedDescendantFollowers),
                   Effect.tap(() =>
                     Effect.logInfo("transcript.selection.repair.completed").pipe(
                       Effect.annotateLogs("rika.thread.id", String(thread.id)),
