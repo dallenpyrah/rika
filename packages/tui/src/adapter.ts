@@ -1301,6 +1301,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     expanded: boolean,
     hasChildren = false,
     hasTerminal = false,
+    activeSiblingCount?: number,
   ) => {
     const failed = unit.block.status === "failed"
     const running = unit.block.status === "running"
@@ -1312,6 +1313,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     } else if (failed && unit.block.presentation.family === "agent") {
       label = failedAgentLabel(unit.block.presentation.activeLabel)
     }
+    const activeCount = running && activeSiblingCount !== undefined ? ` · ${activeSiblingCount} active` : ""
     const detail = unit.block.detail.length === 0 ? "" : ` ${unit.block.detail}`
     const agent = unit.block.presentation.family === "agent"
     const shellFailure =
@@ -1321,7 +1323,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
       hasChildren || hasTerminal || (agent ? unit.block.detail.length > 0 : output !== undefined && output.length > 0)
     if (selected)
       highlight(
-        `${iconChar(failed, running, spinnerFrame, cancelled)} ${label}${agent ? "" : detail}${shellFailure}${expandable ? markerText(expanded) : ""}`,
+        `${iconChar(failed, running, spinnerFrame, cancelled)} ${label}${activeCount}${agent ? "" : detail}${shellFailure}${expandable ? markerText(expanded) : ""}`,
       )
     else {
       append(statusIcon(failed, running, cancelled))
@@ -1330,6 +1332,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         presentation: { ...unit.block.presentation, activeLabel: label, completeLabel: label },
       }).summary
       for (const chunk of renderToolSummary(baseSummary, { leading: " " })[0]!) append(chunk)
+      if (activeCount.length > 0) append(dim(fg(colors.text)(activeCount)))
       if (shellFailure.length > 0) append(fg(colors.red)(shellFailure))
       if (expandable) append(marker(expanded))
     }
@@ -1416,6 +1419,8 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
           } else append(fg(colors.text)(" "))
           for (const chunk of labelLine) append(chunk)
         }
+      if (running && unit.activeSiblingCount !== undefined)
+        append(dim(fg(colors.text)(` · ${unit.activeSiblingCount} active`)))
     }
     if (expandable) append(marker(expanded))
     const headerEnd = line
@@ -1559,6 +1564,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         expanded,
         unit.children !== undefined,
         unit.agentResponse !== undefined,
+        unit.activeSiblingCount,
       )
       if (expanded)
         for (const [childIndex, child] of (unit.children ?? []).entries())
@@ -1581,7 +1587,9 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
     } else if (unit.group === "explore") renderExploreBody(toolUnitsFor(model, unit.blocks), selected, expanded)
     else if (unit.group === "edit") renderEditBody(toolUnitsFor(model, unit.blocks), unit.diffs, selected, expanded)
     else if (unit.group === "shell") renderShellBody(toolUnitsFor(model, unit.blocks), selected, expanded)
-    else for (const toolUnit of toolUnitsFor(model, unit.blocks)) renderOtherToolBody(toolUnit, selected, expanded)
+    else
+      for (const toolUnit of toolUnitsFor(model, unit.blocks))
+        renderOtherToolBody(toolUnit, selected, expanded, false, false, unit.activeSiblingCount)
     const cancelledAgent =
       unit.kind === "tool" &&
       unit.blocks.some((index) => {

@@ -22,6 +22,7 @@ import {
   Effect,
   Exit,
   Fiber,
+  FiberSet,
   Function,
   Layer,
   PubSub,
@@ -1815,9 +1816,9 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               readonly afterCursor?: string
             }
           | { readonly _tag: "Terminal"; readonly afterCursor?: string }
-        const childFollowerJobs = yield* Queue.bounded<ChildFollowerJob>(512)
         const childFollowerStates = new Map<string, ChildFollowerState>()
         const deliveredChildCursors = new Map<string, Set<string>>()
+        let runChildFollower: (job: ChildFollowerJob) => void
         let childFollowerSelection: ChildFollowerSelection = {
           generation: 0,
           threadId: settings.initialThreadId,
@@ -1839,7 +1840,6 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             stopped: yield* Deferred.make<void>(),
           }
           yield* Deferred.succeed(previous.stopped, undefined)
-          yield* Queue.clear(childFollowerJobs)
         })
         const enqueueChildFollower = (
           threadId: Thread.ThreadId,
@@ -1871,21 +1871,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               ? { _tag: "Following", selection }
               : { _tag: "Following", selection, afterCursor: current.afterCursor }
           childFollowerStates.set(key, following)
-          if (
-            !Queue.offerUnsafe(childFollowerJobs, {
-              key,
-              executionId,
-              threadId,
-              rootTurnId,
-              selection,
-            })
-          )
-            childFollowerStates.set(
-              key,
-              following.afterCursor === undefined
-                ? { _tag: "Idle" }
-                : { _tag: "Idle", afterCursor: following.afterCursor },
-            )
+          runChildFollower({ key, executionId, threadId, rootTurnId, selection })
         }
         const resumeWaitingChildFollowers = (threadId: Thread.ThreadId) => {
           for (const [key, state] of childFollowerStates) {
@@ -2307,32 +2293,29 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             }
           }
         })
-        const runChildFollower = Effect.forever(
-          Queue.take(childFollowerJobs).pipe(
-            Effect.flatMap((job) =>
-              childFollowerSelection === job.selection
-                ? followChildExecution(job).pipe(
-                    Effect.catch((error) =>
-                      (String(error).includes("ExecutionNotFound")
-                        ? Effect.logInfo("child-execution.absent")
-                        : Effect.logError("child-execution.follow.failed").pipe(
-                            Effect.annotateLogs("rika.failure.kind", String(error)),
-                          )
-                      ).pipe(
-                        Effect.annotateLogs({
-                          "rika.execution.id": job.executionId,
-                          "rika.thread.id": String(job.threadId),
-                        }),
-                      ),
-                    ),
-                  )
-                : Effect.void,
-            ),
-          ),
+        const forkChildFollower = yield* FiberSet.makeRuntime<never, void, never>().pipe(
+          Effect.provideService(Scope.Scope, sessionScope),
         )
-        yield* Effect.forEach(Array.from({ length: 8 }), () => Effect.forkIn(runChildFollower, sessionScope), {
-          discard: true,
-        })
+        runChildFollower = (job) => {
+          forkChildFollower(
+            Effect.yieldNow.pipe(
+              Effect.andThen(followChildExecution(job)),
+              Effect.catch((error) =>
+                (String(error).includes("ExecutionNotFound")
+                  ? Effect.logInfo("child-execution.absent")
+                  : Effect.logError("child-execution.follow.failed").pipe(
+                      Effect.annotateLogs("rika.failure.kind", String(error)),
+                    )
+                ).pipe(
+                  Effect.annotateLogs({
+                    "rika.execution.id": job.executionId,
+                    "rika.thread.id": String(job.threadId),
+                  }),
+                ),
+              ),
+            ),
+          )
+        }
         const readQueue = Effect.fn("Operation.interactive.readQueue")(function* (
           threadId: Thread.ThreadId,
           dispatch: (event: InteractiveEvent) => void,

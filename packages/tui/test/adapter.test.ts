@@ -1262,6 +1262,20 @@ describe("Surface", () => {
     expect(lines.every((line) => !line.startsWith("│"))).toBe(true)
   })
 
+  test("renders the presenter-owned active sibling count in agent labels", () => {
+    const blocks = Array.from({ length: 4 }, (_, index) => ({
+      ...subagentToolBlock,
+      id: `agent-${index}`,
+      status: index === 3 ? ("complete" as const) : ("running" as const),
+    }))
+    const text = renderedText({
+      blocks,
+      items: blocks.map((block, index) => ({ _tag: "Block", index, id: `tool:${block.id}` })),
+    })
+    expect(text.match(/Subagent working · 3 active/g)).toHaveLength(3)
+    expect(text).toContain("Subagent finished")
+  })
+
   test("renders an expanded subagent body without any added left rail", () => {
     const lines = nonEmptyLines(renderedText({ blocks: [subagentToolBlock], expandedRowKeys: ["tool:agent"] }))
     expect(lines[0]).toContain("Subagent finished")
