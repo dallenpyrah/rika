@@ -69,7 +69,6 @@ import {
 } from "./agent-depth"
 import { resolveSpawnModel } from "./agent-model"
 import * as DataBlobStore from "./data-blob-store"
-import * as ImageInputModel from "./image-input-model"
 
 export { streamingOnlyLanguageModel, withStreamingOnlyModel } from "./streaming-only-model"
 
@@ -285,15 +284,11 @@ const withResilience = (
   registration: ModelRegistry.Registration,
   resilience: ModelResilience.Interface | undefined,
 ): ModelRegistry.Registration => {
-  const imageInputLayer = Layer.effect(
-    LanguageModel.LanguageModel,
-    LanguageModel.LanguageModel.pipe(Effect.map(ImageInputModel.make)),
-  ).pipe(Layer.provideMerge(registration.layer))
-  if (resilience === undefined) return { ...registration, layer: imageInputLayer }
+  if (resilience === undefined) return registration
   const modelLayer = Layer.effect(
     LanguageModel.LanguageModel,
     LanguageModel.LanguageModel.pipe(Effect.map((model) => ModelResilience.apply(model, resilience))),
-  ).pipe(Layer.provideMerge(imageInputLayer))
+  ).pipe(Layer.provideMerge(registration.layer))
   return { ...registration, layer: modelLayer }
 }
 

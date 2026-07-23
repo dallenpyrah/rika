@@ -116,7 +116,7 @@ test(
 )
 
 test(
-  "delivers image attachments to Baton as image bytes",
+  "delivers image attachments to Baton as inline data URLs",
   () =>
     runNative(
       withBackend([TestModel.text("image received")], (fixture) =>
@@ -139,7 +139,12 @@ test(
           )
           expect(parts).toMatchObject([
             { type: "text", text: "inspect " },
-            { type: "file", mediaType: "image/png", data: Uint8Array.from([1, 2, 3]), fileName: "shot.png" },
+            {
+              type: "file",
+              mediaType: "image/png",
+              data: new URL("data:image/png;base64,AQID"),
+              fileName: "shot.png",
+            },
             { type: "text", text: " closely" },
           ])
         }),
@@ -171,7 +176,7 @@ test(
 )
 
 test(
-  "delivers image bytes through a dynamically registered model",
+  "delivers inline image data through a dynamically registered model",
   () =>
     runNative(
       withBackend(
@@ -202,9 +207,15 @@ test(
             const parts = requests[0]?.prompt.content.flatMap((message) =>
               message.role === "user" && Array.isArray(message.content) ? message.content : [],
             )
+            expect(result.events.filter((event) => event.type === "execution.failed")).toEqual([])
             expect(result.status).toBe("completed")
             expect(parts).toMatchObject([
-              { type: "file", mediaType: "image/png", data: Uint8Array.from([1, 2, 3]), fileName: "shot.png" },
+              {
+                type: "file",
+                mediaType: "image/png",
+                data: new URL("data:image/png;base64,AQID"),
+                fileName: "shot.png",
+              },
             ])
           }),
         { modelVariantPolicy: "registration-key" },
@@ -1250,7 +1261,12 @@ for (const answer of ["Approved", "Denied", "Always"] as const) {
             )
             expect(userParts).toMatchObject([
               { type: "text", text: "read " },
-              { type: "file", mediaType: "image/png", data: Uint8Array.from([1, 2, 3]), fileName: "shot.png" },
+              {
+                type: "file",
+                mediaType: "image/png",
+                data: new URL("data:image/png;base64,AQID"),
+                fileName: "shot.png",
+              },
               { type: "text", text: " fixture" },
             ])
           }
