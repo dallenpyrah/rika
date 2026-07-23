@@ -42,6 +42,7 @@ const program = Effect.gen(function* () {
     startupHoldMilliseconds: Number(startupHold),
     outboundCapacity,
     onReady: ResidentProcessStartup.signalReady,
+    hasActiveExecutionWork: Effect.sync(() => activeWork > 0),
     owner: (interactive) =>
       Effect.gen(function* () {
         yield* append("owner-acquisitions.log", `${process.pid}\n`)
@@ -69,14 +70,20 @@ const program = Effect.gen(function* () {
                     Effect.flatMap(Console.log),
                     Effect.orDie,
                   )
+                const delegated = input.prompt[0] === "active-root-with-child"
                 return Effect.sync(() => {
-                  activeWork += 1
+                  activeWork += delegated ? 2 : 1
                 }).pipe(
                   Effect.andThen(append("delayed-work-starts.log", `${process.pid}\n`)),
+                  Effect.andThen(
+                    delegated
+                      ? append("active-executions.log", `${process.pid}:root\n${process.pid}:child\n`)
+                      : Effect.void,
+                  ),
                   Effect.andThen(Effect.never),
                   Effect.ensuring(
                     Effect.sync(() => {
-                      activeWork -= 1
+                      activeWork -= delegated ? 2 : 1
                     }).pipe(Effect.andThen(append("delayed-work-finalizations.log", `${process.pid}\n`))),
                   ),
                 )

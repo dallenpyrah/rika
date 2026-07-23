@@ -27,6 +27,13 @@ export const buildIdentity = typeof RIKA_BUILD_IDENTITY === "string" ? RIKA_BUIL
 export const ClientKind = Schema.Literals(["interactive", "run", "review", "workflow", "thread-continue", "product"])
 export const ConnectRole = Schema.Literals(["launch", "reattach"])
 export type ConnectRole = typeof ConnectRole.Type
+export const replacementDisposition = (options: {
+  readonly connectRole: ConnectRole
+  readonly hasActiveExecutionWork: boolean
+}) => {
+  if (options.connectRole === "reattach") return "restart" as const
+  return options.hasActiveExecutionWork ? ("defer" as const) : ("supersede" as const)
+}
 const WireIdentifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1_024))
 const Proof = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
 export const Handshake = Schema.Struct({
@@ -57,7 +64,7 @@ export type HandshakeAccepted = typeof HandshakeAccepted.Type
 
 export const HandshakeIncompatible = Schema.Struct({
   _tag: Schema.tag("incompatible"),
-  disposition: Schema.Literals(["supersede", "restart"]),
+  disposition: Schema.Literals(["supersede", "restart", "defer"]),
   family: Schema.tag("rika-resident"),
   identity: WireIdentifier,
   clientNonce: WireIdentifier,
@@ -216,6 +223,7 @@ export class ResidentServiceError extends Schema.TaggedErrorClass<ResidentServic
     "incompatible-resident",
     "foreign-listener",
     "message-too-large",
+    "replacement-delayed",
     "resident-absent",
     "resident-draining",
     "startup-failed",

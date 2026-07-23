@@ -498,6 +498,44 @@ describe("resident WebSocket process transport", () => {
   )
 
   test(
+    "keeps a different-build resident alive while a root and delegated child execution are active",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const root = yield* makeRoot
+          try {
+            const mismatched = yield* start(root, 1_000, 0, true, 1_024, 0, false, undefined, 0, {
+              script: "test/fixtures/resident-mismatched-client.ts",
+              environment: {
+                RIKA_TEST_RESIDENT_HOST_SCRIPT: "test/fixtures/resident-mismatched-host.ts",
+                RIKA_TEST_BUILD_IDENTITY: "rika-test-other-build",
+              },
+            })
+            const oldAttached = yield* attachedEffect(mismatched)
+            yield* mismatched.send("active-root-with-child")
+            yield* waitUntil(fileExists(`${root}/active-executions.log`))
+
+            const current = yield* start(root, 1_000)
+            expect(yield* current.nextEffect).toMatchObject({
+              type: "rejected",
+              tag: "ResidentServiceError",
+              error: expect.stringContaining("replacement is delayed"),
+            })
+            expect(alive(oldAttached.hostPid!)).toBe(true)
+            expect(yield* readText(`${root}/active-executions.log`)).toBe(
+              `${oldAttached.hostPid}:root\n${oldAttached.hostPid}:child\n`,
+            )
+            expect(yield* readText(`${root}/owner-acquisitions.log`)).toBe(`${oldAttached.hostPid}\n`)
+            yield* mismatched.kill
+          } finally {
+            yield* cleanRoot(root)
+          }
+        }),
+      ),
+    15_000,
+  )
+
+  test(
     "a reattaching client fails closed against a frozen v3 resident without replacing it",
     () =>
       run(
