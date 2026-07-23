@@ -1451,7 +1451,7 @@ const transcriptUnitBuilder = (model: Model, spinnerFrame = idleSpinnerFrame) =>
         renderNestedTool(child, bodyIndent, childIndex === children.length - 1 && unit.agentResponse === undefined)
     if (expanded && unit.agentResponse !== undefined) {
       const timeline = children.length > 0
-      const terminalPrefix = timeline ? `${bodyPrefix}│   ` : `${bodyPrefix}  `
+      const terminalPrefix = timeline ? `${bodyIndent}│   ` : bodyIndent
       const response = agentResponseOutcome(unit.agentResponse)
       const range =
         response.kind === "answer"

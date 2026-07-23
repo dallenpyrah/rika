@@ -1416,6 +1416,7 @@ describe("Surface", () => {
   test("shows a nested agent title and renders its prompt once in the expanded body", () => {
     const state = model({
       width: 48,
+      entries: [{ role: "assistant", text: "Nested summary", turnId: "child:child" }],
       blocks: [
         { ...subagentToolBlock, id: "parent", detail: "Explore the project" },
         {
@@ -1431,6 +1432,7 @@ describe("Surface", () => {
         { _tag: "Block", index: 1, id: "tool:child", turnId: "child:parent", parentId: "parent" },
         { _tag: "Block", index: 2, id: "tool:grandchild", turnId: "child:child", parentId: "child" },
         { _tag: "Block", index: 3, id: "tool:following", turnId: "child:parent", parentId: "parent" },
+        { _tag: "Entry", index: 0, id: "assistant:child:child:0", turnId: "child:child", parentId: "child" },
       ],
       expandedRowKeys: ["tool:parent", "tool:child"],
     })
@@ -1443,6 +1445,7 @@ describe("Surface", () => {
     expect(lines.some((line) => line.startsWith("  ├ ✓ Subagent finished ▾"))).toBe(true)
     expect(lines.some((line) => line.startsWith("  │   Read-only explore"))).toBe(true)
     expect(lines.some((line) => line.startsWith("  │   ├ ✓ $ git status"))).toBe(true)
+    expect(lines.some((line) => line.startsWith("  │   ╰   Nested summary"))).toBe(true)
     expect(text.match(/Read-only explore/g)).toHaveLength(1)
     expect(lines.every((line) => stringWidth(line) <= 44)).toBe(true)
   })
