@@ -172,7 +172,7 @@ const makeExa = (client: HttpClient.HttpClient, options: ProviderOptions): WebSe
 
 const makeFirecrawl = (client: HttpClient.HttpClient, options: ProviderOptions): WebSearch.SearchProvider => ({
   id: "firecrawl",
-  capabilities: new Set(["web", "github"]),
+  capabilities: new Set(["web"]),
   priority: options.priority ?? 80,
   search: (request) =>
     Effect.gen(function* () {
@@ -186,7 +186,6 @@ const makeFirecrawl = (client: HttpClient.HttpClient, options: ProviderOptions):
           HttpClientRequest.bodyJsonUnsafe({
             query: combinedQuery(request),
             limit: Math.min(10, Math.max(1, request.searchQueries.length * 2)),
-            ...(request.kind === "github" ? { categories: ["github"] } : {}),
           }),
         ),
       )
@@ -281,7 +280,7 @@ export const providerRegistry = [
   },
   {
     id: "firecrawl",
-    capabilities: ["web", "github"],
+    capabilities: ["web"],
     priority: 80,
     credentialEnvironment: "FIRECRAWL_API_KEY",
     search: firecrawl,

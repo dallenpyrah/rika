@@ -16,6 +16,11 @@ describe("tool contracts", () => {
       )
       expect(AgentTools.oracleTool.description).toContain("already-gathered evidence")
       expect(AgentTools.oracleTool.description).toContain("do not use it for primary workspace or codebase exploration")
+      expect(AgentTools.librarianTool.description).toContain(
+        "substantive external documentation, repository, or codebase research",
+      )
+      expect(AgentTools.librarianTool.description).toContain("access-controlled GitHub-oriented")
+      expect(AgentTools.librarianTool.description).toContain("public semantic-code searches")
       expect(schema).toMatchObject({
         properties: {
           prompt: { type: "string" },
@@ -253,6 +258,9 @@ describe("tool contracts", () => {
       })
       expect(searchQueries).not.toHaveProperty("prefixItems")
       expect(schema.properties).not.toHaveProperty("providers")
+      expect(Runtime.webSearchTool.description).toContain("code for public semantic implementation examples")
+      expect(Runtime.webSearchTool.description).toContain("github through the configured GitHub search provider")
+      expect(Runtime.webSearchTool.description).not.toContain("capability, not a particular provider")
       expect(yield* Schema.decodeUnknownEffect(ParallelSearch.SearchQueries)(["current docs"])).toEqual([
         "current docs",
       ])

@@ -37,10 +37,15 @@ const body = (httpRequest: HttpClientRequest.HttpClientRequest) => {
 }
 
 describe("WebSearch registry", () => {
-  it("selects the read-page credential through the provider registry", () => {
+  it("selects the read-page credential and reserves GitHub-kind search for GitHub through the provider registry", () => {
     const parallel = Redacted.make("parallel")
     expect(WebSearch.configuredReadPageCredential({ exa: Redacted.make("exa") })).toBeUndefined()
     expect(WebSearch.configuredReadPageCredential({ exa: Redacted.make("exa"), parallel })).toBe(parallel)
+    expect(
+      WebSearch.providerRegistry.flatMap(({ id, capabilities }) =>
+        capabilities.some((capability) => capability === "github") ? [id] : [],
+      ),
+    ).toEqual(["github"])
   })
 
   it.effect("selects by priority and compares at most three providers without deduplication", () =>
@@ -57,6 +62,22 @@ describe("WebSearch registry", () => {
         "middle",
         "low",
       ])
+    }),
+  )
+
+  it.effect("selects GitHub-kind searches only from a GitHub-capable provider", () =>
+    Effect.gen(function* () {
+      const github = makeProvider("github", 100, ["github"])
+      const firecrawl = makeProvider("firecrawl", 80, ["web"])
+      const search = WebSearch.make([firecrawl, github])
+      expect((yield* search.search({ ...input, kind: "github" })).map((outcome) => outcome.provider)).toEqual([
+        "github",
+      ])
+      expect(
+        (yield* search.search({ ...input, kind: "github", strategy: "compare" })).map((outcome) => outcome.provider),
+      ).toEqual(["github"])
+      const unavailable = yield* Effect.flip(WebSearch.make([firecrawl]).search({ ...input, kind: "github" }))
+      expect(unavailable.message).toContain("No configured web search provider supports 'github'")
     }),
   )
 
@@ -179,19 +200,20 @@ describe("WebSearch HTTP providers", () => {
     )
   })
 
-  it.effect("builds Firecrawl GitHub-category and GitHub REST requests", () => {
+  it.effect("builds Firecrawl web and GitHub REST requests without treating Firecrawl as GitHub search", () => {
     const captured: Array<HttpClientRequest.HttpClientRequest> = []
     return Effect.gen(function* () {
       const firecrawl = yield* WebSearch.firecrawl({ apiKey: Redacted.make("fire"), baseUrl: "https://fire.test" })
       const github = yield* WebSearch.github({ apiKey: Redacted.make("github"), baseUrl: "https://github.test" })
-      const fireResult = yield* firecrawl.search({ ...input, kind: "github", strategy: "auto" })
+      expect([...firecrawl.capabilities]).toEqual(["web"])
+      const fireResult = yield* firecrawl.search({ ...input, kind: "web", strategy: "auto" })
       const githubResult = yield* github.search({
         ...input,
         kind: "github",
         strategy: "auto",
         githubSearchType: "commits",
       })
-      expect(body(captured[0]!)).toMatchObject({ categories: ["github"] })
+      expect(body(captured[0]!)).not.toHaveProperty("categories")
       expect(captured[1]?.url).toContain("/search/commits?q=")
       expect(captured[1]?.headers["x-github-api-version"]).toBe("2022-11-28")
       expect(fireResult.results?.[0]?.excerpts).toEqual(["repository description"])

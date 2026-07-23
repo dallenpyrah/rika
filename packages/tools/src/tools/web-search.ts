@@ -12,7 +12,8 @@ export const Request = Schema.Struct({
   githubSearchType: Schema.optionalKey(WebSearch.GithubSearchType),
 })
 export const tool = Tool.make("web_search", {
-  description: "Search across configured sources. Use code for semantic examples and github for exact GitHub search.",
+  description:
+    "Search configured sources. Use code for public semantic implementation examples, github through the configured GitHub search provider for private or access-controlled and exact GitHub-oriented searches, and web for general research.",
   parameters: Schema.Struct({
     objective: WebSearch.Objective,
     searchQueries: WebSearch.SearchQueries,

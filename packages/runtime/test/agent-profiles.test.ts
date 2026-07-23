@@ -13,17 +13,6 @@ import {
 
 const model = { provider: "test", model: "deterministic" }
 const threadRecoveryTools = ["search_threads", "read_thread_transcript"]
-const expectedInstructions = {
-  Oracle:
-    "Act as a read-only, high-reasoning advisor for high-level planning, architecture tradeoffs, difficult debugging analysis, and critical review of focused evidence. Do not perform primary workspace or codebase exploration; use focused inspection only to assess supplied evidence. Ground your advice in workspace evidence, explain your reasoning and recommendations, and do not modify files.",
-  Librarian:
-    "Research current external sources and return concise, cited findings without modifying files. Start with a self-contained objective and one to three focused queries. Use auto for a normal lookup. Use compare only for disputed, recent, safety-sensitive, or high-impact claims where independent perspectives improve confidence; do not query every source by default. Choose the search kind deliberately. Use web for general research, Exa through kind code for semantic implementation examples, and kind github with githubSearchType for exact code, repositories, issues and pull requests, or commit history. Prefer primary and authoritative sources. Search excerpts are leads, not final proof: use read_web_page when the source text, version, date, qualification, or surrounding context matters. Cross-check important claims, distinguish sourced facts from your conclusions, cite the URLs that support each material finding, and call out disagreement or uncertainty explicitly. Stop when the evidence is sufficient for the request.",
-  Painter:
-    "Produce a requested visual artifact through the available media route and report its metadata. Do not modify source files.",
-  Review: "Review workspace changes for correctness, regressions, and missing tests. Do not modify files.",
-  ReadThread: "Answer only from local thread transcripts and identify the threads used.",
-  Task: "Complete the assigned workspace investigation, reproduction, verification, or implementation task and report findings, changed files, and verification. Modify files only when the delegated task requests it.",
-} as const
 const relayModel = (selection: {
   readonly provider: string
   readonly model: string
@@ -36,7 +25,6 @@ const relayModel = (selection: {
 
 describe("product agent profiles", () => {
   it("loads normalized instructions for every shipping profile", () => {
-    expect(Object.keys(expectedInstructions)).toEqual(names)
     expect(mainInstructions).toContain("Route delegation by purpose")
     expect(mainInstructions).toContain("Call the read_thread subagent selectively")
     for (const name of names) {
@@ -84,12 +72,22 @@ describe("product agent profiles", () => {
     expect(mainInstructions).toContain("tell the user that you are consulting it")
     expect(mainInstructions).toContain("after consulting Oracle, state that you did")
     expect(mainInstructions).toContain("remaining responsible for the implementation and conclusion")
+    expect(mainInstructions).toContain("Use read_web_page directly for a known safe public URL")
+    expect(mainInstructions).toContain("web_search directly only for a one-shot fact or narrow lookup")
+    expect(mainInstructions).toContain("Delegate substantive external research")
+    expect(mainInstructions).toContain("Keep local workspace exploration with Task or workspace tools")
     expect(mainInstructions).toContain("Use auto for normal lookups")
-    expect(mainInstructions).toContain("kind code for semantic implementation examples")
-    expect(mainInstructions).toContain("kind github for exact code")
-    expect(mainInstructions).not.toContain("provider IDs")
-    expect(mainInstructions).toContain("fetch authoritative pages")
-    expect(mainInstructions).toContain("Delegate broad or multi-source external research to Librarian")
+    expect(mainInstructions).toContain("compare only when public claims are disputed")
+    expect(mainInstructions).toContain("kind code for public semantic implementation examples through Exa Code Context")
+    expect(mainInstructions).toContain(
+      "kind github with githubSearchType for private or access-controlled codebases and exact code",
+    )
+    expect(mainInstructions).toContain("through the configured GitHub search provider")
+    expect(mainInstructions).toContain("Prefer repository-qualified GitHub queries for access-controlled material")
+    expect(mainInstructions).toContain("Do not use compare with private or access-controlled material")
+    expect(mainInstructions).toContain("rather than reformulating sensitive terms through code, web, or read_web_page")
+    expect(mainInstructions).toContain("For public research when Exa Code Context or GitHub search is unavailable")
+    expect(mainInstructions).toContain("fetch authoritative public pages")
     expect(mainInstructions).not.toContain("Use subagents for independent work")
     expect(mainInstructions).not.toContain("parallel delegation")
     expect(mainInstructions).not.toContain("same tool-call batch")
@@ -107,8 +105,23 @@ describe("product agent profiles", () => {
       permissions: ["network.read", "thread.read"],
     })
     expect(registered.Librarian?.instructions).toContain("one to three focused queries")
-    expect(registered.Librarian?.instructions).toContain("Use compare only")
-    expect(registered.Librarian?.instructions).not.toContain("provider IDs")
+    expect(registered.Librarian?.instructions).toContain("Use compare only for public")
+    expect(registered.Librarian?.instructions).toContain(
+      "kind code through Exa Code Context for public semantic implementation examples",
+    )
+    expect(registered.Librarian?.instructions).toContain(
+      "kind github with githubSearchType for private or access-controlled codebases",
+    )
+    expect(registered.Librarian?.instructions).toContain("through the configured GitHub search provider")
+    expect(registered.Librarian?.instructions).toContain(
+      "Prefer repository-qualified GitHub queries for access-controlled material",
+    )
+    expect(registered.Librarian?.instructions).toContain("Do not use compare, code, web, or read_web_page")
+    expect(registered.Librarian?.instructions).toContain("use a Task to inspect an available local checkout")
+    expect(registered.Librarian?.instructions).toContain(
+      "For public material, if Exa Code Context or GitHub search is unavailable",
+    )
+    expect(registered.Librarian?.instructions).not.toContain("A github kind selects")
     expect(registered.Librarian?.instructions).toContain("Search excerpts are leads, not final proof")
     expect(registered.Librarian?.instructions).toContain("distinguish sourced facts from your conclusions")
     expect(registered.Librarian?.instructions).toContain("Stop when the evidence is sufficient")
@@ -121,6 +134,14 @@ describe("product agent profiles", () => {
       "workspace investigation, reproduction, verification, or implementation",
     )
     expect(registered.Task?.instructions).toContain("Modify files only when the delegated task requests it")
+    expect(registered.Task?.instructions).toContain(
+      "For external research beyond a narrow lookup, delegate it to Librarian",
+    )
+    expect(registered.Task?.instructions).toContain("private or access-controlled codebases")
+    expect(registered.Task?.instructions).toContain(
+      "Prefer repository-qualified GitHub queries for access-controlled material",
+    )
+    expect(registered.Task?.instructions).toContain("Do not use compare, code, web, or read_web_page")
     expect(registered.Task).toMatchObject({
       tool_names: [
         "grep",

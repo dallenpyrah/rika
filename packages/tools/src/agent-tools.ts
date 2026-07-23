@@ -51,7 +51,7 @@ export const oracleTool = specialist(
 )
 export const librarianTool = specialist(
   "librarian",
-  "Delegate authoritative documentation research to the network-read-only Librarian product agent and wait for its result",
+  "Delegate substantive external documentation, repository, or codebase research—including access-controlled GitHub-oriented and public semantic-code searches—to the network-read-only Librarian product agent and wait for its result",
 )
 export const reviewTool = specialist(
   "review",
