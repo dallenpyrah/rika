@@ -160,7 +160,7 @@ describe("UsageCost", () => {
     ).toBeUndefined()
   })
 
-  it("requires output and every input pricing bucket without double charging reasoning", () => {
+  it("accepts a null zero cache-write bucket but requires complete token accounting", () => {
     expect(
       UsageCost.eventCostUsd(
         reportedTokens("missing-output", "gpt-5.6-sol", 100, null, {
@@ -171,6 +171,14 @@ describe("UsageCost", () => {
     expect(
       UsageCost.eventCostUsd(
         reportedTokens("missing-cache-write", "gpt-5.6-sol", 100, 0, {
+          input_tokens_cache_write: null,
+        }),
+      ),
+    ).toBe(0.0005)
+    expect(
+      UsageCost.eventCostUsd(
+        reportedTokens("unaccounted-cache-write", "gpt-5.6-sol", 100, 0, {
+          input_tokens_uncached: 50,
           input_tokens_cache_write: null,
         }),
       ),
