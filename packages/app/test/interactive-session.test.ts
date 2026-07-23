@@ -1263,6 +1263,8 @@ const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagent
   readonly storedTree: Transcript.Projection
   readonly turnLastCursor: string
   readonly childReplayEvents: ReadonlyArray<ExecutionBackend.Event>
+  readonly turnStatus?: Turn.Status
+  readonly followed?: Ref.Ref<ReadonlyArray<string>>
 }) {
   const subagentThread = thread("subagent-thread", 1)
   const doneTurn: Turn.Turn = {
@@ -1270,7 +1272,7 @@ const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagent
     threadId: subagentThread.id,
     prompt: "delegate",
     executionRoute: executionRoute(),
-    status: "completed",
+    status: options.turnStatus ?? "completed",
     createdAt: 1,
     updatedAt: 1,
     lastCursor: options.turnLastCursor,
@@ -1284,7 +1286,7 @@ const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagent
     turnId === "done"
       ? {
           turnId,
-          status: "completed",
+          status: options.turnStatus ?? "completed",
           lastCursor: "done-final",
           waits: [],
           pendingTools: [],
@@ -1304,6 +1306,16 @@ const makeSubagentReloadHarness = Effect.fn("InteractiveSessionTest.makeSubagent
     cancelWorkflow: () => Effect.die("unused"),
     start: () => Effect.die("unused"),
     inspect: (turnId) => Effect.succeed(inspection(turnId)),
+    follow: (turnId, _cursor, onEvent) => {
+      if (turnId === "done") return Effect.never
+      const events = eventsFor(turnId)
+      return (
+        options.followed === undefined ? Effect.void : Ref.update(options.followed, (followed) => [...followed, turnId])
+      ).pipe(
+        Effect.tap(() => Effect.sync(() => events.forEach((event) => onEvent?.(event)))),
+        Effect.as({ turnId, status: "completed" as const, events }),
+      )
+    },
     steer: () => Effect.die("unused"),
     cancel: () => Effect.die("unused"),
     replay: (turnId) => Effect.succeed({ turnId, status: "completed" as const, events: eventsFor(turnId) }),
@@ -1380,6 +1392,39 @@ const nestedSubagentExpectations = (entries: ReadonlyArray<TranscriptRepository.
 }
 
 describe("InteractiveSession subagent reload", () => {
+  it.effect("follows an already-completed child so the live view receives its tools and final response", () =>
+    Effect.gen(function* () {
+      const followed = yield* Ref.make<ReadonlyArray<string>>([])
+      const rootProjection = Transcript.project("done", "delegate", subagentRootEvents.slice(0, 2))
+      const { session, subagentThread } = yield* makeSubagentReloadHarness({
+        storedTree: rootProjection,
+        turnLastCursor: `execution:done:child:${subagentChildId}`,
+        childReplayEvents: subagentChildEvents,
+        turnStatus: "running",
+        followed,
+      })
+      const events: Array<Operation.InteractiveEvent> = []
+      yield* collectEvents(session, events)
+      yield* session.selectThread(subagentThread.id, 1)
+      for (
+        let attempt = 0;
+        attempt < 400 &&
+        !events.some(
+          (event) => event._tag === "TranscriptPatched" && event.event.cursor === `${subagentChildId}:completed`,
+        );
+        attempt += 1
+      )
+        yield* Effect.yieldNow
+
+      expect(yield* Ref.get(followed)).toContain(subagentChildId)
+      expect(
+        events.flatMap((event) =>
+          event._tag === "TranscriptPatched" && event.turnId === subagentChildId ? [event.event.cursor] : [],
+        ),
+      ).toEqual(subagentChildEvents.map((event) => event.cursor))
+    }),
+  )
+
   it.effect("repairs a persisted subagent tree whose child transcript is empty", () =>
     Effect.gen(function* () {
       const rootProjection = Transcript.project("done", "delegate", subagentRootEvents)

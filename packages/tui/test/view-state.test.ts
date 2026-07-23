@@ -96,6 +96,36 @@ describe("ViewState", () => {
     expect(ViewState.formatActivityCounter(1_234_567)).toBe("1.2M tok")
   })
 
+  test("summarizes top-level subagents separately from all other running tools", () => {
+    const rootAgent = {
+      ...readCall("root-agent", "Root agent"),
+      presentation: {
+        family: "agent" as const,
+        action: "task",
+        activeLabel: "Subagent working",
+        completeLabel: "Subagent finished",
+      },
+    }
+    const nestedAgent = { ...rootAgent, id: "nested-agent" }
+    const blocks = [rootAgent, nestedAgent, readCall("root-read", "a.ts"), readCall("nested-read", "b.ts")]
+    const activity = ViewState.runningToolsActivity({
+      ...ViewState.initial("/work"),
+      blocks,
+      items: [
+        { _tag: "Block", index: 0, id: "tool:root-agent" },
+        { _tag: "Block", index: 1, id: "tool:nested-agent", parentId: "root-agent" },
+        { _tag: "Block", index: 2, id: "tool:root-read" },
+        { _tag: "Block", index: 3, id: "tool:nested-read", parentId: "nested-agent" },
+      ],
+    })
+
+    expect(activity).toEqual({ _tag: "RunningTools", subagents: 1, tools: 2 })
+    expect(ViewState.formatActivity(activity)).toBe("Running 1 subagent, 2 tools")
+    expect(ViewState.formatActivity({ _tag: "RunningTools", subagents: 5, tools: 3 })).toBe(
+      "Running 5 subagents, 3 tools",
+    )
+  })
+
   test("exposes only thread switch, mode change, fast mode, and quit in the command palette", () => {
     expect(Palette.commands).toEqual([
       {

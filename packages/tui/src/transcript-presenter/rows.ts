@@ -19,7 +19,6 @@ export type ToolTranscriptUnit = {
   readonly group: ToolGroupKind
   readonly blocks: ReadonlyArray<number>
   readonly diffs: ReadonlyArray<number>
-  readonly activeSiblingCount?: number
   readonly children?: ReadonlyArray<ToolTranscriptUnit>
   readonly agentResponse?: AgentResponseState
 }
@@ -321,7 +320,6 @@ export const orderedTranscriptItems = (model: Model): ReadonlyArray<TranscriptIt
 interface RowsCache {
   readonly blocks: ReadonlyArray<unknown>
   readonly entries: ReadonlyArray<unknown>
-  readonly pendingChildApprovalOwners: Readonly<Record<string, string>>
   readonly entryItemByIndex: ReadonlyMap<number, TranscriptItem>
   readonly blockItemByIndex: ReadonlyMap<number, TranscriptItem>
   units?: ReadonlyArray<TranscriptUnit>
@@ -332,13 +330,7 @@ const rowsCacheByItems = new WeakMap<ReadonlyArray<unknown>, RowsCache>()
 const rowsCacheFor = (model: Model): RowsCache | undefined => {
   if (model.items.length === 0) return undefined
   const cached = rowsCacheByItems.get(model.items)
-  if (
-    cached !== undefined &&
-    cached.blocks === model.blocks &&
-    cached.entries === model.entries &&
-    cached.pendingChildApprovalOwners === model.pendingChildApprovalOwners
-  )
-    return cached
+  if (cached !== undefined && cached.blocks === model.blocks && cached.entries === model.entries) return cached
   const entryItemByIndex = new Map<number, TranscriptItem>()
   const blockItemByIndex = new Map<number, TranscriptItem>()
   for (const item of model.items as ReadonlyArray<TranscriptItem>) {
@@ -348,7 +340,6 @@ const rowsCacheFor = (model: Model): RowsCache | undefined => {
   const built: RowsCache = {
     blocks: model.blocks,
     entries: model.entries,
-    pendingChildApprovalOwners: model.pendingChildApprovalOwners,
     entryItemByIndex,
     blockItemByIndex,
   }
@@ -364,25 +355,6 @@ export const transcriptUnits = (model: Model): ReadonlyArray<TranscriptUnit> => 
   return units
 }
 
-const withActiveSiblingCounts = (
-  model: Model,
-  units: ReadonlyArray<ToolTranscriptUnit>,
-): ReadonlyArray<ToolTranscriptUnit> => {
-  const awaitingApproval = new Set(Object.values(model.pendingChildApprovalOwners))
-  const active = units.filter((unit) => {
-    const block = model.blocks[unit.blocks[0]!] as TranscriptBlock
-    return (
-      block._tag === "ToolCall" &&
-      block.presentation.family === "agent" &&
-      block.status === "running" &&
-      !awaitingApproval.has(block.id)
-    )
-  })
-  if (active.length === 0) return units
-  const activeUnits = new Set(active)
-  return units.map((unit) => (activeUnits.has(unit) ? { ...unit, activeSiblingCount: active.length } : unit))
-}
-
 const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
   const units: Array<TranscriptUnit> = []
   const childItems = new Map<string, Array<TranscriptItem>>()
@@ -393,26 +365,23 @@ const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
   const agentResponseFor = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): AgentResponseState | undefined =>
     block.presentation.family === "agent" ? agentResponseState(model, block, childItems.get(block.id) ?? []) : undefined
   const nestedTools = (parentId: string): ReadonlyArray<ToolTranscriptUnit> =>
-    withActiveSiblingCounts(
-      model,
-      (childItems.get(parentId) ?? []).flatMap((item) => {
-        if (item._tag !== "Block") return []
-        const block = model.blocks[item.index] as TranscriptBlock
-        if (block._tag !== "ToolCall") return []
-        const children = nestedTools(block.id)
-        const agentResponse = agentResponseFor(block)
-        return [
-          {
-            kind: "tool" as const,
-            group: groupOf(toolKind(block.name, block.presentation.family)),
-            blocks: [item.index],
-            diffs: [],
-            ...(children.length === 0 ? {} : { children }),
-            ...(agentResponse === undefined ? {} : { agentResponse }),
-          },
-        ]
-      }),
-    )
+    (childItems.get(parentId) ?? []).flatMap((item) => {
+      if (item._tag !== "Block") return []
+      const block = model.blocks[item.index] as TranscriptBlock
+      if (block._tag !== "ToolCall") return []
+      const children = nestedTools(block.id)
+      const agentResponse = agentResponseFor(block)
+      return [
+        {
+          kind: "tool" as const,
+          group: groupOf(toolKind(block.name, block.presentation.family)),
+          blocks: [item.index],
+          diffs: [],
+          ...(children.length === 0 ? {} : { children }),
+          ...(agentResponse === undefined ? {} : { agentResponse }),
+        },
+      ]
+    })
   let toolRun: Array<{ readonly index: number; readonly kind: ToolKind }> = []
   let pendingEditDiffs: Array<number> = []
   const flush = () => {
@@ -475,12 +444,7 @@ const transcriptUnitsImpl = (model: Model): ReadonlyArray<TranscriptUnit> => {
     else units.push({ kind: "block", block: item.index })
   }
   flush()
-  const rootTools = withActiveSiblingCounts(
-    model,
-    units.filter((unit): unit is ToolTranscriptUnit => unit.kind === "tool"),
-  )
-  let toolIndex = 0
-  return units.map((unit) => (unit.kind === "tool" ? rootTools[toolIndex++]! : unit))
+  return units
 }
 
 export const isToolOutputDisplayed = (block: Extract<TranscriptBlock, { _tag: "ToolCall" }>): boolean =>

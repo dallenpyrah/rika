@@ -14,7 +14,10 @@ export const Activity = Schema.Union([
   Schema.TaggedStruct("Waiting", {}),
   Schema.TaggedStruct("Thinking", { bytes: Schema.Finite, blockId: Schema.optionalKey(Schema.String) }),
   Schema.TaggedStruct("Streaming", { bytes: Schema.Finite, blockId: Schema.optionalKey(Schema.String) }),
-  Schema.TaggedStruct("RunningTools", {}),
+  Schema.TaggedStruct("RunningTools", {
+    subagents: Schema.optionalKey(Schema.Number),
+    tools: Schema.optionalKey(Schema.Number),
+  }),
   Schema.TaggedStruct("Compacting", {}),
 ])
 export type Activity = typeof Activity.Type
@@ -40,13 +43,41 @@ export const formatActivityCounter = (tokens: number): string => {
 
 export const formatActivity = (activity: Activity | undefined): string | undefined => {
   if (activity === undefined) return undefined
-  if (activity._tag === "RunningTools") return "Running tools"
+  if (activity._tag === "RunningTools") {
+    const labels = [
+      ...(activity.subagents === undefined || activity.subagents === 0
+        ? []
+        : [`${activity.subagents} ${activity.subagents === 1 ? "subagent" : "subagents"}`]),
+      ...(activity.tools === undefined || activity.tools === 0
+        ? []
+        : [`${activity.tools} ${activity.tools === 1 ? "tool" : "tools"}`]),
+    ]
+    return labels.length === 0 ? "Running tools" : `Running ${labels.join(", ")}`
+  }
   if (activity._tag === "Compacting") return "Auto-Compacting"
   if (activity._tag === "Thinking" || activity._tag === "Streaming") {
     const tokens = Math.floor(activity.bytes / 4)
     return `${activity._tag} ${formatActivityCounter(tokens)}`
   }
   return activity._tag
+}
+
+export const runningToolsActivity = (model: Model): Activity => {
+  const nestedBlocks = new Set(
+    (model.items as ReadonlyArray<TranscriptItem>).flatMap((item) =>
+      item._tag === "Block" && item.parentId !== undefined ? [item.index] : [],
+    ),
+  )
+  let subagents = 0
+  let tools = 0
+  for (const [index, candidate] of model.blocks.entries()) {
+    const block = candidate as TranscriptBlock
+    if (block._tag !== "ToolCall" || block.status !== "running") continue
+    if (block.presentation.family === "agent") {
+      if (!nestedBlocks.has(index)) subagents += 1
+    } else tools += 1
+  }
+  return { _tag: "RunningTools", subagents, tools }
 }
 
 const streamActivityImpl = (
@@ -1204,7 +1235,7 @@ export const update: {
           blocks.push(incoming)
         }
         const activityForIncomingBlock = (): Activity => {
-          if (incoming._tag === "ToolCall") return { _tag: "RunningTools" }
+          if (incoming._tag === "ToolCall") return runningToolsActivity({ ...model, blocks, items })
           if (incoming._tag === "ToolResult" || incoming._tag === "Permission") return { _tag: "Waiting" }
           if (incoming._tag === "Compaction") {
             return incoming.status === "running" ? { _tag: "Compacting" } : { _tag: "Waiting" }
@@ -1332,8 +1363,10 @@ export const update: {
       }
     }
     case "BlockAdded": {
+      const blocks = [...model.blocks, message.block]
+      const items = [...model.items, { _tag: "Block" as const, index: model.blocks.length }]
       const activityForAddedBlock = (): Activity => {
-        if (message.block._tag === "ToolCall") return { _tag: "RunningTools" }
+        if (message.block._tag === "ToolCall") return runningToolsActivity({ ...model, blocks, items })
         if (message.block._tag === "ToolResult" || message.block._tag === "Permission") return { _tag: "Waiting" }
         if (message.block._tag === "Compaction") {
           return message.block.status === "running" ? { _tag: "Compacting" } : { _tag: "Waiting" }
@@ -1342,8 +1375,8 @@ export const update: {
       }
       return {
         ...model,
-        blocks: [...model.blocks, message.block],
-        items: [...model.items, { _tag: "Block", index: model.blocks.length }],
+        blocks,
+        items,
         ...(model.busy ? { activity: activityForAddedBlock() } : {}),
       }
     }

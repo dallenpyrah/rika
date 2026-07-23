@@ -1850,15 +1850,6 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           if (selection.threadId !== String(threadId)) return
           const current = childFollowerStates.get(key) ?? { _tag: "Idle" as const }
           if (current._tag === "Terminal") return
-          if (isTerminalStatus(status ?? "running") && current.afterCursor === undefined) {
-            childFollowerStates.set(
-              key,
-              current.afterCursor === undefined
-                ? { _tag: "Terminal" }
-                : { _tag: "Terminal", afterCursor: current.afterCursor },
-            )
-            return
-          }
           if (
             (current._tag === "Waiting" && (status === undefined || status === "waiting")) ||
             (current._tag === "Following" && current.selection === selection)
