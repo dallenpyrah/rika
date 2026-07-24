@@ -304,6 +304,13 @@ export type InteractiveEvent =
       readonly threadId: Thread.ThreadId
       readonly cost: { readonly _tag: "Available"; readonly usd: number } | { readonly _tag: "Unavailable" }
       readonly tokens: { readonly _tag: "Available"; readonly total: number } | { readonly _tag: "Unavailable" }
+      readonly time:
+        | {
+            readonly _tag: "Available"
+            readonly accumulatedMillis: number
+            readonly activeSince?: number
+          }
+        | { readonly _tag: "Unavailable" }
     }
   | {
       readonly _tag: "ContextDiagnostics"
@@ -449,6 +456,14 @@ export const InteractiveEventSchema = Schema.Union([
     ]),
     tokens: Schema.Union([
       Schema.Struct({ _tag: Schema.tag("Available"), total: Schema.Finite }),
+      Schema.Struct({ _tag: Schema.tag("Unavailable") }),
+    ]),
+    time: Schema.Union([
+      Schema.Struct({
+        _tag: Schema.tag("Available"),
+        accumulatedMillis: Schema.Finite,
+        activeSince: Schema.optionalKey(Schema.Finite),
+      }),
       Schema.Struct({ _tag: Schema.tag("Unavailable") }),
     ]),
   }),
