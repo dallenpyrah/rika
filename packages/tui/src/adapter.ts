@@ -38,6 +38,7 @@ import {
   fileSidebarLayoutWidth,
   filteredFiles,
   filteredThreads,
+  activeTimeIcon,
   formatActiveTime,
   formatActivity,
   initial,
@@ -1837,6 +1838,9 @@ export class Surface {
   private welcomeTimer: Fiber.Fiber<void> | undefined
   private toastTimer: Fiber.Fiber<void> | undefined
   private usageLabelWidth = 0
+  private usageLabelHovered = false
+  private usagePointerX: number | undefined
+  private usageLayoutFrame: (() => void) | undefined
   private lastPaste: { readonly text: string; readonly at: number } | undefined
   private model: Model | undefined
   private transcriptChildren: Array<TextRenderable> = []
@@ -2017,6 +2021,26 @@ export class Surface {
     this.modeLabel.onMouseDown = (event) => {
       const column = event.x - this.modeLabel.screenX
       if (column >= 0 && column < this.usageLabelWidth) this.handlers.usageToggle?.()
+    }
+    const updateUsageHover = (event: MouseEvent) => {
+      this.usagePointerX = event.x
+      const column = event.x - this.modeLabel.screenX
+      const hovered = column >= 0 && column < this.usageLabelWidth
+      if (hovered === this.usageLabelHovered) return
+      this.usageLabelHovered = hovered
+      this.renderer.setMousePointer(hovered ? "pointer" : "default")
+      if (this.model !== undefined) this.renderModeLabel(this.model)
+      this.renderer.requestRender()
+    }
+    this.modeLabel.onMouseOver = updateUsageHover
+    this.modeLabel.onMouseMove = updateUsageHover
+    this.modeLabel.onMouseOut = () => {
+      this.usagePointerX = undefined
+      if (!this.usageLabelHovered) return
+      this.usageLabelHovered = false
+      this.renderer.setMousePointer("default")
+      if (this.model !== undefined) this.renderModeLabel(this.model)
+      this.renderer.requestRender()
     }
     this.workspaceLabel = new TextRenderable(renderer, {
       content: "",
@@ -2458,8 +2482,8 @@ export class Surface {
     if (model.usageDisplay === "time") {
       if (model.usageTime?._tag === "Available")
         usageText = formatActiveTime(activeTimeAt(model.usageTime, this.currentTimeMillis()))
-      else if (model.usageTime?._tag === "Unavailable") usageText = "◷ —"
-      else usageText = "◷ ····"
+      else if (model.usageTime?._tag === "Unavailable") usageText = `${activeTimeIcon} —`
+      else usageText = `${activeTimeIcon} ····`
     } else if (model.usageDisplay === "tokens") {
       if (model.usageTokens?._tag === "Available") usageText = formatTokens(model.usageTokens.total)
       else if (model.usageTokens?._tag === "Unavailable") usageText = "— tok"
@@ -2470,17 +2494,52 @@ export class Surface {
     else if (model.usageCost?._tag === "Unavailable") usageText = "$—"
     else if (model.usageCost?._tag === "Loading" || model.busy) usageText = "$····"
     const modeChunks: Array<TextChunk> = []
-    this.usageLabelWidth = usageText.length === 0 ? 0 : stringWidth(` ${usageText} `)
+    const previousRight = this.modeLabel.screenX + this.modeLabel.width
+    this.usageLabelWidth = usageText.length === 0 ? 0 : modeLabelWidth(` ${usageText} `)
     if (usageText.length > 0) {
-      modeChunks.push(dim(fg(colors.text)(` ${usageText} `)))
+      const usage = fg(colors.text)(` ${usageText} `)
+      modeChunks.push(this.usageLabelHovered ? usage : dim(usage))
       modeChunks.push(fg(colors.text)("─"))
     }
     modeChunks.push(fg(colors.text)(" "))
     if (model.fastMode) modeChunks.push(fg(colors.amber)("↯"))
     modeChunks.push(fg(colors[model.mode])(model.mode))
     modeChunks.push(fg(colors.text)(" "))
-    this.modeLabel.width = modeChunks.reduce((total, chunk) => total + stringWidth(chunk.text), 0)
+    const width = modeChunks.reduce((total, chunk) => total + modeLabelWidth(chunk.text), 0)
+    if (this.usagePointerX !== undefined && this.modeLabel.width > 0) {
+      const screenX = previousRight - width
+      const hovered = this.usagePointerX >= screenX && this.usagePointerX < screenX + this.usageLabelWidth
+      if (hovered !== this.usageLabelHovered) {
+        this.usageLabelHovered = hovered
+        this.renderer.setMousePointer(hovered ? "pointer" : "default")
+        if (usageText.length > 0) {
+          const usage = fg(colors.text)(` ${usageText} `)
+          modeChunks[0] = hovered ? usage : dim(usage)
+        }
+      }
+    }
+    this.modeLabel.width = width
     this.modeLabel.content = new StyledText(modeChunks)
+    this.refreshUsageHoverAfterLayout()
+  }
+
+  private refreshUsageHoverAfterLayout(): void {
+    if (this.usagePointerX === undefined || this.usageLayoutFrame !== undefined) return
+    const refresh = () => {
+      this.renderer.off(CliRenderEvents.FRAME, refresh)
+      this.usageLayoutFrame = undefined
+      if (this.destroyed || this.usagePointerX === undefined) return
+      const hovered =
+        this.usagePointerX >= this.modeLabel.screenX &&
+        this.usagePointerX < this.modeLabel.screenX + this.usageLabelWidth
+      if (hovered === this.usageLabelHovered) return
+      this.usageLabelHovered = hovered
+      this.renderer.setMousePointer(hovered ? "pointer" : "default")
+      if (this.model !== undefined) this.renderModeLabel(this.model)
+      this.renderer.requestRender()
+    }
+    this.usageLayoutFrame = refresh
+    this.renderer.on(CliRenderEvents.FRAME, refresh)
   }
 
   private tickLoader(): void {
@@ -3449,6 +3508,8 @@ export class Surface {
     this.renderer.off(CliRenderEvents.FRAME, this.recordRenderedTranscriptScroll)
     if (this.sidebarLayoutFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.sidebarLayoutFrame)
     this.sidebarLayoutFrame = undefined
+    if (this.usageLayoutFrame !== undefined) this.renderer.off(CliRenderEvents.FRAME, this.usageLayoutFrame)
+    this.usageLayoutFrame = undefined
     this.transcriptAnchorScrollBy = 0
     this.pendingTranscriptPosition = undefined
     this.cancelWheelReport()
@@ -3959,6 +4020,8 @@ const formatCost = (usd: number): string =>
     minimumFractionDigits: 2,
     maximumFractionDigits: Math.abs(usd) < 0.01 ? 3 : 2,
   })
+
+const modeLabelWidth = (text: string): number => stringWidth(text.replaceAll(activeTimeIcon, "x"))
 
 export const formatTokens = (tokens: number): string => {
   if (tokens < 1_000) return `${tokens.toLocaleString("en-US")} tok`

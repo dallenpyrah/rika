@@ -379,9 +379,17 @@ describe("InteractiveSession controls", () => {
       yield* session.reopenThread(1)
       yield* session.submit("")
       while ((yield* turns.get(Turn.TurnId.make("created-turn")))?.status !== "completed") yield* Effect.yieldNow
-      while (events.filter((event) => event._tag !== "ThreadsListed").length < 5) yield* Effect.yieldNow
+      while (events.filter((event) => event._tag !== "ThreadsListed").length < 7) yield* Effect.yieldNow
       expect(events.filter((event) => event._tag !== "ThreadsListed")).toEqual([
         { _tag: "ThreadActivated", threadId: "created", title: "New thread" },
+        {
+          _tag: "ThreadUsageUpdated",
+          selectionEpoch: 0,
+          threadId: "created",
+          cost: { _tag: "Unavailable" },
+          tokens: { _tag: "Unavailable" },
+          time: { _tag: "Available", accumulatedMillis: 0 },
+        },
         {
           _tag: "SubmissionAdmitted",
           selectionEpoch: 0,
@@ -410,6 +418,14 @@ describe("InteractiveSession controls", () => {
           turnId: "created-turn",
           revision: 2,
           event: { cursor: "done", sequence: 2, type: "execution.completed", createdAt: 2 },
+        },
+        {
+          _tag: "ThreadUsageUpdated",
+          selectionEpoch: 0,
+          threadId: "created",
+          cost: { _tag: "Unavailable" },
+          tokens: { _tag: "Unavailable" },
+          time: { _tag: "Unavailable" },
         },
       ])
       expect(yield* repositories.get(Thread.ThreadId.make("created"))).toMatchObject({ title: "New thread" })

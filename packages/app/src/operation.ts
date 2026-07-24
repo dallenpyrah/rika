@@ -683,6 +683,16 @@ const displayActiveTime = (totals: UsageCost.Snapshot, threadId: string) => {
       }
 }
 
+type ThreadUsageEvent = Extract<InteractiveEvent, { readonly _tag: "ThreadUsageUpdated" }>
+type UsageTime = ThreadUsageEvent["time"]
+
+const sameUsageTime = (left: UsageTime | undefined, right: UsageTime | undefined): boolean =>
+  left?._tag === right?._tag &&
+  (left?._tag !== "Available" ||
+    (right?._tag === "Available" &&
+      left.accumulatedMillis === right.accumulatedMillis &&
+      left.activeSince === right.activeSince))
+
 const transcriptPatch = (turn: Turn.Turn, event: ExecutionBackend.Event): InteractiveEvent => {
   const executionId = event.executionId ?? event.data?.execution_id
   const turnId =
@@ -1920,11 +1930,26 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           return true
         }
         let observeChildSpawn = ignoreInteractiveEvent
-        type ThreadUsageEvent = Extract<InteractiveEvent, { readonly _tag: "ThreadUsageUpdated" }>
+        const initializeSelectedUsage = (threadId: Thread.ThreadId, request: number): ThreadUsageEvent => {
+          selectedUsage = {
+            request,
+            threadId: String(threadId),
+            snapshot: UsageCost.empty,
+            pending: [],
+          }
+          return {
+            _tag: "ThreadUsageUpdated",
+            selectionEpoch: request,
+            threadId,
+            cost: { _tag: "Unavailable" },
+            tokens: { _tag: "Unavailable" },
+            time: displayActiveTime(UsageCost.empty, String(threadId)),
+          }
+        }
         const withUsageCosts = (
           event: InteractiveEvent,
         ): { readonly event: InteractiveEvent; readonly usage?: ThreadUsageEvent } => {
-          if (event._tag !== "TranscriptPatched" || !UsageCost.isRelevantEvent(event.event)) return { event }
+          if (event._tag !== "TranscriptPatched") return { event }
           const rootTurnId = event.rootTurnId ?? event.turnId
           const observation = {
             threadId: String(event.threadId),
@@ -1933,11 +1958,19 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           }
           observeUsage(observation)
           const selection = selectedUsage
+          const previousTime =
+            selection?.threadId === String(event.threadId) && selection.snapshot !== undefined
+              ? displayActiveTime(selection.snapshot, selection.threadId)
+              : undefined
           if (selection !== undefined && selection.threadId === String(event.threadId)) {
             if (selection.snapshot === undefined) selection.pending.push(observation)
             else selection.snapshot = UsageCost.observe(selection.snapshot, observation)
           }
           const selectedTotals = selection?.threadId === String(event.threadId) ? selection.snapshot : undefined
+          const timeChanged =
+            selectedTotals !== undefined &&
+            !sameUsageTime(previousTime, displayActiveTime(selectedTotals, String(event.threadId)))
+          if (!UsageCost.isRelevantEvent(event.event) && !timeChanged) return { event }
           const totals = selectedTotals ?? currentUsageCosts()
           const costBearing =
             event.event.type === "model.usage.reported" || event.event.type === "model.attempt.completed"
@@ -2387,7 +2420,10 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
               selectedThreadId = String(thread.id)
               yield* activateChildFollowers(thread.id)
             }
-            if (isNewThread) dispatch({ _tag: "ThreadActivated", threadId: String(thread.id), title: thread.title })
+            if (isNewThread) {
+              dispatch({ _tag: "ThreadActivated", threadId: String(thread.id), title: thread.title })
+              dispatch(initializeSelectedUsage(thread.id, currentSelectionEpoch))
+            }
             const isFirstTurn = (yield* turns.list(thread.id)).length === 0
             const firstTurnTitle = temporaryThreadTitle(prompt)
             if (isFirstTurn && thread.title === "New thread" && firstTurnTitle !== thread.title) {
@@ -3741,6 +3777,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
           yield* activateChildFollowers(thread.id)
           currentSelectionEpoch = epoch
           selectedThreadId = String(thread.id)
+          const initialUsage = initializeSelectedUsage(thread.id, epoch)
           selectionLoad = undefined
           yield* Ref.set(selectionRequest, epoch)
           activeSelectionState = {
@@ -3781,6 +3818,7 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
             queuedCount: queue.queuedCount,
             queue: queue.turns.map(queueItem),
           })
+          sessionDispatch(initialUsage)
           yield* startUsageCostLoad
           yield* notifyThreadSummaries
         })
@@ -3942,6 +3980,8 @@ export const productLayer = <ThreadError, TurnError, BackendError, ThreadSummary
                   })
                   yield* Ref.set(interactiveThread, thread)
                   selectedThreadId = String(thread.id)
+                  dispatch({ _tag: "ThreadActivated", threadId: String(thread.id), title: thread.title })
+                  dispatch(initializeSelectedUsage(thread.id, currentSelectionEpoch))
                 }
                 const turn = yield* createForSubmission(turns, {
                   id: yield* options.makeTurnId,

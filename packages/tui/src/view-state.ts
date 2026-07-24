@@ -54,12 +54,14 @@ export const activeTimeAt: {
     ),
 )
 
+export const activeTimeIcon = "◷"
+
 export const formatActiveTime = (duration: Duration.Duration): string => {
   const parts = Duration.parts(duration)
-  if (parts.days > 0) return `◷ ${parts.days}d${parts.hours > 0 ? ` ${parts.hours}h` : ""}`
-  if (parts.hours > 0) return `◷ ${parts.hours}h${parts.minutes > 0 ? ` ${parts.minutes}m` : ""}`
-  if (parts.minutes > 0) return `◷ ${parts.minutes}m${parts.seconds > 0 ? ` ${parts.seconds}s` : ""}`
-  return `◷ ${parts.seconds}s`
+  if (parts.days > 0) return `${activeTimeIcon} ${parts.days}d${parts.hours > 0 ? ` ${parts.hours}h` : ""}`
+  if (parts.hours > 0) return `${activeTimeIcon} ${parts.hours}h${parts.minutes > 0 ? ` ${parts.minutes}m` : ""}`
+  if (parts.minutes > 0) return `${activeTimeIcon} ${parts.minutes}m${parts.seconds > 0 ? ` ${parts.seconds}s` : ""}`
+  return `${activeTimeIcon} ${parts.seconds}s`
 }
 
 export const utf8ByteLength = (value: string): number => {

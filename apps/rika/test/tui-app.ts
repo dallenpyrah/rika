@@ -34,6 +34,9 @@ export const model = {
 
 export interface TuiAppOptions {
   readonly script: ReadonlyArray<Parameters<typeof TestModel.make>[0][number]>
+  readonly root?: string
+  readonly initialThreadId?: string
+  readonly idStart?: number
   readonly shellPermission?: "allow" | "ask" | "deny"
   readonly toolNeedsApproval?: (name: string) => boolean
   readonly workspaceFiles?: Readonly<Record<string, string>>
@@ -50,6 +53,7 @@ export interface TuiApp {
   readonly pressEscape: () => void
   readonly pressArrow: (direction: "up" | "down" | "left" | "right") => void
   readonly pressKey: (key: string, modifiers?: { ctrl?: boolean; alt?: boolean; shift?: boolean }) => void
+  readonly clickText: (text: string) => Effect.Effect<void>
   readonly frame: () => string
   readonly spans: () => CapturedSpans
   readonly waitFrame: (marker: string, timeoutMillis?: number) => Effect.Effect<string>
@@ -70,9 +74,11 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
   const fileSystem = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const temporaryDirectory = yield* Config.string("TMPDIR").pipe(Config.withDefault("/tmp"))
-  const root = yield* fileSystem.makeTempDirectoryScoped({ directory: temporaryDirectory, prefix: "rika-tui-app-" })
+  const root =
+    options.root ??
+    (yield* fileSystem.makeTempDirectoryScoped({ directory: temporaryDirectory, prefix: "rika-tui-app-" }))
   const workspace = path.join(root, "workspace")
-  yield* fileSystem.makeDirectory(workspace)
+  yield* fileSystem.makeDirectory(workspace, { recursive: true })
   for (const [name, content] of Object.entries(options.workspaceFiles ?? {})) {
     const target = path.join(workspace, name)
     yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true })
@@ -112,8 +118,8 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
     (created) => Effect.sync(() => created.renderer.destroy()).pipe(Effect.ignore),
   )
   const terminalTitles: Array<string> = []
-  let nextThread = 0
-  let nextTurn = 0
+  let nextThread = options.idStart ?? 0
+  let nextTurn = options.idStart ?? 0
   let session: Operation.InteractiveSession | undefined
   const reloadLoaded = yield* Deferred.make<void>()
   const runSync = Effect.runSyncWith(yield* Effect.context<never>())
@@ -150,7 +156,15 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
   })
   const operation = Context.get(yield* Layer.buildWithScope(operationLayer, yield* Effect.scope), Operation.Service)
   const operationFiber = yield* Effect.forkChild(
-    operation.run({ _tag: "Interactive", prompt: [], workspace, ephemeral: false }).pipe(Effect.orDie),
+    operation
+      .run({
+        _tag: "Interactive",
+        prompt: [],
+        workspace,
+        ...(options.initialThreadId === undefined ? {} : { threadId: options.initialThreadId }),
+        ephemeral: false,
+      })
+      .pipe(Effect.orDie),
   )
   const frame = () => setup.captureCharFrame()
   const waitFor = (predicate: (frame: string) => boolean, timeoutMillis: number) =>
@@ -187,6 +201,15 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
     pressArrow: (direction) => setup.mockInput.pressArrow(direction),
     pressKey: (key, modifiers) =>
       modifiers?.alt === true ? setup.mockInput.pressKey(`\u001b${key}`) : setup.mockInput.pressKey(key, modifiers),
+    clickText: (text) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => setup.flush())
+        const lines = frame().split("\n")
+        const y = lines.findIndex((line) => line.includes(text))
+        const x = y < 0 ? -1 : lines[y]!.indexOf(text)
+        if (x < 0 || y < 0) return yield* Effect.die(`tui-app could not click missing text: ${text}`)
+        yield* Effect.promise(() => setup.mockMouse.click(x, y))
+      }),
     frame,
     spans: () => setup.captureSpans(),
     waitFrame: (marker, timeoutMillis = 60_000) => waitFor((captured) => captured.includes(marker), timeoutMillis),
@@ -206,6 +229,6 @@ export const tuiApp = Effect.fn("TuiApp.start")(function* (options: TuiAppOption
       yield* Fiber.join(operationFiber).pipe(Effect.asVoid, Effect.orDie)
     }),
   }
-  yield* app.waitFrame("Welcome to Rika")
+  yield* app.waitFrame(options.initialThreadId === undefined ? "Welcome to Rika" : "medium")
   return app
 })

@@ -3597,7 +3597,9 @@ describe("Operation", () => {
         while (!(yield* Ref.get(events)).some((event) => event._tag === "ThreadTitled")) yield* Effect.yieldNow
       }).pipe(provideLayer(layer))
       const dispatched = yield* Ref.get(events)
-      const transcript = dispatched.filter((event) => event._tag !== "ThreadsListed")
+      const transcript = dispatched.filter(
+        (event) => event._tag !== "ThreadsListed" && event._tag !== "ThreadUsageUpdated",
+      )
       expect(transcript.slice(0, 5)).toEqual([
         { _tag: "ThreadActivated", threadId: "thread-interactive", title: "exact prompt" },
         {

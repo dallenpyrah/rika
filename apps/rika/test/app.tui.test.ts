@@ -59,6 +59,97 @@ test(
 )
 
 test(
+  "shows elapsed active time for the first turn of a new session",
+  () =>
+    TuiApp.run(
+      Effect.gen(function* () {
+        const app = yield* TuiApp.tuiApp({ script: [TuiApp.model.text("TIMER_COMPLETE", 1_500)] })
+
+        yield* Effect.promise(() => app.type("Measure this turn."))
+        app.pressEnter()
+        yield* app.waitFrame("$")
+        yield* app.clickText("$")
+        yield* app.waitFrame("tok")
+        yield* app.clickText("tok")
+        const active = yield* app.waitFrame("◷ ")
+        expect(active).toMatch(/◷ [0-9]+s/u)
+        expect(active).not.toContain("◷ ····")
+        yield* app.waitFrame("TIMER_COMPLETE")
+        yield* settled(app)
+        yield* Effect.sleep("1100 millis")
+        const completed = app.frame()
+        const elapsed = completed.match(/◷ ([1-9][0-9]*s)/u)?.[1]
+        expect(elapsed).toBeDefined()
+        yield* Effect.sleep("1100 millis")
+        expect(app.frame()).toContain(`◷ ${elapsed}`)
+        yield* app.quit
+      }),
+    ),
+  240_000,
+)
+
+test(
+  "restores elapsed active time after reopening the persisted thread",
+  () =>
+    TuiApp.run(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          directory: "/tmp",
+          prefix: "rika-timer-reopen-",
+        })
+        let elapsed = ""
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const app = yield* TuiApp.tuiApp({
+              root,
+              workspaceFiles: { "timer.txt": "TIMER" },
+              toolNeedsApproval: (name) => name === "read",
+              script: [
+                TuiApp.model.turn([TuiApp.model.toolCall("read", { path: "timer.txt" }, "timer-read")]),
+                TuiApp.model.text("PERSISTED_TIMER_COMPLETE", 1_500),
+              ],
+            })
+            yield* Effect.promise(() => app.type("Persist this timer."))
+            app.pressEnter()
+            yield* app.waitFrame("$")
+            yield* app.clickText("$")
+            yield* app.waitFrame("tok")
+            yield* app.clickText("tok")
+            const waiting = yield* app.waitFrame("? read [pending]")
+            const waitingElapsed = waiting.match(/◷ ([0-9]+s)/u)?.[1]
+            yield* Effect.sleep("1100 millis")
+            expect(app.frame()).toContain(`◷ ${waitingElapsed}`)
+            app.pressEnter()
+            yield* app.waitFrame("PERSISTED_TIMER_COMPLETE")
+            yield* settled(app)
+            yield* Effect.sleep("1100 millis")
+            elapsed = app.frame().match(/◷ ([1-9][0-9]*s)/u)?.[1] ?? ""
+            expect(elapsed).not.toBe("")
+            yield* app.quit
+          }),
+        )
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const app = yield* TuiApp.tuiApp({ root, initialThreadId: "tui-thread-0", idStart: 10, script: [] })
+            yield* app.waitFrame("$")
+            yield* app.clickText("$")
+            yield* app.waitFrame("tok")
+            yield* app.clickText("tok")
+            yield* app.waitFrame(`◷ ${elapsed}`)
+            yield* Effect.sleep("1100 millis")
+            expect(app.frame()).toContain(`◷ ${elapsed}`)
+            yield* app.quit
+          }),
+        )
+      }),
+    ),
+  240_000,
+)
+
+test(
   "preserves primary and muted nested tool summary spans through the real app stack",
   () =>
     TuiApp.run(
@@ -288,11 +379,16 @@ test(
         app.pressEnter()
         const pending = yield* app.waitFrame("? read [pending]")
         expect(pending).toContain("› Allow once")
+        yield* app.clickText("$")
+        yield* app.waitFrame("tok")
+        yield* app.clickText("tok")
+        expect(yield* app.waitFrame("◷ ")).toMatch(/◷ [0-9]+s/u)
         app.pressEnter()
         const approved = yield* app.waitFrame("APPROVAL_COMPLETE")
         expect(approved).toContain("? read [approved]")
         expect(approved).not.toContain("[pending]")
         yield* settled(app)
+        expect(app.frame()).toMatch(/◷ [0-9]+s/u)
 
         yield* Effect.promise(() => app.type("Cancel the approval."))
         app.pressEnter()

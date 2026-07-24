@@ -280,7 +280,7 @@ vi.mock("@opentui/core", () => ({
   bg: (_color: string) => (chunk: { text: string }) => chunk,
   bold: (chunk: { text: string }) => chunk,
   italic: (chunk: { text: string }) => chunk,
-  dim: (chunk: { text: string }) => chunk,
+  dim: (chunk: { text: string }) => ({ ...chunk, attributes: 2 }),
   underline: (chunk: { text: string }) => chunk,
   strikethrough: (chunk: { text: string }) => chunk,
   link: () => (chunk: { text: string }) => chunk,
@@ -2145,6 +2145,69 @@ describe("Surface", () => {
       expect(usageToggle).toHaveBeenCalledOnce()
       surface.modeLabel.onMouseDown?.({ x: 27 } as never)
       expect(usageToggle).toHaveBeenCalledOnce()
+    }),
+  )
+
+  it.effect("uses native clock width and pointer hover for the usage label", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      surface.update(
+        model({
+          mode: "medium",
+          usageDisplay: "time",
+          usageTime: { _tag: "Available", accumulatedMillis: 103_000 },
+        }),
+      )
+      expect(surface.modeLabel.width).toBe(19)
+      Object.assign(surface.modeLabel, { screenX: 20 })
+      expect(
+        (surface.modeLabel.content as { chunks: ReadonlyArray<{ attributes?: number }> }).chunks[0]?.attributes,
+      ).toBe(2)
+
+      surface.modeLabel.onMouseOver?.({ x: 20 } as never)
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("pointer")
+      expect(
+        (surface.modeLabel.content as { chunks: ReadonlyArray<{ attributes?: number }> }).chunks[0]?.attributes,
+      ).toBeUndefined()
+      surface.modeLabel.onMouseMove?.({ x: 31 } as never)
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("default")
+      surface.modeLabel.onMouseOver?.({ x: 20 } as never)
+      surface.modeLabel.onMouseOut?.({} as never)
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("default")
+    }),
+  )
+
+  it.effect("clears usage hover when a narrower selector moves away from the pointer", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      surface.update(model({ usageDisplay: "tokens", usageTokens: { _tag: "Available", total: 123_456 } }))
+      Object.assign(surface.modeLabel, { screenX: 20 })
+      surface.modeLabel.onMouseOver?.({ x: 20 } as never)
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("pointer")
+
+      surface.update(model({ usageCost: { _tag: "Available", usd: 0 } }))
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("default")
+      expect(
+        (surface.modeLabel.content as { chunks: ReadonlyArray<{ attributes?: number }> }).chunks[0]?.attributes,
+      ).toBe(2)
+    }),
+  )
+
+  it.effect("clears usage hover after layout moves a right-anchored label under a stationary pointer", () =>
+    Effect.gen(function* () {
+      const { surface } = yield* createScoped(handlers())
+      surface.update(model({ usageDisplay: "tokens", usageTokens: { _tag: "Available", total: 123_456 } }))
+      Object.assign(surface.modeLabel, { screenX: 20 })
+      surface.modeLabel.onMouseOver?.({ x: 21 } as never)
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("pointer")
+
+      Object.assign(surface.modeLabel, { screenX: 5 })
+      for (const frame of opentui.frameHandlers) frame()
+
+      expect(opentui.renderer.setMousePointer).toHaveBeenLastCalledWith("default")
+      expect(
+        (surface.modeLabel.content as { chunks: ReadonlyArray<{ attributes?: number }> }).chunks[0]?.attributes,
+      ).toBe(2)
     }),
   )
 

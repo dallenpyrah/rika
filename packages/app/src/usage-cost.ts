@@ -1,6 +1,6 @@
 import * as ExecutionBackend from "@rika/runtime/contract"
 import * as Transcript from "@rika/transcript"
-import { Duration, Effect, Function } from "effect"
+import { Duration, Effect, Function, HashMap, Option } from "effect"
 
 export interface RootExecution {
   readonly threadId: string
@@ -32,6 +32,8 @@ export interface Snapshot {
   readonly activeObservedThreads: ReadonlySet<string>
   readonly timeMalformedThreads: ReadonlySet<string>
   readonly threadActiveTime: ReadonlyMap<string, ActiveTime>
+  readonly executionWorkTimestamps: ReadonlyMap<string, HashMap.HashMap<number, WorkEvidence>>
+  readonly executionActiveBounds: ReadonlyMap<string, ExecutionActiveBounds>
 }
 
 export interface ActiveTime {
@@ -55,6 +57,8 @@ type ActiveEventType =
   | "execution.accepted"
   | "execution.started"
   | "wait.created"
+  | "wait.woken"
+  | "wait.timed_out"
   | "execution.completed"
   | "execution.failed"
   | "execution.cancelled"
@@ -68,6 +72,16 @@ interface AttemptCost {
   readonly providerAmount?: number
   readonly tokens: "absent" | "valid" | "invalid"
   readonly tokenAmount?: number
+}
+
+interface WorkEvidence {
+  readonly id: string
+  readonly createdAt: number
+}
+
+interface ExecutionActiveBounds {
+  readonly threadId: string
+  readonly maximumSequence: number
 }
 
 export const maximumGlobalThreads = 100
@@ -90,12 +104,16 @@ export const empty: Snapshot = {
   activeObservedThreads: new Set(),
   timeMalformedThreads: new Set(),
   threadActiveTime: new Map(),
+  executionWorkTimestamps: new Map(),
+  executionActiveBounds: new Map(),
 }
 
 const activeEventTypes = new Set<string>([
   "execution.accepted",
   "execution.started",
   "wait.created",
+  "wait.woken",
+  "wait.timed_out",
   "execution.completed",
   "execution.failed",
   "execution.cancelled",
@@ -106,28 +124,54 @@ export const isRelevantEvent = (event: ExecutionBackend.Event): boolean =>
 
 const isActiveEventType = (type: string): type is ActiveEventType => activeEventTypes.has(type)
 
+const isTerminalEventType = (type: ActiveEventType): boolean =>
+  type === "execution.completed" || type === "execution.failed" || type === "execution.cancelled"
+
 interface Interval {
   readonly start: number
   readonly end?: number
 }
 
-const executionIntervals = (events: ReadonlyArray<ActiveEvent>): ReadonlyArray<Interval> | undefined => {
+const executionIntervals = (
+  events: ReadonlyArray<ActiveEvent>,
+  workTimestamps: HashMap.HashMap<number, WorkEvidence> | undefined,
+): ReadonlyArray<Interval> | undefined => {
   const ordered = events.toSorted(
     (left, right) =>
       left.sequence - right.sequence || left.type.localeCompare(right.type) || left.id.localeCompare(right.id),
   )
   const intervals: Array<Interval> = []
   let activeSince: number | undefined
+  let activeSequence: number | undefined
   let accepted = false
   let started = false
   let terminal = false
+  let resumedAt: number | undefined
   let previousSequence: number | undefined
   let previousCreatedAt: number | undefined
   for (const event of ordered) {
-    if (previousSequence === event.sequence || (previousCreatedAt !== undefined && event.createdAt < previousCreatedAt))
+    let resumedWorkAt: number | undefined
+    if (
+      event.type === "execution.started" &&
+      resumedAt === undefined &&
+      previousCreatedAt !== undefined &&
+      event.createdAt < previousCreatedAt &&
+      workTimestamps !== undefined
+    )
+      for (const [sequence, evidence] of workTimestamps)
+        if (sequence > event.sequence && evidence.createdAt >= previousCreatedAt)
+          resumedWorkAt = resumedWorkAt === undefined ? evidence.createdAt : Math.min(resumedWorkAt, evidence.createdAt)
+    const createdAt =
+      event.type === "execution.started" && resumedAt !== undefined
+        ? Math.max(event.createdAt, resumedAt)
+        : (resumedWorkAt ?? event.createdAt)
+    if (
+      previousSequence === event.sequence ||
+      (previousCreatedAt !== undefined && createdAt < previousCreatedAt && !isTerminalEventType(event.type))
+    )
       return undefined
     previousSequence = event.sequence
-    previousCreatedAt = event.createdAt
+    previousCreatedAt = createdAt
     if (terminal) return undefined
     if (event.type === "execution.accepted") {
       if (accepted || started || terminal) return undefined
@@ -137,7 +181,9 @@ const executionIntervals = (events: ReadonlyArray<ActiveEvent>): ReadonlyArray<I
     if (event.type === "execution.started") {
       if (terminal || activeSince !== undefined) return undefined
       started = true
-      activeSince = event.createdAt
+      activeSince = createdAt
+      activeSequence = event.sequence
+      resumedAt = undefined
       continue
     }
     if (!started) {
@@ -152,16 +198,25 @@ const executionIntervals = (events: ReadonlyArray<ActiveEvent>): ReadonlyArray<I
       }
       return undefined
     }
-    if (activeSince !== undefined) {
-      intervals.push({ start: activeSince, end: event.createdAt })
-      activeSince = undefined
+    if (event.type === "wait.woken" || event.type === "wait.timed_out") {
+      if (activeSince !== undefined || resumedAt !== undefined) return undefined
+      resumedAt = event.createdAt
+      continue
     }
-    if (
-      event.type === "execution.completed" ||
-      event.type === "execution.failed" ||
-      event.type === "execution.cancelled"
-    )
-      terminal = true
+    if (activeSince !== undefined) {
+      const segmentSequence = activeSequence
+      let workTimestamp: number | undefined
+      if (segmentSequence !== undefined && workTimestamps !== undefined)
+        for (const [sequence, evidence] of workTimestamps)
+          if (sequence > segmentSequence && sequence < event.sequence)
+            workTimestamp =
+              workTimestamp === undefined ? evidence.createdAt : Math.max(workTimestamp, evidence.createdAt)
+      const end = Math.max(activeSince, event.createdAt, workTimestamp ?? event.createdAt)
+      intervals.push({ start: activeSince, end })
+      activeSince = undefined
+      activeSequence = undefined
+    }
+    if (isTerminalEventType(event.type)) terminal = true
   }
   if (activeSince !== undefined) intervals.push({ start: activeSince })
   return intervals
@@ -201,8 +256,8 @@ const rebuildThreadActiveTime = (snapshot: Snapshot, threadId: string): Snapshot
     executions.set(event.executionId, [...(executions.get(event.executionId) ?? []), event])
   }
   const intervals: Array<Interval> = []
-  for (const events of executions.values()) {
-    const execution = executionIntervals(events)
+  for (const [executionId, events] of executions) {
+    const execution = executionIntervals(events, snapshot.executionWorkTimestamps.get(executionId))
     if (execution === undefined) {
       const threadActiveTime = new Map(snapshot.threadActiveTime)
       threadActiveTime.delete(threadId)
@@ -221,6 +276,45 @@ const malformedTime = (snapshot: Snapshot, threadId: string): Snapshot => ({
   activeObservedThreads: new Set(snapshot.activeObservedThreads).add(threadId),
   timeMalformedThreads: new Set(snapshot.timeMalformedThreads).add(threadId),
 })
+
+const observeWorkTimestamp = (
+  snapshot: Snapshot,
+  input: RootExecution & { readonly event: ExecutionBackend.Event },
+): Snapshot => {
+  const event = input.event
+  if (!event.type.startsWith("model.") && !event.type.startsWith("tool.")) return snapshot
+  if (
+    event.executionId === undefined ||
+    event.executionId.length === 0 ||
+    event.id === undefined ||
+    event.id.length === 0 ||
+    !Number.isSafeInteger(event.sequence) ||
+    !Number.isFinite(event.createdAt) ||
+    event.createdAt < 0
+  )
+    return snapshot
+  const executionTimestamps = snapshot.executionWorkTimestamps.get(event.executionId) ?? HashMap.empty()
+  const previous = Option.getOrUndefined(HashMap.get(executionTimestamps, event.sequence))
+  if (previous !== undefined)
+    return previous.id === event.id && previous.createdAt === event.createdAt
+      ? snapshot
+      : malformedTime(snapshot, input.threadId)
+  const nextExecutionTimestamps = HashMap.set(executionTimestamps, event.sequence, {
+    id: event.id,
+    createdAt: event.createdAt,
+  })
+  const withTimestamp = {
+    ...snapshot,
+    executionWorkTimestamps: new Map(snapshot.executionWorkTimestamps).set(event.executionId, nextExecutionTimestamps),
+  }
+  const bounds = snapshot.executionActiveBounds.get(event.executionId)
+  if (
+    bounds === undefined ||
+    (event.sequence >= bounds.maximumSequence && withTimestamp.threadActiveTime.has(bounds.threadId))
+  )
+    return withTimestamp
+  return rebuildThreadActiveTime(withTimestamp, bounds.threadId)
+}
 
 export const activeTime: {
   (snapshot: Snapshot, threadId: string): ActiveTimeAvailability
@@ -268,10 +362,16 @@ const observeActive = (
     createdAt: event.createdAt,
     sequence: event.sequence,
   })
+  const previousBounds = snapshot.executionActiveBounds.get(event.executionId)
+  const executionActiveBounds = new Map(snapshot.executionActiveBounds).set(event.executionId, {
+    threadId: input.threadId,
+    maximumSequence: Math.max(previousBounds?.maximumSequence ?? event.sequence, event.sequence),
+  })
   return rebuildThreadActiveTime(
     {
       ...snapshot,
       activeEvents,
+      executionActiveBounds,
       activeObservedThreads: new Set(snapshot.activeObservedThreads).add(input.threadId),
     },
     input.threadId,
@@ -377,21 +477,23 @@ export const observe: {
 } = Function.dual(
   2,
   (snapshot: Snapshot, input: RootExecution & { readonly event: ExecutionBackend.Event }): Snapshot => {
-    if (isActiveEventType(input.event.type)) return observeActive(snapshot, input)
-    if (input.event.type !== "model.usage.reported" && input.event.type !== "model.attempt.completed") return snapshot
+    const withWorkTimestamp = observeWorkTimestamp(snapshot, input)
+    if (isActiveEventType(input.event.type)) return observeActive(withWorkTimestamp, input)
+    if (input.event.type !== "model.usage.reported" && input.event.type !== "model.attempt.completed")
+      return withWorkTimestamp
     if (
       input.event.executionId === undefined ||
       input.event.executionId.length === 0 ||
       input.event.id === undefined ||
       input.event.id.length === 0
     )
-      return incomplete(snapshot, input.threadId)
+      return incomplete(withWorkTimestamp, input.threadId)
     const deliveryKey = `${input.event.executionId}\u0000${input.event.id}`
-    if (snapshot.usageCursors.has(deliveryKey)) return snapshot
+    if (withWorkTimestamp.usageCursors.has(deliveryKey)) return withWorkTimestamp
     const attemptId = stringField(input.event.data, "model_attempt_id")
-    if (attemptId === undefined) return incomplete(snapshot, input.threadId)
+    if (attemptId === undefined) return incomplete(withWorkTimestamp, input.threadId)
     const attemptKey = `${input.event.executionId}\u0000${attemptId}`
-    const previous = snapshot.attempts.get(attemptKey) ?? {
+    const previous = withWorkTimestamp.attempts.get(attemptKey) ?? {
       threadId: input.threadId,
       turnId: input.turnId,
       estimate: "absent" as const,
@@ -426,12 +528,12 @@ export const observe: {
     } else {
       attempt = previous
     }
-    const attempts = new Map(snapshot.attempts).set(attemptKey, attempt)
+    const attempts = new Map(withWorkTimestamp.attempts).set(attemptKey, attempt)
     return {
-      ...snapshot,
-      ...totals(attempts, snapshot.collectionComplete, snapshot.incompleteThreads),
+      ...withWorkTimestamp,
+      ...totals(attempts, withWorkTimestamp.collectionComplete, withWorkTimestamp.incompleteThreads),
       attempts,
-      usageCursors: new Set(snapshot.usageCursors).add(deliveryKey),
+      usageCursors: new Set(withWorkTimestamp.usageCursors).add(deliveryKey),
     }
   },
 )
@@ -518,7 +620,6 @@ export const collect = Effect.fn("UsageCost.collect")(function* (
       const history = yield* readCompleteHistory(reader, current.executionId, reference)
       if (history !== undefined)
         for (const event of history) {
-          if (!isActiveEventType(event.type)) continue
           snapshot = observe(snapshot, {
             threadId: current.threadId,
             turnId: current.turnId,
